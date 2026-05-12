@@ -167,6 +167,40 @@ services:
     mem_limit: 256m
     mem_reservation: 64m
 
+  # ─────────────────────────────────────────────────────────────
+  # FRONTEND — React production build served via nginx, proxies
+  # /api/* to the backend container. This lets the user run the
+  # WHOLE stack on a single PC without needing a separate Vercel
+  # deploy. Open http://localhost:3000 after `docker compose up`.
+  # ─────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Empty string → frontend uses RELATIVE URLs (/api/...),
+        # which nginx in this same container proxies to the backend
+        # service. Same-origin = no CORS headaches, no host-specific
+        # build, no rebuild needed when moving between PCs.
+        REACT_APP_BACKEND_URL: ""
+    container_name: realflow-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:80"
+    networks:
+      - realflow-net
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+        reservations:
+          memory: 64m
+    mem_limit: 256m
+    mem_reservation: 64m
+
 volumes:
   mongo-data:
   pw-browsers:

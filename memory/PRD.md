@@ -51,3 +51,33 @@ See `/app/memory/test_credentials.md`.
 ## Next session ideas
 - If user shares Resend/Google API keys: wire them up.
 - If user wants finer onboarding: improve post-register message.
+
+---
+
+## Update — One-click installer added (May 2026)
+
+New files in repo root for cross-PC deployment:
+
+| File | Purpose |
+|------|---------|
+| `INSTALL-REALFLOW.bat` | Windows one-click — double-click to install everything (auto-elevates, runs `REALFLOW-DEPLOY.ps1`) |
+| `install-realflow.sh` | Linux/macOS one-click — `sudo bash install-realflow.sh` |
+| `INSTALL.md` | Top-level deployment guide (Urdu + English) |
+| `REALFLOW-DEPLOY.ps1` | Existing PS1 — fixed repo URL to `dynabook`, now prints frontend URL + admin password at end |
+| `docker-compose.yml` | Added `frontend` service (nginx + React build) on port `3000:80`. Whole stack is now self-contained in Docker. |
+
+User can now:
+1. Download/clone repo on any Windows 10/11 PC → double-click `INSTALL-REALFLOW.bat` → everything installs and starts.
+2. On Linux/macOS → `sudo bash install-realflow.sh`.
+3. Open `http://localhost:3000` to access the app.
+4. Admin login credentials printed by installer + stored in `.env`.
+
+What the installer does:
+- Auto-elevates to Admin (Windows) / re-execs with sudo (Linux)
+- Installs Docker Desktop / Docker Engine if missing (winget on Win, apt/dnf/yum/pacman on Linux)
+- Installs Git if missing
+- Clones repo to `C:\realflow` (Win) or `/opt/realflow` (Linux)
+- Generates `.env` with strong random `JWT_SECRET_KEY`, `ADMIN_PASSWORD`, `POSTBACK_TOKEN`
+- `docker compose build && docker compose up -d`
+- Health-checks backend (`/health`) and frontend (`:3000`)
+- Prints admin email + password + all useful URLs
