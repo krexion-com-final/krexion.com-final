@@ -159,17 +159,45 @@ if ($IsExisting -and (-not $SkipBackup)) {
 Step 5 "Building Docker images…"
 Push-Location $InstallPath
 docker compose down --remove-orphans 2>&1 | Out-Null
-docker compose build --pull
+
+# ── Detect total system RAM and pick the right profile ──────────────
+$totalRamGB = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 0)
+Write-Host "    Detected system RAM: $totalRamGB GB"
+$composeFiles = @("-f", "docker-compose.yml")
+if ($totalRamGB -le 10 -and (Test-Path (Join-Path $InstallPath "docker-compose.lowram.yml"))) {
+    Warn "RAM <= 10 GB — enabling LOW-RAM profile (Mongo 1G, Backend 2.5G, RUT max 2 concurrent)."
+    $composeFiles += @("-f", "docker-compose.lowram.yml")
+
+    # Also nudge WSL config if it's missing or unset
+    $wslcfg = Join-Path $env:USERPROFILE ".wslconfig"
+    if (-not (Test-Path $wslcfg) -or -not (Select-String -Path $wslcfg -Pattern "^memory=" -Quiet)) {
+        Warn "No WSL memory cap found — writing $wslcfg (memory=5GB) so Docker can't eat all 8 GB."
+        @"
+[wsl2]
+memory=5GB
+processors=4
+swap=4GB
+localhostForwarding=true
+
+[experimental]
+autoMemoryReclaim=gradual
+sparseVhd=true
+"@ | Out-File -FilePath $wslcfg -Encoding ascii
+        Warn "After this script finishes, run  wsl --shutdown  and then restart Docker Desktop ONCE so the new cap takes effect."
+    }
+}
+
+docker compose @composeFiles build --pull
 OK "Build complete"
 
 Step 6 "Starting services…"
 $tunnelToken = (Get-Content $envFile | Where-Object { $_ -match '^TUNNEL_TOKEN=' }) -replace '^TUNNEL_TOKEN=', ''
 if ($tunnelToken -and $tunnelToken.Trim() -ne "") {
     Write-Host "    Cloudflare Tunnel token found — starting with tunnel"
-    docker compose --profile tunnel up -d
+    docker compose @composeFiles --profile tunnel up -d
 } else {
     Write-Host "    No tunnel token — starting without tunnel (backend on localhost:8001 only)"
-    docker compose up -d
+    docker compose @composeFiles up -d
 }
 Pop-Location
 

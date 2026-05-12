@@ -2386,10 +2386,14 @@ async def run_real_user_traffic_job(
     # Launch with concurrency + optional pacing
     # Extreme speed mode: Max 50 concurrent workers for ultra-fast processing
     # Can handle 100 conversions in 15-20 minutes with proper resources
-    semaphore = asyncio.Semaphore(max(1, min(int(concurrency or 1), 50)))
-    conc = max(1, min(int(concurrency or 1), 50))
-    
-    logger.info(f"RUT Speed Mode: {conc} concurrent workers enabled for max performance")
+    # — but on low-RAM boxes (8 GB laptops) the operator can hard-cap the
+    # ceiling via RUT_MAX_CONCURRENCY env var so a careless slider value
+    # of 10 doesn't OOM the host. Defaults to 50 (the old hard ceiling).
+    _rut_hard_cap = max(1, int(os.environ.get("RUT_MAX_CONCURRENCY", "50")))
+    semaphore = asyncio.Semaphore(max(1, min(int(concurrency or 1), _rut_hard_cap)))
+    conc = max(1, min(int(concurrency or 1), _rut_hard_cap))
+
+    logger.info(f"RUT Speed Mode: {conc} concurrent workers enabled (env cap={_rut_hard_cap})")
 
     async def worker(i: int, shared_browser: Browser):
         # Per-visit pacing: target time for this visit = i * delay_between

@@ -1,0 +1,78 @@
+# ──────────────────────────────────────────────────────────────────
+#  RealFlow — LOW-RAM OVERRIDE  (tuned for 8 GB laptops like the
+#  Dynabook L50-G / similar i5 / Ryzen 5 8 GB ultrabooks)
+#
+#  How to use:
+#     docker compose -f docker-compose.yml -f docker-compose.lowram.yml up -d
+#
+#  Or just rename this file to  docker-compose.override.yml  and the
+#  values below will be merged automatically every time you run
+#  `docker compose up`.
+#
+#  Math behind the numbers (8 GB system, 5 GB WSL allocation):
+#     Mongo  .....  1.0 GB cap  (was 4 GB)
+#     Backend .....  2.5 GB cap  (was 6 GB)
+#     Frontend ....  0.15 GB cap (was 0.25 GB)
+#     ---------------------------------------
+#     Total  ......  ~3.7 GB     << 5 GB WSL  ✓ no swap, no OOM
+#
+#  Concurrency limits are dropped from "blast everything" to "2 parallel
+#  Playwright contexts at a time" — perfect for an i5-U-class CPU.
+# ──────────────────────────────────────────────────────────────────
+
+services:
+
+  mongo:
+    # Smaller WiredTiger cache — DB-level cap (in addition to container cap)
+    command: ["mongod", "--wiredTigerCacheSizeGB", "0.5", "--journalCommitInterval", "100"]
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+        reservations:
+          memory: 256m
+    mem_limit: 1g
+    mem_reservation: 256m
+
+  backend:
+    deploy:
+      resources:
+        limits:
+          memory: 2560m
+        reservations:
+          memory: 1g
+    mem_limit: 2560m
+    mem_reservation: 1g
+    # 512 MB /dev/shm is plenty for max 2-3 chromium contexts
+    shm_size: 512m
+    environment:
+      # Memory throttle hard-cap (MB) — RUT engine PAUSES new visit
+      # dispatch when backend RSS hits 80 % of this. Keep in sync with
+      # the mem_limit above (2.5 GB → 2048 MB throttle target).
+      RUT_MEM_LIMIT_MB: "2048"
+      RUT_MEM_THROTTLE_PCT: "75"
+      RUT_MEM_RESUME_PCT:   "55"
+      # Soft cap on Playwright concurrency — server still respects the
+      # per-job `concurrency` param, but this is the hard ceiling.
+      RUT_MAX_CONCURRENCY:  "2"
+      # Forward the rest from .env (already done by base compose, but
+      # re-stating here so this override is self-contained)
+      MONGO_URL:        "mongodb://mongo:27017"
+      DB_NAME:          "${DB_NAME:-realflow}"
+      JWT_SECRET_KEY:   "${JWT_SECRET_KEY}"
+      ADMIN_EMAIL:      "${ADMIN_EMAIL:-admin@realflow.local}"
+      ADMIN_PASSWORD:   "${ADMIN_PASSWORD}"
+      POSTBACK_TOKEN:   "${POSTBACK_TOKEN}"
+      APP_URL:          "${APP_URL:-http://localhost:3000}"
+      PUBLIC_BASE_URL:  "${PUBLIC_BASE_URL:-http://localhost:3000}"
+      CORS_ORIGINS:     "${CORS_ORIGINS:-*}"
+
+  frontend:
+    deploy:
+      resources:
+        limits:
+          memory: 192m
+        reservations:
+          memory: 48m
+    mem_limit: 192m
+    mem_reservation: 48m

@@ -229,10 +229,27 @@ fi
 # ─────────────────────────────────────────────────────────────────
 step 4 "Building Docker images (first run can take 5-10 min)…"
 docker compose pull --quiet 2>/dev/null || true
-docker compose build
+
+# ── Detect total system RAM and pick the right profile ──────────────
+if [ "$OS" = "linux" ]; then
+    TOTAL_RAM_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    TOTAL_RAM_GB=$(( TOTAL_RAM_KB / 1024 / 1024 ))
+else
+    TOTAL_RAM_BYTES=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
+    TOTAL_RAM_GB=$(( TOTAL_RAM_BYTES / 1024 / 1024 / 1024 ))
+fi
+ok "Detected RAM: ${TOTAL_RAM_GB} GB"
+
+COMPOSE_FILES="-f docker-compose.yml"
+if [ "$TOTAL_RAM_GB" -gt 0 ] && [ "$TOTAL_RAM_GB" -le 10 ] && [ -f docker-compose.lowram.yml ]; then
+    warn "RAM ≤ 10 GB — enabling LOW-RAM profile (Mongo 1G, Backend 2.5G, RUT max 2 concurrent)."
+    COMPOSE_FILES="$COMPOSE_FILES -f docker-compose.lowram.yml"
+fi
+
+docker compose $COMPOSE_FILES build
 
 step 5 "Starting RealFlow stack…"
-docker compose up -d
+docker compose $COMPOSE_FILES up -d
 
 # Wait for backend health
 echo -n "    waiting for backend"

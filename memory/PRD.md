@@ -81,3 +81,31 @@ What the installer does:
 - `docker compose build && docker compose up -d`
 - Health-checks backend (`/health`) and frontend (`:3000`)
 - Prints admin email + password + all useful URLs
+
+---
+
+## Update — 8 GB PC tuning (Dynabook L50-G profile, May 2026)
+
+User confirmed target PC: **Intel i5-10210U / 8 GB RAM / 119 GB SSD / Win 10**.
+Priority: **RUT must run smoothly** on this hardware.
+
+New files added:
+- `docker-compose.lowram.yml` — override file: Mongo cap 1 GB, Backend 2.5 GB, Frontend 192 MB, RUT_MAX_CONCURRENCY=2, RUT_MEM_LIMIT_MB=2048
+- `WSLCONFIG-8GB.bat` — writes `%USERPROFILE%\.wslconfig` with `memory=5GB processors=4 swap=4GB`
+- `DYNABOOK-8GB-GUIDE.md` — dedicated Urdu/English guide with optimal RUT settings (concurrency=2, delay=3-5s, headless, no screenshots)
+
+Install-script changes:
+- `install-realflow.sh` — auto-detects `<=10 GB` RAM, automatically adds `-f docker-compose.lowram.yml` to all compose commands.
+- `REALFLOW-DEPLOY.ps1` — same auto-detection on Windows + auto-creates `.wslconfig` with `memory=5GB` if missing.
+
+Backend code change:
+- `real_user_traffic.py` — concurrency hard ceiling now reads `RUT_MAX_CONCURRENCY` env var (default 50). On 8 GB PCs this caps to 2 even if user slider goes higher, preventing OOM.
+- `backend/.env` updated locally with same values so Emergent preview reflects the production tune.
+
+Math on the user's 8 GB PC:
+- WSL cap 5 GB
+- Mongo 1 GB + Backend 2.5 GB + Frontend 0.2 GB + WSL overhead ~0.5 GB = **~4.2 GB** ≪ 5 GB ✓
+- Windows itself gets remaining 3 GB ✓
+- Result: no swap, no OOM, predictable performance.
+
+Expected RUT throughput on this hardware: **~30 visits per 5 min** with 2 concurrent workers (form-fill visits ~10-15 sec each).
