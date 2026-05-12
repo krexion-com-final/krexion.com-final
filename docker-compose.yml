@@ -1,0 +1,178 @@
+# ──────────────────────────────────────────────────────────────────────
+# RealFlow — Full Stack Docker Compose
+# ──────────────────────────────────────────────────────────────────────
+# What it runs:
+#   • realflow-mongo       — MongoDB 7 (data persisted in named volume)
+#   • realflow-backend     — FastAPI + Playwright (your existing backend/)
+#   • realflow-cloudflared — Cloudflare Tunnel (only if TUNNEL_TOKEN set)
+#
+# Frontend is deployed separately on Vercel.
+# CPI Worker runs natively on Windows (needs USB access to phones).
+# ──────────────────────────────────────────────────────────────────────
+
+services:
+  mongo:
+    image: mongo:7
+    container_name: realflow-mongo
+    restart: unless-stopped
+    # WiredTiger cache hard-cap — without this Mongo defaults to 50% of host
+    # RAM (~14 GB on a 28 GB WSL!) and is the #1 OOM driver for the stack.
+    # 2.5 GB is plenty for hundreds of thousands of clicks + indexes; the
+    # whole working set still fits comfortably in cache.
+    command: ["mongod", "--wiredTigerCacheSizeGB", "2.5", "--journalCommitInterval", "100"]
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - realflow-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ping:1}).ok"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    # Container-level memory ceiling — paired with the WT cache cap above
+    # this is a TWO-LAYER guarantee that Mongo can never grow past 4 GB.
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+        reservations:
+          memory: 1g
+    mem_limit: 4g
+    mem_reservation: 1g
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: realflow-backend
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      MONGO_URL: "mongodb://mongo:27017"
+      DB_NAME: "${DB_NAME:-realflow}"
+      JWT_SECRET_KEY: "${JWT_SECRET_KEY}"
+      ADMIN_EMAIL: "${ADMIN_EMAIL:-admin@realflow.local}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD}"
+      POSTBACK_TOKEN: "${POSTBACK_TOKEN}"
+      APP_URL: "${APP_URL:-https://realflow.online}"
+      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-https://api.realflow.online}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-*}"
+      RESEND_API_KEY: "${RESEND_API_KEY:-}"
+      RESEND_FROM: "${RESEND_FROM:-no-reply@realflow.online}"
+      # Google Sheets API (Service Account) — required by the live gsheet
+      # row-deletion feature. Either set GOOGLE_SHEETS_SA_PATH to the
+      # mounted JSON file, or paste the JSON content into
+      # GOOGLE_SHEETS_SA_JSON. Both optional — gsheet uploads keep
+      # working in read-only mode without them.
+      GOOGLE_SHEETS_SA_PATH: "${GOOGLE_SHEETS_SA_PATH:-/app/backend/secrets/gsheets-sa.json}"
+      GOOGLE_SHEETS_SA_JSON: "${GOOGLE_SHEETS_SA_JSON:-}"
+    ports:
+      # Local-only port exposure — Cloudflare Tunnel handles public traffic
+      - "127.0.0.1:8001:8001"
+    volumes:
+      # Mount Playwright browser cache so we don't redownload on every rebuild
+      - pw-browsers:/pw-browsers
+      # User-uploaded files (XLSX data, proxy lists, UA lists, automation JSON)
+      # MUST be persisted — without this, every container rebuild wipes them.
+      - uploaded-data:/app/backend/uploaded_resources
+      # Real User Traffic job results (screenshots, leftover XLSX, reports)
+      - rut-results:/app/backend/real_user_traffic_results
+      # Service-account JSON for live Google Sheets row deletion. Folder
+      # is .gitignore'd so the key never leaks to git, but mounting it
+      # here makes it readable from inside the container at the path
+      # GOOGLE_SHEETS_SA_PATH points to.
+      - ./backend/secrets:/app/backend/secrets:ro
+    networks:
+      - realflow-net
+    # Resource caps — Playwright + parallel browser launches + big
+    # gsheet/proxy/UA reads can spike RAM. After the 2026-01 ZERO-OOM
+    # rebalance: backend is capped at 6 GB (down from 20 GB) and a code-
+    # level memory-pressure throttle pauses NEW visit dispatch when RSS
+    # crosses 80% of this cap — so the container itself can NEVER OOM
+    # mid-job. Combined with the Mongo 4 GB cap and the 20 GB WSL
+    # allocation, the math is: 6 + 4 + 0.5 (cloudflared ×2) = 10.5 GB
+    # committed << 20 GB WSL. Physically impossible to host-OOM.
+    #
+    # IMPORTANT: these are CONTAINER-level caps. The HOST (Docker Desktop
+    # / WSL2) must have AT LEAST 20 GB allocated to it via `~/.wslconfig`
+    # `memory=20GB` (Windows) or Docker Desktop → Settings → Resources →
+    # Memory slider (macOS / Hyper-V backend). The WSLCONFIG-SETUP.bat
+    # script writes this for you in one click.
+    #
+    # Want more concurrent jobs (>4 simultaneous RUT runs)? Bump
+    # mem_limit to 8g (also bump WSL to 22 GB). Backend RSS grows
+    # ~500 MB per concurrent Playwright context.
+    deploy:
+      resources:
+        limits:
+          memory: 6g
+        reservations:
+          memory: 2g
+    mem_limit: 6g
+    mem_reservation: 2g
+    # Increase shared memory — Playwright's default 64 MB /dev/shm fills
+    # up fast when 5-10 chromium instances render heavy ad-laden offer
+    # pages, causing tab crashes that look like spurious 500s. 2 GB is
+    # plenty for our 10-context max concurrency target.
+    shm_size: 2gb
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8001/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+  # Cloudflare Tunnel — 2 replicas for high-throughput load balancing.
+  #
+  # Cloudflare Tunnels natively support multiple connectors per tunnel —
+  # the Cloudflare edge picks the connector with the lowest latency / load
+  # for each incoming request. Running 2 replicas roughly DOUBLES the
+  # sustainable concurrent-request rate compared to a single tunnel, with
+  # zero domain / DNS / token changes (same TUNNEL_TOKEN is used by both).
+  #
+  # Notes:
+  #   - container_name is intentionally removed so Compose can spawn
+  #     multiple instances (it auto-numbers them realflow-cloudflared-1,
+  #     realflow-cloudflared-2). With container_name set, scaling is
+  #     blocked.
+  #   - deploy.replicas is the swarm-mode spec; for plain `docker compose
+  #     up` you need `--scale cloudflared=2`. REALFLOW-FORCE-SYNC.bat
+  #     handles this automatically.
+  #   - 256 MB cap is plenty — cloudflared idle uses ~30 MB, peaks at
+  #     ~80 MB under heavy traffic. 2 replicas = ~160 MB total, well
+  #     within the 28 GB WSL allocation.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --metrics 0.0.0.0:2000 run --token ${TUNNEL_TOKEN}
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - realflow-net
+    profiles:
+      - tunnel    # only started when `docker compose --profile tunnel up`
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 100
+      resources:
+        limits:
+          memory: 256m
+        reservations:
+          memory: 64m
+    mem_limit: 256m
+    mem_reservation: 64m
+
+volumes:
+  mongo-data:
+  pw-browsers:
+  uploaded-data:
+  rut-results:
+
+networks:
+  realflow-net:
+    driver: bridge

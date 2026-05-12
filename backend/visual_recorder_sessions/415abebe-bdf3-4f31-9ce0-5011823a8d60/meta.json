@@ -1,0 +1,15 @@
+{
+  "session_id": "415abebe-bdf3-4f31-9ce0-5011823a8d60",
+  "url": "https://example.com",
+  "proxy": null,
+  "user_agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+  "headers": [
+    "first",
+    "email",
+    "phone"
+  ],
+  "target_screenshot_path": "/app/backend/visual_recorder_sessions/415abebe-bdf3-4f31-9ce0-5011823a8d60/target_screenshot.png",
+  "final_url": "https://example.com/",
+  "final_text_snippet": "Example Domain\n\nThis domain is for use in documentation examples without needing permission. Avoid use in operations.\n\nLearn more",
+  "step_count": 7
+}

@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RealFlow Admin Toolkit</title>
+<style>
+  :root{
+    --bg:#0a0e1a;--panel:#11172a;--border:#22304a;--text:#e7eefc;--muted:#8aa0c4;
+    --accent:#4F7FFF;--accent2:#22D3EE;--danger:#ef4444;--ok:#22c55e;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;font-family:'SF Mono',Menlo,Consolas,monospace}
+  body{background:var(--bg);color:var(--text);padding:32px 16px;line-height:1.5}
+  .wrap{max-width:880px;margin:0 auto}
+  h1{font-size:28px;margin-bottom:6px;color:var(--accent)}
+  .sub{color:var(--muted);font-size:14px;margin-bottom:32px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:24px;margin-bottom:24px}
+  .card h2{font-size:18px;margin-bottom:6px;display:flex;align-items:center;gap:10px}
+  .card .desc{color:var(--muted);font-size:13px;margin-bottom:18px}
+  label{display:block;font-size:12px;text-transform:uppercase;letter-spacing:0.1em;color:var(--muted);margin-bottom:8px}
+  input,textarea{width:100%;background:#0a0f1f;border:1px solid var(--border);border-radius:8px;padding:12px 14px;color:var(--text);font-size:14px;font-family:inherit}
+  input:focus,textarea:focus{outline:none;border-color:var(--accent)}
+  textarea{min-height:60px;resize:vertical}
+  .row{display:flex;gap:12px;margin-top:14px;flex-wrap:wrap}
+  button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:10px 18px;cursor:pointer;font-size:14px;font-weight:600;transition:transform .1s}
+  button:hover{transform:translateY(-1px)}
+  button.secondary{background:#1e2a44;color:var(--text)}
+  button.danger{background:var(--danger)}
+  .output{margin-top:18px;background:#06090f;border:1px dashed var(--border);border-radius:8px;padding:14px;font-size:13px;color:var(--accent2);word-break:break-all;min-height:48px}
+  .copy{float:right;background:transparent;border:1px solid var(--border);color:var(--muted);padding:4px 10px;font-size:11px;border-radius:6px}
+  .pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;margin-left:6px}
+  .pill.ok{background:rgba(34,197,94,.15);color:var(--ok)}
+  .pill.warn{background:rgba(239,68,68,.15);color:var(--danger)}
+  .info{background:rgba(79,127,255,.08);border-left:3px solid var(--accent);padding:12px 14px;border-radius:6px;font-size:13px;color:var(--muted);margin-top:14px}
+  code{background:#06090f;padding:2px 6px;border-radius:4px;font-size:12px;color:var(--accent2)}
+  .footer{margin-top:24px;text-align:center;color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>RealFlow Admin Toolkit</h1>
+  <p class="sub">Local browser tool — koi data internet pe nahi jaata. Sab kuch aap ke browser ke andar compute hota hai.</p>
+
+  <!-- TOOL 1: Activation Key Hash Generator -->
+  <div class="card">
+    <h2>🔑 Tool 1 — Activation Key Hash Generator</h2>
+    <p class="desc">Nayi activation key banao → SHA-256 hash niche ayega → installer mein paste karo</p>
+    <label for="key-input">Nayi Activation Key (jo bhi rakhna chahte ho)</label>
+    <input id="key-input" type="text" placeholder="e.g. MY-SUPER-SECRET-KEY-2026" oninput="hashKey()" />
+    <div class="row">
+      <button class="secondary" onclick="suggestKey()">🎲 Random Key Banao</button>
+      <button class="secondary" onclick="document.getElementById('key-input').value='';document.getElementById('key-output').textContent='-'">Clear</button>
+    </div>
+    <label style="margin-top:18px">SHA-256 Hash (yeh installer mein paste karna hai)</label>
+    <div class="output" id="key-output">-
+      <button class="copy" onclick="copyText('key-output', event)">Copy</button>
+    </div>
+    <div class="info">
+      <strong>Kahan paste karein:</strong> <code>RealFlow-INSTALL.bat</code> file mein line dhoondein:<br>
+      <code>set "EXPECTED_HASH=..."</code> — purani hash ko nayi se replace karein → commit → done.
+    </div>
+  </div>
+
+  <!-- TOOL 2: Expiry Date Calculator -->
+  <div class="card">
+    <h2>⏰ Tool 2 — Expiry Date Generator</h2>
+    <p class="desc">Aaj se kitne din baad expire karna hai? Niche format installer mein paste karna hai.</p>
+    <label for="days-input">Aaj se kitne din valid?</label>
+    <input id="days-input" type="number" value="60" min="1" max="3650" oninput="calcExpiry()" />
+    <div class="row">
+      <button class="secondary" onclick="document.getElementById('days-input').value=30;calcExpiry()">30 din</button>
+      <button class="secondary" onclick="document.getElementById('days-input').value=60;calcExpiry()">60 din</button>
+      <button class="secondary" onclick="document.getElementById('days-input').value=90;calcExpiry()">90 din</button>
+      <button class="secondary" onclick="document.getElementById('days-input').value=180;calcExpiry()">6 month</button>
+      <button class="secondary" onclick="document.getElementById('days-input').value=365;calcExpiry()">1 saal</button>
+    </div>
+    <label style="margin-top:18px">Expiry Date (YYYYMMDD format — installer mein yehi paste karna hai)</label>
+    <div class="output" id="expiry-output">-
+      <button class="copy" onclick="copyText('expiry-output', event)">Copy</button>
+    </div>
+    <div id="expiry-readable" class="info">Readable date yahan ayega...</div>
+    <div class="info">
+      <strong>Kahan paste karein:</strong> <code>RealFlow-INSTALL.bat</code> mein line dhoondein:<br>
+      <code>set "EXPIRY_DATE=20260710"</code> — number replace karein → commit → done.
+    </div>
+  </div>
+
+  <!-- TOOL 3: Kill-Switch Commands -->
+  <div class="card">
+    <h2>🌐 Tool 3 — Kill-Switch (REVOKE / ACTIVATE)</h2>
+    <p class="desc">GitHub mein <code>.installer-status</code> file ko set karne ke ready-to-copy commands.</p>
+
+    <label>🔴 REVOKE — All installers worldwide ban</label>
+    <div class="output" id="revoke-cmd">REVOKED
+      <button class="copy" onclick="copyText('revoke-cmd', event)">Copy</button>
+    </div>
+
+    <label style="margin-top:18px">🟢 ACTIVATE — Wapas chalu</label>
+    <div class="output" id="activate-cmd">ACTIVE
+      <button class="copy" onclick="copyText('activate-cmd', event)">Copy</button>
+    </div>
+
+    <div class="info">
+      <strong>Step-by-step:</strong><br>
+      1. <a href="https://github.com/ronaldsexedwards40-glitch/dynabook/blob/main/.installer-status" target="_blank" style="color:var(--accent)">Yahan click karke .installer-status file kholein</a><br>
+      2. ✏️ Pencil icon click karein<br>
+      3. Andar wala text delete karke upar wala (REVOKED ya ACTIVE) paste karein<br>
+      4. Niche scroll → <strong>Commit changes</strong> click karein<br>
+      5. 30 second mein effect live ho jata hai
+    </div>
+  </div>
+
+  <!-- TOOL 4: Reference -->
+  <div class="card">
+    <h2>📋 Tool 4 — Current Configuration</h2>
+    <p class="desc">Aap ke installer mein abhi yeh settings hain:</p>
+    <table style="width:100%;font-size:13px;color:var(--muted)">
+      <tr><td style="padding:6px 0">Repo:</td><td style="color:var(--text)"><code>ronaldsexedwards40-glitch/dynabook</code></td></tr>
+      <tr><td style="padding:6px 0">Branch:</td><td style="color:var(--text)"><code>main</code></td></tr>
+      <tr><td style="padding:6px 0">Activation Key:</td><td style="color:var(--text)"><code>LENOVOGEN-RF-2026-9X4K2M-SHAN</code> <span class="pill warn">SECRET</span></td></tr>
+      <tr><td style="padding:6px 0">Key Hash:</td><td style="color:var(--text);word-break:break-all"><code>f59f457eec7f6d0a03d2a508bd32b6a324db6e1a20357d7041a2ef1a85308b8a</code></td></tr>
+      <tr><td style="padding:6px 0">Expiry:</td><td style="color:var(--text)"><code>2026-07-10</code> (60 din)</td></tr>
+    </table>
+  </div>
+
+  <p class="footer">Yeh page sirf aap ke browser mein chalta hai. Koi data internet pe nahi jata.<br>
+  Bookmark kar lein taa-ke kabhi bhi access kar saken.</p>
+</div>
+
+<script>
+async function hashKey(){
+  const key=document.getElementById('key-input').value;
+  if(!key){document.getElementById('key-output').textContent='-';return}
+  const buf=new TextEncoder().encode(key);
+  const hash=await crypto.subtle.digest('SHA-256',buf);
+  const hex=Array.from(new Uint8Array(hash)).map(b=>b.toString(16).padStart(2,'0')).join('');
+  document.getElementById('key-output').innerHTML=hex+' <button class="copy" onclick="copyText(\'key-output\', event)">Copy</button>';
+}
+
+function suggestKey(){
+  const parts=['REALFLOW','DYNA','SHAN','KEY','2026','SECURE'];
+  const rand=()=>Math.random().toString(36).slice(2,7).toUpperCase();
+  const k=`${parts[Math.floor(Math.random()*parts.length)]}-${rand()}-${rand()}-${parts[Math.floor(Math.random()*parts.length)]}`;
+  document.getElementById('key-input').value=k;
+  hashKey();
+}
+
+function calcExpiry(){
+  const days=parseInt(document.getElementById('days-input').value)||0;
+  const d=new Date();
+  d.setDate(d.getDate()+days);
+  const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0'),dd=String(d.getDate()).padStart(2,'0');
+  const yyyymmdd=`${y}${m}${dd}`;
+  document.getElementById('expiry-output').innerHTML=yyyymmdd+' <button class="copy" onclick="copyText(\'expiry-output\', event)">Copy</button>';
+  document.getElementById('expiry-readable').innerHTML=`<strong>Readable:</strong> ${d.toDateString()} (aaj se ${days} din baad)`;
+}
+
+function copyText(id,e){
+  if(e){e.stopPropagation();e.preventDefault()}
+  const el=document.getElementById(id);
+  const txt=el.childNodes[0].textContent.trim();
+  navigator.clipboard.writeText(txt).then(()=>{
+    if(e&&e.target){
+      const old=e.target.textContent;
+      e.target.textContent='Copied!';
+      setTimeout(()=>{e.target.textContent=old},1200)
+    }
+  })
+}
+
+// Initial calculations
+calcExpiry();
+</script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+# Core
+httpx==0.28.1
+PyYAML==6.0.2
+tenacity==9.0.0
+structlog==24.4.0
+python-dotenv==1.0.1
+
+# Android automation
+Appium-Python-Client==4.1.0
+adb-shell==0.4.4
+pure-python-adb==0.3.0.dev0
+
+# iOS automation (Windows-compatible, no Mac required)
+pymobiledevice3==4.10.0
+tidevice3==0.11.3
+
+# Utilities
+faker==33.1.0
+fake-useragent==1.5.1
+aiofiles==24.1.0
+rich==13.9.4

@@ -1,0 +1,245 @@
+import { useEffect, useState } from "react";
+import "./App.css";
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
+import { AnimatePresence } from "framer-motion";
+import { PageTransition } from "./components/PageTransitions";
+import LoginPage from "./pages/LoginPage";
+import ForgotPasswordPage from "./pages/ForgotPasswordPage";
+import ResetPasswordPage from "./pages/ResetPasswordPage";
+import DashboardLayout from "./components/DashboardLayout";
+import Dashboard from "./pages/Dashboard";
+import LinksPage from "./pages/LinksPage";
+import ClicksPage from "./pages/ClicksPage";
+import ConversionsPage from "./pages/ConversionsPage";
+import ProxiesPage from "./pages/ProxiesPage";
+import SettingsPage from "./pages/SettingsPage";
+import ReferrerStatsPage from "./pages/ReferrerStatsPage";
+import ImportTrafficPage from "./pages/ImportTrafficPage";
+import EmailCheckerPage from "./pages/EmailCheckerPage";
+import SeparateDataPage from "./pages/SeparateDataPage";
+import UserAgentGeneratorPage from "./pages/UserAgentGeneratorPage";
+import UserAgentCheckerPage from "./pages/UserAgentCheckerPage";
+import FormFillerPage from "./pages/FormFillerPage";
+import RealUserTrafficPage from "./pages/RealUserTrafficPage";
+import VisualRecorderPage from "./pages/VisualRecorderPage";
+import UploadedThingsPage from "./pages/UploadedThingsPage";
+import CPIOffersPage from "./pages/CPIOffersPage";
+import CPIJobsPage from "./pages/CPIJobsPage";
+import CPIJobDetailPage from "./pages/CPIJobDetailPage";
+import CPIDevicesPage from "./pages/CPIDevicesPage";
+import CPIDashboardPage from "./pages/CPIDashboardPage";
+import CPISmartLinksPage from "./pages/CPISmartLinksPage";
+import CPIWorkerSetupPage from "./pages/CPIWorkerSetupPage";
+import SystemHealthPage from "./pages/SystemHealthPage";
+import AdminLoginPage from "./pages/AdminLoginPage";
+import AdminDashboard from "./pages/AdminDashboard";
+import AnimationDemoPage from "./pages/AnimationDemoPage";
+import BackgroundPreviewPage from "./pages/BackgroundPreviewPage";
+import { Toaster } from "./components/ui/sonner";
+import { BrandingProvider } from "./context/BrandingContext";
+import { ThemeProvider } from "./context/ThemeContext";
+
+// Apply blue theme to body
+if (typeof document !== 'undefined') {
+  document.body.classList.add('blue-theme');
+}
+
+function PrivateRoute({ children }) {
+  const token = localStorage.getItem("token");
+  return token ? children : <Navigate to="/login" />;
+}
+
+function AdminRoute({ children }) {
+  const adminToken = localStorage.getItem("adminToken");
+  return adminToken ? children : <Navigate to="/admin" />;
+}
+
+// Feature-protected route component
+function FeatureRoute({ children, feature }) {
+  const user = JSON.parse(localStorage.getItem("user") || "{}");
+  const features = user.features || {};
+  const isSubUser = user.is_sub_user === true;
+  
+  // Settings is ONLY for main users, and only if not explicitly disabled
+  if (feature === "settings") {
+    // Sub-users can NEVER access settings
+    if (isSubUser) {
+      return <Navigate to="/" replace />;
+    }
+    // Main users can access unless explicitly set to false
+    if (features.settings === false) {
+      return <Navigate to="/" replace />;
+    }
+    return children;
+  }
+  
+  // Backward compat: new granular features fall back to "import_data" legacy flag
+  const LEGACY_IMPORT_GROUP = new Set([
+    "email_checker", "separate_data", "import_traffic", "real_traffic", "ua_generator"
+  ]);
+
+  // If feature is specified and not enabled, redirect to dashboard
+  if (feature) {
+    const explicit = features[feature];
+    const hasAccess =
+      explicit === true ||
+      (explicit === undefined && LEGACY_IMPORT_GROUP.has(feature) && features.import_data === true);
+    if (!hasAccess) {
+      return <Navigate to="/" replace />;
+    }
+  }
+  
+  return children;
+}
+
+function App() {
+  return (
+    <BrandingProvider>
+      <ThemeProvider>
+        <div className="App">
+        <BrowserRouter>
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+            <Route path="/reset-password" element={<ResetPasswordPage />} />
+            <Route path="/admin" element={<AdminLoginPage />} />
+            <Route path="/animation-demo" element={<AnimationDemoPage />} />
+            <Route path="/bg-preview" element={<BackgroundPreviewPage />} />
+            <Route path="/admin/dashboard" element={
+              <AdminRoute>
+                <AdminDashboard />
+              </AdminRoute>
+            } />
+            <Route
+              path="/*"
+              element={
+                <PrivateRoute>
+                  <DashboardLayout>
+                    <Routes>
+                      <Route path="/" element={<Dashboard />} />
+                      <Route path="/links" element={
+                        <FeatureRoute feature="links">
+                          <LinksPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/clicks" element={
+                        <FeatureRoute feature="clicks">
+                          <ClicksPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/conversions" element={
+                        <FeatureRoute feature="conversions">
+                          <ConversionsPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/proxies" element={
+                        <FeatureRoute feature="proxies">
+                          <ProxiesPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/referrers" element={
+                        <FeatureRoute feature="clicks">
+                          <ReferrerStatsPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/import-traffic" element={
+                        <FeatureRoute feature="import_traffic">
+                          <ImportTrafficPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/email-checker" element={
+                        <FeatureRoute feature="email_checker">
+                          <EmailCheckerPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/separate-data" element={
+                        <FeatureRoute feature="separate_data">
+                          <SeparateDataPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/ua-generator" element={
+                        <FeatureRoute feature="ua_generator">
+                          <UserAgentGeneratorPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/ua-checker" element={
+                        <FeatureRoute feature="ua_generator">
+                          <UserAgentCheckerPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/form-filler" element={
+                        <FeatureRoute feature="form_filler">
+                          <FormFillerPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/real-user-traffic" element={
+                        <FeatureRoute feature="real_user_traffic">
+                          <RealUserTrafficPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/visual-recorder" element={
+                        <FeatureRoute feature="real_user_traffic">
+                          <VisualRecorderPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/uploaded-things" element={
+                        <FeatureRoute feature="real_user_traffic">
+                          <UploadedThingsPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/cpi" element={
+                        <FeatureRoute feature="cpi">
+                          <CPIDashboardPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/cpi/offers" element={
+                        <FeatureRoute feature="cpi">
+                          <CPIOffersPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/cpi/jobs" element={
+                        <FeatureRoute feature="cpi">
+                          <CPIJobsPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/cpi/jobs/:id" element={
+                        <FeatureRoute feature="cpi">
+                          <CPIJobDetailPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/cpi/devices" element={
+                        <FeatureRoute feature="cpi">
+                          <CPIDevicesPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/cpi/smartlinks" element={
+                        <FeatureRoute feature="cpi">
+                          <CPISmartLinksPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/cpi/setup" element={
+                        <FeatureRoute feature="cpi">
+                          <CPIWorkerSetupPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/settings" element={
+                        <FeatureRoute feature="settings">
+                          <SettingsPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/system-health" element={<SystemHealthPage />} />
+                    </Routes>
+                  </DashboardLayout>
+                </PrivateRoute>
+              }
+            />
+          </Routes>
+        </BrowserRouter>
+        <Toaster position="bottom-left" />
+      </div>
+      </ThemeProvider>
+    </BrandingProvider>
+  );
+}
+
+export default App;

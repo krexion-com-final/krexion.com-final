@@ -1,0 +1,30 @@
+[
+  {
+    "action": "wait_for_load",
+    "timeout": 60000
+  },
+  {
+    "action": "wait",
+    "ms": 2000
+  },
+  {
+    "action": "evaluate",
+    "script": "(function(){var t='Example Domain\n\nThis domain is for use in documentation examples without needing'.toLowerCase();var els=Array.from(document.querySelectorAll('button,a,div,span,label,input[type=submit]')).filter(function(e){var s=window.getComputedStyle(e);if(s.display==='none'||s.visibility==='hidden')return false;var x=((e.innerText||e.textContent||e.value||'')+'').trim().toLowerCase();return x===t;});if(els.length){els[0].scrollIntoView({block:'center'});els[0].click();}})();"
+  },
+  {
+    "action": "wait",
+    "ms": 1500
+  },
+  {
+    "action": "wait_for_load",
+    "timeout": 60000
+  },
+  {
+    "action": "wait",
+    "ms": 2000
+  },
+  {
+    "action": "wait",
+    "ms": 3000
+  }
+]

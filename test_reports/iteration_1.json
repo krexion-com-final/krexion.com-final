@@ -1,0 +1,40 @@
+{
+  "summary": "Backend smoke + core auth/links/CPI tests for RealFlow. 18/18 pytest cases passed against the public REACT_APP_BACKEND_URL. Verified: /api/diagnostics/health (200), /api/admin/login (admin@realflow.local/admin123 → token, is_admin=true), /api/auth/register, /api/auth/login (+ invalid creds returns 401), /api/links (403 for pending user → 200 [] after admin activation, full create→get→delete cycle works), /api/cpi/offers (200 after enabling `cpi` feature). No 5xx on any core path.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "startup", "issue": "Passlib emits non-fatal warning `module 'bcrypt' has no attribute '__about__'` due to passlib 1.7.x not knowing bcrypt 4.x. Password hashing/verification still works (proven by login tests). Cosmetic only — pin bcrypt<4 or upgrade to passlib >=1.7.5 fork to silence."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_realflow_core.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "(Optional) Silence passlib/bcrypt startup warning by pinning bcrypt<4 in backend/requirements.txt or upgrading passlib.",
+    "(Design note) Newly-registered users start with status=pending and ALL feature flags False — this is intentional but means a fresh signup cannot use /api/links or /api/cpi/* until admin activates them. Confirm this is the intended onboarding UX."
+  ],
+  "critical_code_review_comments": [
+    "server.py is ~13,626 lines — strongly recommend splitting per-domain (auth, admin, links, clicks, cpi already split, rut, gsheet, email, diagnostics). Maintenance and review at this size is dangerous.",
+    "DEFAULT_FEATURES has every flag False (including `links`), but the registration flow does not surface to the new user that they're locked out until admin approval. A clearer 403 message or onboarding state would help. Currently the 403 detail does mention `Contact admin at {ADMIN_CONTACT_EMAIL}` which is good.",
+    "MongoDB ObjectId is correctly excluded via {\"_id\": 0} projection across the routes inspected — good.",
+    "Admin /api/admin/users/{id} update accepts arbitrary feature keys via `extra='allow'` on UserFeatures — safe because gated by admin auth, but worth documenting which keys are recognized (e.g., `cpi` is not in the default UserFeatures schema yet works because of extra=allow)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_realflow_core.py",
+    "/app/backend/tests/__init__.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "success_rate": {"backend": "100% (18/18)", "frontend": "not tested (skipped per request)"},
+  "test_credentials": "Admin: admin@realflow.local / admin123 (from /app/backend/.env). Test users are created/destroyed per run with TEST_ prefix.",
+  "seed_data_creation": "Each run registers one TEST_<uuid>@realflow.local user, activates them via admin, creates+deletes one link. Session teardown deletes any leftover TEST_ users via /api/admin/users.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Pytest suite at /app/backend/tests/test_realflow_core.py is the canonical regression set for core backend smoke. It exercises register→login→admin-activate→links CRUD→cpi list and self-cleans via a session teardown fixture. The /api/links and /api/cpi/* endpoints REQUIRE the admin to (a) set status=active and (b) flip the feature flag on the user — fresh signups will 403 by design. CPI feature key is literally `cpi` (cpi_module.py:220). DB name is `realflow`. Backend exposes via REACT_APP_BACKEND_URL=https://dynabook-dev.preview.emergentagent.com.",
+  "rca of the issue": "No bug. All targeted endpoints behave correctly. The single non-fatal warning is passlib<>bcrypt4 metadata mismatch and has no functional impact."
+}
