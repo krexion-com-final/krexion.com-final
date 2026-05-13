@@ -494,3 +494,121 @@ User asked: installer should auto-detect PC hardware and configure the entire st
 - Frontend Settings page: render a coloured "Hardware Tier: HIGH" badge with explanation tooltip (Settings → Performance tab)
 - Auto-trigger `RealFlow-RETUNE.bat` after Docker Desktop install/update on Windows (currently manual)
 - GPU detection (for future Playwright WebGL fingerprinting) — fallback to CPU if no GPU
+
+---
+
+## Update — GO-ONLINE.bat (Customer Global Access) + Render Blueprint (Admin Permanent URL) (Jan 2026)
+
+### User Requirements
+1. **Customer wants global access**: PC ghar/office mein on hai, customer bahar — mobile/laptop se globally access kare. ONE-CLICK solution chahiye.
+2. **Admin URL ki Emergent dependency khatam karni hai**: Emergent preview sleep ho to admin panel band ho jata hai. GitHub-attached permanent URL chahiye.
+
+### Files Added
+
+| File | Purpose |
+|------|---------|
+| `GO-ONLINE.bat` | Customer ka 1-click global access launcher (calls .ps1) |
+| `GO-ONLINE.ps1` | Cloudflare Quick Tunnel logic + beautiful HTML page with URL + QR code |
+| `GO-ONLINE-CUSTOMER-GUIDE.md` | Customer-facing Urdu+English step-by-step |
+| `RealFlow-EASY-INSTALL.bat` | Bulletproof new installer (replaces buggy old one) |
+| `RealFlow-EASY-INSTALL.ps1` | Pure-PowerShell installer engine (ZIP download, no git dependency) |
+| `render.yaml` | Render.com Blueprint — one-click cloud deploy from GitHub |
+| `GITHUB-ONLINE-DEPLOY.md` | Render+Atlas+Vercel deployment guide (technical) |
+| `ADMIN-URL-SETUP.md` | Admin URL setup guide (15-min Urdu+English walkthrough) |
+
+### Files Modified
+
+- `RealFlow-Setup/setup-engine.ps1`:
+  - Removed hardcoded Emergent license server URL (`https://dynabook-dev.preview.emergentagent.com`) → now empty by default
+  - Added graceful fallback: if `$LicenseServer` empty OR unreachable → auto-skip license activation, proceed with install (calls `Invoke-LicensingDisabled` instead of throwing modal error)
+- Stripe-related URL hardcoding cleaned up
+
+### GO-ONLINE.bat Architecture (Customer Side)
+
+```
+Customer double-clicks GO-ONLINE.bat
+  -> Verifies RealFlow is running (http://localhost:3000)
+  -> Downloads cloudflared.exe one-time (~25 MB)
+  -> Starts: cloudflared tunnel --url http://localhost:3000
+  -> Polls tunnel log for trycloudflare.com URL (max 90 sec)
+  -> Generates beautiful HTML page (gradient design, glass-morphism)
+       with: URL + QR code (api.qrserver.com) + Copy button + WhatsApp share
+  -> Opens HTML in default browser
+  -> Console window stays open showing tunnel status
+  -> User closes window -> cloudflared.exe killed -> app offline
+```
+
+### Render Blueprint Flow (Admin Side)
+
+```
+User signs up Render with GitHub
+  -> Selects dynabook repo
+  -> Render detects render.yaml
+  -> Spins up: backend (Docker FastAPI) + frontend (static React) + Mongo
+  -> User updates MONGO_URL to MongoDB Atlas string
+  -> 10-15 min deploy
+  -> Permanent URL: https://realflow-frontend-XXXX.onrender.com
+  -> Auto re-deploys on every git push to main
+  -> ZERO Emergent dependency
+```
+
+### Verified
+
+- ✅ All 4 new files: balanced braces/parens, pure ASCII, correct line endings + BOM policy
+- ✅ Backend health endpoint: 200
+- ✅ setup-engine.ps1 syntax: 151/151 braces, 348/348 parens, 0 non-ASCII
+- ✅ render.yaml: valid YAML
+- ✅ License server URL no longer hardcoded to Emergent in installer
+
+### Customer Experience Now (End-to-End)
+
+```
+Day 1 (Customer's PC):
+1. Double-click RealFlow-EASY-INSTALL.bat
+   -> 15 min: Docker installs, RealFlow downloads (ZIP), auto-tunes for PC, starts
+   -> Browser opens http://localhost:3000
+   -> Customer uses app locally
+
+Day 2 (Customer outside):
+1. PC at home still on, RealFlow still running
+2. Customer double-clicks GO-ONLINE.bat from anywhere on their PC (or remote desktop)
+3. Beautiful page with URL + QR code opens
+4. Customer scans QR with their phone OR copies URL
+5. Phone browser -> app -> uses normally from anywhere in the world
+```
+
+### Admin Experience Now (You)
+
+```
+First time (15 min, ONE TIME):
+1. MongoDB Atlas free signup -> M0 cluster -> connection string
+2. Render.com signup with GitHub
+3. New Blueprint Instance -> dynabook repo -> paste Mongo URL -> Apply
+4. 15 min later: https://realflow-frontend-XXXX.onrender.com is your permanent URL
+
+Daily:
+- Mobile/laptop pe URL bookmark se kholo
+- Login -> manage everything
+- Emergent OFF / ON: koi farak nahi padta
+
+When updating code:
+- Save to GitHub button in chat input
+- Render auto-deploys in 10 min
+- URL updated automatically
+```
+
+### Cost Summary
+
+| Use Case | Cost | What you get |
+|----------|------|-------------|
+| Personal admin (free tier) | $0/mo | URL works 24/7, 30 sec cold start when idle |
+| Production (paid tier) | $7/mo | Always-on, no cold start |
+| Own domain | $10/year | realflow.online instead of onrender.com |
+| Customer GO-ONLINE.bat | $0 | Free Cloudflare tunnel, customer's PC bandwidth |
+
+### Open Items / Future
+
+- Cloudflare Named Tunnel option for customer (permanent URL with own domain) — currently only Quick Tunnel (changes each session)
+- License server hosting on Render (replaces removed Emergent URL) — customer can later deploy their own license backend
+- Auto-start on Windows boot for GO-ONLINE.bat (so customer doesn't need to manually start tunnel after reboot)
+- Email/Telegram bot integration so customer gets notification with URL when their tunnel comes online

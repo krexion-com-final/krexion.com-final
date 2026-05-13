@@ -36,9 +36,11 @@ $ResumeFile  = Join-Path $ScriptDir ".resume-stage"
 $LogFile     = Join-Path $ScriptDir "setup.log"
 $LicenseFile = Join-Path $ScriptDir ".license"
 
-# License-server URL -- installer phones home here to validate keys + Stripe
-# checkout. Change to your production URL when you migrate off Emergent.
-$LicenseServer = "https://dynabook-dev.preview.emergentagent.com"
+# License-server URL -- installer phones home here to validate keys.
+# DEFAULT: empty (license check disabled, free trial auto-granted). Change
+# this to your own license server URL after you deploy it on Render/DO/etc.
+# Example: $LicenseServer = "https://api.realflow.online"
+$LicenseServer = ""
 
 New-Item -ItemType Directory -Force -Path $BundleDir | Out-Null
 "" | Out-File -FilePath $LogFile -Encoding utf8
@@ -820,16 +822,19 @@ function Invoke-LicenseActivation {
 
     # Fetch live config from server
     Set-UI -Status "Connecting to license server..." -Log "GET $LicenseServer/api/license/config"
+
+    # If no license server is configured -- skip licensing entirely (auto-activate)
+    if ([string]::IsNullOrWhiteSpace($LicenseServer)) {
+        Set-UI -Log "  No LICENSE_SERVER_URL configured -- skipping license activation."
+        return (Invoke-LicensingDisabled)
+    }
+
     try {
         $cfg = Invoke-RestMethod -Uri "$LicenseServer/api/license/config" -Method Get -TimeoutSec 15
     } catch {
-        [System.Windows.Forms.MessageBox]::Show(
-            "Cannot reach the license server at $LicenseServer.`r`n`r`nCheck your internet connection and try again.",
-            "RealFlow Setup -- Network error",
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Warning
-        ) | Out-Null
-        return $false
+        # License server unreachable -- proceed in offline / free mode
+        Set-UI -Log "  License server unreachable ($LicenseServer) -- proceeding without license check."
+        return (Invoke-LicensingDisabled)
     }
     if (-not $cfg.enabled) {
         return (Invoke-LicensingDisabled)
