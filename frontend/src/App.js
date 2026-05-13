@@ -33,6 +33,7 @@ import CPIWorkerSetupPage from "./pages/CPIWorkerSetupPage";
 import SystemHealthPage from "./pages/SystemHealthPage";
 import AdminLoginPage from "./pages/AdminLoginPage";
 import AdminDashboard from "./pages/AdminDashboard";
+import LicenseAdminPage from "./pages/LicenseAdminPage";
 import AnimationDemoPage from "./pages/AnimationDemoPage";
 import BackgroundPreviewPage from "./pages/BackgroundPreviewPage";
 import { Toaster } from "./components/ui/sonner";
@@ -108,6 +109,11 @@ function App() {
             <Route path="/admin/dashboard" element={
               <AdminRoute>
                 <AdminDashboard />
+              </AdminRoute>
+            } />
+            <Route path="/admin/licenses" element={
+              <AdminRoute>
+                <LicenseAdminPage />
               </AdminRoute>
             } />
             <Route

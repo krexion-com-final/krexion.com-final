@@ -18,6 +18,11 @@ $RepoUrl     = "https://github.com/ronaldsexedwards40-glitch/dynabook.git"
 $Branch      = "main"
 $ResumeFile  = Join-Path $ScriptDir ".resume-stage"
 $LogFile     = Join-Path $ScriptDir "setup.log"
+$LicenseFile = Join-Path $ScriptDir ".license"
+
+# License-server URL — installer phones home here to validate keys + Stripe
+# checkout. Change to your production URL when you migrate off Emergent.
+$LicenseServer = "https://dynabook-dev.preview.emergentagent.com"
 
 New-Item -ItemType Directory -Force -Path $BundleDir | Out-Null
 "" | Out-File -FilePath $LogFile -Encoding utf8
@@ -312,6 +317,10 @@ APP_URL=http://localhost:3000
 PUBLIC_BASE_URL=http://localhost:3000
 CORS_ORIGINS=*
 
+# License (set by installer)
+LICENSE_KEY=$(if (Test-Path $LicenseFile) { (Get-Content $LicenseFile -Raw).Trim() } else { '' })
+LICENSE_SERVER_URL=$LicenseServer
+
 # Optional
 RESEND_API_KEY=
 RESEND_FROM=no-reply@realflow.local
@@ -447,7 +456,298 @@ function Start-Install {
 if (Test-Path $ResumeFile) {
     $form.Add_Shown({ Start-Install })
 } else {
-    $installBtn.Add_Click({ Start-Install })
+    $installBtn.Add_Click({
+        # Run license activation first; only proceed if it succeeds
+        if (Invoke-LicenseActivation) {
+            Start-Install
+        }
+    })
+}
+
+# ═══════════════════════════════════════════════════════════════════════
+#   LICENSE ACTIVATION  —  shown as a modal dialog before install starts
+# ═══════════════════════════════════════════════════════════════════════
+function Get-MachineId {
+    # Stable per-PC fingerprint that survives reboot but not OS reinstall
+    try {
+        $uuid = (Get-CimInstance Win32_ComputerSystemProduct -ErrorAction Stop).UUID
+        if ($uuid -and $uuid -notmatch "^0+$") { return "WIN-$uuid" }
+    } catch {}
+    try {
+        $mac = (Get-NetAdapter | Where-Object { $_.Status -eq "Up" } | Select-Object -First 1).MacAddress
+        if ($mac) { return "MAC-" + ($mac -replace "[:\-]", "") }
+    } catch {}
+    return "GUID-" + ([guid]::NewGuid().ToString("N"))
+}
+
+function Invoke-LicensingDisabled {
+    # Server returned enabled=false — proceed without a key, "open install"
+    Set-UI -Log "  Licensing disabled on server — installing without activation"
+    "DISABLED" | Out-File -FilePath $LicenseFile -Encoding ascii
+    return $true
+}
+
+function Show-LicenseDialog {
+    param($Config)
+
+    # Build secondary dialog
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = "RealFlow — License Activation"
+    $dlg.Size = New-Object System.Drawing.Size(560, 460)
+    $dlg.StartPosition = "CenterParent"
+    $dlg.FormBorderStyle = "FixedDialog"
+    $dlg.MaximizeBox = $false
+    $dlg.BackColor = [System.Drawing.Color]::FromArgb(20, 24, 31)
+    $dlg.ForeColor = [System.Drawing.Color]::White
+    $dlg.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+
+    $hdr = New-Object System.Windows.Forms.Label
+    $hdr.Text = "Activate $($Config.product_name)"
+    $hdr.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 16, [System.Drawing.FontStyle]::Bold)
+    $hdr.Location = New-Object System.Drawing.Point(20, 18)
+    $hdr.Size = New-Object System.Drawing.Size(500, 32)
+    $dlg.Controls.Add($hdr)
+
+    $sub = New-Object System.Windows.Forms.Label
+    $price = "{0:N2}" -f [double]$Config.monthly_price
+    $cur = $Config.currency.ToString().ToUpper()
+    $trial = [int]$Config.trial_days
+    $sub.Text = "Price: $price $cur / month     Trial: $trial days     1 license = 1 PC"
+    $sub.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $sub.ForeColor = [System.Drawing.Color]::FromArgb(180, 200, 230)
+    $sub.Location = New-Object System.Drawing.Point(20, 52)
+    $sub.Size = New-Object System.Drawing.Size(500, 22)
+    $dlg.Controls.Add($sub)
+
+    # Tab: License key
+    $gp1 = New-Object System.Windows.Forms.GroupBox
+    $gp1.Text = "  I already have a license key  "
+    $gp1.Location = New-Object System.Drawing.Point(20, 86)
+    $gp1.Size = New-Object System.Drawing.Size(500, 90)
+    $gp1.ForeColor = [System.Drawing.Color]::White
+    $dlg.Controls.Add($gp1)
+
+    $lblKey = New-Object System.Windows.Forms.Label
+    $lblKey.Text = "License key (RFLW-XXXX-XXXX-XXXX-XXXX):"
+    $lblKey.Location = New-Object System.Drawing.Point(12, 26)
+    $lblKey.Size = New-Object System.Drawing.Size(260, 18)
+    $gp1.Controls.Add($lblKey)
+
+    $txtKey = New-Object System.Windows.Forms.TextBox
+    $txtKey.Location = New-Object System.Drawing.Point(12, 46)
+    $txtKey.Size = New-Object System.Drawing.Size(370, 26)
+    $txtKey.Font = New-Object System.Drawing.Font("Consolas", 10)
+    $gp1.Controls.Add($txtKey)
+
+    $btnActivate = New-Object System.Windows.Forms.Button
+    $btnActivate.Text = "Activate"
+    $btnActivate.Location = New-Object System.Drawing.Point(390, 44)
+    $btnActivate.Size = New-Object System.Drawing.Size(100, 30)
+    $btnActivate.BackColor = [System.Drawing.Color]::FromArgb(70, 130, 220)
+    $btnActivate.ForeColor = [System.Drawing.Color]::White
+    $btnActivate.FlatStyle = "Flat"
+    $btnActivate.FlatAppearance.BorderSize = 0
+    $gp1.Controls.Add($btnActivate)
+
+    # Tab: Start trial
+    $gp2 = New-Object System.Windows.Forms.GroupBox
+    $gp2.Text = "  Start a free trial  "
+    $gp2.Location = New-Object System.Drawing.Point(20, 186)
+    $gp2.Size = New-Object System.Drawing.Size(500, 90)
+    $gp2.ForeColor = [System.Drawing.Color]::White
+    $dlg.Controls.Add($gp2)
+
+    if ($trial -le 0) {
+        $gp2.Enabled = $false
+        $gp2.Text = "  Free trial currently disabled  "
+    }
+
+    $lblEmail = New-Object System.Windows.Forms.Label
+    $lblEmail.Text = "Your email (where activation receipt is sent):"
+    $lblEmail.Location = New-Object System.Drawing.Point(12, 26)
+    $lblEmail.Size = New-Object System.Drawing.Size(280, 18)
+    $gp2.Controls.Add($lblEmail)
+
+    $txtEmail = New-Object System.Windows.Forms.TextBox
+    $txtEmail.Location = New-Object System.Drawing.Point(12, 46)
+    $txtEmail.Size = New-Object System.Drawing.Size(370, 26)
+    $gp2.Controls.Add($txtEmail)
+
+    $btnTrial = New-Object System.Windows.Forms.Button
+    $btnTrial.Text = "Start trial"
+    $btnTrial.Location = New-Object System.Drawing.Point(390, 44)
+    $btnTrial.Size = New-Object System.Drawing.Size(100, 30)
+    $btnTrial.BackColor = [System.Drawing.Color]::FromArgb(60, 180, 90)
+    $btnTrial.ForeColor = [System.Drawing.Color]::White
+    $btnTrial.FlatStyle = "Flat"
+    $btnTrial.FlatAppearance.BorderSize = 0
+    $gp2.Controls.Add($btnTrial)
+
+    # Tab: Buy
+    $btnBuy = New-Object System.Windows.Forms.Button
+    $btnBuy.Text = "Buy a license  ($price $cur / mo)"
+    $btnBuy.Location = New-Object System.Drawing.Point(20, 290)
+    $btnBuy.Size = New-Object System.Drawing.Size(500, 36)
+    $btnBuy.BackColor = [System.Drawing.Color]::FromArgb(120, 80, 200)
+    $btnBuy.ForeColor = [System.Drawing.Color]::White
+    $btnBuy.FlatStyle = "Flat"
+    $btnBuy.FlatAppearance.BorderSize = 0
+    $btnBuy.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 10)
+    $dlg.Controls.Add($btnBuy)
+
+    $lblStatus = New-Object System.Windows.Forms.Label
+    $lblStatus.Location = New-Object System.Drawing.Point(20, 336)
+    $lblStatus.Size = New-Object System.Drawing.Size(500, 40)
+    $lblStatus.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(220, 230, 245)
+    $dlg.Controls.Add($lblStatus)
+
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Text = "Cancel"
+    $btnCancel.Location = New-Object System.Drawing.Point(20, 386)
+    $btnCancel.Size = New-Object System.Drawing.Size(100, 30)
+    $btnCancel.BackColor = [System.Drawing.Color]::FromArgb(50, 55, 65)
+    $btnCancel.ForeColor = [System.Drawing.Color]::White
+    $btnCancel.FlatStyle = "Flat"
+    $dlg.Controls.Add($btnCancel)
+
+    $machineId = Get-MachineId
+    Log "  Machine ID: $($machineId.Substring(0, [Math]::Min(16, $machineId.Length)))..."
+
+    $script:ActivationKey = $null
+
+    $btnActivate.Add_Click({
+        $key = $txtKey.Text.Trim().ToUpper()
+        if (-not $key) { $lblStatus.Text = "Please enter a license key."; return }
+        $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(220, 230, 245)
+        $lblStatus.Text = "Validating with license server..."
+        $btnActivate.Enabled = $false
+        try {
+            $body = @{ license_key = $key; machine_id = $machineId; machine_label = $env:COMPUTERNAME } | ConvertTo-Json
+            $r = Invoke-RestMethod -Uri "$LicenseServer/api/license/activate" -Method Post -Body $body -ContentType "application/json" -TimeoutSec 30
+            $script:ActivationKey = $key
+            $key | Out-File -FilePath $LicenseFile -Encoding ascii
+            $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(80, 220, 130)
+            $lblStatus.Text = "Activated! Status: $($r.license.status). Click Cancel to close and the installer will continue."
+            $dlg.DialogResult = "OK"
+            $dlg.Close()
+        } catch {
+            $msg = $_.Exception.Message
+            try { $msg = ($_.ErrorDetails.Message | ConvertFrom-Json).detail } catch {}
+            $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(240, 110, 110)
+            $lblStatus.Text = "Activation failed: $msg"
+        }
+        $btnActivate.Enabled = $true
+    })
+
+    $btnTrial.Add_Click({
+        $email = $txtEmail.Text.Trim()
+        if ($email -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') { $lblStatus.Text = "Please enter a valid email."; return }
+        $btnTrial.Enabled = $false
+        $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(220, 230, 245)
+        $lblStatus.Text = "Requesting trial license..."
+        try {
+            $body = @{ email = $email; machine_id = $machineId } | ConvertTo-Json
+            $r = Invoke-RestMethod -Uri "$LicenseServer/api/license/start-trial" -Method Post -Body $body -ContentType "application/json" -TimeoutSec 30
+            $key = $r.license_key
+            # Auto-bind to this machine
+            $body2 = @{ license_key = $key; machine_id = $machineId; machine_label = $env:COMPUTERNAME } | ConvertTo-Json
+            Invoke-RestMethod -Uri "$LicenseServer/api/license/activate" -Method Post -Body $body2 -ContentType "application/json" -TimeoutSec 30 | Out-Null
+            $script:ActivationKey = $key
+            $key | Out-File -FilePath $LicenseFile -Encoding ascii
+            $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(80, 220, 130)
+            $lblStatus.Text = "Trial activated! Your key: $key  (saved). Closing..."
+            Start-Sleep -Milliseconds 1500
+            $dlg.DialogResult = "OK"
+            $dlg.Close()
+        } catch {
+            $msg = $_.Exception.Message
+            try { $msg = ($_.ErrorDetails.Message | ConvertFrom-Json).detail } catch {}
+            $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(240, 110, 110)
+            $lblStatus.Text = "Trial failed: $msg"
+        }
+        $btnTrial.Enabled = $true
+    })
+
+    $btnBuy.Add_Click({
+        $email = $txtEmail.Text.Trim()
+        if ($email -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
+            $lblStatus.Text = "Enter your email in the trial box above, then click Buy."
+            return
+        }
+        $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(220, 230, 245)
+        $lblStatus.Text = "Creating Stripe checkout..."
+        $btnBuy.Enabled = $false
+        try {
+            # Create or get a license row for this email first
+            $tb = @{ email = $email; machine_id = $machineId } | ConvertTo-Json
+            $tr = Invoke-RestMethod -Uri "$LicenseServer/api/license/start-trial" -Method Post -Body $tb -ContentType "application/json" -TimeoutSec 30
+            $key = $tr.license_key
+
+            $cb = @{ license_key = $key; origin_url = $LicenseServer } | ConvertTo-Json
+            $cr = Invoke-RestMethod -Uri "$LicenseServer/api/license/checkout" -Method Post -Body $cb -ContentType "application/json" -TimeoutSec 30
+
+            $txtKey.Text = $key
+            Start-Process $cr.checkout_url
+            $lblStatus.Text = "Stripe opened in your browser. After paying, paste your key above and click Activate."
+        } catch {
+            $msg = $_.Exception.Message
+            try { $msg = ($_.ErrorDetails.Message | ConvertFrom-Json).detail } catch {}
+            $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(240, 110, 110)
+            $lblStatus.Text = "Checkout failed: $msg"
+        }
+        $btnBuy.Enabled = $true
+    })
+
+    $btnCancel.Add_Click({ $dlg.DialogResult = "Cancel"; $dlg.Close() })
+
+    $result = $dlg.ShowDialog($form)
+    return ($script:ActivationKey -ne $null)
+}
+
+function Invoke-LicenseActivation {
+    # If we have a saved license from previous run AND not disabled, validate
+    if ((Test-Path $LicenseFile)) {
+        $saved = (Get-Content $LicenseFile -Raw).Trim()
+        if ($saved -eq "DISABLED") {
+            Set-UI -Status "Licensing disabled — installing..." -Log "Saved license state: DISABLED"
+            return $true
+        }
+        if ($saved) {
+            Set-UI -Status "Re-validating saved license..." -Log "Saved license key found, validating with server"
+            try {
+                $body = @{ license_key = $saved; machine_id = (Get-MachineId) } | ConvertTo-Json
+                $r = Invoke-RestMethod -Uri "$LicenseServer/api/license/validate" -Method Post -Body $body -ContentType "application/json" -TimeoutSec 20
+                if ($r.ok) {
+                    Set-UI -Log "  License valid (status: $($r.status))"
+                    return $true
+                }
+                Set-UI -Log "  Saved license invalid: $($r.reason). Asking for a new one."
+            } catch {
+                Set-UI -Log "  Could not reach license server — proceeding offline with cached key"
+                return $true
+            }
+        }
+    }
+
+    # Fetch live config from server
+    Set-UI -Status "Connecting to license server..." -Log "GET $LicenseServer/api/license/config"
+    try {
+        $cfg = Invoke-RestMethod -Uri "$LicenseServer/api/license/config" -Method Get -TimeoutSec 15
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Cannot reach the license server at $LicenseServer.`r`n`r`nCheck your internet connection and try again.",
+            "RealFlow Setup — Network error",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        ) | Out-Null
+        return $false
+    }
+    if (-not $cfg.enabled) {
+        return (Invoke-LicensingDisabled)
+    }
+
+    return (Show-LicenseDialog -Config $cfg)
 }
 
 # ─── Show the wizard ──────────────────────────────────────────────────

@@ -687,6 +687,16 @@ export default function AdminDashboard() {
             </div>
           </div>
           <div className="flex items-center gap-4">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => window.location.href = "/admin/licenses"}
+              data-testid="goto-licenses-btn"
+              className="border-[var(--brand-border)]"
+            >
+              <Settings size={16} className="mr-2" />
+              Licenses & Pricing
+            </Button>
             <Button variant="outline" size="sm" onClick={fetchData} className="border-[var(--brand-border)]">
               <RefreshCw size={16} className="mr-2" />
               Refresh

@@ -12844,6 +12844,24 @@ try:
 except Exception as _cpi_err:  # noqa: BLE001
     logger.error(f"CPI module failed to load: {_cpi_err}")
 
+# ─── License + Stripe subscription module ─────────────────────────────
+try:
+    from license_module import license_router, _bind as _license_bind
+
+    # Reuse the existing admin dependency from this file.
+    async def _license_admin(request: Request):
+        return await get_current_admin(request)
+
+    _license_bind(
+        main_db=main_db,
+        get_current_admin=_license_admin,
+        send_email=None,  # send_email integration is optional
+    )
+    app.include_router(license_router)
+    logger.info("License module loaded — endpoints under /api/license, /api/admin/license, /api/webhook/stripe")
+except Exception as _lic_err:  # noqa: BLE001
+    logger.error(f"License module failed to load: {_lic_err}")
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -13244,6 +13262,44 @@ async def startup_db_indexes():
         logger.info("UA versions auto-refresh task scheduled (runs on startup + every 24h)")
     except Exception as e:
         logger.warning(f"Could not schedule UA versions auto-refresh: {e}")
+
+    # ── License heartbeat (this locally-installed app phones home to
+    # the central license server every 6 h to confirm subscription is
+    # still active). If LICENSE_KEY is empty the check is skipped.
+    async def _license_heartbeat_task():
+        import httpx as _httpx
+        key = os.environ.get("LICENSE_KEY", "").strip()
+        server = os.environ.get("LICENSE_SERVER_URL", "").rstrip("/")
+        if not key or not server:
+            logger.info("License heartbeat: skipped (no LICENSE_KEY/LICENSE_SERVER_URL set)")
+            return
+        # Same machine_id format the installer used
+        try:
+            import platform as _plat
+            machine_id = f"WIN-{_plat.node()}"
+        except Exception:  # noqa: BLE001
+            machine_id = "GUID-" + uuid.uuid4().hex
+        while True:
+            try:
+                async with _httpx.AsyncClient(timeout=20.0) as cx:
+                    r = await cx.post(
+                        f"{server}/api/license/validate",
+                        json={"license_key": key, "machine_id": machine_id},
+                    )
+                    if r.status_code == 200:
+                        data = r.json()
+                        logger.info(f"License heartbeat: ok={data.get('ok')} status={data.get('status')}")
+                    else:
+                        logger.warning(f"License heartbeat returned {r.status_code}: {r.text[:120]}")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"License heartbeat failed (offline?): {e}")
+            await asyncio.sleep(6 * 3600)
+
+    try:
+        asyncio.create_task(_license_heartbeat_task())
+        logger.info("License heartbeat task scheduled (every 6h)")
+    except Exception as e:
+        logger.warning(f"Could not start license heartbeat: {e}")
 
     # Ensure Playwright Chromium (headless-shell) is installed for
     # Real-User-Traffic / Form-Filler. We do a STRICT revision check
