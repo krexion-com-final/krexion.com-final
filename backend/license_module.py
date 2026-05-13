@@ -472,6 +472,88 @@ async def admin_extend(key: str, days: int = 31, admin: dict = _admin_dep()):
     return {"ok": True, "subscription_ends_at": _iso(new_end)}
 
 
+@license_router.delete("/admin/license/{key}")
+async def admin_delete_license(key: str, admin: dict = _admin_dep()):
+    """Permanently delete a license key from the database.
+    Customer's local heartbeat will fail validation next cycle.
+    Useful for cleaning up trial keys, revoked keys, mistakes, etc."""
+    r = await _db.licenses.delete_one({"license_key": key})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "License not found.")
+    return {"ok": True, "deleted": key}
+
+
+@license_router.post("/admin/license/bulk-delete")
+async def admin_bulk_delete(payload: dict, admin: dict = _admin_dep()):
+    """Bulk-delete licenses by filter.
+    Body: {
+      "status": "revoked" | "trial" | "active" | "expired" | "all",   (optional)
+      "keys":   ["RFLW-...", "RFLW-..."],                              (optional, takes priority)
+      "expired_only": true|false,                                       (optional)
+      "unactivated_only": true|false                                    (optional - never bound to a machine)
+    }
+    Returns: { "ok": true, "deleted_count": N }
+    """
+    keys = payload.get("keys")
+    status = payload.get("status")
+    expired_only = bool(payload.get("expired_only"))
+    unactivated_only = bool(payload.get("unactivated_only"))
+
+    if keys and isinstance(keys, list) and len(keys) > 0:
+        # Whitelist explicit keys (safest)
+        r = await _db.licenses.delete_many({"license_key": {"$in": keys}})
+        return {"ok": True, "deleted_count": r.deleted_count, "by": "keys"}
+
+    query: Dict[str, Any] = {}
+    if status and status != "all":
+        # "expired" is a logical filter, not a stored status
+        if status == "expired":
+            expired_only = True
+        else:
+            query["status"] = status
+    if expired_only:
+        # subscription_ends_at < now OR trial_ends_at < now (and no active sub)
+        query["$or"] = [
+            {"subscription_ends_at": {"$lt": _now()}, "status": {"$ne": "active"}},
+            {"trial_ends_at": {"$lt": _now()}, "status": "trial"},
+        ]
+    if unactivated_only:
+        query["machine_id"] = None
+
+    if not query:
+        raise HTTPException(400, "Refusing bulk-delete with empty filter. Specify status / keys / expired_only / unactivated_only.")
+
+    r = await _db.licenses.delete_many(query)
+    return {"ok": True, "deleted_count": r.deleted_count, "by": "filter", "filter": query}
+
+
+@license_router.post("/admin/license/cleanup")
+async def admin_cleanup(admin: dict = _admin_dep()):
+    """One-click cleanup: deletes all revoked + all expired licenses.
+    Keeps active and unexpired trial licenses untouched."""
+    # 1. Revoked
+    r1 = await _db.licenses.delete_many({"status": "revoked"})
+    # 2. Expired trials
+    r2 = await _db.licenses.delete_many({
+        "status": "trial",
+        "trial_ends_at": {"$lt": _now()},
+    })
+    # 3. Expired active subscriptions (subscription_ends_at past)
+    r3 = await _db.licenses.delete_many({
+        "subscription_ends_at": {"$lt": _now()},
+        "status": {"$in": ["active", "expired"]},
+    })
+    return {
+        "ok": True,
+        "deleted": {
+            "revoked": r1.deleted_count,
+            "expired_trials": r2.deleted_count,
+            "expired_subscriptions": r3.deleted_count,
+            "total": r1.deleted_count + r2.deleted_count + r3.deleted_count,
+        },
+    }
+
+
 @license_router.post("/admin/license/issue")
 async def admin_issue_license(
     email: EmailStr,

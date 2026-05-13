@@ -664,3 +664,47 @@ When updating code:
 | `GO-ONLINE.bat` + `.ps1` | Customer (optional) | Mobile access to their own RealFlow |
 | `ADMIN-GO-ONLINE.bat` + `.ps1` | DO NOT SHARE -- admin only | Mobile admin access to YOUR admin server |
 | `render.yaml` + `ADMIN-URL-SETUP.md` | Admin only | If you ever want permanent cloud admin URL |
+
+---
+
+## Update — License Delete + Bulk Cleanup (Jan 2026)
+
+### User request
+Admin panel mein "Customers / Licenses" tab par sirf Extend + Revoke buttons the. User chahta tha **Delete** function bhi ho — purane / unused / extra license keys clean karne ke liye, aur bulk delete bhi.
+
+### Backend additions (`/app/backend/license_module.py`)
+
+| Endpoint | Description |
+|----------|-------------|
+| `DELETE /api/admin/license/{key}` | Permanently delete single license. Returns 404 if not found. |
+| `POST /api/admin/license/bulk-delete` | Delete by filter. Body supports `status`, `keys[]`, `expired_only`, `unactivated_only`. Refuses empty filter (returns 400) for safety. |
+| `POST /api/admin/license/cleanup` | One-click: deletes all revoked + all expired trials + all expired subscriptions. Returns count breakdown. |
+
+All endpoints require admin JWT (via `_admin_dep`).
+
+### Frontend additions (`/app/frontend/src/pages/LicenseAdminPage.js`)
+
+1. **Per-row Delete button** (red, next to Extend + Revoke) with confirmation modal:
+   > "PERMANENTLY DELETE license RFLW-XXX? This cannot be undone. Customer's heartbeat will fail validation on next cycle. Use Revoke instead if you just want to block."
+2. **Bulk Cleanup toolbar** (red-tinted banner above the table):
+   - `Delete Revoked + Expired` -> calls /cleanup endpoint
+   - `Delete all Revoked` -> bulk-delete with status=revoked
+   - `Delete all Trial` -> bulk-delete with status=trial
+   - Helper text: "Active licenses are never auto-deleted. Use per-row Delete for specific keys."
+
+### Verified
+
+- ✅ `DELETE /api/admin/license/{key}` returns `{ok:true, deleted:KEY}` and 404 on retry
+- ✅ `POST /api/admin/license/bulk-delete {status:revoked}` returns `{ok:true, deleted_count:N, by:filter}`
+- ✅ `POST /api/admin/license/cleanup` returns full breakdown `{revoked, expired_trials, expired_subscriptions, total}`
+- ✅ Empty filter rejected with 400
+- ✅ Frontend lints clean (no ESLint errors)
+- ✅ Screenshot of /admin/licenses (Customers tab) shows: bulk cleanup banner + per-row Delete buttons visible
+- ✅ All `data-testid` attributes added: `cleanup-all-btn`, `cleanup-revoked-btn`, `cleanup-trial-btn`, `delete-{key}`
+
+### Safety guardrails
+
+- Empty bulk-delete filter -> 400 (prevents accidental "delete everything")
+- Active licenses are NEVER auto-deleted via cleanup or status-based bulk-delete
+- All deletes show confirmation `window.confirm()` modal before executing
+- Cleanup endpoint protects active subscriptions (only deletes EXPIRED active)

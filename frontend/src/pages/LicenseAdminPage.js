@@ -113,6 +113,49 @@ export default function LicenseAdminPage() {
     }
   };
 
+  const deleteLicense = async (key) => {
+    if (!window.confirm(`PERMANENTLY DELETE license ${key}?\n\nThis cannot be undone. The customer's heartbeat will fail validation on next cycle.\n\nUse Revoke instead if you just want to block the customer.`)) return;
+    setBusy(true);
+    try {
+      await axios.delete(`${API}/admin/license/${encodeURIComponent(key)}`, adminAuth());
+      await loadLicenses();
+    } catch (e) {
+      alert(`Delete failed: ${e.response?.data?.detail || e.message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cleanupExpired = async () => {
+    if (!window.confirm("Delete ALL revoked + expired licenses?\n\nThis keeps active and unexpired trials. Cannot be undone.")) return;
+    setBusy(true);
+    try {
+      const r = await axios.post(`${API}/admin/license/cleanup`, {}, adminAuth());
+      const d = r.data?.deleted || {};
+      alert(`Cleanup complete:\n- Revoked: ${d.revoked || 0}\n- Expired trials: ${d.expired_trials || 0}\n- Expired subscriptions: ${d.expired_subscriptions || 0}\n\nTotal deleted: ${d.total || 0}`);
+      await loadLicenses();
+    } catch (e) {
+      alert(`Cleanup failed: ${e.response?.data?.detail || e.message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const bulkDeleteByStatus = async (status) => {
+    const label = status === "revoked" ? "REVOKED" : status === "trial" ? "TRIAL" : status.toUpperCase();
+    if (!window.confirm(`Delete ALL ${label} licenses?\n\nThis cannot be undone.`)) return;
+    setBusy(true);
+    try {
+      const r = await axios.post(`${API}/admin/license/bulk-delete`, { status }, adminAuth());
+      alert(`Deleted ${r.data?.deleted_count || 0} ${label} license(s).`);
+      await loadLicenses();
+    } catch (e) {
+      alert(`Bulk delete failed: ${e.response?.data?.detail || e.message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const issue = async () => {
     if (!issueEmail) return;
     setBusy(true);
@@ -339,6 +382,43 @@ export default function LicenseAdminPage() {
               </div>
             </div>
 
+            {/* Bulk cleanup toolbar -- delete unused / revoked / expired keys in one click */}
+            <div className="bg-red-950/20 border border-red-900/30 rounded-xl p-3 mb-4 flex flex-wrap items-center gap-2">
+              <span className="text-xs text-red-200 font-semibold uppercase tracking-wider mr-2">
+                Bulk cleanup:
+              </span>
+              <button
+                data-testid="cleanup-all-btn"
+                onClick={cleanupExpired}
+                disabled={busy}
+                className="text-xs px-3 py-1.5 bg-red-700/40 hover:bg-red-700/70 border border-red-700/50 rounded text-red-50 font-semibold"
+                title="Delete all revoked + all expired licenses (active and unexpired trials are kept)"
+              >
+                Delete Revoked + Expired
+              </button>
+              <button
+                data-testid="cleanup-revoked-btn"
+                onClick={() => bulkDeleteByStatus("revoked")}
+                disabled={busy}
+                className="text-xs px-3 py-1.5 bg-slate-800 hover:bg-red-900/40 border border-slate-700 rounded"
+                title="Delete only revoked licenses"
+              >
+                Delete all Revoked
+              </button>
+              <button
+                data-testid="cleanup-trial-btn"
+                onClick={() => bulkDeleteByStatus("trial")}
+                disabled={busy}
+                className="text-xs px-3 py-1.5 bg-slate-800 hover:bg-red-900/40 border border-slate-700 rounded"
+                title="Delete all trial licenses (including unexpired ones)"
+              >
+                Delete all Trial
+              </button>
+              <span className="text-[11px] text-slate-500 ml-auto">
+                Active licenses are never auto-deleted. Use per-row Delete for specific keys.
+              </span>
+            </div>
+
             <div className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden">
               <table className="w-full text-sm">
                 <thead className="bg-slate-900/80 text-slate-400 text-xs uppercase tracking-wider">
@@ -386,11 +466,20 @@ export default function LicenseAdminPage() {
                             data-testid={`revoke-${l.license_key}`}
                             onClick={() => revoke(l.license_key)}
                             disabled={busy}
-                            className="text-xs px-2 py-1 bg-red-600/20 hover:bg-red-600/40 border border-red-700/40 rounded"
+                            className="text-xs px-2 py-1 mr-1 bg-red-600/20 hover:bg-red-600/40 border border-red-700/40 rounded"
                           >
                             Revoke
                           </button>
                         )}
+                        <button
+                          data-testid={`delete-${l.license_key}`}
+                          onClick={() => deleteLicense(l.license_key)}
+                          disabled={busy}
+                          className="text-xs px-2 py-1 bg-red-700/30 hover:bg-red-700/60 border border-red-800/50 rounded text-red-100"
+                          title="Permanently delete this license"
+                        >
+                          Delete
+                        </button>
                       </td>
                     </tr>
                   ))}
