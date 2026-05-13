@@ -94,6 +94,23 @@ DAILY USE
 TROUBLESHOOTING
 ───────────────
 
+  ✗ "I double-click Install.bat and a CMD window flashes
+     for 1 second then closes — nothing happens"
+       → This means PowerShell exited before showing the wizard.
+       → Run  Debug.bat  (next to Install.bat) instead. It keeps
+         the window open and prints diagnostics + the exact error.
+       → Most common causes:
+           1. Antivirus quarantined setup-engine.ps1.
+              Open AV → quarantine → restore + add this folder
+              to the exclusion list.
+           2. PowerShell ExecutionPolicy locked by Group Policy.
+              Run as Admin in PowerShell:
+                Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
+           3. .NET Desktop Runtime missing on Windows 10 LTSC.
+              Install from https://dotnet.microsoft.com/download
+           4. You only extracted Install.bat — not the whole folder.
+              Re-extract the entire RealFlow-Setup folder.
+
   • "Docker engine did not start"
        → Open Docker Desktop manually from Start menu
        → Wait for the whale icon to stop animating

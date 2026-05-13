@@ -2,16 +2,32 @@
 #   RealFlow Setup Engine — WinForms wizard, no command line in user's face
 # ═══════════════════════════════════════════════════════════════════════
 
-#Requires -RunAsAdministrator
+# Bootstrap log so even the earliest crash is captured to disk
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$BootLog   = Join-Path $ScriptDir "setup.log"
+"[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')]  Wizard starting (PS $($PSVersionTable.PSVersion))" |
+    Out-File -FilePath $BootLog -Encoding utf8
 
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
+try {
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+    Add-Type -AssemblyName System.Drawing       -ErrorAction Stop
+} catch {
+    $msg = "FATAL: Could not load Windows Forms / Drawing assemblies.`r`n$($_.Exception.Message)"
+    "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')]  $msg" | Out-File -FilePath $BootLog -Append -Encoding utf8
+    Write-Host ""
+    Write-Host $msg -ForegroundColor Red
+    Write-Host ""
+    Write-Host "This usually means .NET Desktop Runtime is missing. Install" -ForegroundColor Yellow
+    Write-Host "it from https://dotnet.microsoft.com/download and try again." -ForegroundColor Yellow
+    Write-Host ""
+    Read-Host "Press ENTER to exit"
+    exit 1
+}
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference     = "SilentlyContinue"
 
 # ─── Paths ─────────────────────────────────────────────────────────────
-$ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $BundleDir   = Join-Path $ScriptDir "bundle"
 $InstallPath = "C:\realflow"
 $RepoUrl     = "https://github.com/ronaldsexedwards40-glitch/dynabook.git"
@@ -752,4 +768,19 @@ function Invoke-LicenseActivation {
 }
 
 # ─── Show the wizard ──────────────────────────────────────────────────
-[void]$form.ShowDialog()
+try {
+    "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')]  Showing wizard form…" |
+        Out-File -FilePath $BootLog -Append -Encoding utf8
+    [void]$form.ShowDialog()
+    "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')]  Wizard closed cleanly." |
+        Out-File -FilePath $BootLog -Append -Encoding utf8
+} catch {
+    $errMsg = "FATAL while showing the wizard:`r`n$($_.Exception.Message)`r`n$($_.ScriptStackTrace)"
+    "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')]  $errMsg" |
+        Out-File -FilePath $BootLog -Append -Encoding utf8
+    Write-Host ""
+    Write-Host $errMsg -ForegroundColor Red
+    Write-Host ""
+    Read-Host "Press ENTER to exit"
+    exit 1
+}
