@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# RealFlow — Hardware Detection & Performance Profile Picker (Linux/macOS)
+# RealFlow -- Hardware Detection & Performance Profile Picker (Linux/macOS)
 #
 # Outputs env-style key=value lines on stdout. Usage:
 #   eval "$(./scripts/detect-hardware.sh)"

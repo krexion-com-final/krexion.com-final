@@ -1,4 +1,4 @@
-# RealFlow — Hardware Detection & Performance Profile Picker (Windows)
+# RealFlow -- Hardware Detection & Performance Profile Picker (Windows)
 #
 # Outputs a single object with detected RAM, CPU cores, free disk +
 # the recommended performance tier. Used by setup-engine.ps1 and
