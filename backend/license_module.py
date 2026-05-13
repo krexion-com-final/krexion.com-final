@@ -40,11 +40,6 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Request, Depends, status
 from pydantic import BaseModel, EmailStr, Field
 
-from emergentintegrations.payments.stripe.checkout import (
-    StripeCheckout,
-    CheckoutSessionRequest,
-)
-
 logger = logging.getLogger(__name__)
 license_router = APIRouter(prefix="/api", tags=["license"])
 
@@ -105,6 +100,16 @@ def _default_config() -> Dict[str, Any]:
         "trial_days": 7,
         "max_pcs_per_license": 1,
         "enabled": True,
+        # Manual purchase flow — installer shows these to customers
+        # instead of a Stripe checkout button. Aap admin panel se
+        # globally edit kar sakte hain.
+        "admin_contact_email": "admin@realflow.local",
+        "admin_contact_message": (
+            "To purchase a license, please email the admin with your name, "
+            "company (optional), and preferred payment method (crypto / "
+            "bank transfer / etc.). The admin will reply with a license "
+            "key once payment is received."
+        ),
         "checkout_success_url_suffix": "/license/success",
         "checkout_cancel_url_suffix": "/license/cancel",
         "updated_at": _now().isoformat(),
@@ -112,23 +117,21 @@ def _default_config() -> Dict[str, Any]:
 
 
 async def get_config() -> Dict[str, Any]:
-    """Read the single config document; seed default if missing."""
+    """Read the single config document; seed default if missing.
+    Also back-fills any newly-added fields from _default_config() so
+    older databases automatically pick up new keys (e.g. admin_contact_*)
+    without an explicit migration."""
+    defaults = _default_config()
     cfg = await _db.license_config.find_one({"id": "global"}, {"_id": 0})
     if not cfg:
-        cfg = _default_config()
-        await _db.license_config.insert_one(cfg.copy())
-        cfg.pop("_id", None)
+        await _db.license_config.insert_one(defaults.copy())
+        return defaults
+    # Back-fill any keys missing from older config docs
+    missing = {k: v for k, v in defaults.items() if k not in cfg}
+    if missing:
+        await _db.license_config.update_one({"id": "global"}, {"$set": missing})
+        cfg.update(missing)
     return cfg
-
-
-def _stripe() -> StripeCheckout:
-    api_key = os.environ.get("STRIPE_API_KEY")
-    if not api_key:
-        raise HTTPException(503, "Stripe is not configured on this license server.")
-    # webhook_url is set per-request in /checkout via host header, so we
-    # leave it empty here — the SDK only uses webhook_url at signature
-    # verification time, which we call inside /api/webhook/stripe.
-    return StripeCheckout(api_key=api_key, webhook_url="")
 
 
 def _get_machine_label(license_doc: Dict[str, Any]) -> str:
@@ -206,6 +209,8 @@ class ConfigUpdate(BaseModel):
     trial_days: Optional[int] = Field(None, ge=0, le=365)
     max_pcs_per_license: Optional[int] = Field(None, ge=1, le=1000)
     enabled: Optional[bool] = None
+    admin_contact_email: Optional[EmailStr] = None
+    admin_contact_message: Optional[str] = Field(None, max_length=2000)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -223,6 +228,8 @@ async def license_config_public():
         "trial_days": cfg["trial_days"],
         "max_pcs_per_license": cfg["max_pcs_per_license"],
         "enabled": cfg["enabled"],
+        "admin_contact_email": cfg.get("admin_contact_email", ""),
+        "admin_contact_message": cfg.get("admin_contact_message", ""),
     }
 
 
@@ -356,149 +363,27 @@ async def validate(body: ValidateRequest):
 
 @license_router.post("/license/checkout")
 async def checkout(body: CheckoutRequest, http_request: Request):
-    cfg = await get_config()
-    if not cfg["enabled"]:
-        raise HTTPException(403, "Licensing is currently disabled.")
-
-    lic = await _db.licenses.find_one({"license_key": body.license_key}, {"_id": 0})
-    if not lic:
-        raise HTTPException(404, "License key not found. Start a trial first.")
-
-    # IMPORTANT (Stripe playbook): amount comes from BACKEND config only
-    amount = float(cfg["monthly_price"])
-    currency = cfg["currency"].lower()
-
-    origin = body.origin_url.rstrip("/")
-    success_url = f"{origin}{cfg['checkout_success_url_suffix']}?session_id={{CHECKOUT_SESSION_ID}}&key={body.license_key}"
-    cancel_url = f"{origin}{cfg['checkout_cancel_url_suffix']}?key={body.license_key}"
-
-    host_url = str(http_request.base_url).rstrip("/")
-    webhook_url = f"{host_url}/api/webhook/stripe"
-    sc = StripeCheckout(api_key=os.environ["STRIPE_API_KEY"], webhook_url=webhook_url)
-
-    req = CheckoutSessionRequest(
-        amount=amount,
-        currency=currency,
-        success_url=success_url,
-        cancel_url=cancel_url,
-        metadata={
-            "license_key": body.license_key,
-            "email": lic["email"],
-            "product": cfg["product_name"],
-            "source": "installer",
-        },
+    """DEPRECATED — Stripe payment flow has been removed. Customers now
+    contact the admin manually (crypto / bank transfer / etc.) and the
+    admin issues a license key from the admin panel. Endpoint kept only
+    so older installers don't crash hard; it returns a friendly 410."""
+    raise HTTPException(
+        status_code=410,
+        detail="Online payments are disabled. Please email the admin to purchase a license."
     )
-    session = await sc.create_checkout_session(req)
-
-    # MANDATORY per Stripe playbook — record txn BEFORE redirect
-    await _db.payment_transactions.insert_one({
-        "session_id": session.session_id,
-        "license_key": body.license_key,
-        "email": lic["email"],
-        "amount": amount,
-        "currency": currency,
-        "payment_status": "initiated",
-        "metadata": {"license_key": body.license_key, "email": lic["email"]},
-        "created_at": _now(),
-        "updated_at": _now(),
-    })
-
-    return {"checkout_url": session.url, "session_id": session.session_id}
 
 
 @license_router.get("/license/status/{session_id}")
-async def license_status(session_id: str, http_request: Request):
-    """Poll endpoint (frontend or installer) — Stripe playbook §7-9."""
-    txn = await _db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
-    if not txn:
-        raise HTTPException(404, "Unknown session.")
-
-    # Direct Stripe SDK call to side-step the emergentintegrations Pydantic-v2
-    # vs StripeObject.metadata incompatibility documented in iteration_2 RCA.
-    import stripe
-    stripe.api_key = os.environ["STRIPE_API_KEY"]
-    # Mirror the same proxy redirect the emergentintegrations SDK uses for
-    # the sk_test_emergent key — direct calls to api.stripe.com would 401.
-    if "emergent" in stripe.api_key:
-        stripe.api_base = "https://integrations.emergentagent.com/stripe"
-    try:
-        s = stripe.checkout.Session.retrieve(session_id)
-    except stripe.error.InvalidRequestError as e:
-        raise HTTPException(404, f"Unknown Stripe session: {e.user_message or str(e)}")
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Stripe status fetch failed: {e}")
-        raise HTTPException(502, "Could not reach Stripe.")
-
-    status_ = (getattr(s, "status", None) or "").lower()
-    payment_status_ = (getattr(s, "payment_status", None) or "").lower()
-
-    # Idempotency — don't re-credit a license on every poll
-    already_paid = txn.get("payment_status") == "paid"
-    if payment_status_ == "paid" and not already_paid:
-        license_key = txn["license_key"]
-        await _db.licenses.update_one(
-            {"license_key": license_key},
-            {"$set": {
-                "status": "active",
-                "subscription_ends_at": _now() + timedelta(days=31),
-                "last_validated_at": _now(),
-            }},
-        )
-        await _db.payment_transactions.update_one(
-            {"session_id": session_id},
-            {"$set": {"payment_status": "paid", "status": status_, "updated_at": _now()}},
-        )
-        await _maybe_notify(
-            subject=f"[RealFlow] Subscription PAID: {txn['email']} (${txn['amount']:.2f})",
-            body=f"License: {license_key}\nAmount: {txn['amount']:.2f} {txn['currency']}\nSession: {session_id}",
-        )
-    elif status_ == "expired" and not already_paid:
-        await _db.payment_transactions.update_one(
-            {"session_id": session_id},
-            {"$set": {"payment_status": "expired", "status": status_, "updated_at": _now()}},
-        )
-
-    return {
-        "status": status_,
-        "payment_status": payment_status_,
-        "amount_total": getattr(s, "amount_total", None),
-        "currency": getattr(s, "currency", None),
-    }
+async def license_status_deprecated(session_id: str):
+    """DEPRECATED — see /license/checkout note."""
+    raise HTTPException(status_code=410, detail="Online payments are disabled.")
 
 
 @license_router.post("/webhook/stripe")
-async def stripe_webhook(request: Request):
-    """Authoritative async confirmation from Stripe."""
-    body = await request.body()
-    sig = request.headers.get("Stripe-Signature", "")
-    host_url = str(request.base_url).rstrip("/")
-    sc = StripeCheckout(
-        api_key=os.environ["STRIPE_API_KEY"],
-        webhook_url=f"{host_url}/api/webhook/stripe",
-    )
-    try:
-        evt = await sc.handle_webhook(body, sig)
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Stripe webhook verify failed: {e}")
-        raise HTTPException(400, "Webhook signature verification failed.")
-
-    sid = evt.session_id
-    if sid and evt.payment_status == "paid":
-        txn = await _db.payment_transactions.find_one({"session_id": sid}, {"_id": 0})
-        if txn and txn.get("payment_status") != "paid":
-            await _db.payment_transactions.update_one(
-                {"session_id": sid},
-                {"$set": {"payment_status": "paid", "updated_at": _now()}},
-            )
-            await _db.licenses.update_one(
-                {"license_key": txn["license_key"]},
-                {"$set": {
-                    "status": "active",
-                    "subscription_ends_at": _now() + timedelta(days=31),
-                    "last_validated_at": _now(),
-                }},
-            )
-    return {"received": True, "event_type": evt.event_type}
+async def stripe_webhook_deprecated(request: Request):
+    """DEPRECATED — see /license/checkout note. Always 200 so any stale
+    Stripe-Dashboard webhook config doesn't loop and retry forever."""
+    return {"received": True, "deprecated": True}
 
 
 # ═════════════════════════════════════════════════════════════════════

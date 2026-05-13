@@ -227,3 +227,49 @@ Central licensing + Stripe subscription engine. All endpoints registered on the 
 - When user moves off Emergent preview to a permanent license server (DigitalOcean / Vercel), update:
   - `LICENSE_SERVER_URL` in installer (setup-engine.ps1 line 22)
   - `LICENSE_SERVER_URL` in customer .env (installer writes this automatically)
+
+---
+
+## Update — Manual purchase flow (Stripe removed) (May 2026)
+
+User requested: no online payment integration. Customers contact admin manually (crypto / bank / etc.) and admin issues license keys via the admin panel.
+
+### Changes:
+**Backend (`license_module.py`):**
+- Removed `emergentintegrations.stripe.checkout` import — no Stripe SDK calls anywhere
+- `POST /api/license/checkout` → returns **410 Gone** with msg "Online payments are disabled."
+- `GET /api/license/status/{sid}` → returns **410 Gone**
+- `POST /api/webhook/stripe` → no-op (returns 200 with `deprecated: true` so any stale Stripe webhook configs don't retry forever)
+- Added two new fields to `license_config`:
+  - `admin_contact_email` (default `"admin@realflow.local"`)
+  - `admin_contact_message` (default with crypto/bank/etc. prompt)
+- `get_config()` now **back-fills** missing keys on existing DB docs — no migration needed
+- Public `GET /api/license/config` returns the new fields (so installer can render them)
+
+**Frontend Admin Panel (`LicenseAdminPage.js`):**
+- New section **"Manual Purchase — Contact Details"** with two editable fields
+- Pricing/trial/master-switch all remain (purely informational for the customer)
+
+**PowerShell installer (`setup-engine.ps1`):**
+- "Buy a license" button (was opening Stripe) → renamed **"Contact Admin to Buy a License"**
+- On click: shows the admin's email + message from license_config, then opens user's default email client with pre-filled subject "License Purchase Request — RealFlow" and body containing their PC name + form fields
+- After admin replies with key → customer pastes in "I have a license key" field → Activate
+
+**Env cleanup:**
+- Removed `STRIPE_API_KEY` from `/app/backend/.env` (no longer needed)
+
+### Flow now:
+1. Customer runs `Install.bat` → activation dialog opens
+2. Three options:
+   a. **Start free trial** (7 days default — admin can change)
+   b. **I have a license key** → paste key from admin, click Activate
+   c. **Contact Admin to Buy** → mailto: opens their email app, pre-filled message
+3. Customer pays admin via crypto / bank / cash (off-app)
+4. Admin opens `/admin/licenses` page → "Issue manual license" → enter email + days → click Issue → email key to customer
+5. Customer pastes key → Activate → app installs
+
+### Files touched:
+- `/app/backend/license_module.py` (removed Stripe ~140 lines, added contact fields)
+- `/app/backend/.env` (removed STRIPE_API_KEY)
+- `/app/frontend/src/pages/LicenseAdminPage.js` (added contact section)
+- `/app/RealFlow-Setup/setup-engine.ps1` (Buy button → mailto:)

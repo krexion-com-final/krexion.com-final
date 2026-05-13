@@ -77,6 +77,8 @@ export default function LicenseAdminPage() {
         trial_days: Number(config.trial_days),
         max_pcs_per_license: Number(config.max_pcs_per_license),
         enabled: !!config.enabled,
+        admin_contact_email: config.admin_contact_email || "",
+        admin_contact_message: config.admin_contact_message || "",
       };
       const r = await axios.put(`${API}/admin/license/config`, patch, adminAuth());
       setConfig(r.data);
@@ -232,6 +234,35 @@ export default function LicenseAdminPage() {
                     {config.enabled ? "ENABLED — installer requires a license" : "DISABLED — open install (no license check)"}
                   </span>
                 </label>
+              </Field>
+            </div>
+
+            <div className="border-t border-slate-800 pt-5 space-y-4">
+              <h3 className="text-sm uppercase tracking-wider text-slate-400 font-semibold">
+                Manual Purchase — Contact Details
+              </h3>
+              <p className="text-xs text-slate-500">
+                Customers click "Contact Admin to Buy" in the installer. Set the email + instructions you want them to see.
+              </p>
+              <Field label="Admin contact email (shown to customers)">
+                <input
+                  data-testid="cfg-admin-email"
+                  type="email"
+                  className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm"
+                  value={config.admin_contact_email || ""}
+                  onChange={(e) => setConfig({ ...config, admin_contact_email: e.target.value })}
+                  placeholder="you@example.com"
+                />
+              </Field>
+              <Field label="Instructions to customer (payment methods, etc.)">
+                <textarea
+                  data-testid="cfg-admin-message"
+                  rows={5}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-sm"
+                  value={config.admin_contact_message || ""}
+                  onChange={(e) => setConfig({ ...config, admin_contact_message: e.target.value })}
+                  placeholder="To purchase, email us with your details and we'll reply with a license key after payment is received. We accept: Bitcoin, USDT (TRC20), bank transfer..."
+                />
               </Field>
             </div>
 

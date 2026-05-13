@@ -512,7 +512,7 @@ function Show-LicenseDialog {
     $price = "{0:N2}" -f [double]$Config.monthly_price
     $cur = $Config.currency.ToString().ToUpper()
     $trial = [int]$Config.trial_days
-    $sub.Text = "Price: $price $cur / month     Trial: $trial days     1 license = 1 PC"
+    $sub.Text = "$price $cur / month  •  $trial-day free trial  •  1 license = 1 PC  •  Manual purchase via admin"
     $sub.Font = New-Object System.Drawing.Font("Segoe UI", 9)
     $sub.ForeColor = [System.Drawing.Color]::FromArgb(180, 200, 230)
     $sub.Location = New-Object System.Drawing.Point(20, 52)
@@ -583,9 +583,10 @@ function Show-LicenseDialog {
     $btnTrial.FlatAppearance.BorderSize = 0
     $gp2.Controls.Add($btnTrial)
 
-    # Tab: Buy
+    # Tab: Contact admin to buy (manual / crypto / bank — no online payment)
     $btnBuy = New-Object System.Windows.Forms.Button
-    $btnBuy.Text = "Buy a license  ($price $cur / mo)"
+    $contactEmail = if ($Config.admin_contact_email) { $Config.admin_contact_email } else { "admin@realflow.local" }
+    $btnBuy.Text = "Contact Admin to Buy a License"
     $btnBuy.Location = New-Object System.Drawing.Point(20, 290)
     $btnBuy.Size = New-Object System.Drawing.Size(500, 36)
     $btnBuy.BackColor = [System.Drawing.Color]::FromArgb(120, 80, 200)
@@ -670,33 +671,33 @@ function Show-LicenseDialog {
     })
 
     $btnBuy.Add_Click({
-        $email = $txtEmail.Text.Trim()
-        if ($email -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
-            $lblStatus.Text = "Enter your email in the trial box above, then click Buy."
-            return
+        # Show a modal with the admin's contact email + instructions, and offer to
+        # open the user's default email client with a pre-filled message.
+        $msg = if ($Config.admin_contact_message) {
+            $Config.admin_contact_message
+        } else {
+            "Please email the admin to purchase a license. The admin accepts manual payments (crypto / bank transfer / etc.) and will reply with a license key once payment is confirmed."
         }
-        $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(220, 230, 245)
-        $lblStatus.Text = "Creating Stripe checkout..."
-        $btnBuy.Enabled = $false
-        try {
-            # Create or get a license row for this email first
-            $tb = @{ email = $email; machine_id = $machineId } | ConvertTo-Json
-            $tr = Invoke-RestMethod -Uri "$LicenseServer/api/license/start-trial" -Method Post -Body $tb -ContentType "application/json" -TimeoutSec 30
-            $key = $tr.license_key
-
-            $cb = @{ license_key = $key; origin_url = $LicenseServer } | ConvertTo-Json
-            $cr = Invoke-RestMethod -Uri "$LicenseServer/api/license/checkout" -Method Post -Body $cb -ContentType "application/json" -TimeoutSec 30
-
-            $txtKey.Text = $key
-            Start-Process $cr.checkout_url
-            $lblStatus.Text = "Stripe opened in your browser. After paying, paste your key above and click Activate."
-        } catch {
-            $msg = $_.Exception.Message
-            try { $msg = ($_.ErrorDetails.Message | ConvertFrom-Json).detail } catch {}
-            $lblStatus.ForeColor = [System.Drawing.Color]::FromArgb(240, 110, 110)
-            $lblStatus.Text = "Checkout failed: $msg"
+        $full = "Admin email:  $contactEmail`r`n`r`n$msg`r`n`r`nClick OK to open your email app with a pre-filled message."
+        $choice = [System.Windows.Forms.MessageBox]::Show(
+            $full,
+            "Contact Admin to Buy",
+            [System.Windows.Forms.MessageBoxButtons]::OKCancel,
+            [System.Windows.Forms.MessageBoxIcon]::Information
+        )
+        if ($choice -eq [System.Windows.Forms.DialogResult]::OK) {
+            $subject = "License Purchase Request - $($Config.product_name)"
+            $emailBody = "Hello,`r`n`r`nI would like to purchase a license for $($Config.product_name).`r`n`r`nMy details:`r`n  Name:`r`n  Company (optional):`r`n  Preferred payment method (crypto / bank / etc.):`r`n  PC name: $($env:COMPUTERNAME)`r`n`r`nPlease reply with payment instructions.`r`n`r`nThank you."
+            # mailto: URL encoding
+            Add-Type -AssemblyName System.Web
+            $mailto = "mailto:$contactEmail?subject=" + [System.Web.HttpUtility]::UrlEncode($subject) + "&body=" + [System.Web.HttpUtility]::UrlEncode($emailBody)
+            try { Start-Process $mailto } catch {
+                [System.Windows.Forms.MessageBox]::Show("Could not open your email app. Please manually email:`r`n`r`n$contactEmail", "Email", "OK", "Information") | Out-Null
+            }
+            $lblStatus.Text = "Email opened. After admin replies with your key, paste it above and click Activate."
+        } else {
+            $lblStatus.Text = "Once you receive your license key from the admin, paste it above and click Activate."
         }
-        $btnBuy.Enabled = $true
     })
 
     $btnCancel.Add_Click({ $dlg.DialogResult = "Cancel"; $dlg.Close() })
