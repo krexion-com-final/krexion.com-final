@@ -258,19 +258,33 @@ function Invoke-Stage1-PrepareTools {
 }
 
 function Invoke-Stage2-WSLConfig {
+    Set-UI -Percent 28 -Status "Step 2 / 6 -- Updating WSL kernel (if needed)..." -Progress "wsl --update"
+
+    # Run wsl --update -- THE most common reason Docker Desktop refuses
+    # to start on fresh Windows 10/11 PCs is "WSL is too old". We do
+    # this BEFORE writing .wslconfig and BEFORE relying on Docker engine.
+    try {
+        Set-UI -Log "  Running: wsl --update (downloads new kernel from Microsoft)"
+        $wslOut = & wsl.exe --update 2>&1 | Out-String
+        $last = ($wslOut.Trim() -split "`r?`n")[-1]
+        Set-UI -Log "  WSL update: $last"
+    } catch {
+        Set-UI -Log "  WSL update skipped: $($_.Exception.Message)"
+    }
+
+    try {
+        & wsl.exe --set-default-version 2 2>&1 | Out-Null
+        Set-UI -Log "  WSL default version set to 2"
+    } catch {}
+
     Set-UI -Percent 30 -Status "Step 2 / 6 -- Tuning WSL memory limit..." -Progress "Writing .wslconfig"
 
     $wslcfg = Join-Path $env:USERPROFILE ".wslconfig"
     $totalRamGB = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 0)
 
-    if ($totalRamGB -le 10) {
-        # 8 GB-class laptops: cap WSL at 5 GB
-        $cap = "5GB"
-    } elseif ($totalRamGB -le 16) {
-        $cap = "10GB"
-    } else {
-        $cap = "16GB"
-    }
+    if ($totalRamGB -le 10)      { $cap = "5GB" }
+    elseif ($totalRamGB -le 16)  { $cap = "10GB" }
+    else                         { $cap = "16GB" }
 
     @"
 [wsl2]
@@ -285,8 +299,30 @@ sparseVhd=true
 "@ | Out-File -FilePath $wslcfg -Encoding ascii
 
     Set-UI -Log "  Wrote $wslcfg (memory=$cap on a ${totalRamGB} GB system)"
-    wsl --shutdown 2>$null | Out-Null
+    & wsl.exe --shutdown 2>$null | Out-Null
     Start-Sleep 3
+
+    # Docker Desktop may have shown "WSL too old". Restart it so it picks
+    # up the freshly updated WSL kernel.
+    $dockerExe = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+    try {
+        Get-Process "Docker Desktop" -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+        Get-Process "com.docker.backend" -EA SilentlyContinue | Stop-Process -Force -EA SilentlyContinue
+        Set-UI -Log "  Stopped Docker Desktop (will relaunch with new WSL)"
+        Start-Sleep 2
+        if (Test-Path $dockerExe) {
+            Start-Process -FilePath $dockerExe
+            Set-UI -Log "  Re-started Docker Desktop, waiting for engine..."
+            for ($i = 0; $i -lt 90; $i++) {
+                try { docker info 2>$null | Out-Null; if ($LASTEXITCODE -eq 0) { break } } catch {}
+                Start-Sleep 2
+                if ($i % 5 -eq 0) { Set-UI -Progress "Waiting for Docker engine after WSL update ($($i*2)s)..." }
+            }
+            Set-UI -Log "  Docker engine ready after WSL update"
+        }
+    } catch {
+        Set-UI -Log "  Docker restart skipped: $($_.Exception.Message)"
+    }
 }
 
 function Invoke-Stage3-FetchCode {

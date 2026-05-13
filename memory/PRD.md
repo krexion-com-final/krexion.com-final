@@ -368,3 +368,28 @@ Verification:
 
 ### Files touched
 - `/app/RealFlow-Setup/setup-engine.ps1` (9 line edits, single rename)
+
+---
+
+## Bug fix #3 — WSL kernel update (May 2026)
+
+### Symptom
+After Docker Desktop install on fresh Windows 10, Docker shows:
+> "WSL needs updating — Your version of Windows Subsystem for Linux
+> (WSL) is too old. Run: wsl --update"
+
+The wizard's INSTALL was technically succeeding through the Docker
+install step, but Docker refused to start because the WSL kernel
+shipped with the base Windows image is older than what current Docker
+Desktop requires.
+
+### Fix
+`Invoke-Stage2-WSLConfig` now runs **`wsl --update`** as its first
+action (before writing `.wslconfig`). This silently downloads + installs
+the latest WSL kernel from Microsoft (~50 MB), then `wsl --set-default-version 2`,
+then writes the memory-cap config, then **restarts Docker Desktop** so
+it picks up the new kernel without the customer having to click "Try
+Again" in Docker's UI.
+
+### Files touched
+- `/app/RealFlow-Setup/setup-engine.ps1` — Stage 2 rewritten (~50 lines)
