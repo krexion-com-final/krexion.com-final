@@ -109,3 +109,40 @@ Math on the user's 8 GB PC:
 - Result: no swap, no OOM, predictable performance.
 
 Expected RUT throughput on this hardware: **~30 visits per 5 min** with 2 concurrent workers (form-fill visits ~10-15 sec each).
+
+---
+
+## Update — True one-folder GUI installer (May 2026)
+
+User asked for a folder-based installer that works like a normal Windows Setup Wizard — single double-click, GUI window, big "INSTALL" button, no command line in their face.
+
+New artifacts in `RealFlow-Setup/`:
+
+| File | Purpose |
+|------|---------|
+| `Install.bat` | One-click entry — auto-elevates, hides itself, launches the PS wizard |
+| `setup-engine.ps1` | **WinForms GUI wizard** with progress bar + status + log box. Big blue "INSTALL" button (only thing user touches). 6-stage installer with reboot/resume support. |
+| `README.txt` | Detailed English instructions |
+| `START-HERE.txt` | 5-line ultra-simple instruction |
+| `bundle/` | Cache folder. After first install, contains `DockerDesktopInstaller.exe` + `Git-Installer.exe` — copy the whole `RealFlow-Setup/` folder via USB and the next PC installs OFFLINE in 5 min. |
+| `bundle/README.txt` | Explains the cache mechanism |
+| `EASY-INSTALL.md` (repo root) | Top-level pointer to this folder |
+
+### Wizard flow (6 stages, with auto-reboot/resume):
+1. **Prepare tools** — download+silent-install Docker Desktop (if missing, ~520 MB) and Git (~50 MB). Caches both in `bundle/`. If Docker was just installed → write `.resume-stage` marker, prompt reboot, auto-resume after restart.
+2. **WSL config** — auto-detect total RAM, write `%USERPROFILE%\.wslconfig` with `memory=5GB` (≤10GB RAM) / `10GB` (≤16) / `16GB` (else).
+3. **Fetch code** — `git clone` (or pull) to `C:\realflow\`.
+4. **Generate .env** — random 24-char `JWT_SECRET_KEY`, `ADMIN_PASSWORD`, `POSTBACK_TOKEN`.
+5. **Build + start** — auto-adds `-f docker-compose.lowram.yml` if RAM ≤ 10 GB. `docker compose build` + `up -d`.
+6. **Wait + open** — health-check backend (`/health`) + frontend (`:3000`), create Desktop shortcut `RealFlow.url`, swap UI to green "OPEN REALFLOW" button → launches browser.
+
+Error path: any throw → red error label + MessageBox with full path to `setup.log`, "INSTALL" re-enabled for retry.
+
+UI design: dark navy palette (#14181F bg, #2840A0 header), Segoe UI font, Consolas in log box. Looks like a normal commercial Windows installer, not a script.
+
+Result: user literally only sees:
+1. UAC popup → Yes
+2. Wizard window
+3. Click blue INSTALL
+4. Wait → click green OPEN REALFLOW
+5. Browser opens

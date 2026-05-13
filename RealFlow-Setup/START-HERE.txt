@@ -1,0 +1,15 @@
+═════════════════════════════════════════════════════════════════
+   START HERE  →  Double-click  Install.bat
+═════════════════════════════════════════════════════════════════
+
+   That's literally it.
+
+   1.  Double-click  Install.bat
+   2.  Click YES on the popup
+   3.  Click the blue INSTALL button
+   4.  Wait
+   5.  Click OPEN REALFLOW when it turns green
+
+Full details in  README.txt
+
+═════════════════════════════════════════════════════════════════
