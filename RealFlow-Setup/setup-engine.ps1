@@ -105,14 +105,14 @@ $detailLabel.ForeColor = [System.Drawing.Color]::FromArgb(190, 200, 220)
 $form.Controls.Add($detailLabel)
 
 # Progress bar
-$progress           = New-Object System.Windows.Forms.ProgressBar
-$progress.Location  = New-Object System.Drawing.Point(20, 270)
-$progress.Size      = New-Object System.Drawing.Size(595, 22)
-$progress.Style     = "Continuous"
-$progress.Minimum   = 0
-$progress.Maximum   = 100
-$progress.Value     = 0
-$form.Controls.Add($progress)
+$progressBar           = New-Object System.Windows.Forms.ProgressBar
+$progressBar.Location  = New-Object System.Drawing.Point(20, 270)
+$progressBar.Size      = New-Object System.Drawing.Size(595, 22)
+$progressBar.Style     = "Continuous"
+$progressBar.Minimum   = 0
+$progressBar.Maximum   = 100
+$progressBar.Value     = 0
+$form.Controls.Add($progressBar)
 
 # Progress text
 $progressText       = New-Object System.Windows.Forms.Label
@@ -168,7 +168,7 @@ function Set-UI {
         [string]$Progress = $null,
         [string]$Log      = $null
     )
-    if ($Percent -ne $null)  { $progress.Value = [Math]::Min(100, [Math]::Max(0, [int]$Percent)) }
+    if ($Percent -ne $null)  { $progressBar.Value = [Math]::Min(100, [Math]::Max(0, [int]$Percent)) }
     if ($Status   -ne $null) { $statusLabel.Text = $Status }
     if ($Progress -ne $null) { $progressText.Text = $Progress }
     if ($Log      -ne $null) {

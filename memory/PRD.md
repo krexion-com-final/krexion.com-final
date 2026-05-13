@@ -325,3 +325,46 @@ Verification:
 ### Files touched (all in RealFlow-Setup/):
 - setup-engine.ps1, Install.bat, Debug.bat, README.txt, START-HERE.txt,
   bundle/README.txt — all sanitized to pure ASCII + correct BOM policy
+
+---
+
+## Bug fix #2 — PowerShell variable shadowing (May 2026)
+
+After the encoding fix, the wizard launched correctly but threw:
+> "The property 'Value' cannot be found on this object. Verify that the
+> property exists and can be set."
+
+### Root cause
+PowerShell variable names are case-INSENSITIVE. The `Set-UI` helper had:
+```powershell
+function Set-UI {
+    param(
+        [object]$Percent  = $null,
+        [string]$Progress = $null,    # parameter named "Progress"
+        ...
+    )
+    $progress.Value = ...             # tried to use the ProgressBar control
+}
+```
+Inside the function body, `$progress` resolved to the **STRING parameter**
+`$Progress` (same name, ignoring case), not the WinForms ProgressBar
+control declared at module scope. Setting `.Value` on a string blew up
+with the exact error the customer saw.
+
+This only manifested AFTER the encoding fix because the script previously
+failed at parse time and never got far enough to execute Set-UI.
+
+### Fix
+Renamed the WinForms ProgressBar control from `$progress` to
+`$progressBar` everywhere (9 occurrences). The Label control
+`$progressText` was unaffected (different name). The function parameter
+`$Progress` and all 19 `-Progress "..."` callers were left untouched.
+
+Verification:
+- 9 `$progressBar` references in the script
+- 8 `$progressText` references preserved
+- 19 `-Progress` parameter usages preserved
+- File still UTF-8 BOM + CRLF + ASCII-only, 786 lines, balanced syntax
+
+### Files touched
+- `/app/RealFlow-Setup/setup-engine.ps1` (9 line edits, single rename)
