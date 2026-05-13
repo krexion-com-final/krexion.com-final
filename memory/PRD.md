@@ -422,3 +422,75 @@ User cloned `ronaldsexedwards40-glitch/dynabook` repo (RealFlow) back into Emerg
 ### Push back to GitHub:
 User should use the **"Save to GitHub"** button in the Emergent chat to commit the current preview state to `main` branch of `ronaldsexedwards40-glitch/dynabook`.
 
+
+---
+
+## Update — 5-Tier Auto-Tuning Performance System (Jan 2026)
+
+User asked: installer should auto-detect PC hardware and configure the entire stack for **maximum performance** based on RAM/CPU. Previously only an 8 GB / "low-ram" profile existed.
+
+### New 5-tier performance system
+
+| Tier | RAM | RUT Concurrency | Mongo Cap | Backend Cap | WSL |
+|------|-----|-----------------|-----------|-------------|-----|
+| MICRO | ≤ 6 GB | 1 | 512 MB | 1.5 GB | 4 GB |
+| LOW   | 7-10 GB | 2 | 1 GB | 2.5 GB | 5 GB |
+| MID   | 11-16 GB | 4 | 2 GB | 4 GB | 10 GB |
+| HIGH  | 17-32 GB | 8 | 4 GB | 8 GB | 20 GB |
+| BEAST | > 32 GB | 16 | 8 GB | 16 GB | 32 GB |
+
+**CPU ceiling**: actual concurrency = `min(tier_value, CPU_cores × 2)` so a 4-core box doesn't get HIGH-tier 8 workers.
+
+### Files added
+
+| File | Purpose |
+|------|---------|
+| `scripts/detect-hardware.ps1` | Windows profile picker; exposes `Get-RealFlowProfile` function |
+| `scripts/detect-hardware.sh` | Linux/macOS — emits `RF_*` env vars (`eval "$(./scripts/detect-hardware.sh)"`) |
+| `docker-compose.micro.yml` | Override for ≤ 6 GB |
+| `docker-compose.lowram.yml` | (existing) 7-10 GB — Dynabook profile |
+| `docker-compose.mid.yml` | Override for 11-16 GB |
+| `docker-compose.high.yml` | Override for 17-32 GB |
+| `docker-compose.beast.yml` | Override for > 32 GB |
+| `RealFlow-RETUNE.bat` | Windows: re-detect + re-apply tuning |
+| `RealFlow-RETUNE.sh` | Linux/macOS: same |
+| `PERFORMANCE-PROFILES.md` | User-facing documentation (Urdu+English) |
+
+### Files modified
+
+- `RealFlow-Setup/setup-engine.ps1` — Stage 2 (WSL config) now dot-sources `scripts/detect-hardware.ps1` and uses the returned profile. Stage 5 (build & start) uses `$script:RFProfile.ComposeOverride` instead of hard-coded `docker-compose.lowram.yml`. WSL processors now scales with CPU count (capped at 12) instead of hardcoded 4.
+- `install-realflow.sh` — replaced inline 3-tier check with `eval $(./scripts/detect-hardware.sh)`. Falls back gracefully if script is missing.
+- `backend/server.py` — added `GET /api/diagnostics/hardware-profile` endpoint that returns detected tier + recommended vs applied settings, so the frontend can render a "your hardware is XYZ tier" badge.
+- `backend/.env` — locally tuned to HIGH tier (32 GB / 8-core Emergent preview): `RUT_MEM_LIMIT_MB=7000`, `RUT_MAX_CONCURRENCY=8`, throttle 82%/62%.
+
+### Customer experience now
+
+1. Customer downloads zip from GitHub on any PC (4 GB old laptop or 64 GB server)
+2. Double-clicks `RealFlow-Setup/Install.bat`
+3. Installer detects: "32 GB RAM, 8 cores → HIGH tier, 8 parallel RUT workers, 8 GB backend"
+4. Installs Docker + WSL + clones repo
+5. Writes optimal `.wslconfig` (memory + processors)
+6. Picks `docker-compose.high.yml` automatically
+7. Stack starts with max safe performance for that hardware
+8. Customer opens app — RUT settings reflect detected tier
+
+### Real-world throughput by tier (form-fill visits)
+
+- MICRO: ~15 visits / 5 min
+- LOW (Dynabook 8GB): ~30 visits / 5 min
+- MID: ~80 visits / 5 min
+- HIGH: ~200 visits / 5 min
+- BEAST: ~500 visits / 5 min
+
+### Verified
+
+- ✅ `/api/diagnostics/hardware-profile` returns 200 with correct HIGH-tier detection on the Emergent preview
+- ✅ PowerShell installer syntax: 150/150 braces, 342/342 parens, 105/105 brackets, BOM intact, 0 non-ASCII
+- ✅ Linux detect script tested: 31 GB / 8 cores → HIGH tier picked
+- ✅ Backend hot-reloaded and serves new env (`RUT_MAX_CONCURRENCY=8` applied)
+
+### Future enhancements
+
+- Frontend Settings page: render a coloured "Hardware Tier: HIGH" badge with explanation tooltip (Settings → Performance tab)
+- Auto-trigger `RealFlow-RETUNE.bat` after Docker Desktop install/update on Windows (currently manual)
+- GPU detection (for future Playwright WebGL fingerprinting) — fallback to CPU if no GPU

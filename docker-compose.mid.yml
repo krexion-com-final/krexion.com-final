@@ -1,0 +1,59 @@
+# ──────────────────────────────────────────────────────────────────
+#  RealFlow — MID profile (11-16 GB RAM, e.g. typical i7 laptop / 16GB desktop)
+#
+#  Use: docker compose -f docker-compose.yml -f docker-compose.mid.yml up -d
+#
+#  Allocation (10 GB WSL):
+#     Mongo    .....  2 GB
+#     Backend  .....  4 GB
+#     Frontend ....  0.25 GB
+#     Total    .....  ~6.5 GB  << 10 GB WSL  ✓
+# ──────────────────────────────────────────────────────────────────
+
+services:
+
+  mongo:
+    command: ["mongod", "--wiredTigerCacheSizeGB", "1"]
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+        reservations:
+          memory: 512m
+    mem_limit: 2g
+    mem_reservation: 512m
+
+  backend:
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+        reservations:
+          memory: 1g
+    mem_limit: 4g
+    mem_reservation: 1g
+    shm_size: 1g
+    environment:
+      RUT_MEM_LIMIT_MB:    "3500"
+      RUT_MEM_THROTTLE_PCT: "80"
+      RUT_MEM_RESUME_PCT:   "60"
+      RUT_MAX_CONCURRENCY:  "4"
+      MONGO_URL:        "mongodb://mongo:27017"
+      DB_NAME:          "${DB_NAME:-realflow}"
+      JWT_SECRET_KEY:   "${JWT_SECRET_KEY}"
+      ADMIN_EMAIL:      "${ADMIN_EMAIL:-admin@realflow.local}"
+      ADMIN_PASSWORD:   "${ADMIN_PASSWORD}"
+      POSTBACK_TOKEN:   "${POSTBACK_TOKEN}"
+      APP_URL:          "${APP_URL:-http://localhost:3000}"
+      PUBLIC_BASE_URL:  "${PUBLIC_BASE_URL:-http://localhost:3000}"
+      CORS_ORIGINS:     "${CORS_ORIGINS:-*}"
+
+  frontend:
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+        reservations:
+          memory: 64m
+    mem_limit: 256m
+    mem_reservation: 64m

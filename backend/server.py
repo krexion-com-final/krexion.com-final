@@ -13026,6 +13026,88 @@ async def diagnostics_health():
 
 
 # ──────────────────────────────────────────────────────────────────────
+# /api/diagnostics/hardware-profile  —  detected tier + applied tuning
+# ──────────────────────────────────────────────────────────────────────
+# Returns the SAME tier that the installer (scripts/detect-hardware.*)
+# uses to pick the docker-compose override. The frontend Settings page
+# renders this so the user can see *why* RUT concurrency is capped at N.
+#
+# Tiers:
+#   MICRO  RAM <= 6 GB   -> 1 RUT worker
+#   LOW    7-10 GB       -> 2 RUT workers
+#   MID    11-16 GB      -> 4 RUT workers
+#   HIGH   17-32 GB      -> 8 RUT workers
+#   BEAST  > 32 GB       -> 16 RUT workers
+#
+# CPU cores act as a HARD ceiling: actual = min(tier, cores*2)
+# ──────────────────────────────────────────────────────────────────────
+@app.get("/api/diagnostics/hardware-profile")
+async def diagnostics_hardware_profile():
+    """Detect the host machine's RAM + CPU and report the chosen
+    performance tier + actual applied tuning (RUT concurrency, mem cap, etc.).
+    Public endpoint — no auth required (no sensitive data exposed)."""
+    import os as _os
+    try:
+        import psutil as _ps
+        total_ram_gb = round(_ps.virtual_memory().total / (1024 ** 3))
+        cpu_cores = _ps.cpu_count(logical=True) or _os.cpu_count() or 1
+    except Exception:
+        total_ram_gb = 0
+        cpu_cores = _os.cpu_count() or 1
+
+    if   total_ram_gb <= 6:   tier, rut, mongo, be, fe, wsl = "MICRO", 1,  "512m",  "1536m", "128m", "4GB"
+    elif total_ram_gb <= 10:  tier, rut, mongo, be, fe, wsl = "LOW",   2,  "1g",    "2560m", "192m", "5GB"
+    elif total_ram_gb <= 16:  tier, rut, mongo, be, fe, wsl = "MID",   4,  "2g",    "4g",    "256m", "10GB"
+    elif total_ram_gb <= 32:  tier, rut, mongo, be, fe, wsl = "HIGH",  8,  "4g",    "8g",    "384m", "20GB"
+    else:                     tier, rut, mongo, be, fe, wsl = "BEAST", 16, "8g",    "16g",   "512m", "32GB"
+
+    # CPU ceiling
+    cpu_ceiling = max(1, cpu_cores * 2)
+    if rut > cpu_ceiling:
+        rut = cpu_ceiling
+
+    # What concurrency is actually enforced *right now* by the backend env?
+    env_concurrency = _os.environ.get("RUT_MAX_CONCURRENCY")
+    actual_concurrency = int(env_concurrency) if env_concurrency and env_concurrency.isdigit() else rut
+
+    compose_override = {
+        "MICRO": "docker-compose.micro.yml",
+        "LOW":   "docker-compose.lowram.yml",
+        "MID":   "docker-compose.mid.yml",
+        "HIGH":  "docker-compose.high.yml",
+        "BEAST": "docker-compose.beast.yml",
+    }[tier]
+
+    return {
+        "detected": {
+            "total_ram_gb": total_ram_gb,
+            "cpu_cores": cpu_cores,
+            "platform": _os.uname().sysname if hasattr(_os, "uname") else "Windows",
+        },
+        "recommended_tier": tier,
+        "recommended_settings": {
+            "rut_concurrency": rut,
+            "mongo_mem_limit": mongo,
+            "backend_mem_limit": be,
+            "frontend_mem_limit": fe,
+            "wsl_memory": wsl,
+            "compose_override": compose_override,
+        },
+        "applied": {
+            "rut_concurrency": actual_concurrency,
+            "rut_mem_limit_mb": _os.environ.get("RUT_MEM_LIMIT_MB"),
+            "matches_recommendation": actual_concurrency == rut,
+        },
+        "hint": (
+            "Run RealFlow-RETUNE.bat (Windows) or sudo bash RealFlow-RETUNE.sh "
+            "(Linux/macOS) to apply the recommended tier."
+            if actual_concurrency != rut
+            else "Backend is already running with the recommended tuning."
+        ),
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────
 # /api/diagnostics/repair  —  one-click auto-fix for common health issues
 # ──────────────────────────────────────────────────────────────────────
 # Surfaced in the new "System Health" page as the green "Auto Repair"

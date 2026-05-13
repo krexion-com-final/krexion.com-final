@@ -1,0 +1,34 @@
+{
+  "summary": "Iteration 4 — Hardware profile endpoint + smoke regression. 19/19 backend tests pass. Verified: GET /api/diagnostics/hardware-profile returns 200 with full shape (detected.total_ram_gb=31, cpu_cores=8, recommended_tier=HIGH, recommended_settings.rut_concurrency=8, applied.rut_concurrency=8, matches_recommendation=true, friendly hint). CPU-ceiling logic enforced (rut <= cores*2). Regression: /api/diagnostics/health still 200 (overall=ok|warn); POST /api/admin/login still returns access_token. scripts/detect-hardware.sh --human prints 'Selected tier' (exit 0); no-args mode emits valid `export RF_*=...` lines that eval cleanly to Tier=HIGH RUT=8. All 5 docker-compose tier overrides, both RETUNE scripts, PERFORMANCE-PROFILES.md, and detect-hardware.ps1 exist and are non-empty.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration4_hardware_profile.py",
+    "/app/test_reports/pytest/iteration4_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is now 13,764 lines — well past the 700-line threshold. The new hardware-profile endpoint is fine in isolation, but the file should be split into routers (diagnostics/, admin/, licensing/, rut/, etc.) before adding more endpoints. This is a long-standing code-smell, not introduced this iteration.",
+    "diagnostics_hardware_profile() does `import psutil as _ps` inside the handler. Acceptable for a rarely-hit diagnostics endpoint, but a module-level import would be cleaner and avoid an ImportError surfacing on every call if psutil is ever uninstalled (right now it silently falls back to total_ram_gb=0).",
+    "The fallback path when psutil import fails returns total_ram_gb=0 -> MICRO tier with rut=1, but no signal to the caller that detection actually failed. Consider adding `detected.detection_failed: true` (or a warning string) so the frontend can show 'hardware detection unavailable' instead of 'your machine is MICRO tier'.",
+    "Tier boundaries in server.py and scripts/detect-hardware.sh are duplicated. If the thresholds ever change, both must be edited in lock-step. Consider extracting to a shared JSON/YAML config or at minimum a constants file referenced by both.",
+    "scripts/detect-hardware.ps1 and detect-hardware.sh both use the em-dash (—) U+2014 in header comments. Harmless in PowerShell with UTF-8 source, but the review request asked to confirm 'non-ASCII clean' — strictly speaking it is NOT pure ASCII. Replace with a regular hyphen if strict ASCII is required by Windows code-page environments (some older PowerShell hosts default to cp1252)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration4_hardware_profile.py"
+  ],
+  "success_rate": {"backend": "100% (19/19)", "frontend": "n/a (backend-only request)"},
+  "test_credentials": "Admin: admin@realflow.local / admin123 (POST /api/admin/login). No user accounts created this iteration.",
+  "seed_data_creation": "None. This iteration only hits read-only diagnostics + admin login; no DB writes.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Re-run with: pytest /app/backend/tests/test_iteration4_hardware_profile.py -v  (uses REACT_APP_BACKEND_URL from /app/frontend/.env automatically). New public endpoint /api/diagnostics/hardware-profile is unauthenticated (no Authorization header needed). Preview host detects as 31 GB RAM / 8 cores -> HIGH tier with rut_concurrency=8; /app/backend/.env has RUT_MAX_CONCURRENCY=8 so applied matches recommendation. If those values change (host migration, env retune), update the assertions in test_high_tier_for_preview_host and test_applied_matches_recommendation_on_preview. The iter-3 smoke (test_iteration3_restore_smoke.py) was NOT re-run per request scope; main agent confirmed only health + admin login regression needed.",
+  "rca of the issue": "No bugs. New endpoint works as specified, tier mapping matches the bash detector, applied/recommended fields line up exactly with the .env tuning (RUT_MAX_CONCURRENCY=8 -> applied.rut_concurrency=8 -> matches_recommendation=true)."
+}

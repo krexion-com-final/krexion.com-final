@@ -277,19 +277,42 @@ function Invoke-Stage2-WSLConfig {
         Set-UI -Log "  WSL default version set to 2"
     } catch {}
 
-    Set-UI -Percent 30 -Status "Step 2 / 6 -- Tuning WSL memory limit..." -Progress "Writing .wslconfig"
+    Set-UI -Percent 30 -Status "Step 2 / 6 -- Tuning WSL for your hardware..." -Progress "Detecting profile"
+
+    # ----- Load shared profile picker -----
+    $detect = Join-Path $InstallPath "scripts\detect-hardware.ps1"
+    if (Test-Path $detect) {
+        . $detect
+    } else {
+        # Fallback inline picker if scripts/ folder missing
+        function Get-RealFlowProfile {
+            $r = [int][math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 0)
+            $c = (Get-CimInstance Win32_Processor | Measure-Object NumberOfLogicalProcessors -Sum).Sum
+            if (-not $c) { $c = [Environment]::ProcessorCount }
+            $ceil = [Math]::Max(1, $c * 2)
+            if     ($r -le 6)  { @{Tier="MICRO";WSLMemory="4GB"; WSLProcessors=[Math]::Min($c,4); RutConcurrency=[Math]::Min(1, $ceil);  TotalRamGB=$r; CpuCores=$c; ComposeOverride="docker-compose.micro.yml"} }
+            elseif ($r -le 10) { @{Tier="LOW";  WSLMemory="5GB"; WSLProcessors=[Math]::Min($c,4); RutConcurrency=[Math]::Min(2, $ceil);  TotalRamGB=$r; CpuCores=$c; ComposeOverride="docker-compose.lowram.yml"} }
+            elseif ($r -le 16) { @{Tier="MID";  WSLMemory="10GB";WSLProcessors=[Math]::Min($c,8); RutConcurrency=[Math]::Min(4, $ceil);  TotalRamGB=$r; CpuCores=$c; ComposeOverride="docker-compose.mid.yml"} }
+            elseif ($r -le 32) { @{Tier="HIGH"; WSLMemory="20GB";WSLProcessors=[Math]::Min($c,10);RutConcurrency=[Math]::Min(8, $ceil);  TotalRamGB=$r; CpuCores=$c; ComposeOverride="docker-compose.high.yml"} }
+            else               { @{Tier="BEAST";WSLMemory="32GB";WSLProcessors=[Math]::Min($c,12);RutConcurrency=[Math]::Min(16,$ceil);  TotalRamGB=$r; CpuCores=$c; ComposeOverride="docker-compose.beast.yml"} }
+        }
+    }
+
+    $rfProfile = Get-RealFlowProfile
+    $script:RFProfile = $rfProfile
+
+    Set-UI -Log "  Detected: $($rfProfile.TotalRamGB) GB RAM, $($rfProfile.CpuCores) CPU cores -> Tier $($rfProfile.Tier)"
+    Set-UI -Log "  -> RUT concurrency = $($rfProfile.RutConcurrency), WSL memory = $($rfProfile.WSLMemory)"
 
     $wslcfg = Join-Path $env:USERPROFILE ".wslconfig"
-    $totalRamGB = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 0)
-
-    if ($totalRamGB -le 10)      { $cap = "5GB" }
-    elseif ($totalRamGB -le 16)  { $cap = "10GB" }
-    else                         { $cap = "16GB" }
+    $totalRamGB = $rfProfile.TotalRamGB
+    $cap        = $rfProfile.WSLMemory
+    $procs      = $rfProfile.WSLProcessors
 
     @"
 [wsl2]
 memory=$cap
-processors=4
+processors=$procs
 swap=4GB
 localhostForwarding=true
 
@@ -298,7 +321,7 @@ autoMemoryReclaim=gradual
 sparseVhd=true
 "@ | Out-File -FilePath $wslcfg -Encoding ascii
 
-    Set-UI -Log "  Wrote $wslcfg (memory=$cap on a ${totalRamGB} GB system)"
+    Set-UI -Log "  Wrote $wslcfg (memory=$cap, processors=$procs on a $totalRamGB GB / $($rfProfile.CpuCores)-core system, tier=$($rfProfile.Tier))"
     & wsl.exe --shutdown 2>$null | Out-Null
     Start-Sleep 3
 
@@ -390,12 +413,24 @@ function Invoke-Stage5-BuildAndStart {
 
     Push-Location $InstallPath
 
-    # Auto-detect low-RAM
-    $totalRamGB = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 0)
+    # ----- Pick the correct docker-compose override based on detected tier -----
     $composeArgs = @("-f", "docker-compose.yml")
-    if ($totalRamGB -le 10 -and (Test-Path "docker-compose.lowram.yml")) {
-        Set-UI -Log "  Low-RAM mode (${totalRamGB} GB) -- adding docker-compose.lowram.yml override"
-        $composeArgs += @("-f", "docker-compose.lowram.yml")
+    if ($script:RFProfile -and $script:RFProfile.ComposeOverride) {
+        $override = $script:RFProfile.ComposeOverride
+        if (Test-Path $override) {
+            Set-UI -Log "  Tier $($script:RFProfile.Tier): using $override"
+            Set-UI -Log "  Tuning: RUT concurrency=$($script:RFProfile.RutConcurrency), $($script:RFProfile.TotalRamGB) GB RAM / $($script:RFProfile.CpuCores) cores"
+            $composeArgs += @("-f", $override)
+        } else {
+            Set-UI -Log "  Tier override $override not found - running with base profile (will use 8 GB defaults)"
+        }
+    } else {
+        # Last-resort fallback (should never trigger because Stage 2 always sets RFProfile)
+        $totalRamGB = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 0)
+        if ($totalRamGB -le 10 -and (Test-Path "docker-compose.lowram.yml")) {
+            Set-UI -Log "  Fallback low-RAM ($totalRamGB GB) - using docker-compose.lowram.yml"
+            $composeArgs += @("-f", "docker-compose.lowram.yml")
+        }
     }
 
     Set-UI -Log "  docker compose $($composeArgs -join ' ') build"

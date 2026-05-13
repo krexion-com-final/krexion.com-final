@@ -230,20 +230,35 @@ fi
 step 4 "Building Docker images (first run can take 5-10 min)…"
 docker compose pull --quiet 2>/dev/null || true
 
-# ── Detect total system RAM and pick the right profile ──────────────
-if [ "$OS" = "linux" ]; then
-    TOTAL_RAM_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
-    TOTAL_RAM_GB=$(( TOTAL_RAM_KB / 1024 / 1024 ))
+# ── Detect hardware and pick the right performance profile ──────────
+if [ -x ./scripts/detect-hardware.sh ]; then
+    eval "$(./scripts/detect-hardware.sh)"
+    ok "Hardware profile: tier=${RF_TIER}  RAM=${RF_RAM_GB} GB  CPU=${RF_CPU_CORES} cores  free-disk=${RF_FREE_DISK_GB} GB"
+    ok "Tuning: RUT concurrency=${RF_RUT_CONCURRENCY}, Mongo=${RF_MONGO_CAP}, Backend=${RF_BACKEND_CAP}"
 else
-    TOTAL_RAM_BYTES=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
-    TOTAL_RAM_GB=$(( TOTAL_RAM_BYTES / 1024 / 1024 / 1024 ))
+    # Fallback inline detection (script not present)
+    if [ "$OS" = "linux" ]; then
+        TOTAL_RAM_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+        RF_RAM_GB=$(( TOTAL_RAM_KB / 1024 / 1024 ))
+    else
+        TOTAL_RAM_BYTES=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
+        RF_RAM_GB=$(( TOTAL_RAM_BYTES / 1024 / 1024 / 1024 ))
+    fi
+    if   [ "$RF_RAM_GB" -le 6  ]; then RF_TIER="MICRO"; RF_COMPOSE_OVERRIDE="docker-compose.micro.yml"
+    elif [ "$RF_RAM_GB" -le 10 ]; then RF_TIER="LOW";   RF_COMPOSE_OVERRIDE="docker-compose.lowram.yml"
+    elif [ "$RF_RAM_GB" -le 16 ]; then RF_TIER="MID";   RF_COMPOSE_OVERRIDE="docker-compose.mid.yml"
+    elif [ "$RF_RAM_GB" -le 32 ]; then RF_TIER="HIGH";  RF_COMPOSE_OVERRIDE="docker-compose.high.yml"
+    else                                RF_TIER="BEAST";RF_COMPOSE_OVERRIDE="docker-compose.beast.yml"
+    fi
+    ok "Detected RAM: ${RF_RAM_GB} GB -> tier ${RF_TIER}"
 fi
-ok "Detected RAM: ${TOTAL_RAM_GB} GB"
 
 COMPOSE_FILES="-f docker-compose.yml"
-if [ "$TOTAL_RAM_GB" -gt 0 ] && [ "$TOTAL_RAM_GB" -le 10 ] && [ -f docker-compose.lowram.yml ]; then
-    warn "RAM ≤ 10 GB — enabling LOW-RAM profile (Mongo 1G, Backend 2.5G, RUT max 2 concurrent)."
-    COMPOSE_FILES="$COMPOSE_FILES -f docker-compose.lowram.yml"
+if [ -n "$RF_COMPOSE_OVERRIDE" ] && [ -f "$RF_COMPOSE_OVERRIDE" ]; then
+    ok "Applying override: ${RF_COMPOSE_OVERRIDE}"
+    COMPOSE_FILES="$COMPOSE_FILES -f $RF_COMPOSE_OVERRIDE"
+else
+    warn "No override file for tier ${RF_TIER:-?} — running base compose (8 GB defaults)."
 fi
 
 docker compose $COMPOSE_FILES build
