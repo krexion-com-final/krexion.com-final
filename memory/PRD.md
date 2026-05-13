@@ -393,3 +393,32 @@ Again" in Docker's UI.
 
 ### Files touched
 - `/app/RealFlow-Setup/setup-engine.ps1` — Stage 2 rewritten (~50 lines)
+
+---
+
+## Update — Restored from GitHub (Jan 2026)
+
+User cloned `ronaldsexedwards40-glitch/dynabook` repo (RealFlow) back into Emergent preview.
+
+### Actions taken:
+1. Wiped Emergent default `/app` template and copied complete `dynabook` repo contents (preserving `.git` so user can push back to `main`).
+2. Wrote `/app/backend/.env` with required vars: `MONGO_URL=mongodb://localhost:27017`, `DB_NAME=realflow`, `JWT_SECRET_KEY`, `ADMIN_EMAIL=admin@realflow.local`, `ADMIN_PASSWORD=admin123`, `POSTBACK_TOKEN`, `RUT_MEM_LIMIT_MB=4096`, plus empty placeholders for SMTP/Resend/Google OAuth/License server.
+3. Wrote `/app/frontend/.env` with preview `REACT_APP_BACKEND_URL` + `WDS_SOCKET_PORT=443`.
+4. `pip install -r requirements.txt` — installed all 226 Python deps successfully.
+5. `yarn install` — installed all frontend deps successfully.
+6. Restarted supervisor services (mongodb + backend + frontend).
+7. Verified `/api/diagnostics/health` returns 200 with mongodb=ok, memory=ok, disk=ok, process=ok (playwright/gsheet SA warns are expected).
+8. Verified `/api/admin/login` returns valid JWT with `admin@realflow.local / admin123`.
+9. Verified frontend renders RealFlow login page correctly on preview URL.
+10. Re-wrote `/app/memory/test_credentials.md`.
+
+### Status: 
+- ✅ Backend running on `:8001` (supervisor)
+- ✅ Frontend running on `:3000` (supervisor)
+- ✅ MongoDB running on `:27017` (supervisor)
+- ✅ All modules loaded: server, CPI, License, RUT (with Playwright install scheduled)
+- ✅ All deployment artifacts intact (`.bat` / `.ps1` / `docker-compose*.yml` / `RealFlow-Setup/` wizard, install scripts, Urdu/English guides)
+
+### Push back to GitHub:
+User should use the **"Save to GitHub"** button in the Emergent chat to commit the current preview state to `main` branch of `ronaldsexedwards40-glitch/dynabook`.
+
