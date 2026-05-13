@@ -1,0 +1,38 @@
+{
+  "summary": "Iteration 5 GO/NO-GO ship-readiness test. 21/21 backend tests pass. All NEW endpoints (DELETE /api/admin/license/{key}, POST /api/admin/license/bulk-delete, POST /api/admin/license/cleanup) work as designed; safety guardrails verified (empty bulk-delete -> 400, active licenses NOT touched by cleanup or status=trial bulk-delete, double-delete -> 404). Regression: health, hardware-profile, admin login, user register+approve, license config/start-trial/issue/list/extend/revoke, license validate (heartbeat), links CRUD all pass. Frontend admin UI verified live: /admin-login renders Admin Access form; /admin/licenses renders License & Subscription page with `tab-licenses` tab; after switching to the Customers/Licenses tab the BULK CLEANUP banner with all three data-testids is visible (cleanup-all-btn, cleanup-revoked-btn, cleanup-trial-btn) and 16 per-row `delete-RFLW-*` buttons are present alongside Extend/Revoke. Clicking each button (window.confirm auto-accepted) actually fires the correct backend endpoint: POST /api/admin/license/bulk-delete, POST /api/admin/license/cleanup, DELETE /api/admin/license/{key} — all confirmed via network capture. GO/NO-GO recommendation: GO — ship-ready.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/admin/licenses", "issues": ["Bulk cleanup banner uses red-on-red 'Delete Revoked + Expired' button (low contrast vs the lighter 'Delete all Revoked' & 'Delete all Trial' siblings) — minor visual hierarchy issue, not a blocker"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration5_license_delete_cleanup.py",
+    "/app/test_reports/pytest/iteration5_results.xml"
+  ],
+  "action_items": [
+    "(Optional, P3) Review the request item that mentioned 'POST /api/license/heartbeat' — current code only exposes POST /api/license/validate. Test passes either way; if main agent intends to ship a /heartbeat alias to customers, add it explicitly.",
+    "(Optional, P3) Review iteration-4 follow-ups still open: split server.py (now ~13.8k lines) into routers; expose `detection_failed` on /diagnostics/hardware-profile when psutil import fails; consolidate tier thresholds shared between scripts/detect-hardware.sh and server.py.",
+    "(Optional, P3) The request item 'POST /api/admin/license/start-trial' does not exist — only /api/license/start-trial (public) does. If admin-initiated trial creation is desired, add a thin admin alias."
+  ],
+  "critical_code_review_comments": [
+    "P0 safety GOOD: admin_bulk_delete correctly raises HTTPException(400) when the resolved query is empty (license_module.py:523). status='all' with no other filter ALSO hits this guard because query stays empty — verified live.",
+    "P0 safety GOOD: admin_cleanup only deletes status=revoked + (trial AND trial_ends_at<now) + (subscription_ends_at<now AND status in [active, expired]). An active license with subscription_ends_at>now is NEVER deleted — verified live with a 365-day active key.",
+    "MEDIUM: bulk-delete with status='trial' deletes ALL trial licenses including ones still inside their trial window (no expired_only filter applied for trial). This matches the visible 'Delete all Trial' button label, but admins may misclick — confirmation alert is the only safety net. Consider requiring a secondary confirm or a 'force_active_trial=true' flag.",
+    "LOW: admin_delete_license + admin_bulk_delete + admin_cleanup all permit hard-delete of stripe_subscription_id-bearing rows with no audit trail. For a paid product, recommend writing the deleted document into a `licenses_archive` collection before delete_many() so revenue ops can audit/restore.",
+    "LOW: license_module.bulk-delete `payload: dict` is untyped — Pydantic model would surface unknown keys (typo like `status_=revoked`) instead of silently no-op'ing into the 400 guard. Cosmetic.",
+    "LOW (carried over from iter-4): server.py is still ~13.8k lines, well past the 700-line threshold. New license_module.py is correctly split; continue that pattern."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration5_license_delete_cleanup.py"
+  ],
+  "success_rate": { "backend": "100% (21/21)", "frontend": "100% (admin-login renders, /admin/licenses renders, all 3 cleanup buttons + 16 per-row delete buttons present, all 3 click-handlers fire correct backend endpoints verified via network capture)" },
+  "test_credentials": "Admin: admin@realflow.local / admin123 (POST /api/admin/login). Created TEST_-prefixed user accounts + license keys during run; most TEST_ licenses got cleaned up by the cleanup button click in the UI test. Some TEST_ user accounts remain in db.users.",
+  "seed_data_creation": "Tests create TEST_-prefixed users, licenses (issue), and trials. TEST_uirow1/uirow2 licenses created for the UI test and deleted by the cleanup-all / per-row-delete clicks. Cleanup is partial — main agent may want to run /api/admin/license/cleanup once before shipping.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Re-run: pytest /app/backend/tests/test_iteration5_license_delete_cleanup.py -v   The test file auto-uses https://dynabook-preview.preview.emergentagent.com (or BACKEND_URL env). Key gotchas: (1) /api/admin/license/issue uses query params email+days, NOT json body. (2) Health endpoint returns mongodb status under checks.mongodb.status, NOT mongodb top-level. (3) Links require both status=active AND features.links=true on the user — use PUT /api/admin/users/{uid}. (4) Frontend admin token localStorage key is `adminToken` (camelCase). (5) UI cleanup buttons are on the `tab-licenses` tab; default tab is `tab-config` so click tab-licenses first. (6) The 'heartbeat' endpoint is actually POST /api/license/validate.",
+  "rca of the issue": "No bugs found. Two initial test failures were both test-script issues (wrong health-check shape, wrong links field name `original_url` vs `offer_url`, missing features.links=true on user) — fixed in the test file. All P0 safety guardrails pass: empty bulk-delete -> 400, active licenses protected from cleanup, active licenses protected from status=trial bulk-delete, double-delete -> 404."
+}
