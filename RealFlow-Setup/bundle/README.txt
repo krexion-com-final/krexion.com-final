@@ -1,4 +1,4 @@
-This folder holds cached installers.
+﻿This folder holds cached installers.
 
 On the FIRST install, the wizard will download:
 
@@ -7,7 +7,7 @@ On the FIRST install, the wizard will download:
 
 and save them here. On subsequent installs (on this PC or any other
 PC if you copy this whole folder via USB), the wizard will detect
-the cached files and SKIP the downloads — saving 10-20 minutes and
+the cached files and SKIP the downloads -- saving 10-20 minutes and
 working completely offline.
 
 DO NOT DELETE this folder if you plan to reinstall or share the

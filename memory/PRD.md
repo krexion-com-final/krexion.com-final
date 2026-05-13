@@ -273,3 +273,55 @@ User requested: no online payment integration. Customers contact admin manually 
 - `/app/backend/.env` (removed STRIPE_API_KEY)
 - `/app/frontend/src/pages/LicenseAdminPage.js` (added contact section)
 - `/app/RealFlow-Setup/setup-engine.ps1` (Buy button → mailto:)
+
+---
+
+## Bug fix — Installer encoding crash (May 2026)
+
+User reported: customer's Install.bat / Debug.bat crashed with PowerShell parse errors:
+- `Unexpected token 'GB' in expression or statement`
+- `Set-UI -Log "  Low-RAM mode (${totalRamGB} GB) â€" adding doc...`
+- `Missing closing ')' in expression`
+- Lines 199, 224, 309, 350, 353, 361 all flagged
+
+### Root cause
+The `setup-engine.ps1` file (written by main agent on a Linux container)
+contained Unicode characters:
+- em dash `—` (U+2014)
+- ellipsis `…` (U+2026)
+- smart quotes `"` `"` `'` `'`
+- box-drawing chars (header decoration)
+
+When the customer's Windows PowerShell reads the file, it falls back to
+Windows-1252 / system ANSI codepage (because there is no UTF-8 BOM).
+Em dashes get mis-decoded as `â€"` (3 bytes), turning code like:
+```
+Set-UI -Log "Step 5 / 6 — Building Docker images..."
+```
+into:
+```
+Set-UI -Log "Step 5 / 6 â€" Building Docker images..."
+```
+which the parser then chokes on (treats `â€` as a token, sees the `"`
+as string-end, etc.).
+
+### Fix
+Python script ran over `RealFlow-Setup/*` and:
+1. Replaced **every non-ASCII character** with its ASCII equivalent
+   (em dash → `--`, smart quotes → `"` `'`, ellipsis → `...`, box
+   drawing → `+` `-` `|`, emoji → empty).
+2. Saved `.ps1` and `.txt` files with **UTF-8 BOM**.
+3. Saved `.bat` files **without BOM** (cmd.exe reads BOM bytes as
+   command name and fails).
+4. Normalised all line endings to **CRLF** (Windows native).
+
+Verification:
+- `setup-engine.ps1`: 786 lines, 0 non-ASCII bytes, BOM=yes
+- `Install.bat` / `Debug.bat`: starts with `@ech` (no BOM)
+- Braces/parens/brackets/here-strings all balanced
+- Specific previously-failing lines (199, 224, 309, 350, 353, 361) all
+  rebuilt with `--` instead of `—`
+
+### Files touched (all in RealFlow-Setup/):
+- setup-engine.ps1, Install.bat, Debug.bat, README.txt, START-HERE.txt,
+  bundle/README.txt — all sanitized to pure ASCII + correct BOM policy

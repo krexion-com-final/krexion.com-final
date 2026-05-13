@@ -1,6 +1,6 @@
-# ═══════════════════════════════════════════════════════════════════════
-#   RealFlow Setup Engine — WinForms wizard, no command line in user's face
-# ═══════════════════════════════════════════════════════════════════════
+﻿# =======================================================================
+#   RealFlow Setup Engine -- WinForms wizard, no command line in user's face
+# =======================================================================
 
 # Bootstrap log so even the earliest crash is captured to disk
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
@@ -27,7 +27,7 @@ try {
 $ErrorActionPreference = "Stop"
 $ProgressPreference     = "SilentlyContinue"
 
-# ─── Paths ─────────────────────────────────────────────────────────────
+# --- Paths -------------------------------------------------------------
 $BundleDir   = Join-Path $ScriptDir "bundle"
 $InstallPath = "C:\realflow"
 $RepoUrl     = "https://github.com/ronaldsexedwards40-glitch/dynabook.git"
@@ -36,21 +36,21 @@ $ResumeFile  = Join-Path $ScriptDir ".resume-stage"
 $LogFile     = Join-Path $ScriptDir "setup.log"
 $LicenseFile = Join-Path $ScriptDir ".license"
 
-# License-server URL — installer phones home here to validate keys + Stripe
+# License-server URL -- installer phones home here to validate keys + Stripe
 # checkout. Change to your production URL when you migrate off Emergent.
 $LicenseServer = "https://dynabook-dev.preview.emergentagent.com"
 
 New-Item -ItemType Directory -Force -Path $BundleDir | Out-Null
 "" | Out-File -FilePath $LogFile -Encoding utf8
 
-# ─── Logging helper ────────────────────────────────────────────────────
+# --- Logging helper ----------------------------------------------------
 function Log {
     param([string]$Message)
     $stamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
     "$stamp  $Message" | Out-File -FilePath $LogFile -Append -Encoding utf8
 }
 
-# ─── Build the wizard form ─────────────────────────────────────────────
+# --- Build the wizard form ---------------------------------------------
 $form               = New-Object System.Windows.Forms.Form
 $form.Text          = "RealFlow Setup"
 $form.Size          = New-Object System.Drawing.Size(640, 470)
@@ -86,7 +86,7 @@ $subtitleLabel.Size      = New-Object System.Drawing.Size(400, 22)
 $subtitleLabel.BackColor = [System.Drawing.Color]::Transparent
 $header.Controls.Add($subtitleLabel)
 
-# Body — status label
+# Body -- status label
 $statusLabel        = New-Object System.Windows.Forms.Label
 $statusLabel.Text   = "Ready to install RealFlow on this PC."
 $statusLabel.Font   = New-Object System.Drawing.Font("Segoe UI", 11)
@@ -135,7 +135,7 @@ $logBox.ForeColor   = [System.Drawing.Color]::FromArgb(160, 180, 200)
 $logBox.Font        = New-Object System.Drawing.Font("Consolas", 8)
 $form.Controls.Add($logBox)
 
-# INSTALL button — the only thing the user touches
+# INSTALL button -- the only thing the user touches
 $installBtn         = New-Object System.Windows.Forms.Button
 $installBtn.Text    = "INSTALL"
 $installBtn.Font    = New-Object System.Drawing.Font("Segoe UI Semibold", 11, [System.Drawing.FontStyle]::Bold)
@@ -160,7 +160,7 @@ $form.Controls.Add($cancelBtn)
 
 $cancelBtn.Add_Click({ $form.Close() })
 
-# ─── Helper: update UI from the install loop ───────────────────────────
+# --- Helper: update UI from the install loop ---------------------------
 function Set-UI {
     param(
         [object]$Percent  = $null,
@@ -178,11 +178,11 @@ function Set-UI {
     [System.Windows.Forms.Application]::DoEvents()
 }
 
-# ─── The actual install logic, broken into stages ──────────────────────
+# --- The actual install logic, broken into stages ----------------------
 function Invoke-Stage1-PrepareTools {
-    Set-UI -Percent 5 -Status "Step 1 / 6 — Checking required tools..." -Progress "" -Log "Stage 1: prepare tools"
+    Set-UI -Percent 5 -Status "Step 1 / 6 -- Checking required tools..." -Progress "" -Log "Stage 1: prepare tools"
 
-    # ── Git ──
+    # -- Git --
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
         Set-UI -Percent 8 -Progress "Installing Git..."
         $gitInstaller = Join-Path $BundleDir "Git-Installer.exe"
@@ -200,11 +200,11 @@ function Invoke-Stage1-PrepareTools {
     }
     Set-UI -Log "  Git: OK ($((git --version) 2>$null))"
 
-    # ── Docker Desktop ──
+    # -- Docker Desktop --
     Set-UI -Percent 15 -Progress "Checking Docker Desktop..."
     $dockerInstalled = (Get-Command docker -ErrorAction SilentlyContinue) -ne $null
     if (-not $dockerInstalled) {
-        Set-UI -Percent 18 -Progress "Downloading Docker Desktop (~520 MB, slow internet may take 10-20 min)..." -Log "  Docker Desktop missing — downloading"
+        Set-UI -Percent 18 -Progress "Downloading Docker Desktop (~520 MB, slow internet may take 10-20 min)..." -Log "  Docker Desktop missing -- downloading"
         $dockerInstaller = Join-Path $BundleDir "DockerDesktopInstaller.exe"
         if (-not (Test-Path $dockerInstaller) -or (Get-Item $dockerInstaller).Length -lt 200MB) {
             Invoke-WebRequest -UseBasicParsing `
@@ -216,12 +216,12 @@ function Invoke-Stage1-PrepareTools {
         Set-UI -Percent 35 -Progress "Installing Docker Desktop (this takes 3-5 min)..." -Log "  Running Docker installer (silent)"
         Start-Process -FilePath $dockerInstaller -ArgumentList "install", "--quiet", "--accept-license" -Wait
 
-        # Save resume marker — we need a reboot for WSL2 / Hyper-V to come online
+        # Save resume marker -- we need a reboot for WSL2 / Hyper-V to come online
         "stage1_done" | Out-File -FilePath $ResumeFile -Encoding ascii
         $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
 
         $result = [System.Windows.Forms.MessageBox]::Show(
-            "Docker Desktop installed successfully.`r`n`r`nA RESTART is required so Windows can enable WSL2 / Hyper-V.`r`n`r`nClick OK to restart now. After restart, just double-click  Install.bat  again — the wizard will continue automatically.",
+            "Docker Desktop installed successfully.`r`n`r`nA RESTART is required so Windows can enable WSL2 / Hyper-V.`r`n`r`nClick OK to restart now. After restart, just double-click  Install.bat  again -- the wizard will continue automatically.",
             "Restart Required",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Information
@@ -231,7 +231,7 @@ function Invoke-Stage1-PrepareTools {
     }
     Set-UI -Log "  Docker: $((docker --version) 2>$null)"
 
-    # ── Make sure Docker daemon is up ──
+    # -- Make sure Docker daemon is up --
     Set-UI -Percent 22 -Progress "Waiting for Docker engine..."
     $dockerOk = $false
     for ($i = 0; $i -lt 90; $i++) {
@@ -258,7 +258,7 @@ function Invoke-Stage1-PrepareTools {
 }
 
 function Invoke-Stage2-WSLConfig {
-    Set-UI -Percent 30 -Status "Step 2 / 6 — Tuning WSL memory limit..." -Progress "Writing .wslconfig"
+    Set-UI -Percent 30 -Status "Step 2 / 6 -- Tuning WSL memory limit..." -Progress "Writing .wslconfig"
 
     $wslcfg = Join-Path $env:USERPROFILE ".wslconfig"
     $totalRamGB = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 0)
@@ -290,10 +290,10 @@ sparseVhd=true
 }
 
 function Invoke-Stage3-FetchCode {
-    Set-UI -Percent 40 -Status "Step 3 / 6 — Downloading RealFlow code..." -Progress "git clone $RepoUrl"
+    Set-UI -Percent 40 -Status "Step 3 / 6 -- Downloading RealFlow code..." -Progress "git clone $RepoUrl"
 
     if (Test-Path (Join-Path $InstallPath ".git")) {
-        Set-UI -Log "  Existing install found — pulling latest"
+        Set-UI -Log "  Existing install found -- pulling latest"
         Push-Location $InstallPath
         git fetch origin 2>$null
         git checkout $Branch 2>$null
@@ -309,11 +309,11 @@ function Invoke-Stage3-FetchCode {
 }
 
 function Invoke-Stage4-GenerateEnv {
-    Set-UI -Percent 50 -Status "Step 4 / 6 — Generating secure passwords..." -Progress "Writing .env"
+    Set-UI -Percent 50 -Status "Step 4 / 6 -- Generating secure passwords..." -Progress "Writing .env"
 
     $envFile = Join-Path $InstallPath ".env"
     if (Test-Path $envFile) {
-        Set-UI -Log "  .env already exists — keeping existing secrets"
+        Set-UI -Log "  .env already exists -- keeping existing secrets"
         return
     }
 
@@ -350,7 +350,7 @@ TUNNEL_TOKEN=
 }
 
 function Invoke-Stage5-BuildAndStart {
-    Set-UI -Percent 60 -Status "Step 5 / 6 — Building Docker images (5-10 min first time)..." -Progress "docker compose build"
+    Set-UI -Percent 60 -Status "Step 5 / 6 -- Building Docker images (5-10 min first time)..." -Progress "docker compose build"
 
     Push-Location $InstallPath
 
@@ -358,7 +358,7 @@ function Invoke-Stage5-BuildAndStart {
     $totalRamGB = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 0)
     $composeArgs = @("-f", "docker-compose.yml")
     if ($totalRamGB -le 10 -and (Test-Path "docker-compose.lowram.yml")) {
-        Set-UI -Log "  Low-RAM mode (${totalRamGB} GB) — adding docker-compose.lowram.yml override"
+        Set-UI -Log "  Low-RAM mode (${totalRamGB} GB) -- adding docker-compose.lowram.yml override"
         $composeArgs += @("-f", "docker-compose.lowram.yml")
     }
 
@@ -372,7 +372,7 @@ function Invoke-Stage5-BuildAndStart {
 }
 
 function Invoke-Stage6-WaitAndOpen {
-    Set-UI -Percent 88 -Status "Step 6 / 6 — Waiting for services to start..." -Progress "Health check"
+    Set-UI -Percent 88 -Status "Step 6 / 6 -- Waiting for services to start..." -Progress "Health check"
 
     # Backend health
     $backendOk = $false
@@ -403,7 +403,7 @@ function Invoke-Stage6-WaitAndOpen {
     "[InternetShortcut]`r`nURL=http://localhost:3000`r`nIconIndex=0" | Out-File -FilePath $shortcut -Encoding ascii
     Set-UI -Log "  Created Desktop shortcut: RealFlow.url"
 
-    Set-UI -Percent 100 -Progress "Install complete!" -Status "✓ Done — RealFlow is running."
+    Set-UI -Percent 100 -Progress "Install complete!" -Status "OK Done -- RealFlow is running."
 
     # Read admin password from .env
     $envFile = Join-Path $InstallPath ".env"
@@ -417,7 +417,7 @@ function Invoke-Stage6-WaitAndOpen {
 
     $titleLabel.Text = "Installation Complete!"
     $subtitleLabel.Text = "Click OPEN REALFLOW to launch your dashboard."
-    $detailLabel.Text = "URL:          http://localhost:3000`r`nAdmin login:  http://localhost:3000/admin-login`r`n  Email:      $adminEmail`r`n  Password:   $adminPass`r`n`r`nIMPORTANT: Save the password above — it is also stored in:`r`n   $envFile`r`n`r`nA Desktop shortcut `"RealFlow.url`" has been created."
+    $detailLabel.Text = "URL:          http://localhost:3000`r`nAdmin login:  http://localhost:3000/admin-login`r`n  Email:      $adminEmail`r`n  Password:   $adminPass`r`n`r`nIMPORTANT: Save the password above -- it is also stored in:`r`n   $envFile`r`n`r`nA Desktop shortcut `"RealFlow.url`" has been created."
     $detailLabel.ForeColor = [System.Drawing.Color]::FromArgb(220, 240, 255)
 
     # Re-wire the button
@@ -429,7 +429,7 @@ function Invoke-Stage6-WaitAndOpen {
     if (Test-Path $ResumeFile) { Remove-Item -Force $ResumeFile }
 }
 
-# ─── Main install flow (called when user clicks INSTALL) ───────────────
+# --- Main install flow (called when user clicks INSTALL) ---------------
 function Start-Install {
     $installBtn.Enabled = $false
     $cancelBtn.Enabled  = $false
@@ -456,10 +456,10 @@ function Start-Install {
     }
     catch {
         $err = $_.Exception.Message
-        Set-UI -Status "✗ Install failed." -Progress "" -Log "ERROR: $err"
+        Set-UI -Status "X Install failed." -Progress "" -Log "ERROR: $err"
         [System.Windows.Forms.MessageBox]::Show(
             "Installation failed:`r`n`r`n$err`r`n`r`nFull log: $LogFile`r`n`r`nMost common fix: open Docker Desktop manually, wait for it to be ready, then re-run this installer.",
-            "RealFlow Setup — Error",
+            "RealFlow Setup -- Error",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error
         )
@@ -468,7 +468,7 @@ function Start-Install {
     }
 }
 
-# ─── If we are resuming after reboot, auto-start the install ──────────
+# --- If we are resuming after reboot, auto-start the install ----------
 if (Test-Path $ResumeFile) {
     $form.Add_Shown({ Start-Install })
 } else {
@@ -480,9 +480,9 @@ if (Test-Path $ResumeFile) {
     })
 }
 
-# ═══════════════════════════════════════════════════════════════════════
-#   LICENSE ACTIVATION  —  shown as a modal dialog before install starts
-# ═══════════════════════════════════════════════════════════════════════
+# =======================================================================
+#   LICENSE ACTIVATION  --  shown as a modal dialog before install starts
+# =======================================================================
 function Get-MachineId {
     # Stable per-PC fingerprint that survives reboot but not OS reinstall
     try {
@@ -497,8 +497,8 @@ function Get-MachineId {
 }
 
 function Invoke-LicensingDisabled {
-    # Server returned enabled=false — proceed without a key, "open install"
-    Set-UI -Log "  Licensing disabled on server — installing without activation"
+    # Server returned enabled=false -- proceed without a key, "open install"
+    Set-UI -Log "  Licensing disabled on server -- installing without activation"
     "DISABLED" | Out-File -FilePath $LicenseFile -Encoding ascii
     return $true
 }
@@ -508,7 +508,7 @@ function Show-LicenseDialog {
 
     # Build secondary dialog
     $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text = "RealFlow — License Activation"
+    $dlg.Text = "RealFlow -- License Activation"
     $dlg.Size = New-Object System.Drawing.Size(560, 460)
     $dlg.StartPosition = "CenterParent"
     $dlg.FormBorderStyle = "FixedDialog"
@@ -528,7 +528,7 @@ function Show-LicenseDialog {
     $price = "{0:N2}" -f [double]$Config.monthly_price
     $cur = $Config.currency.ToString().ToUpper()
     $trial = [int]$Config.trial_days
-    $sub.Text = "$price $cur / month  •  $trial-day free trial  •  1 license = 1 PC  •  Manual purchase via admin"
+    $sub.Text = "$price $cur / month  *  $trial-day free trial  *  1 license = 1 PC  *  Manual purchase via admin"
     $sub.Font = New-Object System.Drawing.Font("Segoe UI", 9)
     $sub.ForeColor = [System.Drawing.Color]::FromArgb(180, 200, 230)
     $sub.Location = New-Object System.Drawing.Point(20, 52)
@@ -599,7 +599,7 @@ function Show-LicenseDialog {
     $btnTrial.FlatAppearance.BorderSize = 0
     $gp2.Controls.Add($btnTrial)
 
-    # Tab: Contact admin to buy (manual / crypto / bank — no online payment)
+    # Tab: Contact admin to buy (manual / crypto / bank -- no online payment)
     $btnBuy = New-Object System.Windows.Forms.Button
     $contactEmail = if ($Config.admin_contact_email) { $Config.admin_contact_email } else { "admin@realflow.local" }
     $btnBuy.Text = "Contact Admin to Buy a License"
@@ -727,7 +727,7 @@ function Invoke-LicenseActivation {
     if ((Test-Path $LicenseFile)) {
         $saved = (Get-Content $LicenseFile -Raw).Trim()
         if ($saved -eq "DISABLED") {
-            Set-UI -Status "Licensing disabled — installing..." -Log "Saved license state: DISABLED"
+            Set-UI -Status "Licensing disabled -- installing..." -Log "Saved license state: DISABLED"
             return $true
         }
         if ($saved) {
@@ -741,7 +741,7 @@ function Invoke-LicenseActivation {
                 }
                 Set-UI -Log "  Saved license invalid: $($r.reason). Asking for a new one."
             } catch {
-                Set-UI -Log "  Could not reach license server — proceeding offline with cached key"
+                Set-UI -Log "  Could not reach license server -- proceeding offline with cached key"
                 return $true
             }
         }
@@ -754,7 +754,7 @@ function Invoke-LicenseActivation {
     } catch {
         [System.Windows.Forms.MessageBox]::Show(
             "Cannot reach the license server at $LicenseServer.`r`n`r`nCheck your internet connection and try again.",
-            "RealFlow Setup — Network error",
+            "RealFlow Setup -- Network error",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Warning
         ) | Out-Null
@@ -767,9 +767,9 @@ function Invoke-LicenseActivation {
     return (Show-LicenseDialog -Config $cfg)
 }
 
-# ─── Show the wizard ──────────────────────────────────────────────────
+# --- Show the wizard --------------------------------------------------
 try {
-    "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')]  Showing wizard form…" |
+    "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')]  Showing wizard form..." |
         Out-File -FilePath $BootLog -Append -Encoding utf8
     [void]$form.ShowDialog()
     "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')]  Wizard closed cleanly." |

@@ -1,17 +1,17 @@
 @echo off
-REM ╔══════════════════════════════════════════════════════════════════╗
-REM ║                 RealFlow Setup — DEBUG MODE                       ║
-REM ║                                                                  ║
-REM ║  Runs the wizard with ALL output visible.                        ║
-REM ║  Use this when Install.bat fails silently.                       ║
-REM ║                                                                  ║
-REM ║  The window will STAY OPEN after the wizard exits so you can     ║
-REM ║  read any error messages and copy them.                          ║
-REM ╚══════════════════════════════════════════════════════════════════╝
+REM +==================================================================+
+REM |                 RealFlow Setup -- DEBUG MODE                       |
+REM |                                                                  |
+REM |  Runs the wizard with ALL output visible.                        |
+REM |  Use this when Install.bat fails silently.                       |
+REM |                                                                  |
+REM |  The window will STAY OPEN after the wizard exits so you can     |
+REM |  read any error messages and copy them.                          |
+REM +==================================================================+
 
 setlocal
 
-REM ─── Auto-elevate ────────────────────────────────────────────────
+REM --- Auto-elevate ------------------------------------------------
 net session >nul 2>&1
 if %errorLevel% neq 0 (
     echo Need Administrator. Re-launching with UAC prompt...
@@ -19,14 +19,14 @@ if %errorLevel% neq 0 (
     exit /b
 )
 
-title RealFlow Setup — DEBUG MODE
+title RealFlow Setup -- DEBUG MODE
 cd /d "%~dp0"
 color 0E
 
 echo.
-echo  ╔══════════════════════════════════════════════════════════╗
-echo  ║              RealFlow Setup — DEBUG MODE                 ║
-echo  ╚══════════════════════════════════════════════════════════╝
+echo  +==========================================================+
+echo  |              RealFlow Setup -- DEBUG MODE                 |
+echo  +==========================================================+
 echo.
 echo  This window will STAY OPEN. Watch for error messages below.
 echo.
@@ -47,29 +47,29 @@ echo.
 
 if not exist "%~dp0setup-engine.ps1" (
     color 0C
-    echo  ✗ setup-engine.ps1 NOT FOUND in %~dp0
+    echo  X setup-engine.ps1 NOT FOUND in %~dp0
     echo    Make sure you extracted the WHOLE RealFlow-Setup folder.
     pause
     exit /b 1
 )
-echo  ✓ setup-engine.ps1 found
+echo  OK setup-engine.ps1 found
 echo.
 
 echo  --- Parsing setup-engine.ps1 (syntax check) ---
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$null = [System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw '%~dp0setup-engine.ps1'), [ref]$null); Write-Host '  ✓ Script parses cleanly'" 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$null = [System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw '%~dp0setup-engine.ps1'), [ref]$null); Write-Host '  OK Script parses cleanly'" 2>&1
 if errorlevel 1 (
     color 0C
-    echo  ✗ Script has syntax errors. See above.
+    echo  X Script has syntax errors. See above.
     pause
     exit /b 1
 )
 echo.
 
 echo  --- Launching wizard (verbose) ---
-echo  ──────────────────────────────────────────────────────────────
+echo  --------------------------------------------------------------
 powershell -NoProfile -ExecutionPolicy Bypass -NoExit -File "%~dp0setup-engine.ps1"
 
-echo  ──────────────────────────────────────────────────────────────
+echo  --------------------------------------------------------------
 echo.
 echo  Wizard process ended.
 echo.
