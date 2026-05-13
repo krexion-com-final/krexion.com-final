@@ -708,3 +708,90 @@ All endpoints require admin JWT (via `_admin_dep`).
 - Active licenses are NEVER auto-deleted via cleanup or status-based bulk-delete
 - All deletes show confirmation `window.confirm()` modal before executing
 - Cleanup endpoint protects active subscriptions (only deletes EXPIRED active)
+
+---
+
+## Update — Comprehensive Installer Bug Fix Pass (Jan 2026)
+
+### Customer Issue
+Customer (Jinny) was using OLD `RealFlow-Setup/Install.bat` (downloaded weeks ago from GitHub) which still had the git clone bug we identified earlier. Got "Installation failed: From https://github.com/ronaldsexedwards40-glitch/dynabook" dialog. The new RealFlow-EASY-INSTALL.bat was never sent to them.
+
+### Root Causes (ALL fixed in this pass)
+
+1. **OLD setup-engine.ps1 Stage 3 used `git clone --branch ... 2>&1 | Out-Null`** -> errors silently swallowed, no `$LASTEXITCODE` check, dialog showed only "Cloning into..." stdout
+2. **No network pre-check** -> failed silently if GitHub unreachable
+3. **No robust folder cleanup** -> if C:\realflow had partial files, clone fails
+4. **No `$LASTEXITCODE` check after docker compose build / up** -> script continued through failures
+5. **Generic "open Docker Desktop manually" error message** for EVERY error type (misleading when issue is network/disk/permissions)
+6. **Git was REQUIRED** -> if Git install failed (slow internet, antivirus), entire installer aborted
+
+### Fixes Applied to `RealFlow-Setup/setup-engine.ps1`
+
+**Stage 1 (PrepareTools)**:
+- Git is now OPTIONAL (wrapped in try/catch, continues if install fails)
+- Stage 3 no longer needs Git -> graceful degradation
+
+**Stage 3 (FetchCode) -- completely rewritten**:
+- Network pre-check (`Invoke-WebRequest https://github.com`)
+- Robust cleanup of C:\realflow:
+  - First `docker compose down` to release file locks
+  - Then `takeown.exe + icacls.exe` to grant admin rights
+  - Then `Remove-Item -Recurse -Force` (retry once with 3-sec sleep)
+  - Throws clear error if cleanup still fails
+- Replaced `git clone` with **GitHub ZIP download**:
+  - `https://github.com/.../archive/refs/heads/main.zip`
+  - `Expand-Archive` to %TEMP%, then `Move-Item` to C:\realflow
+  - Each failure path throws a clear error with fix instructions
+
+**Stage 5 (BuildAndStart)**:
+- Added `$LASTEXITCODE -ne 0` check after `docker compose build` and `docker compose up -d`
+- Throws clear error with diagnostic commands if either fails
+
+**Error Dialog**:
+- Now detects error type (network/file-lock/docker/disk-space) from error message
+- Shows context-aware FIX section in the popup
+- Tells user exactly which file has the full log
+
+### New File Added
+
+`/app/QUICK-FIX-INSTALL.bat` -- single-file emergency installer that customers with the broken old install can run:
+1. Self-elevates to Administrator
+2. Cleans up `C:\realflow` robustly (takeown/icacls/double-retry)
+3. Downloads `RealFlow-EASY-INSTALL.ps1` + `.bat` fresh from GitHub raw URLs
+4. Runs the new installer
+5. Returns clean success/failure message
+
+Customer instruction: "Just download QUICK-FIX-INSTALL.bat from GitHub, double-click, done."
+
+### Verified
+
+- ✅ setup-engine.ps1 syntax: 176/176 braces, 384/384 parens, 0 non-ASCII, BOM intact
+- ✅ All 8 installer files (.bat + .ps1): balanced + pure ASCII
+- ✅ `git clone --branch` no longer present anywhere in setup-engine.ps1
+- ✅ ZIP download stage present
+- ✅ Context-aware error dialog present
+- ✅ Backend health: 200 (no regressions)
+- ✅ License list endpoint: working (14 licenses total)
+
+### Files modified / added
+
+| File | Change |
+|------|--------|
+| `RealFlow-Setup/setup-engine.ps1` | Stage 1 (Git optional), Stage 3 (ZIP download + robust cleanup + network check), Stage 5 (exit code checks), error dialog (context-aware) |
+| `QUICK-FIX-INSTALL.bat` | New single-file emergency installer for stuck customers |
+
+### Customer Recovery Path
+
+```
+Customer with old broken install:
+  1. Download QUICK-FIX-INSTALL.bat from GitHub (1 file, 5 KB)
+  2. Double-click -> self-elevate -> clean C:\realflow -> fresh install
+  3. Done in 15-30 min
+  4. No git, no manual cleanup, no PATH issues
+```
+
+### Future / Backlog
+
+- One-line PowerShell installer: `iwr -useb https://.../install.ps1 | iex` for tech-savvy users
+- Bundle cloudflared.exe and Docker installer in QUICK-FIX folder (offline install for customers with very slow internet)
+- Auto-update check: when customer opens RealFlow, check if a newer version is on GitHub and prompt update

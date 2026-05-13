@@ -184,23 +184,31 @@ function Set-UI {
 function Invoke-Stage1-PrepareTools {
     Set-UI -Percent 5 -Status "Step 1 / 6 -- Checking required tools..." -Progress "" -Log "Stage 1: prepare tools"
 
-    # -- Git --
+    # -- Git is OPTIONAL --
+    # Stage 3 uses ZIP download from GitHub (no git needed). Git is only
+    # installed opportunistically so future updates can use 'git pull'.
+    # If Git install fails for any reason, we continue (ZIP fallback works).
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-        Set-UI -Percent 8 -Progress "Installing Git..."
-        $gitInstaller = Join-Path $BundleDir "Git-Installer.exe"
-        if (-not (Test-Path $gitInstaller) -or (Get-Item $gitInstaller).Length -lt 10MB) {
-            Set-UI -Progress "Downloading Git (~50 MB)..." -Log "  Downloading Git for Windows"
-            Invoke-WebRequest -UseBasicParsing `
-                -Uri "https://github.com/git-for-windows/git/releases/download/v2.46.0.windows.1/Git-2.46.0-64-bit.exe" `
-                -OutFile $gitInstaller
-        } else {
-            Set-UI -Log "  Using cached Git installer"
+        Set-UI -Percent 8 -Progress "Installing Git (optional)..."
+        try {
+            $gitInstaller = Join-Path $BundleDir "Git-Installer.exe"
+            if (-not (Test-Path $gitInstaller) -or (Get-Item $gitInstaller).Length -lt 10MB) {
+                Set-UI -Progress "Downloading Git (~50 MB)..." -Log "  Downloading Git for Windows"
+                Invoke-WebRequest -UseBasicParsing `
+                    -Uri "https://github.com/git-for-windows/git/releases/download/v2.46.0.windows.1/Git-2.46.0-64-bit.exe" `
+                    -OutFile $gitInstaller -TimeoutSec 600
+            } else {
+                Set-UI -Log "  Using cached Git installer"
+            }
+            Set-UI -Progress "Installing Git (silent)..."
+            Start-Process -FilePath $gitInstaller -ArgumentList "/VERYSILENT", "/NORESTART", "/NOCANCEL", "/SP-", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS" -Wait
+            $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+        } catch {
+            Set-UI -Log "  Git install skipped: $($_.Exception.Message) (continuing -- ZIP download will be used)"
         }
-        Set-UI -Progress "Installing Git (silent)..."
-        Start-Process -FilePath $gitInstaller -ArgumentList "/VERYSILENT", "/NORESTART", "/NOCANCEL", "/SP-", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS" -Wait
-        $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
     }
-    Set-UI -Log "  Git: OK ($((git --version) 2>$null))"
+    $gitVer = (& git --version 2>$null)
+    if ($gitVer) { Set-UI -Log "  Git: OK ($gitVer)" } else { Set-UI -Log "  Git: not installed (OK -- ZIP download will be used)" }
 
     # -- Docker Desktop --
     Set-UI -Percent 15 -Progress "Checking Docker Desktop..."
@@ -351,22 +359,86 @@ sparseVhd=true
 }
 
 function Invoke-Stage3-FetchCode {
-    Set-UI -Percent 40 -Status "Step 3 / 6 -- Downloading RealFlow code..." -Progress "git clone $RepoUrl"
+    # ============================================================
+    # Bulletproof source fetch: ZIP download from GitHub (no git
+    # dependency, no PATH issues, no clone-into-non-empty-folder).
+    # ============================================================
+    Set-UI -Percent 35 -Status "Step 3 / 6 -- Checking internet..." -Progress "ping github.com"
 
-    if (Test-Path (Join-Path $InstallPath ".git")) {
-        Set-UI -Log "  Existing install found -- pulling latest"
-        Push-Location $InstallPath
-        git fetch origin 2>$null
-        git checkout $Branch 2>$null
-        git pull --ff-only origin $Branch 2>$null
-        Pop-Location
-    } else {
-        if (Test-Path $InstallPath) {
-            Remove-Item -Recurse -Force $InstallPath
-        }
-        git clone --branch $Branch $RepoUrl $InstallPath 2>&1 | Out-Null
-        Set-UI -Log "  Cloned to $InstallPath"
+    # 1. Network pre-check
+    try {
+        $null = Invoke-WebRequest -Uri "https://github.com" -UseBasicParsing -TimeoutSec 12 -ErrorAction Stop
+        Set-UI -Log "  Network OK -- GitHub reachable"
+    } catch {
+        throw "Cannot reach GitHub.`r`n`r`nCheck your internet connection.`r`nIf on office WiFi try mobile hotspot or VPN.`r`n`r`nDetail: $($_.Exception.Message)"
     }
+
+    Set-UI -Percent 40 -Status "Step 3 / 6 -- Cleaning up any old install..." -Progress "Remove old C:\realflow"
+
+    # 2. ROBUST cleanup of any prior install (handles locked files, partial installs)
+    if (Test-Path $InstallPath) {
+        # First, stop any docker containers using this path so files unlock
+        if (Test-Path (Join-Path $InstallPath "docker-compose.yml")) {
+            try {
+                Push-Location $InstallPath
+                & docker compose down 2>&1 | Out-Null
+                Pop-Location
+            } catch {}
+        }
+        # Take ownership + grant full perms (admin already running)
+        try {
+            & takeown.exe /F $InstallPath /R /D Y 2>&1 | Out-Null
+            & icacls.exe $InstallPath /grant "Administrators:F" /T /C /Q 2>&1 | Out-Null
+        } catch {}
+        # Try delete twice (some processes release locks slowly)
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $InstallPath
+        if (Test-Path $InstallPath) {
+            Start-Sleep -Seconds 3
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $InstallPath
+        }
+        if (Test-Path $InstallPath) {
+            throw "Could not delete $InstallPath.`r`n`r`nFIX:`r`n  1. Close VS Code, file explorer, and any program with files open in C:\realflow`r`n  2. Open Task Manager -- end any 'docker' or 'node' processes`r`n  3. Restart your PC`r`n  4. Run this installer again"
+        }
+        Set-UI -Log "  Old install cleaned up successfully"
+    }
+
+    Set-UI -Percent 45 -Status "Step 3 / 6 -- Downloading RealFlow from GitHub..." -Progress "Downloading ZIP (~5 MB)"
+
+    # 3. Download ZIP (no git needed)
+    $zipUrl     = $RepoUrl -replace "\.git$","" -replace "https://github.com","https://github.com"
+    $zipUrl     = "$zipUrl/archive/refs/heads/$Branch.zip"
+    $tempZip    = Join-Path $env:TEMP "realflow-source.zip"
+    $tempExtract = Join-Path $env:TEMP "realflow-extract"
+
+    if (Test-Path $tempZip)     { Remove-Item -Force $tempZip }
+    if (Test-Path $tempExtract) { Remove-Item -Recurse -Force $tempExtract }
+
+    try {
+        Invoke-WebRequest -Uri $zipUrl -OutFile $tempZip -UseBasicParsing -TimeoutSec 600
+        $sizeMB = [math]::Round((Get-Item $tempZip).Length / 1MB, 1)
+        Set-UI -Log "  Downloaded $sizeMB MB from $zipUrl"
+    } catch {
+        throw "Could not download from GitHub.`r`n`r`nURL: $zipUrl`r`nDetail: $($_.Exception.Message)`r`n`r`nFIX:`r`n  1. Check your internet`r`n  2. Manually open the URL in a browser to test`r`n  3. If your ISP blocks GitHub, use a VPN or mobile hotspot`r`n  4. Re-run this installer"
+    }
+
+    Set-UI -Percent 47 -Status "Step 3 / 6 -- Extracting source code..." -Progress "Unzipping"
+
+    # 4. Extract
+    try {
+        Expand-Archive -Path $tempZip -DestinationPath $tempExtract -Force
+    } catch {
+        throw "Could not extract the downloaded ZIP.`r`n`r`nFIX:`r`n  - Make sure you have at least 1 GB free disk space`r`n  - Run installer as Administrator (right-click -> Run as administrator)"
+    }
+
+    # 5. Move extracted folder to C:\realflow
+    $extractedFolder = Get-ChildItem -Path $tempExtract -Directory | Select-Object -First 1
+    if (-not $extractedFolder) {
+        throw "ZIP extracted but no source folder found. Try re-running installer."
+    }
+    Move-Item -Path $extractedFolder.FullName -Destination $InstallPath -Force
+    Remove-Item -Recurse -Force $tempZip, $tempExtract -ErrorAction SilentlyContinue
+
+    Set-UI -Log "  Source code extracted to $InstallPath"
 }
 
 function Invoke-Stage4-GenerateEnv {
@@ -437,9 +509,17 @@ function Invoke-Stage5-BuildAndStart {
 
     Set-UI -Log "  docker compose $($composeArgs -join ' ') build"
     & docker compose @composeArgs build 2>&1 | Tee-Object -FilePath $LogFile -Append | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Pop-Location
+        throw "Docker image build failed (exit code $LASTEXITCODE). See full log: $LogFile`r`n`r`nCommon causes:`r`n  - Docker Desktop not fully started (open it, wait 1-2 min)`r`n  - Less than 5 GB free disk space`r`n  - Slow internet caused image download to time out (re-run installer)"
+    }
 
     Set-UI -Percent 80 -Progress "Starting containers..." -Log "  docker compose up -d"
     & docker compose @composeArgs up -d 2>&1 | Tee-Object -FilePath $LogFile -Append | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Pop-Location
+        throw "Docker containers failed to start (exit code $LASTEXITCODE). See log: $LogFile`r`n`r`nTry: open Command Prompt -> cd C:\realflow -> docker compose up -d -> read the error"
+    }
 
     Pop-Location
 }
@@ -530,8 +610,23 @@ function Start-Install {
     catch {
         $err = $_.Exception.Message
         Set-UI -Status "X Install failed." -Progress "" -Log "ERROR: $err"
+
+        # Pick a context-aware fix suggestion based on the error message
+        $fix = ""
+        if ($err -match "Cannot reach GitHub|unable to access|github.com|getaddrinfo|timed out|TimeoutSec") {
+            $fix = "NETWORK ISSUE:`r`n  1. Check WiFi / Ethernet`r`n  2. Open https://github.com in a browser to verify`r`n  3. If your ISP blocks it, try mobile hotspot or VPN`r`n  4. Re-run this installer"
+        } elseif ($err -match "Could not delete|access.*denied|in use by another process|Permission denied") {
+            $fix = "FILE LOCK ISSUE:`r`n  1. Close VS Code, file explorer, terminals open on C:\realflow`r`n  2. Open Task Manager -- end any 'docker'/'node' processes`r`n  3. Restart your PC`r`n  4. Run this installer AS ADMINISTRATOR (right-click -> Run as administrator)"
+        } elseif ($err -match "Docker|docker daemon|docker engine|dockerd|wsl") {
+            $fix = "DOCKER ISSUE:`r`n  1. Open Start Menu -> Docker Desktop -> wait for whale icon to stop animating (1-2 min)`r`n  2. If still failing, restart your PC`r`n  3. Make sure Windows 10 (Build 19041+) or Windows 11`r`n  4. Re-run this installer"
+        } elseif ($err -match "disk space|out of space|enough space") {
+            $fix = "DISK SPACE ISSUE:`r`n  1. Free up at least 10 GB on C: drive`r`n  2. Empty Recycle Bin`r`n  3. Run Disk Cleanup (Win+R -> cleanmgr)`r`n  4. Re-run this installer"
+        } else {
+            $fix = "GENERIC FIX:`r`n  1. Open the log file: $LogFile`r`n  2. Scroll to the END for the real error`r`n  3. WhatsApp / email the last 30 lines of the log to support`r`n  4. Or just try: restart PC -> open Docker Desktop -> re-run installer"
+        }
+
         [System.Windows.Forms.MessageBox]::Show(
-            "Installation failed:`r`n`r`n$err`r`n`r`nFull log: $LogFile`r`n`r`nMost common fix: open Docker Desktop manually, wait for it to be ready, then re-run this installer.",
+            "Installation failed:`r`n`r`n$err`r`n`r`n--------------------`r`n$fix`r`n--------------------`r`n`r`nFull log: $LogFile",
             "RealFlow Setup -- Error",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error
