@@ -146,3 +146,84 @@ Result: user literally only sees:
 3. Click blue INSTALL
 4. Wait → click green OPEN REALFLOW
 5. Browser opens
+
+---
+
+## Update — Paid SaaS / License + Stripe (May 2026)
+
+### New backend module: `/app/backend/license_module.py`
+Central licensing + Stripe subscription engine. All endpoints registered on the existing FastAPI app.
+
+**Public endpoints** (no auth — called by installer + locally-running app):
+- `GET /api/license/config` — live pricing/trial/rules
+- `POST /api/license/start-trial` — `{email, machine_id?}` → license_key
+- `POST /api/license/activate` — `{license_key, machine_id, machine_label?}` → binds 1 PC
+- `POST /api/license/validate` — `{license_key, machine_id}` → status (heartbeat)
+- `POST /api/license/checkout` — `{license_key, origin_url}` → Stripe URL
+- `GET /api/license/status/{session_id}` — poll Stripe (with idempotent credit)
+- `POST /api/webhook/stripe` — Stripe async confirmation (authoritative credit path)
+
+**Admin endpoints** (existing admin JWT):
+- `GET/PUT /api/admin/license/config` — edit pricing/trial/rules/master-switch GLOBALLY
+- `GET /api/admin/license/list` — paginated, searchable
+- `POST /api/admin/license/revoke/{key}` — blocks customer's PC instantly
+- `POST /api/admin/license/extend/{key}?days=` — manual extension
+- `POST /api/admin/license/issue?email=&days=` — comp / vendor license
+- `GET /api/admin/license/transactions` — Stripe txn log
+
+### MongoDB collections (in `main_db`):
+- `license_config` — single doc id="global"
+- `licenses` — license_key, email, status, machine_id, stripe_*, expires
+- `payment_transactions` — Stripe checkout txn log (playbook §5 mandated)
+
+### Frontend
+- New page `/admin/licenses` (LicenseAdminPage.js) with two tabs:
+  - **Pricing & Rules** — product name, monthly price, currency, trial days, max PCs, master switch
+  - **Customers / Licenses** — searchable table with extend/revoke + manual issue
+- Added "Licenses & Pricing" button to AdminDashboard header
+
+### Desktop installer (PowerShell wizard)
+`RealFlow-Setup/setup-engine.ps1` now has a **License Activation modal dialog** before the install starts. UI:
+- 3 paths: "I have a license key" / "Start free trial" / "Buy license (calls Stripe)"
+- On success → writes `.license` file next to installer, INSTALL stage continues
+- On reinstall → re-validates saved key against server; if expired/revoked → re-shows the modal
+- Machine fingerprint = Win32_ComputerSystemProduct.UUID (stable per PC)
+- Activated key written into `C:\realflow\.env` as `LICENSE_KEY=`
+
+### Locally-running app (heartbeat)
+`server.py` adds `_license_heartbeat_task()` background task — every 6h POSTs to `LICENSE_SERVER_URL/api/license/validate` with `LICENSE_KEY` + machine_id. Logs status. (No enforcement yet — runs in observe mode; flip to hard-block in a follow-up by checking status before serving requests.)
+
+### Stripe integration
+- Uses `emergentintegrations.payments.stripe.checkout.StripeCheckout` per playbook
+- API key: `sk_test_emergent` (in pod env)
+- `GET /api/license/status` uses direct `stripe` SDK with `api_base` redirected to `https://integrations.emergentagent.com/stripe` (works around Pydantic v2 vs StripeObject.metadata incompatibility found by testing agent)
+- Amount always read from BACKEND `license_config.monthly_price` — never from frontend (playbook §1 security)
+
+### Tests
+**26/26 pytest cases PASS** (`/app/backend/tests/test_license_module.py`):
+- Trial reuse, 1-PC enforcement (409), validate-wrong-machine,
+  Stripe checkout + status, all admin CRUD, master switch, auth gates,
+  no _id leak.
+
+### Bugs fixed by testing agent during iter 2:
+- Timezone-naive datetime comparison (added `_as_aware()` helper)
+
+### Bugs fixed by main agent after iter 2:
+- `/api/license/status` 500 — replaced `emergentintegrations.get_checkout_status()` with direct `stripe.checkout.Session.retrieve()` + proxy api_base
+- Stripe SDK `Session.get()` not supported → switched to `getattr()`
+
+### Files added/changed:
+- `/app/backend/license_module.py` (new, ~470 lines)
+- `/app/backend/server.py` (+license wiring, +heartbeat task)
+- `/app/backend/.env` (+STRIPE_API_KEY, +LICENSE_SERVER_URL)
+- `/app/frontend/src/pages/LicenseAdminPage.js` (new)
+- `/app/frontend/src/App.js` (+route /admin/licenses)
+- `/app/frontend/src/pages/AdminDashboard.js` (+Licenses button)
+- `/app/RealFlow-Setup/setup-engine.ps1` (+activation modal, +machine ID, +heartbeat key into .env)
+
+### Open items / future
+- Hard-block locally-running app when license expired (currently observe-only)
+- Email notifications via Resend on activation/payment (`_maybe_notify` is a no-op until `send_email` is wired)
+- When user moves off Emergent preview to a permanent license server (DigitalOcean / Vercel), update:
+  - `LICENSE_SERVER_URL` in installer (setup-engine.ps1 line 22)
+  - `LICENSE_SERVER_URL` in customer .env (installer writes this automatically)

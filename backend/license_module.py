@@ -409,20 +409,33 @@ async def checkout(body: CheckoutRequest, http_request: Request):
 @license_router.get("/license/status/{session_id}")
 async def license_status(session_id: str, http_request: Request):
     """Poll endpoint (frontend or installer) — Stripe playbook §7-9."""
-    host_url = str(http_request.base_url).rstrip("/")
-    webhook_url = f"{host_url}/api/webhook/stripe"
-    sc = StripeCheckout(api_key=os.environ["STRIPE_API_KEY"], webhook_url=webhook_url)
-    s = await sc.get_checkout_status(session_id)
-
     txn = await _db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
     if not txn:
         raise HTTPException(404, "Unknown session.")
 
+    # Direct Stripe SDK call to side-step the emergentintegrations Pydantic-v2
+    # vs StripeObject.metadata incompatibility documented in iteration_2 RCA.
+    import stripe
+    stripe.api_key = os.environ["STRIPE_API_KEY"]
+    # Mirror the same proxy redirect the emergentintegrations SDK uses for
+    # the sk_test_emergent key — direct calls to api.stripe.com would 401.
+    if "emergent" in stripe.api_key:
+        stripe.api_base = "https://integrations.emergentagent.com/stripe"
+    try:
+        s = stripe.checkout.Session.retrieve(session_id)
+    except stripe.error.InvalidRequestError as e:
+        raise HTTPException(404, f"Unknown Stripe session: {e.user_message or str(e)}")
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Stripe status fetch failed: {e}")
+        raise HTTPException(502, "Could not reach Stripe.")
+
+    status_ = (getattr(s, "status", None) or "").lower()
+    payment_status_ = (getattr(s, "payment_status", None) or "").lower()
+
     # Idempotency — don't re-credit a license on every poll
     already_paid = txn.get("payment_status") == "paid"
-    if s.payment_status == "paid" and not already_paid:
+    if payment_status_ == "paid" and not already_paid:
         license_key = txn["license_key"]
-        # Activate the license for 31 days, mark as active
         await _db.licenses.update_one(
             {"license_key": license_key},
             {"$set": {
@@ -433,23 +446,23 @@ async def license_status(session_id: str, http_request: Request):
         )
         await _db.payment_transactions.update_one(
             {"session_id": session_id},
-            {"$set": {"payment_status": "paid", "status": s.status, "updated_at": _now()}},
+            {"$set": {"payment_status": "paid", "status": status_, "updated_at": _now()}},
         )
         await _maybe_notify(
             subject=f"[RealFlow] Subscription PAID: {txn['email']} (${txn['amount']:.2f})",
             body=f"License: {license_key}\nAmount: {txn['amount']:.2f} {txn['currency']}\nSession: {session_id}",
         )
-    elif s.status == "expired" and not already_paid:
+    elif status_ == "expired" and not already_paid:
         await _db.payment_transactions.update_one(
             {"session_id": session_id},
-            {"$set": {"payment_status": "expired", "status": s.status, "updated_at": _now()}},
+            {"$set": {"payment_status": "expired", "status": status_, "updated_at": _now()}},
         )
 
     return {
-        "status": s.status,
-        "payment_status": s.payment_status,
-        "amount_total": s.amount_total,
-        "currency": s.currency,
+        "status": status_,
+        "payment_status": payment_status_,
+        "amount_total": getattr(s, "amount_total", None),
+        "currency": getattr(s, "currency", None),
     }
 
 
