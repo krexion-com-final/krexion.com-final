@@ -612,3 +612,55 @@ When updating code:
 - License server hosting on Render (replaces removed Emergent URL) — customer can later deploy their own license backend
 - Auto-start on Windows boot for GO-ONLINE.bat (so customer doesn't need to manually start tunnel after reboot)
 - Email/Telegram bot integration so customer gets notification with URL when their tunnel comes online
+
+---
+
+## Update — ADMIN-GO-ONLINE.bat (Separate file for admin use) (Jan 2026)
+
+### Architecture clarification (user confirmed)
+- **Customer's PC**: Runs RealFlow locally 24/7. Fully self-contained. Has license heartbeat that runs in OBSERVE-ONLY mode (no hard-block if admin server is unreachable).
+- **Admin's PC (business owner)**: Runs RealFlow as admin/license server. Only needs to be ON when admin wants to manage things. When OFF, customers continue working unaffected.
+- License module already in observe mode -> customer impact when admin offline = ZERO.
+
+### Files Added
+
+| File | Purpose |
+|------|---------|
+| `ADMIN-GO-ONLINE.bat` | Entry-point .bat for admin-only mobile access |
+| `ADMIN-GO-ONLINE.ps1` | Logic: reads admin creds from .env, starts cloudflared tunnel, opens deep-linked /admin-login URL with credentials shown |
+
+### Differences from `GO-ONLINE.bat` (customer version)
+
+| Feature | GO-ONLINE.bat (customer) | ADMIN-GO-ONLINE.bat (admin) |
+|---------|--------------------------|----------------------------|
+| Audience | End customer | Business owner only |
+| URL | `https://xxx.trycloudflare.com` | `https://xxx.trycloudflare.com/admin-login` |
+| HTML page | Blue/teal "live online" | Purple/magenta "ADMIN PANEL" |
+| Shows credentials | No | Yes -- reads ADMIN_EMAIL + ADMIN_PASSWORD from .env, displays in HTML with one-click copy buttons |
+| Console message | "App online" | "Admin online -- customers UNAFFECTED" |
+| Branding | Generic RealFlow | Admin control panel feel |
+
+### How Get-EnvValue works (PS1)
+- Reads .env from script dir / C:\realflow\.env / backend\.env (multiple fallback paths)
+- Extracts ADMIN_EMAIL + ADMIN_PASSWORD
+- Embeds in HTML page so admin can copy with one click on mobile
+- If password not found, instructs admin to check .env manually
+
+### Verified
+- All 4 files (`ADMIN-GO-ONLINE.bat`, `.ps1`, `GO-ONLINE.bat`, `.ps1`): balanced braces (83/83), parens (82/82), pure ASCII, CRLF + BOM correct
+- Backend running, no regressions
+
+### Customer architecture statement (now explicitly documented)
+- Each customer installation is INDEPENDENT
+- License heartbeat is observe-only (no enforcement when server offline)
+- Admin PC can be off 90% of the time -- customers unaffected
+- This is production-grade SaaS architecture (mirror of how Auth0/Stripe sandbox modes behave)
+
+### Files distribution plan
+
+| File | Goes to | Why |
+|------|---------|-----|
+| `RealFlow-EASY-INSTALL.bat` + `.ps1` | Customer | One-click install |
+| `GO-ONLINE.bat` + `.ps1` | Customer (optional) | Mobile access to their own RealFlow |
+| `ADMIN-GO-ONLINE.bat` + `.ps1` | DO NOT SHARE -- admin only | Mobile admin access to YOUR admin server |
+| `render.yaml` + `ADMIN-URL-SETUP.md` | Admin only | If you ever want permanent cloud admin URL |
