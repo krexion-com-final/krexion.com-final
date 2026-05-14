@@ -1,0 +1,43 @@
+{
+  "summary": "Iteration 6 fresh-clone backend verification for dynabook/RealFlow. Wrote a new focused smoke suite (test_iteration6_clone_smoke.py) covering all endpoints called out in the review request: diagnostics/health, diagnostics/hardware-profile, admin/login (success+failure), license/config (public), admin/license/list (auth-gated + JWT), auth/register, auth/login (success + bad pw + duplicate), and /api/links (auth-gated + JWT after admin approval with features.links=true). 12/12 new tests pass. Also re-ran the iter-5 regression suite (test_iteration5_license_delete_cleanup.py) against the new clone — 21/21 pass. Total 33/33. Backend is healthy end-to-end on the public preview URL https://bookdyna-sync.preview.emergentagent.com. MongoDB reachable, admin JWT issuance works, license module behaves correctly (auth required where expected), user signup -> admin-approve -> login -> protected resource flow works.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/diagnostics/hardware-profile", "issue": "Response uses 'recommended_tier' instead of canonical 'tier'/'hardware_tier'. Carried over from iter-4/5 follow-ups. Not a functional bug; just an API-shape inconsistency that easily trips smoke tests."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration6_clone_smoke.py",
+    "/app/test_reports/pytest/iteration6_results.xml",
+    "/app/test_reports/pytest/iteration5_regression.xml"
+  ],
+  "action_items": [
+    "(P3, carried) server.py is still ~13.6k lines — continue the license_module.py extraction pattern for auth, links, cpi, rut modules.",
+    "(P3, carried) Consider exposing canonical 'tier' field at the top level of /api/diagnostics/hardware-profile (alongside 'recommended_tier') so external smoke tests don't drift.",
+    "(P3, carried) Consider adding POST /api/license/heartbeat as an alias of /api/license/validate so the public docs term matches the endpoint name."
+  ],
+  "critical_code_review_comments": [
+    "All previously-flagged P0 safety guardrails on license bulk-delete and cleanup remain intact in this fresh clone (empty bulk-delete -> 400; active licenses untouched by cleanup; double-delete -> 404 — all verified by re-running iter-5).",
+    "Admin login correctly rejects wrong password (returns 401/403, not 500) — no information leak.",
+    "Auth/register correctly rejects duplicate emails (4xx, not 500).",
+    "/api/links and /api/admin/license/list both correctly require JWT (401/403 without Authorization header).",
+    "Health endpoint reports playwright rev 1148 warn + gsheet_sa warn as documented in the request — these are non-blocking and main agent already acknowledged."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration6_clone_smoke.py"
+  ],
+  "success_rate": {
+    "backend": "100% (12/12 new + 21/21 regression = 33/33)",
+    "frontend": "not tested (review_request scope = backend only)"
+  },
+  "test_credentials": "Admin: admin@realflow.local / admin123. New TEST_clone_<uuid8>@example.com users created during register/login test; user is approved via PUT /api/admin/users/{id} with status=active + features.links=true.",
+  "seed_data_creation": "Each run creates one TEST_clone_<uuid8>@example.com user in db.users (left in place; same convention as iter-5).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Re-run with: REACT_APP_BACKEND_URL=https://bookdyna-sync.preview.emergentagent.com pytest /app/backend/tests/test_iteration6_clone_smoke.py /app/backend/tests/test_iteration5_license_delete_cleanup.py -v. Gotchas (still valid): (1) admin_login response token key is 'access_token' (also accept 'token'). (2) hardware-profile uses 'recommended_tier' under root + 'detected.cpu_cores'/'detected.total_ram_gb'. (3) health endpoint mongo status path is checks.mongodb.status. (4) /api/links requires features.links=true on user, set via PUT /api/admin/users/{id}. (5) /api/admin/license/issue uses query params email+days, not body."
+}
