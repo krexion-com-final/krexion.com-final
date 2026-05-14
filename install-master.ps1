@@ -3,6 +3,10 @@
 # NO here-strings, NO parens-in-strings, Windows-safe encoding
 # ==============================================================
 
+param(
+    [switch]$CustomerMode  # If true: hide admin info from customer
+)
+
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 
@@ -370,7 +374,8 @@ $envLines = @(
     "SMTP_PASSWORD=",
     "GOOGLE_SHEETS_SA_PATH=",
     "LICENSE_SERVER_URL=",
-    "LICENSE_KEY="
+    "LICENSE_KEY=",
+    ("IS_CUSTOMER_INSTALL=" + $CustomerMode.ToString().ToLower())
 )
 $envLines | Set-Content -Path $envPath -Encoding ASCII -Force
 Show-Ok ".env generated [secure random passwords]"
@@ -439,47 +444,101 @@ Write-Host ("=" * 70) -ForegroundColor Green
 Write-Host "  REALFLOW READY HAI!" -ForegroundColor Green
 Write-Host ("=" * 70) -ForegroundColor Green
 Write-Host ""
-Write-Host "  ACCESS URLS:" -ForegroundColor Cyan
-Write-Host "    App:         http://localhost:3000" -ForegroundColor White
-Write-Host "    Admin:       http://localhost:3000/admin-login" -ForegroundColor White
-Write-Host "    API Docs:    http://localhost:8001/docs" -ForegroundColor White
-Write-Host ""
-Write-Host "  ADMIN LOGIN:" -ForegroundColor Yellow
-Write-Host "    Email:       admin@realflow.local" -ForegroundColor White
-Write-Host ("    Password:    " + $adminPw) -ForegroundColor White
-Write-Host ""
 
-# Save creds - using array
-$credsFile = "$env:USERPROFILE\Desktop\RealFlow-Credentials.txt"
-$credsLines = @(
-    "=================================================",
-    "  RealFlow - Aap Ke Admin Credentials",
-    "=================================================",
-    "",
-    "  Browser kholein:",
-    "    http://localhost:3000",
-    "",
-    "  Admin Login:",
-    "    URL:       http://localhost:3000/admin-login",
-    "    Email:     admin@realflow.local",
-    ("    Password:  " + $adminPw),
-    "",
-    ("  Installed:   " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')),
-    ("  Folder:      " + $INSTALL_DIR),
-    "",
-    "=================================================",
-    "  IMPORTANT: Yeh file delete na karein!",
-    "  Apne phone mein bhi screenshot save kar lein.",
-    "================================================="
-)
+if ($CustomerMode) {
+    # Customer mode - DO NOT show admin password
+    Write-Host "  YEH STEPS FOLLOW KAREIN:" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  1. Browser khud khulega" -ForegroundColor White
+    Write-Host "  2. NEW ACCOUNT register karein:" -ForegroundColor White
+    Write-Host "       http://localhost:3000/register" -ForegroundColor Yellow
+    Write-Host "  3. Apna naam, email, password daalein" -ForegroundColor White
+    Write-Host "  4. Admin se license key lein WhatsApp pe" -ForegroundColor White
+    Write-Host "  5. Setup wizard mein license activate karein" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  ACCESS URL:" -ForegroundColor Cyan
+    Write-Host "    Main App:        http://localhost:3000" -ForegroundColor White
+    Write-Host "    Register:        http://localhost:3000/register" -ForegroundColor White
+    Write-Host "    Login:           http://localhost:3000/login" -ForegroundColor White
+    Write-Host ""
+} else {
+    # Admin mode - show admin credentials
+    Write-Host "  ACCESS URLS:" -ForegroundColor Cyan
+    Write-Host "    App:         http://localhost:3000" -ForegroundColor White
+    Write-Host "    Admin:       http://localhost:3000/admin-login" -ForegroundColor White
+    Write-Host "    API Docs:    http://localhost:8001/docs" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  ADMIN LOGIN:" -ForegroundColor Yellow
+    Write-Host "    Email:       admin@realflow.local" -ForegroundColor White
+    Write-Host ("    Password:    " + $adminPw) -ForegroundColor White
+    Write-Host ""
+}
+
+# Save creds based on mode
+$credsFile = "$env:USERPROFILE\Desktop\RealFlow-Info.txt"
+if ($CustomerMode) {
+    # Customer credentials file - NO admin info
+    $credsLines = @(
+        "=================================================",
+        "  RealFlow - Aap Ka Setup",
+        "=================================================",
+        "",
+        "  Browser kholein:",
+        "    http://localhost:3000",
+        "",
+        "  Pehle naya account banaye:",
+        "    http://localhost:3000/register",
+        "",
+        "  Phir login karein:",
+        "    http://localhost:3000/login",
+        "",
+        "  License key chahiye?",
+        "    Admin se WhatsApp pe license key lein.",
+        "    Setup wizard mein 'I have a license key' click karein.",
+        "",
+        ("  Installed:   " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')),
+        ("  Folder:      " + $INSTALL_DIR),
+        "",
+        "=================================================",
+        "  ZAROORI: Yeh file delete na karein!",
+        "================================================="
+    )
+} else {
+    # Admin credentials file
+    $credsLines = @(
+        "=================================================",
+        "  RealFlow - Aap Ke Admin Credentials",
+        "=================================================",
+        "",
+        "  Browser kholein:",
+        "    http://localhost:3000",
+        "",
+        "  Admin Login:",
+        "    URL:       http://localhost:3000/admin-login",
+        "    Email:     admin@realflow.local",
+        ("    Password:  " + $adminPw),
+        "",
+        ("  Installed:   " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')),
+        ("  Folder:      " + $INSTALL_DIR),
+        "",
+        "=================================================",
+        "  IMPORTANT: Yeh file delete na karein!",
+        "  Apne phone mein bhi screenshot save kar lein.",
+        "================================================="
+    )
+}
 $credsLines | Set-Content -Path $credsFile -Encoding UTF8 -Force
-Show-Ok ("Credentials saved: " + $credsFile)
+Show-Ok ("Info saved: " + $credsFile)
 
 # Desktop shortcut
 try {
     $wsh = New-Object -ComObject WScript.Shell
     $sc = $wsh.CreateShortcut("$env:USERPROFILE\Desktop\RealFlow.url")
-    $sc.TargetPath = "http://localhost:3000"
+    if ($CustomerMode) {
+        $sc.TargetPath = "http://localhost:3000/register"
+    } else {
+        $sc.TargetPath = "http://localhost:3000"
+    }
     $sc.Save()
     Show-Ok "Desktop shortcut: RealFlow.url"
 } catch { }
@@ -487,7 +546,11 @@ try {
 # Open browser
 Show-Info "Browser open kar raha hun"
 Start-Sleep -Seconds 2
-Start-Process "http://localhost:3000"
+if ($CustomerMode) {
+    Start-Process "http://localhost:3000/register"
+} else {
+    Start-Process "http://localhost:3000"
+}
 
 Write-Host ""
 Write-Host "  Mubarak ho! RealFlow chal raha hai." -ForegroundColor Green
