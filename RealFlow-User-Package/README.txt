@@ -102,17 +102,27 @@ DAILY USE KE FILES (C:\realflow folder mein)
 PROBLEM AA RAHA HAI?
 ======================
 
-  Installation fail ho gaya?
-    - "TROUBLESHOOTING.txt" file padhein
+  Pehle "FIX-PROBLEMS.bat" double-click karein!
+  Yeh sab kuch khud diagnose aur fix karta hai.
+  
+  Installation kuch der ke baad stuck dikhe?
+    - INTEZAR KAREIN! Heartbeat message dikhe to kaam chal raha hai
+    - "wsl --update" 5-15 min le sakta hai (silent download)
+    - "Docker download" 3-10 min le sakta hai
+    - "Containers build" 5-15 min le sakta hai
+    - Yeh sab NORMAL hai - 30 min tak wait karein
+  
+  Truly stuck ho gaya?
+    - "FIX-PROBLEMS.bat" double-click karein
+    - Wo khud sab fix karega
+  
+  Phir bhi issue?
     - Log files admin ko bhejen:
       C:\Users\YOUR-NAME\AppData\Local\Temp\realflow-install.log
       C:\Users\YOUR-NAME\AppData\Local\Temp\realflow-transcript.log
   
   Browser nahi khula?
     - Manually kholein: http://localhost:3000/register
-  
-  Phir bhi issue hai?
-    - Admin ko WhatsApp karein with screenshot
 
 
 

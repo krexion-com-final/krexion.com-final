@@ -190,19 +190,82 @@ if ($justRebooted) {
 # ============================================================
 Show-Step "STEP 3/7: WSL2 Kernel Update"
 
-Show-Info "Running 'wsl --update' [Docker stuck ka #1 fix]"
-$null = & wsl --update 2>&1
-if ($LASTEXITCODE -eq 0) {
-    Show-Ok "WSL kernel updated"
+Show-Info "WSL kernel update - yeh 1-10 min le sakta hai"
+Show-Info "Silent download hota hai - heartbeat dikha raha hun ki kaam chal raha hai"
+Write-Host ""
+
+# Run wsl --update in background with heartbeat
+$wslJob = Start-Job -ScriptBlock {
+    $result = & wsl --update 2>&1 | Out-String
+    return @{ Exit = $LASTEXITCODE; Out = $result }
+}
+
+$wslStartTime = Get-Date
+$wslDone = $false
+$wslSuccess = $false
+$maxWslWait = 600  # 10 min max
+$dots = ""
+
+while (-not $wslDone) {
+    $elapsed = ((Get-Date) - $wslStartTime).TotalSeconds
+    if ($wslJob.State -eq "Completed") {
+        $wslDone = $true
+        $r = Receive-Job $wslJob
+        if ($r.Exit -eq 0) { $wslSuccess = $true }
+        Remove-Job $wslJob -Force
+        break
+    }
+    if ($elapsed -gt $maxWslWait) {
+        Show-Warn "wsl --update 10 min se zyada le raha hai - cancel kar raha hun"
+        Stop-Job $wslJob -ErrorAction SilentlyContinue
+        Remove-Job $wslJob -Force -ErrorAction SilentlyContinue
+        $wslDone = $true
+        break
+    }
+    Start-Sleep -Seconds 10
+    $elapsedInt = [int]$elapsed
+    $dots = $dots + "."
+    if ($dots.Length -gt 5) { $dots = "." }
+    $heartbeat = "  [..]   wsl --update chal raha hai" + $dots + " (" + $elapsedInt + "s elapsed, max 600s)"
+    Write-Host $heartbeat -ForegroundColor Cyan
+}
+
+if ($wslSuccess) {
+    Show-Ok "WSL kernel updated successfully"
 } else {
-    Show-Warn "wsl --update failed, MSI fallback try kar raha hun..."
+    Show-Warn "wsl --update fail/timeout - MSI fallback try kar raha hun"
+    Show-Info "MSI download chal raha hai (50 MB) - 1-3 min lagta hai"
     try {
         $msi = "$env:TEMP\wsl_update.msi"
-        Invoke-WebRequest -Uri $WSL_KERNEL_URL -OutFile $msi -UseBasicParsing -TimeoutSec 180
-        Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait
-        Show-Ok "WSL kernel installed via MSI"
+        if (Test-Path $msi) { Remove-Item $msi -Force -ErrorAction SilentlyContinue }
+
+        # Download with retry (3 attempts)
+        $downloaded = $false
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+                Show-Info ("MSI download attempt " + $attempt + "/3")
+                Invoke-WebRequest -Uri $WSL_KERNEL_URL -OutFile $msi -UseBasicParsing -TimeoutSec 180
+                if (Test-Path $msi) {
+                    $size = (Get-Item $msi).Length
+                    if ($size -gt 1MB) { $downloaded = $true; break }
+                }
+            } catch {
+                Show-Warn ("Attempt " + $attempt + " fail: " + $_.Exception.Message)
+                Start-Sleep -Seconds 5
+            }
+        }
+
+        if ($downloaded) {
+            Show-Info "Installing WSL kernel via MSI"
+            Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait
+            Show-Ok "WSL kernel installed via MSI"
+        } else {
+            Show-Warn "MSI download fail after 3 attempts - continuing anyway"
+            Show-Warn "Docker shayad fir bhi kaam karega - aage check karenge"
+        }
     } catch {
-        Show-Warn "MSI fallback fail - continuing anyway"
+        Show-Warn ("MSI install error: " + $_.Exception.Message)
+        Show-Warn "Continuing - Docker pe test karenge"
     }
 }
 
@@ -235,17 +298,62 @@ Show-Step "STEP 4/7: Docker Desktop Setup"
 $dockerExe = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
 if (-not (Test-Path $dockerExe)) {
     Show-Info "Docker Desktop nahi mila. Download kar raha hun [600MB, 3-10 min]"
+    Show-Info "Internet speed pe depend karega - heartbeat dikhata rahunga"
     $dInst = "$env:TEMP\DockerDesktopInstaller.exe"
-    try {
-        Invoke-WebRequest -Uri $DOCKER_URL -OutFile $dInst -UseBasicParsing -TimeoutSec 1200
-        Show-Ok "Downloaded"
-    } catch {
-        Show-Err ("Docker download failed: " + $_)
+    if (Test-Path $dInst) { Remove-Item $dInst -Force -ErrorAction SilentlyContinue }
+
+    # Download with progress and retry
+    $dlSuccess = $false
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            Show-Info ("Download attempt " + $attempt + "/3")
+            $dlJob = Start-Job -ScriptBlock {
+                param($url, $out)
+                Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing -TimeoutSec 1800
+            } -ArgumentList $DOCKER_URL, $dInst
+
+            $dlStart = Get-Date
+            $dlDots = ""
+            while ($dlJob.State -eq "Running") {
+                Start-Sleep -Seconds 15
+                $dlElapsed = [int]((Get-Date) - $dlStart).TotalSeconds
+                $sizeMb = 0
+                if (Test-Path $dInst) { $sizeMb = [math]::Round((Get-Item $dInst).Length / 1MB, 0) }
+                $dlDots = $dlDots + "."
+                if ($dlDots.Length -gt 5) { $dlDots = "." }
+                $msg = "  [..]   Docker download" + $dlDots + " (" + $dlElapsed + "s, " + $sizeMb + " MB downloaded)"
+                Write-Host $msg -ForegroundColor Cyan
+                if ($dlElapsed -gt 1800) {
+                    Stop-Job $dlJob -ErrorAction SilentlyContinue
+                    break
+                }
+            }
+            Remove-Job $dlJob -Force -ErrorAction SilentlyContinue
+
+            if (Test-Path $dInst) {
+                $finalSize = (Get-Item $dInst).Length
+                if ($finalSize -gt 100MB) {
+                    $dlSuccess = $true
+                    Show-Ok ("Downloaded - " + [math]::Round($finalSize / 1MB, 0) + " MB")
+                    break
+                }
+            }
+        } catch {
+            Show-Warn ("Attempt " + $attempt + " fail: " + $_.Exception.Message)
+            Start-Sleep -Seconds 10
+        }
+    }
+
+    if (-not $dlSuccess) {
+        Show-Err "Docker download fail after 3 attempts"
         Show-Err "Manual install: https://www.docker.com/products/docker-desktop/"
+        Show-Err "Aap manual install karein, phir INSTALL.bat dobara chalayein"
         Stop-Transcript -ErrorAction SilentlyContinue
         exit 1
     }
+
     Show-Info "Installing Docker Desktop silently [3-5 min]"
+    Show-Info "Yeh silent install hai - kuch dikhega nahi, please wait"
     $p = Start-Process -FilePath $dInst -ArgumentList "install","--quiet","--accept-license" -Wait -PassThru
     $okCodes = @(0, 3010)
     if ($okCodes -notcontains $p.ExitCode) {
@@ -403,10 +511,41 @@ if (($ram -le 10) -and (Test-Path "docker-compose.lowram.yml")) {
     Show-Info "High-tier profile use kar raha hun"
 }
 
-Show-Info "Containers build kar raha hun [5-15 min first time]"
-& docker compose @composeArgs build 2>&1 | Tee-Object -FilePath $LOG_FILE -Append
-if ($LASTEXITCODE -ne 0) {
+Show-Info "Containers build kar raha hun - YEH 5-15 MIN LE SAKTA HAI"
+Show-Info "Background mein chal raha hai - heartbeat dikhata rahunga"
+
+$buildJob = Start-Job -ScriptBlock {
+    param($dir, $argz)
+    Set-Location $dir
+    $output = & docker compose @argz build 2>&1 | Out-String
+    return @{ Exit = $LASTEXITCODE; Out = $output }
+} -ArgumentList $INSTALL_DIR, $composeArgs
+
+$buildStart = Get-Date
+$buildDots = ""
+while ($buildJob.State -eq "Running") {
+    Start-Sleep -Seconds 20
+    $buildElapsed = [int]((Get-Date) - $buildStart).TotalSeconds
+    $buildDots = $buildDots + "."
+    if ($buildDots.Length -gt 5) { $buildDots = "." }
+    $bmsg = "  [..]   Build chal raha hai" + $buildDots + " (" + $buildElapsed + "s elapsed, please wait)"
+    Write-Host $bmsg -ForegroundColor Cyan
+    if ($buildElapsed -gt 1800) {
+        Show-Warn "Build 30 min se zyada le raha hai - kuch issue ho sakta hai"
+        break
+    }
+}
+
+$buildResult = Receive-Job $buildJob
+Remove-Job $buildJob -Force -ErrorAction SilentlyContinue
+$buildResult.Out | Add-Content -Path $LOG_FILE -ErrorAction SilentlyContinue
+
+if ($buildResult.Exit -ne 0) {
     Show-Err ("Build failed. Log: " + $LOG_FILE)
+    Show-Err "Common fixes:"
+    Show-Err "  1. PC restart karein"
+    Show-Err "  2. Antivirus 10 min disable karein"
+    Show-Err "  3. INSTALL.bat dobara chalayein"
     Pop-Location
     Stop-Transcript -ErrorAction SilentlyContinue
     exit 1
