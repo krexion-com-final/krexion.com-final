@@ -382,17 +382,24 @@ Show-Step "STEP 7/7: Building + Starting RealFlow"
 
 Push-Location $INSTALL_DIR
 
-$compose = "docker-compose.yml"
+# Pick compose files (base + optional override for RAM tier)
+$composeArgs = @("-f", "docker-compose.yml")
 if (($ram -le 10) -and (Test-Path "docker-compose.lowram.yml")) {
-    $compose = "docker-compose.lowram.yml"
+    $composeArgs += @("-f", "docker-compose.lowram.yml")
     Show-Info "Low-RAM profile use kar raha hun"
 } elseif (($ram -le 16) -and (Test-Path "docker-compose.mid.yml")) {
-    $compose = "docker-compose.mid.yml"
+    $composeArgs += @("-f", "docker-compose.mid.yml")
     Show-Info "Mid-tier profile use kar raha hun"
+} elseif (($ram -gt 32) -and (Test-Path "docker-compose.beast.yml")) {
+    $composeArgs += @("-f", "docker-compose.beast.yml")
+    Show-Info "Beast profile use kar raha hun"
+} elseif (($ram -gt 16) -and (Test-Path "docker-compose.high.yml")) {
+    $composeArgs += @("-f", "docker-compose.high.yml")
+    Show-Info "High-tier profile use kar raha hun"
 }
 
 Show-Info "Containers build kar raha hun [5-15 min first time]"
-& docker compose -f $compose build 2>&1 | Tee-Object -FilePath $LOG_FILE -Append
+& docker compose @composeArgs build 2>&1 | Tee-Object -FilePath $LOG_FILE -Append
 if ($LASTEXITCODE -ne 0) {
     Show-Err ("Build failed. Log: " + $LOG_FILE)
     Pop-Location
@@ -402,7 +409,7 @@ if ($LASTEXITCODE -ne 0) {
 Show-Ok "Build complete"
 
 Show-Info "Containers start kar raha hun"
-& docker compose -f $compose up -d 2>&1 | Tee-Object -FilePath $LOG_FILE -Append
+& docker compose @composeArgs up -d 2>&1 | Tee-Object -FilePath $LOG_FILE -Append
 if ($LASTEXITCODE -ne 0) {
     Show-Err ("Start failed. Log: " + $LOG_FILE)
     Pop-Location
