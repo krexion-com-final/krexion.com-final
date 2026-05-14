@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta property="og:title" content="RealFlow - One-Click Install">
+<meta property="og:description" content="Traffic tracking + CPI automation. Install in 20 minutes. Sirf 2 click.">
+<meta property="og:image" content="https://opengraph.githubassets.com/1/ronaldsexedwards40-glitch/dynabook">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<title>RealFlow - 1-Click Install</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-font-smoothing: antialiased; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #000;
+    color: #fff;
+    min-height: 100vh;
+    overflow-x: hidden;
+    position: relative;
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background:
+      radial-gradient(circle at 20% 30%, rgba(79,127,255,0.15), transparent 50%),
+      radial-gradient(circle at 80% 70%, rgba(139,92,246,0.12), transparent 50%);
+    pointer-events: none;
+    z-index: 0;
+  }
+  .container {
+    position: relative;
+    z-index: 1;
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 40px 24px;
+  }
+  .logo {
+    font-size: 14px;
+    letter-spacing: 8px;
+    color: #4F7FFF;
+    font-weight: 600;
+    text-transform: uppercase;
+    margin-bottom: 20px;
+    text-align: center;
+  }
+  h1 {
+    font-size: clamp(40px, 8vw, 64px);
+    font-weight: 900;
+    line-height: 1.05;
+    text-align: center;
+    margin-bottom: 16px;
+    background: linear-gradient(135deg, #fff 0%, #4F7FFF 60%, #8B5CF6 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .subtitle {
+    text-align: center;
+    color: #A0A0A0;
+    font-size: 18px;
+    margin-bottom: 48px;
+    line-height: 1.5;
+  }
+  .badge {
+    display: inline-block;
+    background: rgba(79,127,255,0.15);
+    color: #4F7FFF;
+    padding: 6px 14px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid rgba(79,127,255,0.3);
+    margin-bottom: 32px;
+  }
+  .center { text-align: center; }
+  .features {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 16px;
+    margin-bottom: 48px;
+  }
+  .feature {
+    background: rgba(20,20,30,0.5);
+    border: 1px solid rgba(79,127,255,0.2);
+    border-radius: 14px;
+    padding: 20px;
+    text-align: center;
+    backdrop-filter: blur(10px);
+  }
+  .feature-icon { font-size: 28px; margin-bottom: 10px; }
+  .feature-title { font-size: 13px; font-weight: 700; color: #fff; margin-bottom: 4px; }
+  .feature-desc { font-size: 11px; color: #A0A0A0; line-height: 1.4; }
+
+  .btn-primary {
+    display: block;
+    width: 100%;
+    background: linear-gradient(135deg, #4F7FFF, #3D66D9);
+    color: #fff;
+    padding: 22px 32px;
+    border-radius: 999px;
+    text-decoration: none;
+    font-weight: 700;
+    font-size: 18px;
+    text-align: center;
+    box-shadow: 0 20px 60px -10px rgba(79,127,255,0.5);
+    transition: transform 0.2s, box-shadow 0.2s;
+    margin-bottom: 16px;
+    border: none;
+    cursor: pointer;
+  }
+  .btn-primary:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 25px 70px -10px rgba(79,127,255,0.7);
+  }
+  .btn-primary:active { transform: translateY(0); }
+  .btn-secondary {
+    display: block;
+    width: 100%;
+    background: rgba(20,20,30,0.6);
+    color: #fff;
+    padding: 16px 28px;
+    border-radius: 999px;
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 15px;
+    text-align: center;
+    border: 1px solid rgba(255,255,255,0.1);
+    transition: background 0.2s;
+  }
+  .btn-secondary:hover { background: rgba(40,40,55,0.7); }
+
+  .steps {
+    background: rgba(10,10,20,0.6);
+    border: 1px solid rgba(79,127,255,0.2);
+    border-radius: 20px;
+    padding: 32px 24px;
+    margin: 48px 0 32px;
+    backdrop-filter: blur(12px);
+  }
+  .steps h2 {
+    font-size: 22px;
+    margin-bottom: 24px;
+    color: #fff;
+    text-align: center;
+  }
+  .step {
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+    margin-bottom: 18px;
+    padding-bottom: 18px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+  .step:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+  .step-num {
+    flex-shrink: 0;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #4F7FFF, #8B5CF6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 14px;
+  }
+  .step-content { flex: 1; }
+  .step-title { font-weight: 600; margin-bottom: 4px; }
+  .step-desc { color: #A0A0A0; font-size: 14px; line-height: 1.5; }
+
+  .credentials {
+    background: linear-gradient(135deg, rgba(79,127,255,0.1), rgba(139,92,246,0.1));
+    border: 1px solid rgba(79,127,255,0.3);
+    border-radius: 16px;
+    padding: 24px;
+    margin: 32px 0;
+  }
+  .credentials h3 {
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: #4F7FFF;
+    margin-bottom: 16px;
+  }
+  .cred-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 10px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+  .cred-item:last-child { border-bottom: none; }
+  .cred-key { color: #A0A0A0; font-size: 13px; }
+  .cred-val { color: #fff; font-family: ui-monospace, "SF Mono", monospace; font-size: 13px; }
+
+  .specs {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+    margin: 24px 0;
+  }
+  .spec {
+    background: rgba(20,20,30,0.5);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px;
+    padding: 14px;
+    font-size: 12px;
+  }
+  .spec strong { color: #4F7FFF; display: block; margin-bottom: 4px; font-size: 11px; text-transform: uppercase; }
+
+  footer {
+    text-align: center;
+    padding: 32px 0;
+    color: #555;
+    font-size: 13px;
+    border-top: 1px solid rgba(255,255,255,0.05);
+    margin-top: 48px;
+  }
+  footer a { color: #4F7FFF; text-decoration: none; }
+  .copy-btn {
+    background: rgba(79,127,255,0.2);
+    border: 1px solid rgba(79,127,255,0.4);
+    color: #fff;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    cursor: pointer;
+    margin-left: 8px;
+  }
+  .copy-btn:hover { background: rgba(79,127,255,0.3); }
+  @media (max-width: 480px) {
+    .container { padding: 24px 16px; }
+    h1 { font-size: 36px; }
+    .features { grid-template-columns: 1fr 1fr; }
+    .specs { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <div class="center">
+    <div class="badge">EST 2025 · v2.0 ULTIMATE</div>
+  </div>
+
+  <div class="logo">REALFLOW</div>
+  <h1>Install in 20 Minutes.<br>Bagair Kisi Issue Ke.</h1>
+  <p class="subtitle">
+    Traffic tracking + CPI automation platform.<br>
+    Sirf 2 click. Sab kuch automatic.
+  </p>
+
+  <!-- Primary CTA -->
+  <a href="https://github.com/ronaldsexedwards40-glitch/dynabook/archive/refs/heads/main.zip" 
+     class="btn-primary" 
+     data-testid="download-zip-btn"
+     download>
+    Download ZIP &amp; Install
+  </a>
+
+  <a href="https://github.com/ronaldsexedwards40-glitch/dynabook" 
+     class="btn-secondary"
+     data-testid="github-repo-btn"
+     target="_blank">
+    GitHub par dekhein
+  </a>
+
+  <!-- Features -->
+  <h2 style="text-align:center; font-size:14px; text-transform:uppercase; letter-spacing:3px; color:#A0A0A0; margin: 48px 0 24px;">
+    Sab Kuch Auto
+  </h2>
+  <div class="features">
+    <div class="feature">
+      <div class="feature-icon">🤖</div>
+      <div class="feature-title">WSL2 Auto-Setup</div>
+      <div class="feature-desc">Windows features khud enable</div>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">🐳</div>
+      <div class="feature-title">Docker Auto-Fix</div>
+      <div class="feature-desc">"Starting" stuck → 3-step recovery</div>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">🔄</div>
+      <div class="feature-title">Auto-Resume</div>
+      <div class="feature-desc">Reboot ke baad khud continue</div>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">🎯</div>
+      <div class="feature-title">Auto-Tuned</div>
+      <div class="feature-desc">Aap ke PC ke liye optimized</div>
+    </div>
+  </div>
+
+  <!-- Install Steps -->
+  <div class="steps">
+    <h2>Install Karne Ka Tareeqa</h2>
+
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-content">
+        <div class="step-title">ZIP Download Karein</div>
+        <div class="step-desc">Upar wala "Download ZIP" button click karein. ~10 MB file save hogi.</div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-content">
+        <div class="step-title">Extract Karein</div>
+        <div class="step-desc">ZIP file par right-click → "Extract All" → Desktop pe extract karein.</div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-content">
+        <div class="step-title">Installer Run Karein</div>
+        <div class="step-desc">Extracted folder ke andar <code>RealFlow-ULTIMATE-INSTALL.bat</code> file ko double-click karein.</div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">4</div>
+      <div class="step-content">
+        <div class="step-title">UAC Popup → Yes</div>
+        <div class="step-desc">Windows admin permission maange to "Yes" click karein.</div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">5</div>
+      <div class="step-content">
+        <div class="step-title">Wait Karein (20-30 min)</div>
+        <div class="step-desc">Coffee piyen ☕. Installer sab kuch khud kar lega. End mein browser khud khulega.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- After install -->
+  <div class="credentials">
+    <h3>Install Ke Baad</h3>
+    <div class="cred-item">
+      <span class="cred-key">App URL:</span>
+      <span class="cred-val">http://localhost:3000</span>
+    </div>
+    <div class="cred-item">
+      <span class="cred-key">Admin Login:</span>
+      <span class="cred-val">http://localhost:3000/admin-login</span>
+    </div>
+    <div class="cred-item">
+      <span class="cred-key">Email:</span>
+      <span class="cred-val">admin@realflow.local</span>
+    </div>
+    <div class="cred-item">
+      <span class="cred-key">Password:</span>
+      <span class="cred-val">Desktop pe "RealFlow-Credentials.txt"</span>
+    </div>
+  </div>
+
+  <!-- Specs -->
+  <h2 style="text-align:center; font-size:14px; text-transform:uppercase; letter-spacing:3px; color:#A0A0A0; margin: 32px 0 16px;">
+    System Requirements
+  </h2>
+  <div class="specs">
+    <div class="spec"><strong>OS</strong>Windows 10 (Build 19041+) / Windows 11</div>
+    <div class="spec"><strong>RAM</strong>8 GB minimum, 16 GB recommended</div>
+    <div class="spec"><strong>Storage</strong>20 GB free space</div>
+    <div class="spec"><strong>Internet</strong>5 Mbps minimum during install</div>
+  </div>
+
+  <!-- Footer -->
+  <footer>
+    <p style="margin-bottom: 8px;">
+      <a href="https://github.com/ronaldsexedwards40-glitch/dynabook/issues" target="_blank">Issue report karein</a> ·
+      <a href="https://github.com/ronaldsexedwards40-glitch/dynabook/blob/main/USER-GUIDE-PRODUCTION.md" target="_blank">Full Guide</a>
+    </p>
+    <p>RealFlow · Self-hosted on your PC · No data shared with anyone</p>
+  </footer>
+
+</div>
+
+<script>
+  // Add copy buttons next to credentials
+  document.querySelectorAll('.cred-item').forEach(item => {
+    const val = item.querySelector('.cred-val');
+    if (!val) return;
+    const text = val.textContent.trim();
+    if (text.startsWith('http') || text.includes('@')) {
+      const btn = document.createElement('button');
+      btn.className = 'copy-btn';
+      btn.textContent = 'Copy';
+      btn.onclick = () => {
+        navigator.clipboard.writeText(text);
+        btn.textContent = 'Copied!';
+        setTimeout(() => btn.textContent = 'Copy', 1500);
+      };
+      val.appendChild(btn);
+    }
+  });
+
+  // Smooth scroll
+  document.documentElement.style.scrollBehavior = 'smooth';
+</script>
+
+</body>
+</html>
