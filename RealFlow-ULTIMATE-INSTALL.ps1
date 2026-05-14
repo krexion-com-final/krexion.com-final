@@ -11,6 +11,11 @@
 # - Beautiful colored output, clear progress
 # ============================================================
 
+param(
+    [switch]$Force,           # Skip all pre-checks, force install
+    [switch]$SkipVirtCheck    # Skip only the virtualization check
+)
+
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 
@@ -162,24 +167,88 @@ if ($totalRam -lt 3.5) {
 }
 Write-Ok "RAM check complete"
 
-# Check virtualization
+# Check virtualization (smart multi-method detection)
+if ($Force -or $SkipVirtCheck) {
+    Write-Warn "Virtualization check SKIPPED (force flag enabled)"
+} else {
 Write-Info "Checking CPU virtualization (VT-x/AMD-V)..."
-$cpu = Get-CimInstance Win32_Processor
-if ($cpu.VirtualizationFirmwareEnabled -eq $false) {
-    Write-Err "CPU virtualization is DISABLED in BIOS."
-    Write-Err ""
-    Write-Err "  FIX: Enable virtualization in BIOS:"
-    Write-Err "  1. Restart your PC"
-    Write-Err "  2. Press F2/F10/DEL/ESC during boot (varies by manufacturer)"
-    Write-Err "  3. Find 'Virtualization Technology' or 'VT-x' or 'AMD-V'"
-    Write-Err "  4. Set to ENABLED"
-    Write-Err "  5. Save and reboot"
-    Write-Err ""
-    Write-Err "  Then run this installer again."
-    Stop-Transcript -ErrorAction SilentlyContinue
-    exit 1
+
+$virtEnabled = $false
+$virtChecks = @()
+
+# Method 1: Check if Hypervisor is already present (most reliable)
+try {
+    $compInfo = Get-ComputerInfo -Property HyperVisorPresent -ErrorAction SilentlyContinue
+    if ($compInfo.HyperVisorPresent -eq $true) {
+        $virtEnabled = $true
+        $virtChecks += "HyperVisor active (Method 1)"
+    }
+} catch { }
+
+# Method 2: Check if WSL is functional (if WSL works, virt is enabled)
+try {
+    $wslStatus = & wsl --status 2>&1 | Out-String
+    if ($LASTEXITCODE -eq 0 -and $wslStatus -notmatch "not installed|not enabled") {
+        $virtEnabled = $true
+        $virtChecks += "WSL functional (Method 2)"
+    }
+} catch { }
+
+# Method 3: Check systeminfo output
+try {
+    $sysinfo = & systeminfo 2>&1 | Out-String
+    if ($sysinfo -match "A hypervisor has been detected" -or
+        $sysinfo -match "VM Monitor Mode Extensions:\s+Yes" -or
+        $sysinfo -match "Virtualization Enabled In Firmware:\s+Yes" -or
+        $sysinfo -match "Second Level Address Translation:\s+Yes") {
+        $virtEnabled = $true
+        $virtChecks += "systeminfo confirms (Method 3)"
+    }
+} catch { }
+
+# Method 4: Original WMI check (least reliable on Win11 24H2)
+try {
+    $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue
+    if ($cpu.VirtualizationFirmwareEnabled -eq $true) {
+        $virtEnabled = $true
+        $virtChecks += "Win32_Processor reports enabled (Method 4)"
+    }
+    if ($cpu.VMMonitorModeExtensions -eq $true -or
+        $cpu.SecondLevelAddressTranslationExtensions -eq $true) {
+        $virtEnabled = $true
+        $virtChecks += "CPU extensions present (Method 4b)"
+    }
+} catch { }
+
+# Method 5: Check Windows feature state — if Hyper-V or WSL2 was previously
+# installed and works, virt must be on
+try {
+    $hyperv = Get-WindowsOptionalFeature -Online -FeatureName "Microsoft-Hyper-V" -ErrorAction SilentlyContinue
+    $vmp = Get-WindowsOptionalFeature -Online -FeatureName "VirtualMachinePlatform" -ErrorAction SilentlyContinue
+    if (($hyperv -and $hyperv.State -eq "Enabled") -or ($vmp -and $vmp.State -eq "Enabled")) {
+        # Feature enabled doesn't guarantee virt on, but combined with no errors so far suggests it's fine
+        $virtChecks += "Virtualization features enabled (Method 5)"
+        # Don't auto-pass on this alone, but reduces false-negative confidence
+    }
+} catch { }
+
+if ($virtEnabled) {
+    Write-Ok "CPU virtualization enabled ($($virtChecks -join '; '))"
+} else {
+    # Soft warning — don't hard-fail. Let installer continue and Docker
+    # will fail at startup if virt is truly off (with clear recovery flow).
+    Write-Warn "Could not auto-detect virtualization status."
+    Write-Warn "  (Windows 11 24H2 sometimes reports false for VirtualizationFirmwareEnabled)"
+    Write-Warn ""
+    Write-Warn "  If installation fails later, virtualization may need to be enabled:"
+    Write-Warn "  1. Restart PC, press F2/F10/DEL during boot"
+    Write-Warn "  2. Find 'Virtualization Technology' / 'VT-x' / 'AMD-V' / 'SVM Mode'"
+    Write-Warn "  3. Set to ENABLED, save, reboot"
+    Write-Warn ""
+    Write-Warn "  Continuing installation — will try WSL2 + Docker anyway..."
+    Start-Sleep -Seconds 3
 }
-Write-Ok "CPU virtualization enabled"
+} # end of virt check block
 
 # ============================================================
 # STEP 2: Enable Windows Features (WSL2 + VMP + Hyper-V)
