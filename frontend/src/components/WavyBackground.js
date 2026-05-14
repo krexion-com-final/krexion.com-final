@@ -4,14 +4,47 @@ import { useEffect, useRef } from "react";
  * Cursor-following vertical wavy lines (spotlight effect).
  * Used as a global animated background on Login + every Dashboard page.
  *
- * Pure-black canvas with bright blue (#4F7FFF) lines that come alive
- * only near the cursor — keeps GPU usage low.
+ * Color follows the active theme — reads CSS variable `--brand-primary`
+ * from <html> and re-syncs whenever the theme changes (MutationObserver
+ * on the documentElement style attribute).
  *
  * Props:
  *   intensity (number 0-1, default 1) — opacity multiplier for the lines
  *   lineCount (number, default 60)    — number of vertical lines
  *   zIndex   (number, default 0)      — canvas stacking position
  */
+
+// Convert hex (#RRGGBB / #RGB / rgba / rgb / hsl) to [r,g,b]
+function colorToRgb(input) {
+  if (!input) return [79, 127, 255];
+  const s = String(input).trim();
+  // #RRGGBB or #RGB
+  if (s.startsWith("#")) {
+    let hex = s.slice(1);
+    if (hex.length === 3) hex = hex.split("").map((c) => c + c).join("");
+    if (hex.length === 6) {
+      return [
+        parseInt(hex.slice(0, 2), 16),
+        parseInt(hex.slice(2, 4), 16),
+        parseInt(hex.slice(4, 6), 16),
+      ];
+    }
+  }
+  // rgb(r,g,b) or rgba(r,g,b,a)
+  const m = s.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+  if (m) return [parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)];
+  // Fallback
+  return [79, 127, 255];
+}
+
+function readBrandPrimary() {
+  if (typeof window === "undefined") return [79, 127, 255];
+  const val = getComputedStyle(document.documentElement)
+    .getPropertyValue("--brand-primary")
+    .trim();
+  return colorToRgb(val || "#4F7FFF");
+}
+
 export default function WavyBackground({
   intensity = 1,
   lineCount = 60,
@@ -23,6 +56,20 @@ export default function WavyBackground({
     y: typeof window !== "undefined" ? window.innerHeight / 2 : 0,
   });
   const smoothMouseRef = useRef({ ...rawMouseRef.current });
+  const rgbRef = useRef([79, 127, 255]);
+
+  useEffect(() => {
+    rgbRef.current = readBrandPrimary();
+    // Watch for theme changes (ThemeContext writes inline style on <html>)
+    const observer = new MutationObserver(() => {
+      rgbRef.current = readBrandPrimary();
+    });
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["style", "data-theme-mode"],
+    });
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     const onMove = (e) => {
@@ -75,6 +122,8 @@ export default function WavyBackground({
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       time += 0.01;
 
+      const [r, g, b] = rgbRef.current;
+
       for (const line of lines) {
         const dx = Math.abs(line.baseX - mx);
         const spotlightR = 500;
@@ -85,7 +134,7 @@ export default function WavyBackground({
 
         ctx.beginPath();
         const finalOpacity = line.opacity * (0.5 + line.mouseInfluence * 0.7);
-        ctx.strokeStyle = `rgba(79, 127, 255, ${finalOpacity})`;
+        ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${finalOpacity})`;
         ctx.lineWidth = 2.2;
         ctx.lineCap = "round";
 

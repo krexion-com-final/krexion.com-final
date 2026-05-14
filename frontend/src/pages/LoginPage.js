@@ -216,7 +216,7 @@ export default function LoginPage() {
             {/* Header */}
             <div className="text-center mb-8">
               <h3 className="text-white text-3xl font-bold mb-2">Hey There,</h3>
-              <h4 className="text-[#4F7FFF] text-4xl font-bold mb-4">Welcome Back!</h4>
+              <h4 className="text-4xl font-bold mb-4" style={{ color: "var(--brand-primary)" }}>Welcome Back!</h4>
               <p className="text-gray-400 text-sm">Let's get you back into your account.</p>
             </div>
 
@@ -224,21 +224,23 @@ export default function LoginPage() {
             <div className="flex gap-2 mb-6">
               <button
                 onClick={() => setActiveTab("login")}
-                className={`flex-1 py-3 px-4 rounded-xl font-medium transition-all duration-300 ${
+                className="flex-1 py-3 px-4 rounded-xl font-medium transition-all duration-300"
+                style={
                   activeTab === "login"
-                    ? "bg-[#4F7FFF] text-white shadow-lg shadow-blue-500/50"
-                    : "bg-gray-900 text-gray-400 hover:bg-gray-800"
-                }`}
+                    ? { backgroundColor: "var(--brand-primary)", color: "#fff", boxShadow: "0 10px 30px -10px var(--brand-primary)" }
+                    : { backgroundColor: "rgba(20,20,30,0.6)", color: "#a0a0a0" }
+                }
               >
                 Login
               </button>
               <button
                 onClick={() => setActiveTab("register")}
-                className={`flex-1 py-3 px-4 rounded-xl font-medium transition-all duration-300 ${
+                className="flex-1 py-3 px-4 rounded-xl font-medium transition-all duration-300"
+                style={
                   activeTab === "register"
-                    ? "bg-[#4F7FFF] text-white shadow-lg shadow-blue-500/50"
-                    : "bg-gray-900 text-gray-400 hover:bg-gray-800"
-                }`}
+                    ? { backgroundColor: "var(--brand-primary)", color: "#fff", boxShadow: "0 10px 30px -10px var(--brand-primary)" }
+                    : { backgroundColor: "rgba(20,20,30,0.6)", color: "#a0a0a0" }
+                }
               >
                 Register
               </button>
@@ -254,7 +256,8 @@ export default function LoginPage() {
                     value={loginForm.email}
                     onChange={(e) => setLoginForm({ ...loginForm, email: e.target.value })}
                     required
-                    className="bg-white/90 text-black rounded-full py-6 px-6 focus:ring-2 focus:ring-[#4F7FFF] border-0"
+                    className="bg-white/90 text-black rounded-full py-6 px-6 focus-visible:ring-2 border-0"
+                    style={{ '--tw-ring-color': 'var(--brand-primary)' }}
                     data-testid="login-email-input"
                   />
                 </div>
@@ -266,7 +269,8 @@ export default function LoginPage() {
                     value={loginForm.password}
                     onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
                     required
-                    className="bg-white/90 text-black rounded-full py-6 px-6 pr-12 focus:ring-2 focus:ring-[#4F7FFF] border-0"
+                    className="bg-white/90 text-black rounded-full py-6 px-6 pr-12 focus-visible:ring-2 border-0"
+                    style={{ '--tw-ring-color': 'var(--brand-primary)' }}
                     data-testid="login-password-input"
                   />
                   <button
@@ -279,13 +283,14 @@ export default function LoginPage() {
                 </div>
 
                 <div className="flex items-center justify-between text-sm mt-4">
-                  <Link to="/forgot-password" className="text-gray-400 hover:text-[#4F7FFF] transition">
+                  <Link to="/forgot-password" className="text-gray-400 transition hover:opacity-80" style={{ '--hover-color': 'var(--brand-primary)' }}>
                     Forgot password?
                   </Link>
                   <button
                     type="submit"
                     disabled={loading}
-                    className="px-8 py-3 rounded-full bg-gradient-to-r from-[#4F7FFF] to-[#3D66D9] text-white hover:shadow-lg hover:shadow-blue-500/50 transition-all disabled:opacity-50"
+                    className="px-8 py-3 rounded-full text-white hover:opacity-90 transition-all disabled:opacity-50"
+                    style={{ background: "linear-gradient(135deg, var(--brand-primary), var(--brand-accent))", boxShadow: "0 10px 30px -10px var(--brand-primary)" }}
                     data-testid="login-submit-button"
                   >
                     {loading ? "Signing in..." : "Sign In →"}
@@ -296,7 +301,7 @@ export default function LoginPage() {
                 <div className="mt-6 text-center">
                   <Link 
                     to="/admin" 
-                    className="text-xs text-gray-500 hover:text-[#4F7FFF] transition flex items-center justify-center gap-2"
+                    className="text-xs text-gray-500 transition flex items-center justify-center gap-2 hover:opacity-80"
                   >
                     <Shield size={14} />
                     Admin Login
@@ -311,7 +316,8 @@ export default function LoginPage() {
                   value={registerForm.name}
                   onChange={(e) => setRegisterForm({ ...registerForm, name: e.target.value })}
                   required
-                  className="bg-white/90 text-black rounded-full py-6 px-6 focus:ring-2 focus:ring-[#4F7FFF] border-0"
+                  className="bg-white/90 text-black rounded-full py-6 px-6 focus-visible:ring-2 border-0"
+                  style={{ '--tw-ring-color': 'var(--brand-primary)' }}
                   data-testid="register-name-input"
                 />
                 <Input
@@ -320,7 +326,8 @@ export default function LoginPage() {
                   value={registerForm.email}
                   onChange={(e) => setRegisterForm({ ...registerForm, email: e.target.value })}
                   required
-                  className="bg-white/90 text-black rounded-full py-6 px-6 focus:ring-2 focus:ring-[#4F7FFF] border-0"
+                  className="bg-white/90 text-black rounded-full py-6 px-6 focus-visible:ring-2 border-0"
+                  style={{ '--tw-ring-color': 'var(--brand-primary)' }}
                   data-testid="register-email-input"
                 />
                 <div className="relative">
@@ -344,7 +351,8 @@ export default function LoginPage() {
                 <button
                   type="submit"
                   disabled={loading}
-                  className="w-full py-3 rounded-full bg-gradient-to-r from-[#4F7FFF] to-[#3D66D9] text-white hover:shadow-lg hover:shadow-blue-500/50 transition-all disabled:opacity-50"
+                  className="w-full py-3 rounded-full text-white hover:opacity-90 transition-all disabled:opacity-50"
+                  style={{ background: "linear-gradient(135deg, var(--brand-primary), var(--brand-accent))", boxShadow: "0 10px 30px -10px var(--brand-primary)" }}
                   data-testid="register-submit-button"
                 >
                   {loading ? "Creating..." : "Create Account"}
