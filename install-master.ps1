@@ -1,14 +1,12 @@
 # ==============================================================
-# RealFlow Master Installer (install-master.ps1)
-# Called by REALFLOW.bat - already running as Administrator
-# ==============================================================
-# Zero-question install. Just works. Auto-recovery for everything.
+# RealFlow Master Installer v3.1
+# NO here-strings, NO parens-in-strings, Windows-safe encoding
 # ==============================================================
 
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 
-# --- Constants ---
+# Constants
 $INSTALL_DIR    = "C:\realflow"
 $LOG_FILE       = "$env:TEMP\realflow-install.log"
 $RESUME_MARKER  = "$env:TEMP\realflow-resume.flag"
@@ -16,21 +14,27 @@ $REPO_ZIP_URL   = "https://github.com/ronaldsexedwards40-glitch/dynabook/archive
 $DOCKER_URL     = "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe"
 $WSL_KERNEL_URL = "https://wslstorehosted.blob.core.windows.net/wslblob/wsl_update_x64.msi"
 
-# TLS 1.2 for all web requests
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-# --- Helpers ---
-function Log {
+# Helpers - all use single param to avoid parser issues
+function Log-Line {
     param([string]$Msg, [string]$Color = "White")
     $ts = Get-Date -Format "HH:mm:ss"
-    Write-Host "[$ts] $Msg" -ForegroundColor $Color
-    Add-Content -Path $LOG_FILE -Value "[$ts] $Msg" -ErrorAction SilentlyContinue
+    $line = "[" + $ts + "] " + $Msg
+    Write-Host $line -ForegroundColor $Color
+    Add-Content -Path $LOG_FILE -Value $line -ErrorAction SilentlyContinue
 }
-function Ok { param($m) Log "  [OK]   $m" "Green" }
-function Warn { param($m) Log "  [WARN] $m" "Yellow" }
-function Err { param($m) Log "  [ERR]  $m" "Red" }
-function Info { param($m) Log "  [..]   $m" "Cyan" }
-function Step { param($t) Write-Host ""; Write-Host ("=" * 70) -ForegroundColor Magenta; Write-Host "  $t" -ForegroundColor Magenta; Write-Host ("=" * 70) -ForegroundColor Magenta }
+function Show-Ok    { param([string]$m) Log-Line ("  [OK]   " + $m) "Green" }
+function Show-Warn  { param([string]$m) Log-Line ("  [WARN] " + $m) "Yellow" }
+function Show-Err   { param([string]$m) Log-Line ("  [ERR]  " + $m) "Red" }
+function Show-Info  { param([string]$m) Log-Line ("  [..]   " + $m) "Cyan" }
+function Show-Step  {
+    param([string]$t)
+    Write-Host ""
+    Write-Host ("=" * 70) -ForegroundColor Magenta
+    Write-Host ("  " + $t) -ForegroundColor Magenta
+    Write-Host ("=" * 70) -ForegroundColor Magenta
+}
 
 function Test-DockerWorking {
     try {
@@ -61,104 +65,109 @@ function Wait-Docker {
         if (Test-DockerWorking) { return $true }
         Start-Sleep -Seconds 5
         $e += 5
-        if ($e % 30 -eq 0) { Write-Host "      Wait kar raha hun... ($($e)s/$($Sec)s)" -ForegroundColor DarkGray }
+        if (($e % 30) -eq 0) {
+            $msg = "      Wait kar raha hun... " + [string]$e + "s/" + [string]$Sec + "s"
+            Write-Host $msg -ForegroundColor DarkGray
+        }
     }
     return $false
 }
 
-function Random-String {
+function New-RandomString {
     param([int]$L = 24)
-    -join ((1..$L) | ForEach-Object { ('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'[(Get-Random -Maximum 62)]) })
+    $chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    $out = ""
+    for ($i = 0; $i -lt $L; $i++) {
+        $out = $out + $chars[(Get-Random -Maximum 62)]
+    }
+    return $out
 }
 
-# --- Start logging ---
-"=== RealFlow install started $(Get-Date) ===" | Out-File -FilePath $LOG_FILE -Force
+# Start logging
+$startMsg = "=== RealFlow install started " + (Get-Date) + " ==="
+$startMsg | Out-File -FilePath $LOG_FILE -Force
 Start-Transcript -Path "$env:TEMP\realflow-transcript.log" -Force -ErrorAction SilentlyContinue | Out-Null
 
-# ==============================================================
-# SHOW BANNER
-# ==============================================================
+# Banner
 Clear-Host
 Write-Host ""
-Write-Host "  ____            _ _____ _              " -ForegroundColor Cyan
-Write-Host " |  _ \ ___  __ _| |  ___| | _____      __" -ForegroundColor Cyan
-Write-Host " | |_) / _ \/ _``| | |_  | |/ _ \ \ /\ / /" -ForegroundColor Cyan
-Write-Host " |  _ <  __/ (_| | |  _| | | (_) \ V  V / " -ForegroundColor Cyan
-Write-Host " |_| \_\___|\__,_|_|_|   |_|\___/ \_/\_/  " -ForegroundColor Cyan
-Write-Host ""
-Write-Host "        MASTER INSTALLER v3.0 - ZERO QUESTIONS" -ForegroundColor White
+Write-Host "  ===============================================" -ForegroundColor Cyan
+Write-Host "  ||                                           ||" -ForegroundColor Cyan
+Write-Host "  ||           R E A L F L O W                 ||" -ForegroundColor Cyan
+Write-Host "  ||      Master Installer v3.1 Bulletproof    ||" -ForegroundColor Cyan
+Write-Host "  ||                                           ||" -ForegroundColor Cyan
+Write-Host "  ===============================================" -ForegroundColor Cyan
 Write-Host ""
 
-# ==============================================================
-# STEP 1: Quick system summary
-# ==============================================================
-Step "STEP 1/7: System Info"
+# ============================================================
+# STEP 1: System Info
+# ============================================================
+Show-Step "STEP 1/7: System Info"
 $os = Get-CimInstance Win32_OperatingSystem
 $ram = [math]::Round(($os.TotalVisibleMemorySize / 1MB), 1)
 $cores = [Environment]::ProcessorCount
-Info "OS: $($os.Caption) (Build $($os.BuildNumber))"
-Info "RAM: $ram GB | Cores: $cores"
+Show-Info ("OS: " + $os.Caption + " - Build " + $os.BuildNumber)
+Show-Info ("RAM: " + $ram + " GB | Cores: " + $cores)
 if ([int]$os.BuildNumber -lt 19041) {
-    Err "Windows version bahut purana hai (Build $($os.BuildNumber))."
-    Err "Settings -> Update karein, phir dobara try karein."
+    Show-Err "Windows version bahut purana hai."
+    Show-Err "Settings -> Update karein, phir dobara try karein."
     Stop-Transcript -ErrorAction SilentlyContinue
     exit 1
 }
-Ok "Compatible system"
+Show-Ok "Compatible system"
 
-# ==============================================================
-# STEP 2: Enable Windows Features (WSL + VMP)
-# ==============================================================
-Step "STEP 2/7: Windows Features Enable"
+# ============================================================
+# STEP 2: Windows Features
+# ============================================================
+Show-Step "STEP 2/7: Windows Features Enable"
 
 $rebootNeeded = $false
-foreach ($fname in @("Microsoft-Windows-Subsystem-Linux", "VirtualMachinePlatform")) {
-    Info "Checking: $fname"
+$featureList = @("Microsoft-Windows-Subsystem-Linux", "VirtualMachinePlatform")
+foreach ($fname in $featureList) {
+    Show-Info ("Checking: " + $fname)
     $f = Get-WindowsOptionalFeature -Online -FeatureName $fname -ErrorAction SilentlyContinue
     if ($f -and $f.State -eq "Enabled") {
-        Ok "$fname already enabled"
+        Show-Ok ($fname + " already enabled")
     } else {
-        Info "Enabling $fname..."
+        Show-Info ("Enabling " + $fname)
         $r = Enable-WindowsOptionalFeature -Online -FeatureName $fname -NoRestart -ErrorAction SilentlyContinue
         if ($r.RestartNeeded) { $rebootNeeded = $true }
-        Ok "$fname enabled"
+        Show-Ok ($fname + " enabled")
     }
 }
 
-# Reboot handling
+# Handle reboot
 $justRebooted = (Test-Path $RESUME_MARKER)
 if ($justRebooted) {
     Remove-Item $RESUME_MARKER -Force -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName "RealFlowAutoResume" -Confirm:$false -ErrorAction SilentlyContinue
-    Ok "Reboot ke baad resume hua. Continuing..."
+    Show-Ok "Reboot ke baad resume hua. Continuing..."
 } elseif ($rebootNeeded) {
-    Warn "Windows features enable hone ke liye 1 reboot zaroori hai"
-
-    # Create resume marker
+    Show-Warn "Windows features enable hone ke liye 1 reboot zaroori hai"
     "rebooted" | Out-File -FilePath $RESUME_MARKER -Force
 
-    # Create scheduled task for auto-resume (logon-trigger, runs REALFLOW.bat from Desktop)
-    # We'll re-download fresh REALFLOW.bat to Desktop so resume always uses latest
-    try {
-        $batPath = "$env:USERPROFILE\Desktop\REALFLOW-RESUME.bat"
-        @"
-@echo off
-fltmc >nul 2>&1
-if %errorLevel% neq 0 (
-    powershell -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
-    exit /b
-)
-powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; iwr 'https://raw.githubusercontent.com/ronaldsexedwards40-glitch/dynabook/main/install-master.ps1' -OutFile '%TEMP%\im.ps1' -UseBasicParsing; & '%TEMP%\im.ps1'"
-"@ | Out-File -FilePath $batPath -Encoding ASCII -Force
+    # Build resume .bat using array (no here-string)
+    $batPath = "$env:USERPROFILE\Desktop\REALFLOW-RESUME.bat"
+    $batLines = @(
+        '@echo off',
+        'fltmc >nul 2>&1',
+        'if %errorLevel% neq 0 (',
+        '    powershell -Command "Start-Process -FilePath ''%~f0'' -Verb RunAs"',
+        '    exit /b',
+        ')',
+        'powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; iwr ''https://raw.githubusercontent.com/ronaldsexedwards40-glitch/dynabook/main/install-master.ps1'' -OutFile ''%TEMP%\im.ps1'' -UseBasicParsing; & ''%TEMP%\im.ps1''"'
+    )
+    $batLines | Set-Content -Path $batPath -Encoding ASCII -Force
 
-        $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$batPath`""
+    try {
+        $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument ("/c `"" + $batPath + "`"")
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
-        $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -RunLevel Highest -LogonType Interactive
+        $principal = New-ScheduledTaskPrincipal -UserId ($env:USERDOMAIN + "\" + $env:USERNAME) -RunLevel Highest -LogonType Interactive
         Register-ScheduledTask -TaskName "RealFlowAutoResume" -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force -ErrorAction Stop | Out-Null
-        Ok "Auto-resume task setup ho gaya"
+        Show-Ok "Auto-resume task setup ho gaya"
     } catch {
-        Warn "Auto-resume task fail: $_"
+        Show-Warn ("Auto-resume task fail: " + $_)
     }
 
     Write-Host ""
@@ -167,92 +176,97 @@ powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::Security
     Write-Host "   Login ke baad installer khud continue karega." -ForegroundColor Yellow
     Write-Host "  ============================================" -ForegroundColor Yellow
     Write-Host ""
-
     Start-Sleep -Seconds 10
     Restart-Computer -Force
     exit 0
 }
 
-# ==============================================================
-# STEP 3: WSL2 Kernel (CRITICAL — fixes Docker "Starting" stuck)
-# ==============================================================
-Step "STEP 3/7: WSL2 Kernel Update"
+# ============================================================
+# STEP 3: WSL2 Kernel Update
+# ============================================================
+Show-Step "STEP 3/7: WSL2 Kernel Update"
 
-Info "Running 'wsl --update' (yeh Docker stuck ka #1 fix hai)..."
-$wslOut = & wsl --update 2>&1 | Out-String
+Show-Info "Running 'wsl --update' [Docker stuck ka #1 fix]"
+$null = & wsl --update 2>&1
 if ($LASTEXITCODE -eq 0) {
-    Ok "WSL kernel updated"
+    Show-Ok "WSL kernel updated"
 } else {
-    Warn "wsl --update failed, MSI fallback try kar raha hun..."
+    Show-Warn "wsl --update failed, MSI fallback try kar raha hun..."
     try {
         $msi = "$env:TEMP\wsl_update.msi"
         Invoke-WebRequest -Uri $WSL_KERNEL_URL -OutFile $msi -UseBasicParsing -TimeoutSec 180
         Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait
-        Ok "WSL kernel installed via MSI"
+        Show-Ok "WSL kernel installed via MSI"
     } catch {
-        Warn "MSI bhi fail: $_  (continuing — Docker might still work)"
+        Show-Warn "MSI fallback fail - continuing anyway"
     }
 }
 
-Info "WSL2 default version set kar raha hun..."
+Show-Info "WSL2 default version set kar raha hun"
 & wsl --set-default-version 2 2>&1 | Out-Null
-Ok "WSL2 default set"
+Show-Ok "WSL2 default set"
 
-# Auto-configure .wslconfig based on RAM
-$wslMem = if ($ram -le 8) { "5GB" } elseif ($ram -le 16) { "10GB" } else { "16GB" }
+# Auto-configure .wslconfig - using array, no here-string
+$wslMem = "10GB"
+if ($ram -le 8) { $wslMem = "5GB" }
+if ($ram -gt 16) { $wslMem = "16GB" }
 $wslCpu = [math]::Min($cores, 12)
-@"
-[wsl2]
-memory=$wslMem
-processors=$wslCpu
-swap=4GB
-localhostForwarding=true
-"@ | Out-File -FilePath "$env:USERPROFILE\.wslconfig" -Encoding ASCII -Force
-Ok "WSL2 configured: $wslMem RAM, $wslCpu cores"
 
-# ==============================================================
+$wslconfPath = $env:USERPROFILE + "\.wslconfig"
+$wslconfLines = @(
+    "[wsl2]",
+    ("memory=" + $wslMem),
+    ("processors=" + $wslCpu),
+    "swap=4GB",
+    "localhostForwarding=true"
+)
+$wslconfLines | Set-Content -Path $wslconfPath -Encoding ASCII -Force
+Show-Ok ("WSL2 configured: " + $wslMem + " RAM, " + $wslCpu + " cores")
+
+# ============================================================
 # STEP 4: Docker Desktop Install
-# ==============================================================
-Step "STEP 4/7: Docker Desktop Setup"
+# ============================================================
+Show-Step "STEP 4/7: Docker Desktop Setup"
 
 $dockerExe = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
 if (-not (Test-Path $dockerExe)) {
-    Info "Docker Desktop nahi mila. Download kar raha hun (~600 MB, 3-10 min)..."
+    Show-Info "Docker Desktop nahi mila. Download kar raha hun [600MB, 3-10 min]"
     $dInst = "$env:TEMP\DockerDesktopInstaller.exe"
     try {
         Invoke-WebRequest -Uri $DOCKER_URL -OutFile $dInst -UseBasicParsing -TimeoutSec 1200
-        Ok "Downloaded"
+        Show-Ok "Downloaded"
     } catch {
-        Err "Docker download failed: $_"
-        Err "Manual install: https://www.docker.com/products/docker-desktop/"
+        Show-Err ("Docker download failed: " + $_)
+        Show-Err "Manual install: https://www.docker.com/products/docker-desktop/"
         Stop-Transcript -ErrorAction SilentlyContinue
         exit 1
     }
-    Info "Installing Docker Desktop silently (3-5 min)..."
+    Show-Info "Installing Docker Desktop silently [3-5 min]"
     $p = Start-Process -FilePath $dInst -ArgumentList "install","--quiet","--accept-license" -Wait -PassThru
-    if ($p.ExitCode -notin @(0, 3010)) {
-        Err "Docker install failed ($($p.ExitCode))"
+    $okCodes = @(0, 3010)
+    if ($okCodes -notcontains $p.ExitCode) {
+        Show-Err ("Docker install failed - code " + $p.ExitCode)
         Stop-Transcript -ErrorAction SilentlyContinue
         exit 1
     }
-    Ok "Docker installed"
+    Show-Ok "Docker installed"
     Remove-Item $dInst -Force -ErrorAction SilentlyContinue
 } else {
-    Ok "Docker Desktop already installed"
+    Show-Ok "Docker Desktop already installed"
 }
 
-# ==============================================================
-# STEP 5: Force Docker to Running (with 3 recovery attempts)
-# ==============================================================
-Step "STEP 5/7: Starting Docker (auto-recovery enabled)"
+# ============================================================
+# STEP 5: Force Docker to Running
+# ============================================================
+Show-Step "STEP 5/7: Starting Docker [auto-recovery enabled]"
 
 Stop-DockerHard
 Start-DockerSilent | Out-Null
-Info "Initial startup ka wait (max 2 min)..."
+Show-Info "Initial startup ka wait [max 2 min]"
 $ready = Wait-Docker -Sec 120
 
 if (-not $ready) {
-    Warn "Docker stuck. Recovery 1/3: WSL restart..."
+    Show-Warn "Docker stuck. Recovery 1/3: WSL restart"
     Stop-DockerHard
     & wsl --shutdown 2>&1 | Out-Null
     Start-Sleep -Seconds 5
@@ -260,7 +274,7 @@ if (-not $ready) {
     $ready = Wait-Docker -Sec 120
 }
 if (-not $ready) {
-    Warn "Recovery 2/3: WSL kernel re-update..."
+    Show-Warn "Recovery 2/3: WSL kernel re-update"
     Stop-DockerHard
     & wsl --update 2>&1 | Out-Null
     & wsl --shutdown 2>&1 | Out-Null
@@ -269,7 +283,7 @@ if (-not $ready) {
     $ready = Wait-Docker -Sec 150
 }
 if (-not $ready) {
-    Warn "Recovery 3/3: Docker settings reset..."
+    Show-Warn "Recovery 3/3: Docker settings reset"
     Stop-DockerHard
     $sJson = "$env:APPDATA\Docker\settings.json"
     if (Test-Path $sJson) { Remove-Item $sJson -Force -ErrorAction SilentlyContinue }
@@ -279,128 +293,126 @@ if (-not $ready) {
 }
 
 if (-not $ready) {
-    Err ""
-    Err "Docker start nahi ho raha 3 recovery ke baad bhi."
-    Err ""
-    Err "FIX:"
-    Err "  1. PC restart karein"
-    Err "  2. Login ke baad Docker Desktop khud open karein"
-    Err "  3. Whale icon green hone tak wait karein"
-    Err "  4. REALFLOW.bat dobara chalayein"
-    Err ""
-    Err "Agar phir bhi fail to BIOS mein virtualization enable karein:"
-    Err "  - PC restart, F2/F10/DEL press during boot"
-    Err "  - 'Virtualization Technology' / 'VT-x' / 'AMD-V' / 'SVM Mode' ENABLED karein"
-    Err "  - Save, reboot, REALFLOW.bat chalayein"
+    Show-Err "Docker start nahi ho raha 3 recovery ke baad bhi."
+    Show-Err ""
+    Show-Err "FIX:"
+    Show-Err "  1. PC restart karein"
+    Show-Err "  2. Login ke baad Docker Desktop khud open karein from Start Menu"
+    Show-Err "  3. Whale icon green hone tak wait karein"
+    Show-Err "  4. REALFLOW.bat dobara chalayein"
+    Show-Err ""
+    Show-Err "Agar phir bhi fail to BIOS mein virtualization enable karein."
     Stop-Transcript -ErrorAction SilentlyContinue
     exit 1
 }
-Ok "Docker is running!"
+Show-Ok "Docker is running!"
 
-# ==============================================================
-# STEP 6: Download RealFlow + Configure
-# ==============================================================
-Step "STEP 6/7: Downloading RealFlow"
+# ============================================================
+# STEP 6: Download RealFlow
+# ============================================================
+Show-Step "STEP 6/7: Downloading RealFlow"
 
 if (Test-Path $INSTALL_DIR) {
-    Info "Purana install clean kar raha hun..."
+    Show-Info "Purana install clean kar raha hun"
     Push-Location $INSTALL_DIR
     & docker compose down 2>&1 | Out-Null
     Pop-Location
-    & takeown.exe /f "$INSTALL_DIR" /r /d Y 2>&1 | Out-Null
-    & icacls.exe "$INSTALL_DIR" /grant "$env:USERNAME`:F" /T /Q 2>&1 | Out-Null
+    & takeown.exe /f $INSTALL_DIR /r /d Y 2>&1 | Out-Null
+    & icacls.exe $INSTALL_DIR /grant ($env:USERNAME + ":F") /T /Q 2>&1 | Out-Null
     Remove-Item -Path $INSTALL_DIR -Recurse -Force -ErrorAction SilentlyContinue
     if (Test-Path $INSTALL_DIR) {
         Start-Sleep -Seconds 3
         Remove-Item -Path $INSTALL_DIR -Recurse -Force -ErrorAction SilentlyContinue
     }
-    Ok "Cleaned old install"
+    Show-Ok "Cleaned old install"
 }
 
 $zip = "$env:TEMP\realflow.zip"
 $ext = "$env:TEMP\realflow-extract"
-Info "Downloading latest from GitHub (~50 MB)..."
+Show-Info "Downloading latest from GitHub [50MB]"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 if (Test-Path $ext) { Remove-Item $ext -Recurse -Force }
 try {
     Invoke-WebRequest -Uri $REPO_ZIP_URL -OutFile $zip -UseBasicParsing -TimeoutSec 600
-    Ok "Downloaded"
+    Show-Ok "Downloaded"
 } catch {
-    Err "Download failed: $_"
+    Show-Err ("Download failed: " + $_)
     Stop-Transcript -ErrorAction SilentlyContinue
     exit 1
 }
 
-Info "Extracting..."
+Show-Info "Extracting..."
 Expand-Archive -Path $zip -DestinationPath $ext -Force
 $inner = Get-ChildItem $ext -Directory | Select-Object -First 1
 Move-Item -Path $inner.FullName -Destination $INSTALL_DIR -Force
 Remove-Item $zip -Force -ErrorAction SilentlyContinue
 Remove-Item $ext -Recurse -Force -ErrorAction SilentlyContinue
-Ok "Extracted to $INSTALL_DIR"
+Show-Ok ("Extracted to " + $INSTALL_DIR)
 
-# Generate .env
-$jwt = Random-String 32
-$adminPw = Random-String 16
-$pbToken = Random-String 24
-@"
-MONGO_URL=mongodb://mongo:27017
-DB_NAME=realflow
-JWT_SECRET_KEY=$jwt
-ADMIN_EMAIL=admin@realflow.local
-ADMIN_PASSWORD=$adminPw
-POSTBACK_TOKEN=$pbToken
-CORS_ORIGINS=*
-RUT_MEM_LIMIT_MB=4096
-RUT_MAX_CONCURRENCY=4
-RESEND_API_KEY=
-SMTP_USER=
-SMTP_PASSWORD=
-GOOGLE_SHEETS_SA_PATH=
-LICENSE_SERVER_URL=
-LICENSE_KEY=
-"@ | Out-File -FilePath "$INSTALL_DIR\.env" -Encoding ASCII -Force
-Ok ".env generated (secure random passwords)"
+# Generate .env using array - no here-string
+$jwt = New-RandomString -L 32
+$adminPw = New-RandomString -L 16
+$pbToken = New-RandomString -L 24
 
-# ==============================================================
+$envPath = $INSTALL_DIR + "\.env"
+$envLines = @(
+    "MONGO_URL=mongodb://mongo:27017",
+    "DB_NAME=realflow",
+    ("JWT_SECRET_KEY=" + $jwt),
+    "ADMIN_EMAIL=admin@realflow.local",
+    ("ADMIN_PASSWORD=" + $adminPw),
+    ("POSTBACK_TOKEN=" + $pbToken),
+    "CORS_ORIGINS=*",
+    "RUT_MEM_LIMIT_MB=4096",
+    "RUT_MAX_CONCURRENCY=4",
+    "RESEND_API_KEY=",
+    "SMTP_USER=",
+    "SMTP_PASSWORD=",
+    "GOOGLE_SHEETS_SA_PATH=",
+    "LICENSE_SERVER_URL=",
+    "LICENSE_KEY="
+)
+$envLines | Set-Content -Path $envPath -Encoding ASCII -Force
+Show-Ok ".env generated [secure random passwords]"
+
+# ============================================================
 # STEP 7: Build + Start
-# ==============================================================
-Step "STEP 7/7: Building + Starting RealFlow"
+# ============================================================
+Show-Step "STEP 7/7: Building + Starting RealFlow"
 
 Push-Location $INSTALL_DIR
 
-# Auto-pick compose file based on RAM
 $compose = "docker-compose.yml"
-if ($ram -le 10 -and (Test-Path "docker-compose.lowram.yml")) {
+if (($ram -le 10) -and (Test-Path "docker-compose.lowram.yml")) {
     $compose = "docker-compose.lowram.yml"
-    Info "Low-RAM profile use kar raha hun"
-} elseif ($ram -le 16 -and (Test-Path "docker-compose.mid.yml")) {
+    Show-Info "Low-RAM profile use kar raha hun"
+} elseif (($ram -le 16) -and (Test-Path "docker-compose.mid.yml")) {
     $compose = "docker-compose.mid.yml"
-    Info "Mid-tier profile use kar raha hun"
+    Show-Info "Mid-tier profile use kar raha hun"
 }
 
-Info "Containers build kar raha hun (5-15 min first time)..."
+Show-Info "Containers build kar raha hun [5-15 min first time]"
 & docker compose -f $compose build 2>&1 | Tee-Object -FilePath $LOG_FILE -Append
 if ($LASTEXITCODE -ne 0) {
-    Err "Build failed. Log: $LOG_FILE"
+    Show-Err ("Build failed. Log: " + $LOG_FILE)
     Pop-Location
     Stop-Transcript -ErrorAction SilentlyContinue
     exit 1
 }
-Ok "Build complete"
+Show-Ok "Build complete"
 
-Info "Containers start kar raha hun..."
+Show-Info "Containers start kar raha hun"
 & docker compose -f $compose up -d 2>&1 | Tee-Object -FilePath $LOG_FILE -Append
 if ($LASTEXITCODE -ne 0) {
-    Err "Start failed. Log: $LOG_FILE"
+    Show-Err ("Start failed. Log: " + $LOG_FILE)
     Pop-Location
     Stop-Transcript -ErrorAction SilentlyContinue
     exit 1
 }
 Pop-Location
 
-# Wait for RealFlow to respond
-Info "RealFlow ready hone ka wait..."
+# Wait for RealFlow
+Show-Info "RealFlow ready hone ka wait"
 $ok = $false
 for ($i = 0; $i -lt 24; $i++) {
     Start-Sleep -Seconds 5
@@ -408,12 +420,13 @@ for ($i = 0; $i -lt 24; $i++) {
         $r = Invoke-WebRequest -Uri "http://localhost:3000" -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
         if ($r.StatusCode -eq 200) { $ok = $true; break }
     } catch { }
-    if ($i % 6 -eq 5) { Write-Host "      Loading... ($((($i+1)*5))s)" -ForegroundColor DarkGray }
+    if (($i % 6) -eq 5) {
+        $sec = ($i + 1) * 5
+        Write-Host ("      Loading... " + $sec + "s") -ForegroundColor DarkGray
+    }
 }
 
-# ==============================================================
 # DONE
-# ==============================================================
 Write-Host ""
 Write-Host ("=" * 70) -ForegroundColor Green
 Write-Host "  REALFLOW READY HAI!" -ForegroundColor Green
@@ -426,45 +439,46 @@ Write-Host "    API Docs:    http://localhost:8001/docs" -ForegroundColor White
 Write-Host ""
 Write-Host "  ADMIN LOGIN:" -ForegroundColor Yellow
 Write-Host "    Email:       admin@realflow.local" -ForegroundColor White
-Write-Host "    Password:    $adminPw" -ForegroundColor White
+Write-Host ("    Password:    " + $adminPw) -ForegroundColor White
 Write-Host ""
 
-# Save credentials to Desktop
+# Save creds - using array
 $credsFile = "$env:USERPROFILE\Desktop\RealFlow-Credentials.txt"
-@"
-=================================================
-  RealFlow - Aap Ke Admin Credentials
-=================================================
+$credsLines = @(
+    "=================================================",
+    "  RealFlow - Aap Ke Admin Credentials",
+    "=================================================",
+    "",
+    "  Browser kholein:",
+    "    http://localhost:3000",
+    "",
+    "  Admin Login:",
+    "    URL:       http://localhost:3000/admin-login",
+    "    Email:     admin@realflow.local",
+    ("    Password:  " + $adminPw),
+    "",
+    ("  Installed:   " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')),
+    ("  Folder:      " + $INSTALL_DIR),
+    "",
+    "=================================================",
+    "  IMPORTANT: Yeh file delete na karein!",
+    "  Apne phone mein bhi screenshot save kar lein.",
+    "================================================="
+)
+$credsLines | Set-Content -Path $credsFile -Encoding UTF8 -Force
+Show-Ok ("Credentials saved: " + $credsFile)
 
-  Browser kholein:
-    http://localhost:3000
-
-  Admin Login:
-    URL:       http://localhost:3000/admin-login
-    Email:     admin@realflow.local
-    Password:  $adminPw
-
-  Installed:   $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-  Folder:      $INSTALL_DIR
-
-=================================================
-  IMPORTANT: Yeh file delete na karein!
-  Apne phone mein bhi screenshot save kar lein.
-=================================================
-"@ | Out-File -FilePath $credsFile -Encoding UTF8 -Force
-Ok "Credentials saved: $credsFile"
-
-# Create Desktop shortcut
+# Desktop shortcut
 try {
     $wsh = New-Object -ComObject WScript.Shell
     $sc = $wsh.CreateShortcut("$env:USERPROFILE\Desktop\RealFlow.url")
     $sc.TargetPath = "http://localhost:3000"
     $sc.Save()
-    Ok "Desktop shortcut: RealFlow.url"
+    Show-Ok "Desktop shortcut: RealFlow.url"
 } catch { }
 
 # Open browser
-Info "Browser open kar raha hun..."
+Show-Info "Browser open kar raha hun"
 Start-Sleep -Seconds 2
 Start-Process "http://localhost:3000"
 
