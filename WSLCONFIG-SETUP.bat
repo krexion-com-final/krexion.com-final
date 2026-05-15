@@ -1,6 +1,6 @@
 @echo off
 REM ════════════════════════════════════════════════════════════════════
-REM   RealFlow — One-Click WSL2 Memory Allocation (ZERO-OOM Plan)
+REM   Krexion — One-Click WSL2 Memory Allocation (ZERO-OOM Plan)
 REM   ────────────────────────────────────────────────────────────────
 REM   Allocates 20 GB RAM + 8 CPU cores + 8 GB swap to WSL2 / Docker.
 REM   Of those 20 GB:
@@ -19,7 +19,7 @@ REM     • Your PC has 32 GB+ total RAM and you want bullet-proof memory
 REM
 REM   What it does:
 REM     1. Writes a .wslconfig file to %USERPROFILE% with the recommended
-REM        ZERO-OOM limits for RealFlow on a 32 GB PC.
+REM        ZERO-OOM limits for Krexion on a 32 GB PC.
 REM     2. Shuts down WSL so the new limits take effect.
 REM     3. Reminds you to restart Docker Desktop (it can't auto-restart
 REM        another GUI app reliably from a script).
@@ -36,7 +36,7 @@ setlocal
 
 echo.
 echo ============================================================
-echo   RealFlow — WSL2 Memory Allocation Setup (20 GB - ZERO-OOM)
+echo   Krexion — WSL2 Memory Allocation Setup (20 GB - ZERO-OOM)
 echo ============================================================
 echo.
 
@@ -106,7 +106,7 @@ echo     docker run --rm alpine sh -c "free -h ^| grep Mem"
 echo.
 echo   Expected:  Mem:  ~19Gi total  ^(some overhead from Linux kernel^)
 echo.
-echo   Then run REALFLOW-FORCE-SYNC.bat so the backend container picks
+echo   Then run KREXION-FORCE-SYNC.bat so the backend container picks
 echo   up the new 6 GB mem_limit + Mongo 4 GB cap from docker-compose.yml.
 echo ============================================================
 echo.

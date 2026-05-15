@@ -1,4 +1,4 @@
-# RealFlow Project — Collaboration Handoff Prompt
+# Krexion Project — Collaboration Handoff Prompt
 
 > **Use kaise karein**: Aap apne Emergent account pe ek naya project ya chat shuru karo, niche likha hua poora prompt copy karo, paste karo, aur send kar do. Agent saari context samajh ke kaam shuru kar dega.
 
@@ -7,7 +7,7 @@
 ## 📋 PROMPT (copy this entire block, paste in Emergent chat)
 
 ```
-PROJECT HANDOFF — RealFlow CPI / Real-User-Traffic Automation Platform
+PROJECT HANDOFF — Krexion CPI / Real-User-Traffic Automation Platform
 
 I am taking over this project from a friend. Please clone this public GitHub repo
 and continue development on the SAME main branch — all your commits should land
@@ -21,7 +21,7 @@ collaboration on this email)
 📦 WHAT THIS PROJECT IS
 ═══════════════════════════════════════════════════════════════════════
 
-RealFlow is a full-stack web app + Python automation suite for two main use cases:
+Krexion is a full-stack web app + Python automation suite for two main use cases:
 
 1. CPI (Cost-Per-Install) automation — a cloud-based React/FastAPI dashboard
    orchestrates a standalone Python worker running on the owner's Windows PC.
@@ -46,18 +46,18 @@ RealFlow is a full-stack web app + Python automation suite for two main use case
 ═══════════════════════════════════════════════════════════════════════
 
 Cloud (preview, also hosted on Vercel for production):
-- Frontend: React (CRA) — production deployed at https://realflow.online
+- Frontend: React (CRA) — production deployed at https://krexion.com
 - Backend: FastAPI + MongoDB
 - Backend hosted in Docker on the owner's Windows PC (NOT on Emergent or Vercel)
-- Public access via Cloudflare Tunnel: api.realflow.online → realflow-backend:8001
-- Domain DNS: realflow.online (Cloudflare proxied)
+- Public access via Cloudflare Tunnel: api.krexion.com → krexion-backend:8001
+- Domain DNS: krexion.com (Cloudflare proxied)
 
 Standalone (Windows PC):
-- Docker Compose: realflow-mongo + realflow-backend + realflow-cloudflared
-- Master deploy script: RealFlow-AUTO.bat (auto git pull + container rebuild)
+- Docker Compose: krexion-mongo + krexion-backend + krexion-cloudflared
+- Master deploy script: Krexion-AUTO.bat (auto git pull + container rebuild)
 - Tunnel setup helper: FIX-TUNNEL.bat
 - Diagnostic helper: DIAGNOSE.bat
-- CPI worker: /realflow-cpi-worker/ — separate Python project for ADB control
+- CPI worker: /krexion-cpi-worker/ — separate Python project for ADB control
 
 Key files:
 - /app/backend/server.py — main FastAPI server (10k+ lines, large but cohesive)
@@ -78,7 +78,7 @@ Key files:
 ═══════════════════════════════════════════════════════════════════════
 
 ✅ Admin login (local + cloud) working
-✅ Cloudflare Tunnel chal raha hai — public URL realflow.online live
+✅ Cloudflare Tunnel chal raha hai — public URL krexion.com live
 ✅ User registration + admin approval flow
 ✅ FlashRewards survey bot tested END-TO-END against real production URLs
    (lovable.app → retailproductsusa.com → displayoptoffers.com → eward4spot.com)
@@ -92,7 +92,7 @@ Key files:
 ✅ AI Answer Learning (rut_answer_learning.py) — biases future jobs toward
    high-conversion answer patterns
 ✅ Excel data file uploads with Docker volume persistence
-✅ One-click Windows deploy script (RealFlow-AUTO.bat)
+✅ One-click Windows deploy script (Krexion-AUTO.bat)
 ✅ CPI Android engine with strict device locale/timezone sync, fresh-install
    enforcement, app force-stopping
 ✅ Bug fixes shipped recently: empty user list (Pydantic name field), wmic
@@ -129,13 +129,13 @@ P2 — future:
 🔐 CREDENTIALS (already in /app/memory/test_credentials.md)
 ═══════════════════════════════════════════════════════════════════════
 
-LOCAL PRODUCTION (Windows PC, https://realflow.online):
+LOCAL PRODUCTION (Windows PC, https://krexion.com):
 - Admin email: us9661626@gmail.com
 - Admin password: (owner will provide separately — DO NOT share publicly)
-- Default seed admin (also exists): admin@realflow.local / admin123
+- Default seed admin (also exists): admin@krexion.local / admin123
 
 CLOUD PREVIEW (Emergent k8s):
-- Admin: admin@realflow.local / admin123
+- Admin: admin@krexion.local / admin123
 - Test user: test@test.com / test12345
 
 CLOUDFLARE TUNNEL: token stored in /app/.env on the Windows PC. The friend
@@ -192,7 +192,7 @@ GO.
 
 ### Step 1: Repo Public Karo
 
-1. **https://github.com/<APKA_USERNAME>/<REPO_NAME>** kholo (jahan aapka realflow code hai)
+1. **https://github.com/<APKA_USERNAME>/<REPO_NAME>** kholo (jahan aapka krexion code hai)
 2. **Settings** tab → niche scroll → **"Change visibility"** section → **"Change to public"**
 3. Confirm karo (repo name dobara type karna hoga)
 

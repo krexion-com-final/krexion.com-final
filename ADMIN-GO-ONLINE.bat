@@ -1,6 +1,6 @@
 @echo off
 REM +================================================================+
-REM |   RealFlow ADMIN GO-ONLINE                                      |
+REM |   Krexion ADMIN GO-ONLINE                                      |
 REM |                                                                  |
 REM |   FOR THE OWNER/ADMIN ONLY -- not for customers.                |
 REM |                                                                  |

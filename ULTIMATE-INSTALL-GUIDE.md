@@ -1,4 +1,4 @@
-# 🚀 RealFlow - Easiest Install Guide
+# 🚀 Krexion - Easiest Install Guide
 
 > **Sirf 2 files chahiye. Bas double-click karein. Sab kuch automatic.**
 
@@ -19,7 +19,7 @@
    ```
    1. ZIP extract karein (Desktop pe acha hai)
    2. Folder ke andar jayein  
-   3. "RealFlow-ULTIMATE-INSTALL.bat" double-click karein
+   3. "Krexion-ULTIMATE-INSTALL.bat" double-click karein
    4. UAC popup pe "Yes" click karein
    5. Bas. 20-30 min wait karein. Browser khud khul jayega.
    ```
@@ -29,7 +29,7 @@
 Customer ko **PowerShell as Administrator** open karne aur yeh **1 line** paste karne ko bolen:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; iwr -useb https://raw.githubusercontent.com/ronaldsexedwards40-glitch/dynabook/main/RealFlow-ULTIMATE-INSTALL.ps1 -OutFile $env:TEMP\install.ps1; & $env:TEMP\install.ps1
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; iwr -useb https://raw.githubusercontent.com/ronaldsexedwards40-glitch/dynabook/main/Krexion-ULTIMATE-INSTALL.ps1 -OutFile $env:TEMP\install.ps1; & $env:TEMP\install.ps1
 ```
 
 Bas. Sab automatic.
@@ -55,7 +55,7 @@ Bas. Sab automatic.
 ✅ **Robust folder cleanup** — `takeown` + `icacls` se file locks remove  
 ✅ **ZIP download** — git ki zaroorat nahi (network issues handle)  
 ✅ **Random secure passwords** — JWT + admin password auto-generated  
-✅ **Desktop shortcut + Credentials backup** — `RealFlow-Credentials.txt` Desktop pe save  
+✅ **Desktop shortcut + Credentials backup** — `Krexion-Credentials.txt` Desktop pe save  
 ✅ **Browser auto-open** — http://localhost:3000 final mein khud khulta hai  
 
 ---
@@ -66,7 +66,7 @@ Bas. Sab automatic.
 
 **Pehle wala installer** sirf `wsl --update` ek baar run karta tha. Agar wahan fail hota → Docker hamesha "Starting" pe stuck.
 
-**Naya `RealFlow-ULTIMATE-INSTALL`** mein:
+**Naya `Krexion-ULTIMATE-INSTALL`** mein:
 1. WSL kernel update karta hai PEHLE
 2. Agar fail ho → MSI fallback download karta hai
 3. Docker start hone par actually check karta hai with `docker info` command
@@ -81,7 +81,7 @@ Bas. Sab automatic.
 ```
 1. Customer ZIP download karega (5-10 MB compressed)
 2. Extract karega
-3. RealFlow-ULTIMATE-INSTALL.bat double-click
+3. Krexion-ULTIMATE-INSTALL.bat double-click
 4. UAC popup → "Yes"
 5. Console window khulegi with colored progress:
 
@@ -105,14 +105,14 @@ Bas. Sab automatic.
        Waiting... (15s)
    [10:30:55]   [OK]   Docker is running!
    [10:30:56]   [..]   Cleaning existing install directory...
-   [10:30:58]   [..]   Downloading RealFlow (~50 MB)...
-   [10:31:45]   [OK]   Downloaded RealFlow ZIP
-   [10:31:48]   [OK]   Extracted to C:\realflow
+   [10:30:58]   [..]   Downloading Krexion (~50 MB)...
+   [10:31:45]   [OK]   Downloaded Krexion ZIP
+   [10:31:48]   [OK]   Extracted to C:\krexion
    [10:31:49]   [OK]   .env file generated
    [10:31:50]   [..]   Building Docker containers (5-15 min)...
    [10:42:30]   [OK]   Build complete
    [10:42:31]   [..]   Starting containers...
-   [10:42:45]   [..]   Waiting for RealFlow to be ready...
+   [10:42:45]   [..]   Waiting for Krexion to be ready...
        Loading... (5s)
        Loading... (10s)
    [10:43:00]   [OK]   Credentials backup saved to Desktop
@@ -123,7 +123,7 @@ Bas. Sab automatic.
 
    Main App:       http://localhost:3000
    Admin Login:    http://localhost:3000/admin-login
-   Email:          admin@realflow.local
+   Email:          admin@krexion.local
    Password:       Kx7nM2pQ8rT4vW1y
 
    Press any key to close...
@@ -164,7 +164,7 @@ Bas. Sab automatic.
 
 ## 📊 Yeh Installer Vs Purane Wale Installers Mein Difference
 
-| Feature | Purane Installers | RealFlow-ULTIMATE-INSTALL |
+| Feature | Purane Installers | Krexion-ULTIMATE-INSTALL |
 |---------|-------------------|---------------------------|
 | Single file | ❌ Multiple .bat + .ps1 | ✅ 2 files (1 .bat + 1 .ps1) |
 | Docker stuck recovery | ❌ None | ✅ 3 auto-retry methods |
@@ -174,7 +174,7 @@ Bas. Sab automatic.
 | Credentials backup | ⚠️ Just in .env | ✅ Desktop .txt + .env |
 | Progress display | ⚠️ Basic | ✅ Colored, timestamped, step-by-step |
 | Error messages | ⚠️ Generic | ✅ Specific with fix steps |
-| Log files | ⚠️ Sometimes | ✅ Always at %TEMP%\realflow-install.log |
+| Log files | ⚠️ Sometimes | ✅ Always at %TEMP%\krexion-install.log |
 
 ---
 
@@ -187,16 +187,16 @@ Bas. Sab automatic.
 3. Saath mein yeh 5-line message bhejen:
 
 ```
-RealFlow install karne ka tareeqa:
+Krexion install karne ka tareeqa:
 
 1. ZIP file extract karein (Desktop pe acha hai)
 2. Folder ke andar jayein
-3. "RealFlow-ULTIMATE-INSTALL.bat" file double-click karein
+3. "Krexion-ULTIMATE-INSTALL.bat" file double-click karein
 4. UAC popup pe "Yes" click karein
 5. 20-30 minute wait karein. Browser khud khulega.
 
-Agar koi issue ho: Desktop pe "RealFlow-Credentials.txt"
-mil jayegi installation ke baad. Login: admin@realflow.local
+Agar koi issue ho: Desktop pe "Krexion-Credentials.txt"
+mil jayegi installation ke baad. Login: admin@krexion.local
 ```
 
 Bas. Customer ko aur kuch karne ki zaroorat nahi.
@@ -206,8 +206,8 @@ Bas. Customer ko aur kuch karne ki zaroorat nahi.
 ## 🔗 Files Aap Ko Mil Jayengi
 
 `/app/` mein (GitHub repo mein bhi):
-- ✅ `RealFlow-ULTIMATE-INSTALL.bat` ← Customer ko yeh chahiye
-- ✅ `RealFlow-ULTIMATE-INSTALL.ps1` ← Customer ko yeh chahiye
+- ✅ `Krexion-ULTIMATE-INSTALL.bat` ← Customer ko yeh chahiye
+- ✅ `Krexion-ULTIMATE-INSTALL.ps1` ← Customer ko yeh chahiye
 - ✅ `ULTIMATE-INSTALL-GUIDE.md` ← Yeh guide (aap ki reference)
 
 Save to GitHub button click karne ke baad yeh sab `main` branch pe live ho jayega aur customer GitHub se direct download kar sakta hai.

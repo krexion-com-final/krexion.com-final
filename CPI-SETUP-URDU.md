@@ -1,6 +1,6 @@
-# RealFlow CPI Module — Urdu Setup Guide
+# Krexion CPI Module — Urdu Setup Guide
 
-> **Yeh guide aap ke home PC pe RealFlow CPI Worker setup karne ka step-by-step process hai.**
+> **Yeh guide aap ke home PC pe Krexion CPI Worker setup karne ka step-by-step process hai.**
 > Aap ko sirf phones connect karne hain, baki sab automatic.
 
 ---
@@ -23,20 +23,20 @@
 - libimobiledevice (Windows port)
 - iTunes drivers (for iPhone USB recognition)
 
-### RealFlow Account
-- ✅ realflow.online pe **active user account** hona chahiye
+### Krexion Account
+- ✅ krexion.com pe **active user account** hona chahiye
 - ✅ Admin se **CPI feature enabled** karwana hai (Profile → Features → CPI)
 
 ---
 
 ## 🚀 Setup — One-Click Installation
 
-### Step 1 — RealFlow Update Karein
-Aap ke home PC pe pehle se `realflow-backend` aur `realflow-mongo` Docker chal rahe hain. Latest CPI module pull karein:
+### Step 1 — Krexion Update Karein
+Aap ke home PC pe pehle se `krexion-backend` aur `krexion-mongo` Docker chal rahe hain. Latest CPI module pull karein:
 
 ```powershell
-cd C:\realflow
-.\REALFLOW-UPDATE.bat
+cd C:\krexion
+.\KREXION-UPDATE.bat
 ```
 
 Yeh `git pull` + `docker compose build` + restart kar dega.
@@ -47,9 +47,9 @@ PowerShell **Administrator mode** me kholein:
 
 Phir yeh paste karein:
 ```powershell
-cd C:\realflow
+cd C:\krexion
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-.\deployment\cpi\REALFLOW-CPI-SETUP.ps1
+.\deployment\cpi\KREXION-CPI-SETUP.ps1
 ```
 
 Script automatically install karega:
@@ -64,12 +64,12 @@ Script automatically install karega:
 ⏱ **Pehli baar 10-15 minutes lagenge** (downloads).
 
 ### Step 3 — config.yaml Edit Karein
-File location: `C:\realflow\realflow-cpi-worker\config.yaml`
+File location: `C:\krexion\krexion-cpi-worker\config.yaml`
 
 **JWT token paste karna**:
-1. realflow.online pe login karein
+1. krexion.com pe login karein
 2. Browser DevTools open karein (F12)
-3. Application → Local Storage → `https://realflow.online`
+3. Application → Local Storage → `https://krexion.com`
 4. `token` ki value copy karein (lambi string hogi `eyJhbGc...` se start)
 5. config.yaml me paste karein:
    ```yaml
@@ -149,7 +149,7 @@ File location: `C:\realflow\realflow-cpi-worker\config.yaml`
 #### 4.5 — Verify
 PowerShell me:
 ```powershell
-cd C:\realflow\realflow-cpi-worker
+cd C:\krexion\krexion-cpi-worker
 .\venv-cpi-worker\Scripts\python.exe -m tidevice3 list
 ```
 Output me iPhone UDID dikhna chahiye.
@@ -159,8 +159,8 @@ Output me iPhone UDID dikhna chahiye.
 ## ✅ Health Check — Doctor Run Karein
 
 ```powershell
-cd C:\realflow
-.\deployment\cpi\REALFLOW-CPI-DOCTOR.ps1
+cd C:\krexion
+.\deployment\cpi\KREXION-CPI-DOCTOR.ps1
 ```
 
 Sab green ✓ dikhe, koi red ✗ na ho. Devices section me **Android + iPhone dono** dikhne chahiye.
@@ -171,35 +171,35 @@ Sab green ✓ dikhe, koi red ✗ na ho. Devices section me **Android + iPhone do
 
 ### Manual Start (Foreground)
 ```powershell
-cd C:\realflow
-.\deployment\cpi\REALFLOW-CPI-WORKER-START.bat
+cd C:\krexion
+.\deployment\cpi\KREXION-CPI-WORKER-START.bat
 ```
 Logs live console pe dikhenge. Ctrl+C se stop.
 
 ### Auto-Start on Boot (Recommended)
 ```powershell
-cd C:\realflow
+cd C:\krexion
 .\deployment\cpi\INSTALL-WORKER-AS-SERVICE.ps1
 ```
-Yeh `RealFlowCPIWorker` naam ki Windows service install karega. PC reboot pe automatic chalegi.
+Yeh `KrexionCPIWorker` naam ki Windows service install karega. PC reboot pe automatic chalegi.
 
 Service manage karne ke commands:
 ```powershell
-nssm status RealFlowCPIWorker      # Check status
-nssm restart RealFlowCPIWorker     # Restart
-nssm stop RealFlowCPIWorker        # Stop
+nssm status KrexionCPIWorker      # Check status
+nssm restart KrexionCPIWorker     # Restart
+nssm stop KrexionCPIWorker        # Stop
 ```
 
 Logs:
-- `C:\realflow\realflow-cpi-worker\worker.out.log`
-- `C:\realflow\realflow-cpi-worker\worker.err.log`
+- `C:\krexion\krexion-cpi-worker\worker.out.log`
+- `C:\krexion\krexion-cpi-worker\worker.err.log`
 
 ---
 
 ## 🌐 Web Se Use Karna (Daily Routine)
 
 ### Pehli Baar
-1. realflow.online open karein
+1. krexion.com open karein
 2. Login karein
 3. Sidebar me **CPI Devices** click karein → aap ka Android + iPhone "online" dikhne chahiye 🟢
 4. **CPI Offers** me ek offer add karein (jo aap ke network panel se mil raha hai)
@@ -217,7 +217,7 @@ Logs:
 - **CPI Dashboard** → earnings (estimated), conversions, devices online
 
 ### Conversions Verify Karna
-- RealFlow panel **conversion_likely** mark karega worker ne workflow complete kiya
+- Krexion panel **conversion_likely** mark karega worker ne workflow complete kiya
 - Aap apne **CPI network panel** (taptrcks etc.) pe ja kar verify karein
 - Network panel pe agar conversion register ho gayi → aap ki kamai pakki ✅
 - Network panel pe nahi aayi → offer ne reject kiya (anti-detect issue ya geo issue)
@@ -229,24 +229,24 @@ Logs:
 ### Weekly (5 min)
 - Phone reboot karein (memory cleanup)
 - worker.err.log check karein for errors
-- Earnings reconciliation (RealFlow vs network panel)
+- Earnings reconciliation (Krexion vs network panel)
 
 ### Monthly (30 min)
 - Magisk modules update (phone se)
 - Apple ID rotation check (iOS)
-- Worker code update: `cd C:\realflow && git pull && nssm restart RealFlowCPIWorker`
+- Worker code update: `cd C:\krexion && git pull && nssm restart KrexionCPIWorker`
 - Performance review: kis offer pe success rate kam, kis pe zyada
 
 ### As-Needed
 - Naya phone add karna: connect via USB → worker auto-detect → web UI me dikhega
 - Apple ID 2FA prompt aaye → web UI alert dikhega → SMS code aap ke personal phone pe → web UI me code dalein → workflow continue
-- JWT expire ho jaaye → realflow.online pe re-login → naya token copy → config.yaml update → worker restart
+- JWT expire ho jaaye → krexion.com pe re-login → naya token copy → config.yaml update → worker restart
 
 ---
 
 ## ⚠️ Important Reminders
 
-1. **Conversion numbers RealFlow pe = ESTIMATED**. Asli payout network panel pe verify karein.
+1. **Conversion numbers Krexion pe = ESTIMATED**. Asli payout network panel pe verify karein.
 2. **Offer-level bans normal hain** — ek offer ban hua to dusra try karein, account level pe rare ban hota hai.
 3. **Slow ramp-up karein** — pehla din 5 installs, fir 10, 20, 50… acha record banayein.
 4. **Multiple offers parallel chala sakte hain** — sirf devices share karne ka resource constraint.
@@ -260,7 +260,7 @@ Logs:
 
 Worker logs check karein:
 ```powershell
-Get-Content C:\realflow\realflow-cpi-worker\worker.err.log -Tail 50
+Get-Content C:\krexion\krexion-cpi-worker\worker.err.log -Tail 50
 ```
 
 Sab kuch ho gaya — happy earning! 💰

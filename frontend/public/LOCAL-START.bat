@@ -1,11 +1,11 @@
 @echo off
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
-title RealFlow - Local Deploy
+title Krexion - Local Deploy
 color 0B
 
 echo ============================================================
-echo   RealFlow - Local One-Click Deploy (Windows / No Docker)
+echo   Krexion - Local One-Click Deploy (Windows / No Docker)
 echo ============================================================
 echo.
 
@@ -136,7 +136,7 @@ echo [SETUP] [5/5] .env files + admin password generate...
 
 set "JWT_SECRET="
 for /f "delims=" %%i in ('powershell -NoProfile -Command "-join ((48..57)+(65..90)+(97..122) ^| Get-Random -Count 48 ^| %% {[char]$_})"') do set "JWT_SECRET=%%i"
-if "!JWT_SECRET!"=="" set "JWT_SECRET=realflow-%random%%random%%random%-jwt"
+if "!JWT_SECRET!"=="" set "JWT_SECRET=krexion-%random%%random%%random%-jwt"
 
 set "ADMIN_PASS="
 for /f "delims=" %%i in ('powershell -NoProfile -Command "$c='abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'; -join (1..16 ^| %% { $c[(Get-Random -Maximum $c.Length)] })"') do set "ADMIN_PASS=%%i"
@@ -148,16 +148,16 @@ if "!POSTBACK_TOK!"=="" set "POSTBACK_TOK=pb-%random%%random%"
 
 > backend\.env (
     echo MONGO_URL=mongodb://localhost:27017
-    echo DB_NAME=realflow
+    echo DB_NAME=krexion
     echo JWT_SECRET_KEY=!JWT_SECRET!
-    echo ADMIN_EMAIL=admin@realflow.local
+    echo ADMIN_EMAIL=admin@krexion.local
     echo ADMIN_PASSWORD=!ADMIN_PASS!
     echo POSTBACK_TOKEN=!POSTBACK_TOK!
     echo APP_URL=http://localhost:3000
     echo PUBLIC_BASE_URL=http://localhost:8001
     echo CORS_ORIGINS=*
     echo RESEND_API_KEY=
-    echo RESEND_FROM=no-reply@realflow.local
+    echo RESEND_FROM=no-reply@krexion.local
     echo SENDER_EMAIL=onboarding@resend.dev
     echo GOOGLE_CLIENT_ID=
     echo GOOGLE_CLIENT_SECRET=
@@ -172,13 +172,13 @@ if "!POSTBACK_TOK!"=="" set "POSTBACK_TOK=pb-%random%%random%"
 
 > CREDENTIALS.txt (
     echo ============================================================
-    echo  RealFlow Admin Credentials - SAFE RAKHEIN
+    echo  Krexion Admin Credentials - SAFE RAKHEIN
     echo ============================================================
     echo  Frontend:    http://localhost:3000
     echo  Backend:     http://localhost:8001
     echo  Admin URL:   http://localhost:3000/admin
     echo.
-    echo  Admin Email:    admin@realflow.local
+    echo  Admin Email:    admin@krexion.local
     echo  Admin Password: !ADMIN_PASS!
     echo ============================================================
 )
@@ -268,13 +268,13 @@ echo         [OK] MongoDB OK
 
 :: Start backend
 echo [START] Backend (FastAPI) launching on http://localhost:8001
-start "RealFlow Backend" cmd /k "cd /d %~dp0 && call .venv\Scripts\activate.bat && cd backend && python -m uvicorn server:app --host 0.0.0.0 --port 8001 --workers 1"
+start "Krexion Backend" cmd /k "cd /d %~dp0 && call .venv\Scripts\activate.bat && cd backend && python -m uvicorn server:app --host 0.0.0.0 --port 8001 --workers 1"
 
 timeout /t 5 /nobreak >nul
 
 :: Start frontend
 echo [START] Frontend launching on http://localhost:3000
-start "RealFlow Frontend" cmd /k "cd /d %~dp0\frontend && %AppData%\npm\serve.cmd -s build -l 3000"
+start "Krexion Frontend" cmd /k "cd /d %~dp0\frontend && %AppData%\npm\serve.cmd -s build -l 3000"
 
 timeout /t 3 /nobreak >nul
 
@@ -284,7 +284,7 @@ start "" http://localhost:3000
 color 0A
 echo.
 echo ============================================================
-echo   REALFLOW IS RUNNING
+echo   KREXION IS RUNNING
 echo ============================================================
 echo   Frontend:    http://localhost:3000
 echo   Backend API: http://localhost:8001

@@ -1,10 +1,10 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
-title RealFlow - Cloudflare Tunnel Fix
+title Krexion - Cloudflare Tunnel Fix
 color 0B
 
 REM ════════════════════════════════════════════════════════════
-REM  RealFlow Tunnel Fixer
+REM  Krexion Tunnel Fixer
 REM  - Cloudflare error 1033 = cloudflared connector down
 REM  - Yeh script TUNNEL_TOKEN ko .env mein dalti hai aur
 REM    cloudflared container ko start karti hai (data ko bina chhede)
@@ -14,14 +14,14 @@ cd /d "%~dp0"
 set "ROOT=%CD%"
 echo.
 echo  ============================================================
-echo   RealFlow Cloudflare Tunnel Fix
+echo   Krexion Cloudflare Tunnel Fix
 echo  ============================================================
 echo.
 echo   Folder: !ROOT!
 echo.
 
 if not exist "!ROOT!\.env" (
-    echo  [X] .env file nahi mili. Pehle RealFlow-AUTO.bat chala ke
+    echo  [X] .env file nahi mili. Pehle Krexion-AUTO.bat chala ke
     echo      app deploy karo, phir yeh script chalao.
     pause
     exit /b 1
@@ -30,7 +30,7 @@ if not exist "!ROOT!\.env" (
 REM ─── Token input ───
 echo  Cloudflare Zero Trust dashboard se TUNNEL_TOKEN paste karo:
 echo  ^(https://one.dash.cloudflare.com -^> Networks -^> Tunnels
-echo   -^> realflow tunnel -^> Configure -^> token copy^)
+echo   -^> krexion tunnel -^> Configure -^> token copy^)
 echo.
 set "NEW_TOKEN="
 set /p "NEW_TOKEN=  Paste TUNNEL_TOKEN: "
@@ -78,7 +78,7 @@ echo.
 
 REM ─── Old cloudflared container hatao (agar ho) ───
 echo  [2/4] Purana cloudflared container saaf kar raha hun...
-docker rm -f realflow-cloudflared >nul 2>&1
+docker rm -f krexion-cloudflared >nul 2>&1
 echo        OK
 echo.
 
@@ -100,10 +100,10 @@ echo.
 echo  ============================================================
 echo   Status check
 echo  ============================================================
-docker ps --filter "name=realflow-cloudflared" --format "    {{.Names}}: {{.Status}}"
+docker ps --filter "name=krexion-cloudflared" --format "    {{.Names}}: {{.Status}}"
 echo.
 echo  Cloudflared container logs ^(last 15 lines^):
-docker logs --tail 15 realflow-cloudflared 2>&1
+docker logs --tail 15 krexion-cloudflared 2>&1
 echo.
 
 echo  ============================================================
@@ -111,12 +111,12 @@ echo   Test
 echo  ============================================================
 echo.
 echo  Public API test...
-powershell -NoProfile -Command "try { $r = Invoke-RestMethod -Uri 'https://api.realflow.online/api/admin/login' -Method POST -Body (@{email='admin@realflow.local';password='admin123'} ^| ConvertTo-Json) -ContentType 'application/json' -TimeoutSec 20; if ($r.access_token) { Write-Host '  PUBLIC LOGIN: PASS  ✓' -ForegroundColor Green } else { Write-Host '  PUBLIC LOGIN: FAIL (no token)' -ForegroundColor Red } } catch { Write-Host ('  PUBLIC LOGIN: FAIL - ' + $_.Exception.Message) -ForegroundColor Red }"
+powershell -NoProfile -Command "try { $r = Invoke-RestMethod -Uri 'https://api.krexion.com/api/admin/login' -Method POST -Body (@{email='admin@krexion.local';password='admin123'} ^| ConvertTo-Json) -ContentType 'application/json' -TimeoutSec 20; if ($r.access_token) { Write-Host '  PUBLIC LOGIN: PASS  ✓' -ForegroundColor Green } else { Write-Host '  PUBLIC LOGIN: FAIL (no token)' -ForegroundColor Red } } catch { Write-Host ('  PUBLIC LOGIN: FAIL - ' + $_.Exception.Message) -ForegroundColor Red }"
 
 echo.
 echo  ============================================================
-echo   Done. Ab browser mein https://realflow.online/admin
-echo   khol ke admin@realflow.local / admin123 se login karo.
+echo   Done. Ab browser mein https://krexion.com/admin
+echo   khol ke admin@krexion.local / admin123 se login karo.
 echo  ============================================================
 echo.
 pause

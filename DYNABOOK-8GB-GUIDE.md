@@ -38,7 +38,7 @@
 4. Docker Desktop ko restart karein (tray icon → Quit → re-open).
 
 ### Step 2 — Installer chalaein
-**`INSTALL-REALFLOW.bat`** double-click. Script automatically:
+**`INSTALL-KREXION.bat`** double-click. Script automatically:
 - RAM detect kare ga (8 GB) → **Low-RAM profile** auto-enable kare ga
 - Mongo cap **1 GB**, Backend cap **2.5 GB**, Frontend **192 MB**
 - `RUT_MAX_CONCURRENCY=2` set kar de ga
@@ -71,11 +71,11 @@ Diagnostics check: `http://localhost:8001/api/diagnostics/health`
 2. Pehla job hamesha **10 visits ka test** karein — agar smooth chala to chunk badha lo.
 
 ### Agar phir bhi slow ho?
-1. Open Docker Desktop → **Containers** tab → check `realflow-backend` memory bar. Agar 90%+ pe red ho to:
+1. Open Docker Desktop → **Containers** tab → check `krexion-backend` memory bar. Agar 90%+ pe red ho to:
    - `RUT_MAX_CONCURRENCY=1` set karein in `.env`
    - `docker compose down && docker compose -f docker-compose.yml -f docker-compose.lowram.yml up -d`
 2. Chrome / Edge band karein RUT job ke time (browser memory eat karta hai).
-3. Antivirus exclude karein `C:\realflow\` folder ko (Defender real-time scan slow karta hai Docker file I/O).
+3. Antivirus exclude karein `C:\krexion\` folder ko (Defender real-time scan slow karta hai Docker file I/O).
 
 ---
 
@@ -91,21 +91,21 @@ Aap ki PC pe **realistic numbers**:
 | **100 visits batch** | ~15-20 minutes |
 | Boot time (cold start) | ~2 minutes (first time 8-10 min) |
 
-Agar aap ko **>50 visits/minute** chahiye to **16 GB RAM** ka PC use karein ya cloud VPS (DigitalOcean $24/mo droplet) pe deploy karein — same `install-realflow.sh` chalega.
+Agar aap ko **>50 visits/minute** chahiye to **16 GB RAM** ka PC use karein ya cloud VPS (DigitalOcean $24/mo droplet) pe deploy karein — same `install-krexion.sh` chalega.
 
 ---
 
 ## 🛡 Daily Maintenance (har 2-3 din)
 
 ```cmd
-cd C:\realflow
-REALFLOW-DOCTOR.bat        :: health check
+cd C:\krexion
+KREXION-DOCTOR.bat        :: health check
 docker system prune -f      :: purane images delete (saves 1-2 GB disk)
 ```
 
 Mongo data backup (har hafta):
 ```cmd
-docker exec realflow-mongo mongodump --archive=/data/db/backup.archive
+docker exec krexion-mongo mongodump --archive=/data/db/backup.archive
 ```
 
 ---
@@ -116,14 +116,14 @@ docker exec realflow-mongo mongodump --archive=/data/db/backup.archive
 2. **Background mein Chrome / Edge / Photoshop chalana** → RAM compete kare gi ❌
 3. **WSL cap nahi karna** → Docker poori RAM kha jayega ❌
 4. **HDD pe install karna (agar laptop pe second drive ho)** → Mongo slow ho jayega. Always **SSD** pe.
-5. **Antivirus scan on**, `C:\realflow\` ko exclude na karna → Docker file I/O slow.
+5. **Antivirus scan on**, `C:\krexion\` ko exclude na karna → Docker file I/O slow.
 
 ---
 
 ## 🆘 TL;DR (single-line)
 
 ```
-WSLCONFIG-8GB.bat → wsl --shutdown → Docker restart → INSTALL-REALFLOW.bat → http://localhost:3000
+WSLCONFIG-8GB.bat → wsl --shutdown → Docker restart → INSTALL-KREXION.bat → http://localhost:3000
 RUT concurrency = 2, delay = 3-5 sec. Done.
 ```
 

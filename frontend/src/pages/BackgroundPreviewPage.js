@@ -60,7 +60,7 @@ export default function BackgroundPreviewPage() {
       <div className="relative z-10 flex min-h-screen flex-col items-center justify-center px-6 py-12">
         <div className="w-full max-w-3xl rounded-2xl border border-white/10 bg-black/60 p-8 backdrop-blur-xl">
           <p className="text-xs uppercase tracking-[0.3em] text-blue-400">
-            RealFlow · Background Preview
+            Krexion · Background Preview
           </p>
           <h1 className="mt-2 text-3xl font-bold sm:text-4xl">
             {current.title}

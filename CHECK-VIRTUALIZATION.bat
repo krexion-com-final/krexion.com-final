@@ -1,17 +1,17 @@
 @echo off
 REM ============================================================
-REM  RealFlow VIRTUALIZATION DIAGNOSTIC - Quick Check
+REM  Krexion VIRTUALIZATION DIAGNOSTIC - Quick Check
 REM ============================================================
 REM  Yeh tool 4 alag methods se check karta hai ki aap ke
 REM  PC pe virtualization ENABLED hai ya DISABLED.
 REM ============================================================
 
-title RealFlow Virtualization Check
+title Krexion Virtualization Check
 color 0B
 
 echo.
 echo  ============================================================
-echo   RealFlow Virtualization Status Check
+echo   Krexion Virtualization Status Check
 echo  ============================================================
 echo.
 echo   4 alag methods se test kar raha hai...
@@ -62,12 +62,12 @@ powershell -ExecutionPolicy Bypass -NoProfile -Command ^
     "Write-Host '';" ^
     "if ($ci.HyperVisorPresent -or ($LASTEXITCODE -eq 0) -or $found) {" ^
     "    Write-Host '    Virtualization is ENABLED' -ForegroundColor Green;" ^
-    "    Write-Host '    Aap RealFlow-ULTIMATE-INSTALL.bat normally chala sakte hain' -ForegroundColor Green" ^
+    "    Write-Host '    Aap Krexion-ULTIMATE-INSTALL.bat normally chala sakte hain' -ForegroundColor Green" ^
     "} else {" ^
     "    Write-Host '    Status: UNCERTAIN (Win11 24H2 false-negative bug possible)' -ForegroundColor Yellow;" ^
     "    Write-Host '';" ^
     "    Write-Host '    Try karein:' -ForegroundColor Yellow;" ^
-    "    Write-Host '    1. RealFlow-FORCE-INSTALL.bat chalayein (virt check skip karta hai)' -ForegroundColor White;" ^
+    "    Write-Host '    1. Krexion-FORCE-INSTALL.bat chalayein (virt check skip karta hai)' -ForegroundColor White;" ^
     "    Write-Host '    2. Agar Docker start nahi hota to BIOS mein virt enable karein' -ForegroundColor White" ^
     "}"
 

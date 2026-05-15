@@ -80,7 +80,7 @@ async def send_alert_email(
         smtp_port = 587
     resend_key = _pick("resend_api_key", "RESEND_API_KEY")
     resend_from = _pick("resend_from", "RESEND_FROM") or _pick("sender_email", "SENDER_EMAIL")
-    sender_name = _pick("sender_name", "APP_NAME") or "RealFlow"
+    sender_name = _pick("sender_name", "APP_NAME") or "Krexion"
     sender_email = (
         cfg.get("sender_email")
         or smtp_user
@@ -210,7 +210,7 @@ async def maybe_send_low_stock_alert(
     notification_email: Optional[str],
     primary_email: Optional[str],
     alerts_enabled: bool,
-    app_name: str = "RealFlow",
+    app_name: str = "Krexion",
 ) -> bool:
     """Check the upload's row counters and send a low-stock alert if the
     sheet has crossed the threshold for the first time. Returns True when
@@ -290,7 +290,7 @@ async def maybe_send_low_stock_alert(
     )
 
     try:
-        await send_alert_email(target, subject, html, db=user_db.client["realflow"] if user_db is not None else None)
+        await send_alert_email(target, subject, html, db=user_db.client["krexion"] if user_db is not None else None)
     except Exception as e:
         logger.warning(f"[notify] low-stock send_alert_email failed: {e}")
         return False
@@ -320,7 +320,7 @@ __all__ = [
 # ──────────────────── Admin-managed email config ────────────────────────
 #
 # The single source of truth for SMTP/Resend creds is a Mongo doc in the
-# main `realflow` DB (collection `admin_settings`, doc id `email_config`).
+# main `krexion` DB (collection `admin_settings`, doc id `email_config`).
 # This keeps the config out of `.env` files (and out of git) and lets one
 # admin configure email-sending for ALL users with a single form in the
 # admin panel.

@@ -32,7 +32,7 @@ import requests
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://fluid-dynamics-12.preview.emergentagent.com").rstrip("/")
 TEST_EMAIL = "test@test.com"
 TEST_PASSWORD = "test12345"
-ADMIN_EMAIL = "admin@realflow.local"
+ADMIN_EMAIL = "admin@krexion.local"
 ADMIN_PASSWORD = "admin123"
 
 

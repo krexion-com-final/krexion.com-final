@@ -24,11 +24,11 @@ https://github.com/ronaldsexedwards40-glitch/dynabook/archive/refs/heads/main.zi
 
 **WhatsApp message template:**
 ```
-🚀 RealFlow Install Link:
+🚀 Krexion Install Link:
 
 1. ZIP download: https://github.com/ronaldsexedwards40-glitch/dynabook/archive/refs/heads/main.zip
 2. Extract karein
-3. RealFlow-ULTIMATE-INSTALL.bat double-click
+3. Krexion-ULTIMATE-INSTALL.bat double-click
 4. UAC popup pe "Yes"
 5. 20-30 min wait — browser khud khulega
 
@@ -73,7 +73,7 @@ Bas itna hi. Koi issue ho to msg karein.
 
 **WhatsApp message template:**
 ```
-🚀 RealFlow Install:
+🚀 Krexion Install:
 
 👉 https://ronaldsexedwards40-glitch.github.io/dynabook/install.html
 
@@ -96,11 +96,11 @@ Koi issue ho to msg karein! ✨
    ```
    https://ronaldsexedwards40-glitch.github.io/dynabook/install.html
    ```
-3. (Optional) Custom alias daalein: `realflow-install`
+3. (Optional) Custom alias daalein: `krexion-install`
 4. **"Shorten URL"** click karein
 5. Aap ko short link milegi:
    ```
-   https://tinyurl.com/realflow-install
+   https://tinyurl.com/krexion-install
    ```
 
 ✅ Free, instant, no signup, custom name possible
@@ -108,9 +108,9 @@ Koi issue ho to msg karein! ✨
 #### 🥈 Method B: is.gd (super fast, no signup)
 
 1. https://is.gd open karein
-2. URL paste + (optional) "Customize URL" mein `realflow` daalein
+2. URL paste + (optional) "Customize URL" mein `krexion` daalein
 3. **"Shorten"** click karein
-4. Result: `https://is.gd/realflow` (agar available ho)
+4. Result: `https://is.gd/krexion` (agar available ho)
 
 #### 🥉 Method C: Bit.ly (signup needed, but professional)
 
@@ -118,7 +118,7 @@ Koi issue ho to msg karein! ✨
 2. **"Create new"** → **"Link"**
 3. Long URL paste karein
 4. Free plan mein **bit.ly/XXXX** milta hai (5 custom per month)
-5. Aap can choose: `bit.ly/realflow-install`
+5. Aap can choose: `bit.ly/krexion-install`
 
 ✅ Professional, analytics (kitne logon ne click kiya), custom links
 
@@ -126,9 +126,9 @@ Koi issue ho to msg karein! ✨
 
 Agar serious business hai aur own brand chahiye:
 1. Cloudflare account banaye
-2. Custom domain kharide (e.g., `realflow.online` — $10/year)
-3. Cloudflare Pages se `install.realflow.online` ya `realflow.online/install`
-4. Result: `https://realflow.online/install`
+2. Custom domain kharide (e.g., `krexion.com` — $10/year)
+3. Cloudflare Pages se `install.krexion.com` ya `krexion.com/install`
+4. Result: `https://krexion.com/install`
 
 ---
 
@@ -137,9 +137,9 @@ Agar serious business hai aur own brand chahiye:
 ### Template 1: Friendly + Short (Recommended)
 
 ```
-🚀 *RealFlow* installation:
+🚀 *Krexion* installation:
 
-👉 https://tinyurl.com/realflow-install
+👉 https://tinyurl.com/krexion-install
 
 Open link → "Download & Install" button → 20-30 min wait → done!
 
@@ -149,7 +149,7 @@ Koi bhi issue ho, sirf msg kar dena ✨
 ### Template 2: With Trust Indicators
 
 ```
-🚀 *RealFlow* - Traffic Automation Platform
+🚀 *Krexion* - Traffic Automation Platform
 
 ✅ Self-hosted (aap ki PC pe chalta hai)
 ✅ No data sharing
@@ -157,7 +157,7 @@ Koi bhi issue ho, sirf msg kar dena ✨
 ✅ 20 minute setup
 
 📲 Install karein:
-https://tinyurl.com/realflow-install
+https://tinyurl.com/krexion-install
 
 Step-by-step instructions link pe milengi.
 ```
@@ -165,7 +165,7 @@ Step-by-step instructions link pe milengi.
 ### Template 3: Sales Pitch + CTA
 
 ```
-🔥 *RealFlow* - Production-Ready Traffic Platform
+🔥 *Krexion* - Production-Ready Traffic Platform
 
 🎯 Features:
 • Anti-detect browser farm (RUT)
@@ -175,7 +175,7 @@ Step-by-step instructions link pe milengi.
 • License management built-in
 
 📲 Install (20 min):
-https://tinyurl.com/realflow-install
+https://tinyurl.com/krexion-install
 
 Beautiful step-by-step page khulegi.
 ```
@@ -183,15 +183,15 @@ Beautiful step-by-step page khulegi.
 ### Template 4: Maximum Urgency
 
 ```
-🚀 RealFlow ready hai!
+🚀 Krexion ready hai!
 
-📥 Install link: https://tinyurl.com/realflow-install
+📥 Install link: https://tinyurl.com/krexion-install
 
 Bas yeh 5 steps:
 1. Link kholein
 2. "Download & Install" button click
 3. ZIP extract karein  
-4. RealFlow-ULTIMATE-INSTALL.bat double-click
+4. Krexion-ULTIMATE-INSTALL.bat double-click
 5. UAC pe Yes → 20 min wait
 
 20 minute baad browser khud khulega ✨
@@ -205,7 +205,7 @@ Bas yeh 5 steps:
 
 | What to change | Where in file |
 |----------------|---------------|
-| App name "RealFlow" | Line ~96 `<h1>` |
+| App name "Krexion" | Line ~96 `<h1>` |
 | Tagline | Line ~104 `<p class="subtitle">` |
 | Features (4 cards) | Lines ~158-185 |
 | Steps (5 cards) | Lines ~193-225 |
@@ -221,7 +221,7 @@ Edit karke save karein → 1 min mein GitHub Pages pe live ho jayega.
 
 ### Phase 1: One-time Setup (10 min)
 1. ✅ GitHub Pages enable karein (Settings → Pages → Save)
-2. ✅ TinyURL pe short link banaye: `tinyurl.com/realflow-install`
+2. ✅ TinyURL pe short link banaye: `tinyurl.com/krexion-install`
 3. ✅ Yeh short link save karein WhatsApp/email mein
 
 ### Phase 2: Customer Outreach (per customer 2 min)
@@ -247,7 +247,7 @@ Edit karke save karein → 1 min mein GitHub Pages pe live ho jayega.
 **Aap ke liye best setup**:
 
 1. **GitHub Pages enable karein** → `install.html` live ho jayegi
-2. **TinyURL** se short banaye: `tinyurl.com/realflow-install`
+2. **TinyURL** se short banaye: `tinyurl.com/krexion-install`
 3. **Template 1** copy karein, customer ko bhejein
 
 **Result**: Customer ko 1 link milti hai → Click → Beautiful page → Install → 20 min mein ready.

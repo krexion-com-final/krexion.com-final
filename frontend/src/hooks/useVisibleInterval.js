@@ -4,7 +4,7 @@
 // callback while the tab is in the background and resumes (with an
 // immediate refresh) when the user comes back.
 //
-// Why this matters for RealFlow performance:
+// Why this matters for Krexion performance:
 //   The dashboard, uploaded-things, jobs, and CPI pages all poll the
 //   backend every few seconds for live updates. A user who keeps 5 tabs
 //   open in the background is doing 5x the work for zero benefit —

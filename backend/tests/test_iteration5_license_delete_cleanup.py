@@ -21,7 +21,7 @@ BASE_URL = os.environ.get("BACKEND_URL") or "https://dynabook-preview.preview.em
 BASE_URL = BASE_URL.rstrip("/")
 API = f"{BASE_URL}/api"
 
-ADMIN_EMAIL = "admin@realflow.local"
+ADMIN_EMAIL = "admin@krexion.local"
 ADMIN_PASSWORD = "admin123"
 
 

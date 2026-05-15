@@ -1,7 +1,7 @@
 # ============================================================
-#  RealFlow -- One-Click Cloud Deploy (Render.com Blueprint)
+#  Krexion -- One-Click Cloud Deploy (Render.com Blueprint)
 # ============================================================
-#  This file tells Render.com EXACTLY how to deploy RealFlow
+#  This file tells Render.com EXACTLY how to deploy Krexion
 #  to the cloud directly from GitHub.
 #
 #  USAGE:
@@ -10,7 +10,7 @@
 #  3. Connect your GitHub repo (ronaldsexedwards40-glitch/dynabook)
 #  4. Render finds this file automatically -> deploys everything
 #  5. After 10 min you get a permanent URL like:
-#        https://realflow-XXXX.onrender.com
+#        https://krexion-XXXX.onrender.com
 #
 #  Auto-deploys on every git push to main.
 #  No Emergent. No local PC. Lives on the cloud.
@@ -22,7 +22,7 @@ services:
   # Backend API (FastAPI + Python)
   # ──────────────────────────────────────────────────
   - type: web
-    name: realflow-backend
+    name: krexion-backend
     runtime: docker
     plan: starter          # $7/mo, always-on. Use "free" for sleep-on-idle.
     dockerfilePath: ./backend/Dockerfile
@@ -33,14 +33,14 @@ services:
     envVars:
       - key: MONGO_URL
         fromDatabase:
-          name: realflow-mongo
+          name: krexion-mongo
           property: connectionString
       - key: DB_NAME
-        value: realflow
+        value: krexion
       - key: JWT_SECRET_KEY
         generateValue: true   # Render generates a strong secret
       - key: ADMIN_EMAIL
-        value: admin@realflow.local
+        value: admin@krexion.local
       - key: ADMIN_PASSWORD
         generateValue: true   # Render generates, you check dashboard for value
       - key: POSTBACK_TOKEN
@@ -63,7 +63,7 @@ services:
   # Frontend (React static site)
   # ──────────────────────────────────────────────────
   - type: web
-    name: realflow-frontend
+    name: krexion-frontend
     runtime: static
     plan: free                # frontend is always free (static)
     buildCommand: cd frontend && yarn install && yarn build
@@ -73,7 +73,7 @@ services:
     envVars:
       - key: REACT_APP_BACKEND_URL
         fromService:
-          name: realflow-backend
+          name: krexion-backend
           type: web
           property: host       # auto-injects backend URL
     routes:
@@ -85,9 +85,9 @@ services:
 # MongoDB (managed database)
 # ──────────────────────────────────────────────────
 databases:
-  - name: realflow-mongo
+  - name: krexion-mongo
     plan: starter             # $7/mo for managed Mongo on Render
-    databaseName: realflow
+    databaseName: krexion
     region: singapore
     # If you want FREE Mongo: use MongoDB Atlas (https://mongodb.com/atlas)
     # then set MONGO_URL env var manually instead of fromDatabase.

@@ -1,14 +1,14 @@
-# 🚀 RealFlow — Easiest Install Method
+# 🚀 Krexion — Easiest Install Method
 
 > Aap chahte hain ek hi folder, ek hi button click, sab automatic? Yahi hai.
 
 ## Step 1 — Folder open karein
 
-Is repo mein **`RealFlow-Setup/`** folder hai. Use folder ko USB ya new PC pe copy karein (ya yahin chalain).
+Is repo mein **`Krexion-Setup/`** folder hai. Use folder ko USB ya new PC pe copy karein (ya yahin chalain).
 
 ## Step 2 — Double-click karein
 
-`RealFlow-Setup/` folder ke andar **`Install.bat`** ko double-click karein.
+`Krexion-Setup/` folder ke andar **`Install.bat`** ko double-click karein.
 
 ## Step 3 — UAC popup pe "Yes" karein
 
@@ -24,23 +24,23 @@ Bas. Wizard khud:
 - ✅ Random secure admin password generate karega
 - ✅ Docker images build karega
 - ✅ Sab containers start karega
-- ✅ Desktop pe "RealFlow" shortcut banayega
+- ✅ Desktop pe "Krexion" shortcut banayega
 - ✅ Browser mein `http://localhost:3000` open karega
 
 ## Step 5 — Wait karein (5-30 minutes first time)
 
 Progress bar dikhega. Reboot ki zaroorat hui to wizard khud reboot karwa de ga aur restart ke baad **auto-resume** kar de ga.
 
-## Step 6 — "OPEN REALFLOW" button pe click karein
+## Step 6 — "OPEN KREXION" button pe click karein
 
-Done! Browser mein RealFlow open ho jayega. Admin password wizard screen pe + `C:\realflow\.env` mein saved hai.
+Done! Browser mein Krexion open ho jayega. Admin password wizard screen pe + `C:\krexion\.env` mein saved hai.
 
 ---
 
 ## 📦 Folder Contents
 
 ```
-RealFlow-Setup/
+Krexion-Setup/
 ├── Install.bat         ← YE DOUBLE-CLICK KAREIN
 ├── setup-engine.ps1    ← Wizard ki actual logic (PowerShell)
 ├── README.txt          ← Detailed English instructions
@@ -55,7 +55,7 @@ RealFlow-Setup/
 
 ## 🔄 Dusre PC pe install karna ho?
 
-**First PC pe install karne ke baad**, `RealFlow-Setup/` folder ko USB pe copy karein.
+**First PC pe install karne ke baad**, `Krexion-Setup/` folder ko USB pe copy karein.
 
 `bundle/` folder ke andar Docker + Git installers cached ho gaye hain. Dusre PC pe wizard khud detect karega cached files aur **skip karega downloads** — install sirf **5 minute** mein ho jayega, internet nahi b ho to b chal jayega.
 
@@ -68,7 +68,7 @@ RealFlow-Setup/
 Linux/Mac pe ye GUI wizard nahi chalega. Aap use karein:
 
 ```bash
-sudo bash install-realflow.sh
+sudo bash install-krexion.sh
 ```
 
 (Repo ke root mein already maujood hai.)
@@ -77,6 +77,6 @@ sudo bash install-realflow.sh
 
 ## ❓ Issues?
 
-`RealFlow-Setup/setup.log` file mein full log save hota hai — agar fail ho to ye file open karke last error dekhein. 90% issues "Docker not running" hote hain — Docker Desktop manually start karke `Install.bat` dobara click karein.
+`Krexion-Setup/setup.log` file mein full log save hota hai — agar fail ho to ye file open karke last error dekhein. 90% issues "Docker not running" hote hain — Docker Desktop manually start karke `Install.bat` dobara click karein.
 
-Full troubleshooting: **`RealFlow-Setup/README.txt`**
+Full troubleshooting: **`Krexion-Setup/README.txt`**

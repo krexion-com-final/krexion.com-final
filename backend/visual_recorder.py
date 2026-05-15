@@ -1,6 +1,6 @@
 """
 Visual Recorder — interactive Playwright session manager that records the
-user's clicks/typing as a RealFlow automation JSON.
+user's clicks/typing as a Krexion automation JSON.
 
 Workflow:
 1. /api/visual-recorder/start — launches a headless Chromium with the

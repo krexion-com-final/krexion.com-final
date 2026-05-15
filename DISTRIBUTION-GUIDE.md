@@ -4,18 +4,18 @@
 
 | File | Kiske Liye | Kya Karta Hai |
 |------|------------|---------------|
-| `REALFLOW.bat` | **Aap (Admin)** | Admin password show karta hai — aap kar sakte ho license issue, user manage, etc |
-| `REALFLOW-CUSTOMER.bat` | **Customer** | Admin password HIDE — customer sirf normal user account banata hai |
+| `KREXION.bat` | **Aap (Admin)** | Admin password show karta hai — aap kar sakte ho license issue, user manage, etc |
+| `KREXION-CUSTOMER.bat` | **Customer** | Admin password HIDE — customer sirf normal user account banata hai |
 
 ## 🔐 Kya Farq Hai?
 
-### REALFLOW.bat (Admin Version)
+### KREXION.bat (Admin Version)
 - ✅ Install ke baad **admin password Desktop pe save** hota hai
 - ✅ Aap `/admin-login` se login kar sakte hain
 - ✅ License management, user approval, pricing control
 - ✅ Browser khulta hai → `http://localhost:3000`
 
-### REALFLOW-CUSTOMER.bat (Customer Version)
+### KREXION-CUSTOMER.bat (Customer Version)
 - ❌ Admin password **kahin save nahi hota** — customer ko pata hi nahi chalega
 - ✅ Customer ko `/register` page pe direct le jata hai
 - ✅ Customer apna naam/email se naya account banata hai
@@ -30,11 +30,11 @@
 GitHub se ZIP download karein aur customer ko bhejein. Customer ko bolen:
 
 ```
-🚀 RealFlow Install:
+🚀 Krexion Install:
 
 1. ZIP file download karein
 2. Extract karein (Desktop pe acha hai)
-3. "REALFLOW-CUSTOMER.bat" file dhondein (REALFLOW.bat NAHI!)
+3. "KREXION-CUSTOMER.bat" file dhondein (KREXION.bat NAHI!)
 4. Us pe double-click karein
 5. UAC popup pe "YES"
 6. 20-30 minute wait karein
@@ -47,19 +47,19 @@ License key chahiye to mujhe WhatsApp karein.
 ### Option 2: Sirf 2 Files Bhejen
 
 WhatsApp pe ZIP karke bhejen:
-- `REALFLOW-CUSTOMER.bat` (3 KB)
+- `KREXION-CUSTOMER.bat` (3 KB)
 - `install-master.ps1` (22 KB)
 
-Customer extract karke `REALFLOW-CUSTOMER.bat` double-click kare.
+Customer extract karke `KREXION-CUSTOMER.bat` double-click kare.
 
-## 🚨 Important: Customer Ko REALFLOW.bat NAHI Bhejna!
+## 🚨 Important: Customer Ko KREXION.bat NAHI Bhejna!
 
-Agar customer ne **REALFLOW.bat** chala diya:
-- Admin password Desktop pe save ho jata hai (`RealFlow-Info.txt`)
+Agar customer ne **KREXION.bat** chala diya:
+- Admin password Desktop pe save ho jata hai (`Krexion-Info.txt`)
 - Customer use kar sakta hai `/admin-login`
 - Customer sab kuch control kar sakta hai
 
-**Hamesha `REALFLOW-CUSTOMER.bat` ZIP mein dalein.**
+**Hamesha `KREXION-CUSTOMER.bat` ZIP mein dalein.**
 
 ## 📋 Workflow
 
@@ -68,8 +68,8 @@ Agar customer ne **REALFLOW.bat** chala diya:
 │ AAP (ADMIN)                                             │
 ├─────────────────────────────────────────────────────────┤
 │                                                         │
-│  1. REALFLOW.bat se apni PC pe install                 │
-│  2. Admin panel access (admin@realflow.local)          │
+│  1. KREXION.bat se apni PC pe install                 │
+│  2. Admin panel access (admin@krexion.local)          │
 │  3. /admin/licenses pe pricing/rules set karein        │
 │                                                         │
 │  Apni PC: http://localhost:3000/admin-login            │
@@ -82,7 +82,7 @@ Agar customer ne **REALFLOW.bat** chala diya:
 │ CUSTOMER                                                │
 ├─────────────────────────────────────────────────────────┤
 │                                                         │
-│  1. Aap se REALFLOW-CUSTOMER.bat le                    │
+│  1. Aap se KREXION-CUSTOMER.bat le                    │
 │  2. Apni PC pe install                                  │
 │  3. /register pe account banaye                         │
 │  4. Aap se license key WhatsApp se le                  │
@@ -97,7 +97,7 @@ Agar customer ne **REALFLOW.bat** chala diya:
 ## 💡 Customer Activation Process
 
 ### Phase 1: Customer Install (20-30 min)
-1. Customer `REALFLOW-CUSTOMER.bat` chalata hai
+1. Customer `KREXION-CUSTOMER.bat` chalata hai
 2. Install complete hote hi `/register` page khul jati hai
 
 ### Phase 2: Account Create (2 min)
@@ -116,7 +116,7 @@ Agar customer ne **REALFLOW.bat** chala diya:
 1. Customer setup wizard mein "I have a license key" click karega
 2. Key paste karega
 3. Activate
-4. ✅ RealFlow chalu
+4. ✅ Krexion chalu
 
 ### Phase 5: Login (Customer karta hai)
 1. Customer `/login` page pe email + password daalta hai
@@ -157,7 +157,7 @@ Bata den agar yeh add karna hai!
 
 Customer ko bhejne se pehle:
 - [ ] **Save to GitHub** button click ho gaya
-- [ ] **REALFLOW-CUSTOMER.bat** file mein hai
+- [ ] **KREXION-CUSTOMER.bat** file mein hai
 - [ ] **install-master.ps1** saath hai
 - [ ] Customer ko **admin password** kahin se nahi pata
 - [ ] License key issue karne ka plan hai
@@ -165,8 +165,8 @@ Customer ko bhejne se pehle:
 ## 🎯 Quick Reference
 
 ```
-Aap install karein:        REALFLOW.bat       (admin access milta hai)
-Customer install karein:   REALFLOW-CUSTOMER.bat (sirf user features)
+Aap install karein:        KREXION.bat       (admin access milta hai)
+Customer install karein:   KREXION-CUSTOMER.bat (sirf user features)
 ```
 
-Bas itna hi! Customer ko `REALFLOW-CUSTOMER.bat` bhejein, baki same workflow.
+Bas itna hi! Customer ko `KREXION-CUSTOMER.bat` bhejein, baki same workflow.

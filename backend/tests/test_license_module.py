@@ -1,5 +1,5 @@
 """
-RealFlow License Module — backend test suite (iteration 2)
+Krexion License Module — backend test suite (iteration 2)
 Tests the new /api/license/* (public) and /api/admin/license/* (admin)
 endpoints introduced in license_module.py.
 
@@ -21,7 +21,7 @@ BASE_URL = os.environ.get(
     "https://dynabook-dev.preview.emergentagent.com",
 ).rstrip("/")
 
-ADMIN_EMAIL = "admin@realflow.local"
+ADMIN_EMAIL = "admin@krexion.local"
 ADMIN_PASSWORD = "admin123"
 
 # Unique prefix so we don't collide with prior trial licenses

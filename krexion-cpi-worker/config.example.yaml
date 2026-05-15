@@ -1,0 +1,85 @@
+# Krexion CPI Worker — example configuration
+# Copy this to `config.yaml` and edit the values for your environment.
+# DO NOT commit config.yaml to git (it contains your API token).
+
+api:
+  # Cloud backend (production):
+  base_url: "https://api.krexion.com"
+  # If running locally for testing, point to your local backend:
+  # base_url: "http://localhost:8001"
+
+  # Long-lived JWT for the user account that owns the CPI feature.
+  # To get this:
+  #   1. Login on https://krexion.com
+  #   2. Open browser DevTools → Application → Local Storage
+  #   3. Copy the value of the "token" key
+  token: "PASTE_YOUR_KREXION_JWT_HERE"
+
+  # Polling interval (seconds). 5s is a good default.
+  poll_interval_seconds: 5
+
+  # Heartbeat interval per device (seconds).
+  heartbeat_interval_seconds: 30
+
+# ─────────────────────────────────────────────────────────────
+# Engine configuration
+# ─────────────────────────────────────────────────────────────
+android:
+  enabled: true
+  # adb path. On Windows with platform-tools in PATH this can stay "adb".
+  adb_path: "adb"
+  # Auto-discover all attached devices via `adb devices`.
+  auto_discover: true
+  # Only use these device serials (comma-separated). Empty = all.
+  serial_allowlist: []
+  # Magisk Props Config integration (requires Magisk root on device).
+  use_magisk_props: true
+  # Run Frida server on device for sensor / battery hooks (advanced).
+  use_frida: true
+  # Path to frida-server binary (will be pushed to device automatically).
+  # Leave blank to skip.
+  frida_server_path: ""
+
+ios:
+  # Set to true only when you have an iPhone connected. Android-only users leave false.
+  enabled: false
+  # Path to libimobiledevice tools (idevice_id, ideviceinstaller).
+  # On Windows install via KREXION-CPI-SETUP.ps1 — leave default.
+  libimobiledevice_path: "C:\\Program Files\\libimobiledevice"
+  # tidevice executable (auto-installed via pip).
+  tidevice_path: "tidevice3"
+  # WebDriverAgent .ipa path (sideloaded via Sideloadly during setup).
+  wda_bundle_id: "com.facebook.WebDriverAgentRunner.xctrunner"
+  # Apple ID rotation: list of Apple IDs to cycle through.
+  apple_ids:
+    - email: "your-apple-id-1@icloud.com"
+      password: "ENV:APPLE_ID_PWD_1"
+      cooldown_hours: 6
+  auto_discover: true
+  serial_allowlist: []
+
+# ─────────────────────────────────────────────────────────────
+# Install workflow tuning
+# ─────────────────────────────────────────────────────────────
+workflow:
+  # Settle delay AFTER install + behavior sim before marking conversion_likely.
+  default_settle_seconds: 60
+  # Behavior simulation duration (random in this range, seconds).
+  # 5+ min recommended so AppsFlyer/Adjust SDK fires conversion event.
+  behavior_min_seconds: 300
+  behavior_max_seconds: 360
+  # Click-to-install delay (seconds). Realistic users don't install instantly.
+  pre_install_min_seconds: 15
+  pre_install_max_seconds: 45
+  # Per-install timeout (kill if exceeded). 15 min covers slow proxy + 5min behavior.
+  install_timeout_seconds: 900
+  # Max retries on transient failures.
+  max_retries: 1
+
+# ─────────────────────────────────────────────────────────────
+# Logging
+# ─────────────────────────────────────────────────────────────
+logging:
+  level: "INFO"            # DEBUG | INFO | WARNING | ERROR
+  file: "worker.log"
+  json_logs: false         # set true for structured JSON logs

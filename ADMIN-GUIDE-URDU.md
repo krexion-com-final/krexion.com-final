@@ -1,4 +1,4 @@
-# 🛠️ RealFlow Admin — Self-Manage Guide
+# 🛠️ Krexion Admin — Self-Manage Guide
 
 Aap kahin se bhi, kisi bhi computer/mobile pe, GitHub web UI se 3 cheezein khud manage kar sakte ho:
 1. 🔴 Kill-switch (REVOKE / ACTIVATE)
@@ -26,7 +26,7 @@ Maine ek HTML page banaya hai jo aap ke browser mein khud key hash + expiry date
    (HTML preview service — page open ho jaye gi)
 
 **Option 2 — Local pe**
-- `C:\realflow\ADMIN-TOOLKIT.html` file ko double-click karein → default browser mein khul jaye gi
+- `C:\krexion\ADMIN-TOOLKIT.html` file ko double-click karein → default browser mein khul jaye gi
 
 **Option 3 — GitHub Pages (cleanest)** *(advanced - chahien toh setup karein)*
 - Repo Settings → Pages → Source: `main` branch root → save
@@ -110,7 +110,7 @@ Installer file mein expiry baked hai. Extend karne ke 2 steps:
 
 **Step 2.1**: Browser mein kholein:
 ```
-https://github.com/ronaldsexedwards40-glitch/dynabook/blob/main/RealFlow-INSTALL.bat
+https://github.com/ronaldsexedwards40-glitch/dynabook/blob/main/Krexion-INSTALL.bat
 ```
 
 **Step 2.2**: ✏️ Pencil icon click karein
@@ -167,7 +167,7 @@ $k='YOUR-NEW-KEY-HERE'
 
 **Step 3.1**: Browser mein kholein:
 ```
-https://github.com/ronaldsexedwards40-glitch/dynabook/blob/main/RealFlow-INSTALL.bat
+https://github.com/ronaldsexedwards40-glitch/dynabook/blob/main/Krexion-INSTALL.bat
 ```
 
 **Step 3.2**: ✏️ Pencil icon click
@@ -194,20 +194,20 @@ set "EXPECTED_HASH=<nayi-hash-yahan>"
 
 ## Scenario 1: File leak ho gayi! Foran band karo
 1. `.installer-status` → `REVOKED` → commit (30 sec mein worldwide kill)
-2. Bonus: `https://github.com/settings/tokens` → PAT "RealFlow Installer" → Delete
+2. Bonus: `https://github.com/settings/tokens` → PAT "Krexion Installer" → Delete
 
 ## Scenario 2: 60 din ho gaye, extend karna hai
 1. ADMIN-TOOLKIT.html → 90 din ka YYYYMMDD copy
-2. `RealFlow-INSTALL.bat` mein `EXPIRY_DATE` line update → commit
+2. `Krexion-INSTALL.bat` mein `EXPIRY_DATE` line update → commit
 
 ## Scenario 3: Nayi key chahiye (purani ko bhool gaye ya leak)
 1. ADMIN-TOOLKIT.html → Tool 1 → nayi key + hash generate
-2. `RealFlow-INSTALL.bat` mein `EXPECTED_HASH` update → commit
+2. `Krexion-INSTALL.bat` mein `EXPECTED_HASH` update → commit
 3. Nayi key safe rakhein!
 
 ## Scenario 4: Sab kuch reset karna hai (security incident)
 1. ADMIN-TOOLKIT.html se nayi key + hash
-2. RealFlow-INSTALL.bat mein 3 cheezein change:
+2. Krexion-INSTALL.bat mein 3 cheezein change:
    - `EXPECTED_HASH` (nayi key)
    - `EXPIRY_DATE` (naye 90 din)
    - `GH_PAT` (naya token bhi ho to)

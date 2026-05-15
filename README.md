@@ -1,4 +1,4 @@
-# 🚀 RealFlow
+# 🚀 Krexion
 
 > **Self-hosted traffic tracking + conversion + CPI automation platform**
 
@@ -10,7 +10,7 @@ Built with FastAPI + React + MongoDB + Playwright. Production-ready, multi-tenan
 
 ### 🪟 Windows (One-Click Install)
 
-Download the repo as ZIP from GitHub → extract → double-click **`RealFlow-Setup/Install.bat`** → follow GUI wizard.
+Download the repo as ZIP from GitHub → extract → double-click **`Krexion-Setup/Install.bat`** → follow GUI wizard.
 
 📖 **Complete user guide**: [USER-GUIDE-PRODUCTION.md](USER-GUIDE-PRODUCTION.md)
 
@@ -19,7 +19,7 @@ Download the repo as ZIP from GitHub → extract → double-click **`RealFlow-Se
 ```bash
 git clone https://github.com/ronaldsexedwards40-glitch/dynabook.git
 cd dynabook
-sudo bash install-realflow.sh
+sudo bash install-krexion.sh
 ```
 
 After install → open `http://localhost:3000` → login with credentials printed by installer.
@@ -104,7 +104,7 @@ Installer detects your hardware and configures the entire stack for optimal perf
 - **Admin/business owner guide**: [ADMIN-GUIDE-PRODUCTION.md](ADMIN-GUIDE-PRODUCTION.md) ⭐
 
 ### 📖 Deep Dives
-- **Full feature reference**: [REALFLOW-USER-GUIDE.md](REALFLOW-USER-GUIDE.md) (42 KB, all features explained)
+- **Full feature reference**: [KREXION-USER-GUIDE.md](KREXION-USER-GUIDE.md) (42 KB, all features explained)
 - **CPI module setup (Urdu)**: [CPI-SETUP-URDU.md](CPI-SETUP-URDU.md)
 - **CPI FAQs (Urdu)**: [CPI-FAQ-URDU.md](CPI-FAQ-URDU.md)
 - **Deployment guide (Urdu)**: [DEPLOY-README-URDU.md](DEPLOY-README-URDU.md)
@@ -132,7 +132,7 @@ After install, login at `http://localhost:3000/admin-login`:
 
 | Field | Value |
 |-------|-------|
-| Email | `admin@realflow.local` |
+| Email | `admin@krexion.local` |
 | Password | Printed by installer (also in `.env` as `ADMIN_PASSWORD`) |
 
 ⚠️ **CHANGE the default password immediately in production!**
@@ -141,11 +141,11 @@ After install, login at `http://localhost:3000/admin-login`:
 
 ## 🚦 Daily Operations
 
-### Windows (run from `C:\realflow`)
+### Windows (run from `C:\krexion`)
 ```powershell
-.\REALFLOW-LOGS.bat      # Live logs
-.\REALFLOW-UPDATE.bat    # Pull + rebuild + restart
-.\REALFLOW-STOP.bat      # Stop everything
+.\KREXION-LOGS.bat      # Live logs
+.\KREXION-UPDATE.bat    # Pull + rebuild + restart
+.\KREXION-STOP.bat      # Stop everything
 .\GO-ONLINE.bat          # Public URL (customer access)
 .\ADMIN-GO-ONLINE.bat    # Admin mobile access (DO NOT SHARE)
 ```

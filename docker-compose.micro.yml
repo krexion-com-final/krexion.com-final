@@ -1,5 +1,5 @@
 # ──────────────────────────────────────────────────────────────────
-#  RealFlow — MICRO profile (≤ 6 GB RAM machines, e.g. old 4GB laptops)
+#  Krexion — MICRO profile (≤ 6 GB RAM machines, e.g. old 4GB laptops)
 #
 #  Use: docker compose -f docker-compose.yml -f docker-compose.micro.yml up -d
 #
@@ -39,9 +39,9 @@ services:
       RUT_MEM_RESUME_PCT:   "50"
       RUT_MAX_CONCURRENCY:  "1"
       MONGO_URL:        "mongodb://mongo:27017"
-      DB_NAME:          "${DB_NAME:-realflow}"
+      DB_NAME:          "${DB_NAME:-krexion}"
       JWT_SECRET_KEY:   "${JWT_SECRET_KEY}"
-      ADMIN_EMAIL:      "${ADMIN_EMAIL:-admin@realflow.local}"
+      ADMIN_EMAIL:      "${ADMIN_EMAIL:-admin@krexion.local}"
       ADMIN_PASSWORD:   "${ADMIN_PASSWORD}"
       POSTBACK_TOKEN:   "${POSTBACK_TOKEN}"
       APP_URL:          "${APP_URL:-http://localhost:3000}"

@@ -30,7 +30,7 @@ Yeh 5 alag methods se test karega aur batayega:
 
 ### Step 2: Force Install Run Karein
 
-**`RealFlow-FORCE-INSTALL.bat`** ko double-click karein.
+**`Krexion-FORCE-INSTALL.bat`** ko double-click karein.
 
 Yeh virtualization check ko **skip** karta hai aur normal install continue karta hai.
 
@@ -58,7 +58,7 @@ Bas. 20-30 min mein install ho jayega.
 5. **Save & Exit** (usually F10)
 6. PC restart hone do
 7. `CHECK-VIRTUALIZATION.bat` dobara chala kar confirm karein
-8. `RealFlow-ULTIMATE-INSTALL.bat` chalayein
+8. `Krexion-ULTIMATE-INSTALL.bat` chalayein
 
 ---
 
@@ -66,8 +66,8 @@ Bas. 20-30 min mein install ho jayega.
 
 | File | Kab Use Karein |
 |------|----------------|
-| `RealFlow-ULTIMATE-INSTALL.bat` | **Normal install** — pehli baar |
-| `RealFlow-FORCE-INSTALL.bat` | **Virtualization check skip** karna ho |
+| `Krexion-ULTIMATE-INSTALL.bat` | **Normal install** — pehli baar |
+| `Krexion-FORCE-INSTALL.bat` | **Virtualization check skip** karna ho |
 | `CHECK-VIRTUALIZATION.bat` | **Diagnose** karna ho ki virt enabled hai ya nahi |
 
 ---
@@ -82,8 +82,8 @@ Aap ke screenshot mein dikha hai ki:
 
 **Mera suggestion**:
 1. Pehle `CHECK-VIRTUALIZATION.bat` chalayein
-2. Agar yeh kahe "ENABLED" → `RealFlow-FORCE-INSTALL.bat` chalayein
-3. Agar yeh kahe "UNCERTAIN" → bhi `RealFlow-FORCE-INSTALL.bat` try karein
+2. Agar yeh kahe "ENABLED" → `Krexion-FORCE-INSTALL.bat` chalayein
+3. Agar yeh kahe "UNCERTAIN" → bhi `Krexion-FORCE-INSTALL.bat` try karein
 4. Sirf agar **Docker bhi start nahi hota** to BIOS mein enable karein
 
 ---
@@ -124,7 +124,7 @@ Agar phir bhi fail to console mein detailed fix steps milengi.
 ### Q: Mera laptop purana hai, BIOS mein virtualization option nahi dikh raha?
 A: Bahut purane laptops mein yeh option nahi hota. Solution:
 - Manufacturer ki website se latest BIOS update karein
-- Ya cloud pe RealFlow chalayein (Render.com — `render.yaml` already provided)
+- Ya cloud pe Krexion chalayein (Render.com — `render.yaml` already provided)
 
 ---
 
@@ -136,7 +136,7 @@ Agar 3 cheezein try ki aur kuch kaam nahi kiya:
    - `CHECK-VIRTUALIZATION.bat` ka output
    - Installer ka error message
 2. **Log file share karein**:
-   - `C:\Users\YOUR_USER\AppData\Local\Temp\realflow-ultimate-install.log`
-   - `C:\Users\YOUR_USER\AppData\Local\Temp\realflow-install.log`
+   - `C:\Users\YOUR_USER\AppData\Local\Temp\krexion-ultimate-install.log`
+   - `C:\Users\YOUR_USER\AppData\Local\Temp\krexion-install.log`
 
 Aap ko 5 minute mein fix bata diya jayega.

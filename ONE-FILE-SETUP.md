@@ -1,14 +1,14 @@
-# 🚀 RealFlow — Sirf 1 File. Bas.
+# 🚀 Krexion — Sirf 1 File. Bas.
 
 ## Aap Customer Ko Yeh Bhejen
 
-**ZIP file** ya **REALFLOW.bat** + **install-master.ps1** (dono saath)
+**ZIP file** ya **KREXION.bat** + **install-master.ps1** (dono saath)
 
 Customer ko sirf yeh batayein:
 
 ```
 1. ZIP extract karein
-2. REALFLOW.bat double-click karein  
+2. KREXION.bat double-click karein  
 3. UAC popup pe YES
 4. 20-30 min wait karein
 
@@ -44,7 +44,7 @@ Bas. Kuch nahi karna. Browser khud khulega.
 - Stuck? → **Recovery 3**: Docker settings reset + restart
 - Sab fail? → Clear error with manual fix steps
 
-### Step 6: RealFlow Download (1-2 min)
+### Step 6: Krexion Download (1-2 min)
 - GitHub se latest ZIP
 - Purane install ka cleanup (takeown + icacls)
 - Random secure passwords generate
@@ -56,8 +56,8 @@ Bas. Kuch nahi karna. Browser khud khulega.
 - Browser khud open
 
 ### Done!
-- Desktop pe `RealFlow-Credentials.txt` file
-- Desktop pe `RealFlow.url` shortcut
+- Desktop pe `Krexion-Credentials.txt` file
+- Desktop pe `Krexion.url` shortcut
 - Browser khulta hai http://localhost:3000
 
 ---
@@ -66,7 +66,7 @@ Bas. Kuch nahi karna. Browser khud khulega.
 
 | File | Kya Karta Hai | Customer Ko Bhejna Hai? |
 |------|---------------|--------------------------|
-| `REALFLOW.bat` | THE ONE FILE | ✅ YES |
+| `KREXION.bat` | THE ONE FILE | ✅ YES |
 | `install-master.ps1` | Asli installer logic | ✅ YES (saath bhejen) |
 
 **Bas. Sirf yeh 2 files.**
@@ -80,21 +80,21 @@ Bas. Kuch nahi karna. Browser khud khulega.
 Aap: Save to GitHub button click karein
 Aap: Customer ko link bhejein:
      https://github.com/ronaldsexedwards40-glitch/dynabook/archive/refs/heads/main.zip
-Customer: Download → Extract → REALFLOW.bat double-click
+Customer: Download → Extract → KREXION.bat double-click
 ```
 
 ### Option B: Just 2 files via WhatsApp
 ```
-Aap: REALFLOW.bat + install-master.ps1 zip karke bhejein  
-Customer: Extract → REALFLOW.bat double-click
+Aap: KREXION.bat + install-master.ps1 zip karke bhejein  
+Customer: Extract → KREXION.bat double-click
 ```
-*Note: REALFLOW.bat agar install-master.ps1 nahi mile to khud GitHub se download karega — so just REALFLOW.bat bhi bheju to chalega.*
+*Note: KREXION.bat agar install-master.ps1 nahi mile to khud GitHub se download karega — so just KREXION.bat bhi bheju to chalega.*
 
-### Option C: Just REALFLOW.bat (Smallest, ~3 KB)
+### Option C: Just KREXION.bat (Smallest, ~3 KB)
 ```
-Aap: Sirf REALFLOW.bat bhejein
+Aap: Sirf KREXION.bat bhejein
 Customer: Double-click karein
-REALFLOW.bat: install-master.ps1 GitHub se khud download karega
+KREXION.bat: install-master.ps1 GitHub se khud download karega
 ```
 *Pre-requisite: Save to GitHub button click ho chuka hai*
 
@@ -106,13 +106,13 @@ REALFLOW.bat: install-master.ps1 GitHub se khud download karega
 A: **Right-click karein → "Run as administrator"** OR UAC popup pe YES karein
 
 ### Q: "Reboot maange, mein kya karu?"
-A: **Y dabayein** ya **PC restart karein** — installer khud login ke baad continue karega (Desktop pe `REALFLOW-RESUME.bat` ban jata hai jo auto-run hota hai)
+A: **Y dabayein** ya **PC restart karein** — installer khud login ke baad continue karega (Desktop pe `KREXION-RESUME.bat` ban jata hai jo auto-run hota hai)
 
 ### Q: "Docker stuck pe atak gaya"
 A: Installer **3 baar khud try karta hai**. Agar 3 baar fail to console mein detailed fix milega — Photo bhej dein admin ko
 
 ### Q: "Browser nahi khula"
-A: Browser khud kholein → http://localhost:3000 → Desktop pe `RealFlow-Credentials.txt` se admin login
+A: Browser khud kholein → http://localhost:3000 → Desktop pe `Krexion-Credentials.txt` se admin login
 
 ### Q: "Bohut time lag raha hai"
 A: First time install **20-30 min** lagta hai. Coffee piyen ☕. Background mein chalne dein — band na karein.
@@ -123,9 +123,9 @@ A: First time install **20-30 min** lagta hai. Coffee piyen ☕. Background mein
 
 Pehle khud test karein, phir customer ko bhejein:
 
-### Test 1: REALFLOW.bat work karta hai?
+### Test 1: KREXION.bat work karta hai?
 1. **Save to GitHub** button click karein (Emergent chat)
-2. Apni Windows 11 PC pe `REALFLOW.bat` download karein
+2. Apni Windows 11 PC pe `KREXION.bat` download karein
 3. Double-click
 4. UAC pe YES
 5. Wait kar ke dekhein step-by-step kaisa progress hota hai
@@ -150,7 +150,7 @@ Pehle khud test karein, phir customer ko bhejein:
 1. ⬆️ Chat input mein **"Save to GitHub"** button click karein
 2. ⏰ 2 minute wait karein
 3. ✅ Verify karein https://github.com/ronaldsexedwards40-glitch/dynabook pe yeh files dikh rahi hain:
-   - `REALFLOW.bat`
+   - `KREXION.bat`
    - `install-master.ps1`
 4. 📲 Customer ko bhejein
 
@@ -159,14 +159,14 @@ Pehle khud test karein, phir customer ko bhejein:
 ## 🎨 Customer Ko Bhejne Wala Message
 
 ```
-🚀 *RealFlow Install* (Sirf 1 file, sab automatic)
+🚀 *Krexion Install* (Sirf 1 file, sab automatic)
 
 📥 Download: 
 https://github.com/ronaldsexedwards40-glitch/dynabook/archive/refs/heads/main.zip
 
 📋 Steps:
 1. ZIP extract karein
-2. "REALFLOW.bat" double-click  
+2. "KREXION.bat" double-click  
 3. UAC popup pe "YES"
 4. 20-30 min wait karein (chai/coffee 🍵)
 

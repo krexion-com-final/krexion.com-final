@@ -5,7 +5,7 @@
 ### Customer Ko Sirf Yeh **1 File** Chahiye:
 
 ```
-REALFLOW-CUSTOMER.bat   (3 KB)
+KREXION-CUSTOMER.bat   (3 KB)
 ```
 
 **Bas. Aur kuch nahi.**
@@ -19,7 +19,7 @@ Customer ne double-click kiya
         ↓
 UAC popup → YES
         ↓
-REALFLOW-CUSTOMER.bat khud check karta hai:
+KREXION-CUSTOMER.bat khud check karta hai:
   - Local install-master.ps1 hai? → use that
   - Nahi hai? → GitHub se DOWNLOAD KARTA HAI ⭐
         ↓
@@ -28,7 +28,7 @@ install-master.ps1 chal jata hai
 Sab kuch automatic:
   ✅ WSL2 setup
   ✅ Docker install
-  ✅ RealFlow code download
+  ✅ Krexion code download
   ✅ Build + start
   ✅ Browser khulta hai /register pe
 ```
@@ -48,7 +48,7 @@ Ye sab khud-bakhud hota hai:
 | 7. Docker install | 3-5 min | Nothing |
 | 8. WSL kernel update | 1 min | Nothing |
 | 9. Docker start + recovery | 2 min | Nothing |
-| 10. RealFlow ZIP (~50 MB) | 1 min | Nothing |
+| 10. Krexion ZIP (~50 MB) | 1 min | Nothing |
 | 11. Containers build | 5-15 min | Nothing |
 | 12. Browser opens | 5 sec | Register karein |
 
@@ -60,26 +60,26 @@ Ye sab khud-bakhud hota hai:
 
 ### Goal: Customer apni PC ko ghar pe chala kar **kahin se bhi access** kare
 
-Already aapka **`GO-ONLINE.bat`** file `C:\realflow\` folder mein install ho jati hai. Customer ko bas yeh use karna hai.
+Already aapka **`GO-ONLINE.bat`** file `C:\krexion\` folder mein install ho jati hai. Customer ko bas yeh use karna hai.
 
 ### Customer Ko Online Hone Ka Tareeqa
 
-#### Step 1: PC pe RealFlow chal raha hai
-- Customer ne `REALFLOW-CUSTOMER.bat` chala ke install kiya
-- `C:\realflow` folder ban gaya
+#### Step 1: PC pe Krexion chal raha hai
+- Customer ne `KREXION-CUSTOMER.bat` chala ke install kiya
+- `C:\krexion` folder ban gaya
 - Docker containers chal rahe hain (Docker Desktop khula hai)
 
 #### Step 2: Online Jana Hai
-1. `C:\realflow` folder kholein  
+1. `C:\krexion` folder kholein  
 2. **`GO-ONLINE.bat`** file double-click karein
 3. Console window khulegi:
 
 ```
 ============================================================
-  RealFlow GO ONLINE -- Step 1 of 3
+  Krexion GO ONLINE -- Step 1 of 3
 ============================================================
-  Checking that RealFlow is running on this PC...
-  OK -- RealFlow is running locally at http://localhost:3000
+  Checking that Krexion is running on this PC...
+  OK -- Krexion is running locally at http://localhost:3000
 
 ============================================================
   Step 2 of 3 -- Setting up tunnel software
@@ -100,8 +100,8 @@ Already aapka **`GO-ONLINE.bat`** file `C:\realflow\` folder mein install ho jat
    - 💬 **WhatsApp share button**
 
 5. Customer ab kahin se bhi access kar sakta hai:
-   - Office ka PC → URL paste karein → RealFlow khul jayega
-   - Mobile → QR scan karein → mobile pe RealFlow
+   - Office ka PC → URL paste karein → Krexion khul jayega
+   - Mobile → QR scan karein → mobile pe Krexion
    - Doost ko URL bhejen → WhatsApp share
 
 #### Step 3: Console Window BAND NA KAREIN!
@@ -110,18 +110,18 @@ Already aapka **`GO-ONLINE.bat`** file `C:\realflow\` folder mein install ho jat
 #### Step 4: Online Band Karna Hai
 - Console window close karein
 - Public URL dead ho jayegi
-- RealFlow sirf customer ki PC pe (`localhost:3000`) chalu rahega
+- Krexion sirf customer ki PC pe (`localhost:3000`) chalu rahega
 
 ---
 
 ## 🎯 Customer Ko Bhejne Wala Final Message
 
 ```
-🚀 *RealFlow Install + Online Access*
+🚀 *Krexion Install + Online Access*
 
 📥 Step 1: File Download
 Yeh file download karein:
-https://raw.githubusercontent.com/ronaldsexedwards40-glitch/dynabook/main/REALFLOW-CUSTOMER.bat
+https://raw.githubusercontent.com/ronaldsexedwards40-glitch/dynabook/main/KREXION-CUSTOMER.bat
 
 📋 Step 2: Install
 1. File double-click karein
@@ -132,7 +132,7 @@ https://raw.githubusercontent.com/ronaldsexedwards40-glitch/dynabook/main/REALFL
 
 🌐 Step 3: Online Access (Bonus!)
 Install ke baad agar mobile ya kahin aur se access karna ho:
-1. C:\realflow folder kholein  
+1. C:\krexion folder kholein  
 2. GO-ONLINE.bat double-click
 3. Public URL milega
 4. URL kahin se bhi access ho jayega
@@ -149,14 +149,14 @@ Install ke baad agar mobile ya kahin aur se access karna ho:
 
 #### Option A: Free permanent URL (Cloudflare Named Tunnel)
 - Cloudflare account banaye (free)
-- Domain free use kar sakte hain (e.g., `customer.realflow.online`)
+- Domain free use kar sakte hain (e.g., `customer.krexion.com`)
 - URL hamesha same rehta hai
 - Setup: 15 min
 
 #### Option B: Render.com Cloud Hosting (Recommended)
 - PC band karne par bhi accessible
 - $0-7/month
-- URL: `https://customer-realflow.onrender.com`
+- URL: `https://customer-krexion.onrender.com`
 
 #### Option C: Use temporary URL daily
 - Free, no setup
@@ -183,7 +183,7 @@ Aap chahein to customer ke liye permanent URL setup kar sakte hain:
 
 ### Cloudflare Named Tunnel Setup (Customer's PC pe)
 1. Customer Cloudflare account banaye (free)
-2. Aap unhe domain doosre subdomain pe map karein (e.g., `customer1.realflow.online`)
+2. Aap unhe domain doosre subdomain pe map karein (e.g., `customer1.krexion.com`)
 3. One-time setup: `cloudflared tunnel login` + `cloudflared tunnel create`
 4. Customer ki PC pe service install kar dein
 5. **Result**: Permanent URL jo PC restart par bhi same rahti hai
@@ -195,13 +195,13 @@ Aap chahein to customer ke liye permanent URL setup kar sakte hain:
 ## ✅ Summary
 
 ### Customer Ko Bhejna Hai:
-1. **`REALFLOW-CUSTOMER.bat`** — Single file (3 KB) install
-2. **Already inside** `C:\realflow` folder after install:
+1. **`KREXION-CUSTOMER.bat`** — Single file (3 KB) install
+2. **Already inside** `C:\krexion` folder after install:
    - `GO-ONLINE.bat` — Public URL banane ke liye
-   - `LOCAL-START.bat` — RealFlow start
-   - `LOCAL-STOP.bat` — RealFlow stop  
-   - `REALFLOW-UPDATE.bat` — Update to latest
-   - `REALFLOW-LOGS.bat` — Logs dekhne ke liye
+   - `LOCAL-START.bat` — Krexion start
+   - `LOCAL-STOP.bat` — Krexion stop  
+   - `KREXION-UPDATE.bat` — Update to latest
+   - `KREXION-LOGS.bat` — Logs dekhne ke liye
 
 ### Customer Ka Daily Use:
 ```
@@ -209,11 +209,11 @@ Subah:    LOCAL-START.bat double-click (agar PC abhi on hua hai)
 Online:   GO-ONLINE.bat double-click (mobile access chahiye to)
 Offline:  Window close kar dein
 Raat:     LOCAL-STOP.bat (resources free karne ke liye)
-Update:   REALFLOW-UPDATE.bat (kabhi kabhi)
+Update:   KREXION-UPDATE.bat (kabhi kabhi)
 ```
 
 ### Customer Ki Required Files (Aap Ko Bhejni Hain):
-**Sirf 1 file**: `REALFLOW-CUSTOMER.bat`
+**Sirf 1 file**: `KREXION-CUSTOMER.bat`
 
 Bas. Aur kuch nahi! Sab kuch wo file khud handle kar leti hai.
 
@@ -224,13 +224,13 @@ Bas. Aur kuch nahi! Sab kuch wo file khud handle kar leti hai.
 ### Method 1: GitHub Direct Link (Easiest)
 WhatsApp pe yeh link bhejen:
 ```
-https://raw.githubusercontent.com/ronaldsexedwards40-glitch/dynabook/main/REALFLOW-CUSTOMER.bat
+https://raw.githubusercontent.com/ronaldsexedwards40-glitch/dynabook/main/KREXION-CUSTOMER.bat
 ```
 Customer click karega → file download → done
 
 ### Method 2: Bit.ly / TinyURL Shortlink
 ```
-https://tinyurl.com/realflow-customer
+https://tinyurl.com/krexion-customer
 ```
 Aap khud bana sakte hain TinyURL pe — easier to share
 

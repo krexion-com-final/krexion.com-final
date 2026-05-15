@@ -1,5 +1,5 @@
 """
-Iteration 3 backend smoke tests for RealFlow.
+Iteration 3 backend smoke tests for Krexion.
 Covers: admin auth, user register/login, admin user mgmt (approve + features),
 protected endpoints (links, uploads, settings), CPI smoke (dashboard stats + smartlink).
 
@@ -24,7 +24,7 @@ if not BASE_URL:
     except Exception:
         pass
 
-ADMIN_EMAIL = "admin@realflow.local"
+ADMIN_EMAIL = "admin@krexion.local"
 ADMIN_PASSWORD = "admin123"
 
 TIMEOUT = 30
@@ -34,7 +34,7 @@ def _rand(n=6):
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
 
 
-TEST_USER_EMAIL = f"tester+{_rand()}@realflow.local"
+TEST_USER_EMAIL = f"tester+{_rand()}@krexion.local"
 TEST_USER_PASSWORD = "Test12345!"
 
 

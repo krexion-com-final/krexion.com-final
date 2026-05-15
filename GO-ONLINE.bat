@@ -1,9 +1,9 @@
 @echo off
 REM +================================================================+
-REM |   RealFlow GO ONLINE - One-Click Global Access                 |
+REM |   Krexion GO ONLINE - One-Click Global Access                 |
 REM |                                                                 |
 REM |   What this does:                                               |
-REM |   - Creates a public HTTPS URL for your RealFlow                |
+REM |   - Creates a public HTTPS URL for your Krexion                |
 REM |   - Works from your mobile, laptop, anywhere in the world      |
 REM |   - URL is shown in a nice window (with QR code to scan)        |
 REM |   - Just double-click. Nothing else.                            |

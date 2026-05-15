@@ -1,6 +1,6 @@
 @echo off
 REM ====================================================================
-REM   RealFlow FRESH DEPLOY v2 (Bulletproof)
+REM   Krexion FRESH DEPLOY v2 (Bulletproof)
 REM   ───────────────────────────────────────
 REM   Drop this in NEW download folder. Right-click - Run as Admin.
 REM
@@ -23,13 +23,13 @@ exit /b
 
 :MAIN
 setlocal EnableDelayedExpansion
-title RealFlow - FRESH DEPLOY (Bulletproof)
+title Krexion - FRESH DEPLOY (Bulletproof)
 color 0A
 
 cls
 echo.
 echo  ============================================================
-echo    RealFlow - FRESH DEPLOY (Bulletproof)
+echo    Krexion - FRESH DEPLOY (Bulletproof)
 echo  ============================================================
 echo.
 
@@ -55,8 +55,8 @@ echo.
 
 REM ───── Confirm ─────
 echo  WARNING: ye actions hone wali hain:
-echo    1. Saari purani RealFlow containers + volumes HATAYI jayein gi
-echo    2. SAFETY backup banega: F:\online\real flow\realflow-backups\
+echo    1. Saari purani Krexion containers + volumes HATAYI jayein gi
+echo    2. SAFETY backup banega: F:\online\real flow\krexion-backups\
 echo    3. NEW folder se fresh deploy
 echo.
 set "GO=yes"
@@ -67,7 +67,7 @@ echo.
 REM ───── Backup folder ─────
 for /f "tokens=2 delims==" %%a in ('wmic OS Get localdatetime /value') do set "DT=%%a"
 set "TS=!DT:~0,8!-!DT:~8,6!"
-set "BACKUP_ROOT=F:\online\real flow\realflow-backups"
+set "BACKUP_ROOT=F:\online\real flow\krexion-backups"
 set "BACKUP_DIR=!BACKUP_ROOT!\fresh-deploy-!TS!"
 if not exist "!BACKUP_ROOT!" mkdir "!BACKUP_ROOT!"
 if not exist "!BACKUP_DIR!" mkdir "!BACKUP_DIR!"
@@ -80,7 +80,7 @@ REM   STEP 1: Backup .env from old install
 REM ════════════════════════════════════════════════════════════
 echo [1/8] Old .env files backup...
 set "OLD_WORKDIR="
-for /f "delims=" %%p in ('docker inspect realflow-backend --format "{{ index .Config.Labels \"com.docker.compose.project.working_dir\" }}" 2^>nul') do (
+for /f "delims=" %%p in ('docker inspect krexion-backend --format "{{ index .Config.Labels \"com.docker.compose.project.working_dir\" }}" 2^>nul') do (
     set "OLD_WORKDIR=%%p"
 )
 
@@ -96,7 +96,7 @@ if defined OLD_WORKDIR (
 )
 
 REM Also try the known amna folder
-set "AMNA_PATH=F:\online\real flow\real flow amna\realflow-amna-main\realflow-amna-main"
+set "AMNA_PATH=F:\online\real flow\real flow amna\krexion-amna-main\krexion-amna-main"
 if exist "!AMNA_PATH!\.env" (
     if not exist "!BACKUP_DIR!\old.env" (
         copy /Y "!AMNA_PATH!\.env" "!BACKUP_DIR!\old.env" >nul
@@ -147,8 +147,8 @@ REM   STEP 4: Force-clean leftover resources
 REM ════════════════════════════════════════════════════════════
 echo [4/8] Force-clean containers/volumes/networks...
 
-REM Remove containers matching realflow-*
-for /f "delims=" %%c in ('docker ps -a --filter "name=realflow-" --format "{{.Names}}" 2^>nul') do (
+REM Remove containers matching krexion-*
+for /f "delims=" %%c in ('docker ps -a --filter "name=krexion-" --format "{{.Names}}" 2^>nul') do (
     docker rm -f %%c >nul 2>nul
     echo        Removed container: %%c
 )
@@ -159,8 +159,8 @@ for /f "delims=" %%v in ('findstr /R "mongo-data pw-browsers" "!VOL_LIST_FILE!" 
     echo        Removed volume: %%v
 )
 
-REM Remove networks matching realflow
-for /f "delims=" %%n in ('docker network ls --filter "name=realflow" --format "{{.Name}}" 2^>nul') do (
+REM Remove networks matching krexion
+for /f "delims=" %%n in ('docker network ls --filter "name=krexion" --format "{{.Name}}" 2^>nul') do (
     docker network rm %%n >nul 2>nul
     echo        Removed network: %%n
 )
@@ -172,10 +172,10 @@ REM ═════════════════════════�
 echo [5/8] Naya .env bana raha hun...
 
 set "ENV_FILE=!ROOT!\.env"
-set "ADMIN_EMAIL_VAL=admin@realflow.local"
+set "ADMIN_EMAIL_VAL=admin@krexion.local"
 set "ADMIN_PASS_VAL=admin123"
-set "APP_URL_VAL=https://realflow.online"
-set "PUBLIC_BASE_URL_VAL=https://api.realflow.online"
+set "APP_URL_VAL=https://krexion.com"
+set "PUBLIC_BASE_URL_VAL=https://api.krexion.com"
 set "TUNNEL_TOKEN_VAL="
 
 REM Inherit from old .env if exists
@@ -194,7 +194,7 @@ for /f "delims=" %%j in ('powershell -NoProfile -Command "-join ((1..48) ^| %% {
 for /f "delims=" %%t in ('powershell -NoProfile -Command "-join ((1..32) ^| %% { [char[]](48..57+97..122) ^| Get-Random })"') do set "POSTBACK_TOK=%%t"
 
 REM Write fresh .env (no quotes, no spaces around =)
-> "!ENV_FILE!" echo DB_NAME=realflow
+> "!ENV_FILE!" echo DB_NAME=krexion
 >> "!ENV_FILE!" echo JWT_SECRET_KEY=!JWT_SECRET!
 >> "!ENV_FILE!" echo ADMIN_EMAIL=!ADMIN_EMAIL_VAL!
 >> "!ENV_FILE!" echo ADMIN_PASSWORD=!ADMIN_PASS_VAL!
@@ -203,7 +203,7 @@ REM Write fresh .env (no quotes, no spaces around =)
 >> "!ENV_FILE!" echo PUBLIC_BASE_URL=!PUBLIC_BASE_URL_VAL!
 >> "!ENV_FILE!" echo CORS_ORIGINS=*
 >> "!ENV_FILE!" echo RESEND_API_KEY=
->> "!ENV_FILE!" echo RESEND_FROM=no-reply@realflow.online
+>> "!ENV_FILE!" echo RESEND_FROM=no-reply@krexion.com
 >> "!ENV_FILE!" echo TUNNEL_TOKEN=!TUNNEL_TOKEN_VAL!
 
 echo        OK - .env written
@@ -277,9 +277,9 @@ if defined BACKED_ANY (
     echo    !BACKUP_DIR!\volumes\
     echo  Restore karna ho to ye command chalayein:
     for /f "delims=" %%f in ('dir /b "!BACKUP_DIR!\volumes\*.tar.gz" 2^>nul') do (
-        echo    docker stop realflow-mongo
-        echo    docker run --rm -v realflow-mongo-data:/data -v "!BACKUP_DIR!\volumes:/backup" alpine sh -c "rm -rf /data/* /data/.* 2^>/dev/null; tar xzf /backup/%%f -C /data"
-        echo    docker start realflow-mongo
+        echo    docker stop krexion-mongo
+        echo    docker run --rm -v krexion-mongo-data:/data -v "!BACKUP_DIR!\volumes:/backup" alpine sh -c "rm -rf /data/* /data/.* 2^>/dev/null; tar xzf /backup/%%f -C /data"
+        echo    docker start krexion-mongo
         goto :NORESTORE_DONE
     )
 )

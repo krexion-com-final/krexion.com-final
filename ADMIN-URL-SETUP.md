@@ -1,4 +1,4 @@
-# RealFlow — Admin URL (Bina Emergent Ke)
+# Krexion — Admin URL (Bina Emergent Ke)
 
 > **Aapka problem**: Emergent preview sleep ho jata hai → admin URL band ho jata hai
 > **Solution**: Render.com pe deploy karo → URL **24/7 permanent** + GitHub se auto-update
@@ -20,10 +20,10 @@ Iske baad aapka admin URL hamesha kaam karega. Emergent ki kabhi zarurat nahi.
    - Tier: **M0 FREE** (sasta wala neeche)
    - Provider: **AWS**
    - Region: **Mumbai (ap-south-1)** ya **Singapore (ap-southeast-1)**
-   - Cluster name: `realflow`
+   - Cluster name: `krexion`
    - **Create** dabao (1 min wait)
 5. **Database Access** (left sidebar) → **Add New Database User**:
-   - Username: `realflow`
+   - Username: `krexion`
    - Password button: **Autogenerate Secure Password** → password **COPY karo** kahin safe likh lo
    - Built-in role: **Read and write to any database**
    - **Add User**
@@ -34,12 +34,12 @@ Iske baad aapka admin URL hamesha kaam karega. Emergent ki kabhi zarurat nahi.
    - Driver: **Python**, Version: 3.12 or later
    - Connection string ye copy karo:
      ```
-     mongodb+srv://realflow:<password>@realflow.xxxxx.mongodb.net/?retryWrites=true&w=majority
+     mongodb+srv://krexion:<password>@krexion.xxxxx.mongodb.net/?retryWrites=true&w=majority
      ```
    - `<password>` ki jagah jo password Step 5 mein copy kiya tha **woh paste karo**
-   - End mein `/realflow` add karo. Final string:
+   - End mein `/krexion` add karo. Final string:
      ```
-     mongodb+srv://realflow:Abc123Xyz789@realflow.xxxxx.mongodb.net/realflow?retryWrites=true&w=majority
+     mongodb+srv://krexion:Abc123Xyz789@krexion.xxxxx.mongodb.net/krexion?retryWrites=true&w=majority
      ```
    - Ye string **kahin safe rakh lo** — agle step mein chahiye
 
@@ -57,11 +57,11 @@ Iske baad aapka admin URL hamesha kaam karega. Emergent ki kabhi zarurat nahi.
    - Repo dhoondo: **`ronaldsexedwards40-glitch/dynabook`**
    - **Connect** dabao
 3. Render `render.yaml` file detect karega → preview dikhayega:
-   - `realflow-backend` (FastAPI)
-   - `realflow-frontend` (React static)
-   - `realflow-mongo` (we'll skip this and use Atlas)
+   - `krexion-backend` (FastAPI)
+   - `krexion-frontend` (React static)
+   - `krexion-mongo` (we'll skip this and use Atlas)
 4. **IMPORTANT — Environment variables update karo**:
-   - `realflow-backend` ke `MONGO_URL` field find karo
+   - `krexion-backend` ke `MONGO_URL` field find karo
    - **Edit** dabao → Step 1 mein copy ki MongoDB Atlas string paste karo
    - Save
 5. Niche scroll → **"Apply"** dabao
@@ -73,22 +73,22 @@ Iske baad aapka admin URL hamesha kaam karega. Emergent ki kabhi zarurat nahi.
 
 ### Step 4: Apna Admin URL le lo
 
-1. Render dashboard → left sidebar → **realflow-frontend** click karo
+1. Render dashboard → left sidebar → **krexion-frontend** click karo
 2. Upar URL dikhayi dega:
    ```
-   https://realflow-frontend-XXXX.onrender.com
+   https://krexion-frontend-XXXX.onrender.com
    ```
 3. **Yeh aapka permanent admin URL hai** — bookmark karo
 4. Open karo → login screen aayega
 
 ### Step 5: Admin password lo
 
-1. Dashboard → **realflow-backend** click karo
+1. Dashboard → **krexion-backend** click karo
 2. Left tab → **Environment**
 3. Find karo: `ADMIN_PASSWORD` field
 4. Eye icon dabao → password **copy karo**
 5. Wapas frontend URL pe → **"Admin Login"** → login karo:
-   - Email: `admin@realflow.local`
+   - Email: `admin@krexion.local`
    - Password: (jo copy kiya)
 6. Admin Dashboard khul jayega ✅
 
@@ -99,7 +99,7 @@ Iske baad aapka admin URL hamesha kaam karega. Emergent ki kabhi zarurat nahi.
 ```
 Mobile pe browser open karo
   ↓
-https://realflow-frontend-XXXX.onrender.com kholo
+https://krexion-frontend-XXXX.onrender.com kholo
   ↓
 Admin login
   ↓
@@ -157,17 +157,17 @@ Aapko **manually deploy** karne ki kabhi zarurat nahi. Code change karo → GitH
 
 ---
 
-## 🎁 Bonus: Apna Domain (`realflow.online`)
+## 🎁 Bonus: Apna Domain (`krexion.com`)
 
 Free `onrender.com` URL ki jagah professional domain chahiye?
 
 1. **Namecheap** se domain khareedo ($8-12/year): https://namecheap.com
 2. Cloudflare DNS pe add karo (free): https://dash.cloudflare.com
 3. Add CNAME record:
-   - `app.realflow.online` → `realflow-frontend-XXXX.onrender.com`
-4. Render dashboard → realflow-frontend → **Settings** → **Custom Domain** → `app.realflow.online` add karo
+   - `app.krexion.com` → `krexion-frontend-XXXX.onrender.com`
+4. Render dashboard → krexion-frontend → **Settings** → **Custom Domain** → `app.krexion.com` add karo
 5. Render auto-SSL certificate issue karega (~5 min)
-6. Ab aapka admin URL: **https://app.realflow.online** ✅
+6. Ab aapka admin URL: **https://app.krexion.com** ✅
 
 ---
 
@@ -210,7 +210,7 @@ A: Free tier sleeps lekin auto-wakes. Paid tier 99.95% uptime guarantee. Same re
 - Connection string mein password mein `<password>` jaisa placeholder na ho
 
 ### Login fails
-- Email: `admin@realflow.local` (default)
+- Email: `admin@krexion.local` (default)
 - Password: Render backend → Environment → `ADMIN_PASSWORD`
 - Agar bhool gaye to env me edit kar do, save → backend restart → naya password apply
 
@@ -220,7 +220,7 @@ A: Free tier sleeps lekin auto-wakes. Paid tier 99.95% uptime guarantee. Same re
 
 - [ ] MongoDB Atlas account banaya
 - [ ] M0 free cluster banaya
-- [ ] Database user `realflow` + password generate kiya
+- [ ] Database user `krexion` + password generate kiya
 - [ ] Network Access → 0.0.0.0/0 whitelist kiya
 - [ ] MongoDB connection string copy ki
 - [ ] Render.com signup with GitHub

@@ -1,5 +1,5 @@
 """
-Iteration 6 - Fresh-clone backend smoke test for RealFlow / dynabook.
+Iteration 6 - Fresh-clone backend smoke test for Krexion / dynabook.
 Covers: diagnostics, admin login, license module, user register/login/approve, links.
 Uses REACT_APP_BACKEND_URL from frontend/.env so we hit the same edge-routed URL the UI uses.
 """
@@ -25,7 +25,7 @@ def _resolve_base_url():
 
 
 BASE_URL = _resolve_base_url()
-ADMIN_EMAIL = "admin@realflow.local"
+ADMIN_EMAIL = "admin@krexion.local"
 ADMIN_PASSWORD = "admin123"
 
 

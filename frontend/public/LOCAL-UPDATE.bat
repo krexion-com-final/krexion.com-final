@@ -1,7 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
-title RealFlow - UPDATE
+title Krexion - UPDATE
 color 0B
 
 set "GH_OWNER=ronaldsexedwards40-glitch"
@@ -20,7 +20,7 @@ set "ZIP_URL=https://github.com/%GH_OWNER%/%GH_REPO%/archive/refs/heads/%GH_BRAN
 set "EXTRACTED_FOLDER=%GH_REPO%-%GH_BRANCH%"
 
 echo ============================================================
-echo   RealFlow - Update to Latest Code
+echo   Krexion - Update to Latest Code
 echo ============================================================
 echo.
 
@@ -37,15 +37,15 @@ call "%~dp0LOCAL-STOP.bat"
 echo.
 echo [UPDATE] Latest code GitHub se download ho raha hai (~50 MB)...
 
-if not exist "%TEMP%\realflow-update" mkdir "%TEMP%\realflow-update"
-set "ZIP_PATH=%TEMP%\realflow-update\realflow.zip"
+if not exist "%TEMP%\krexion-update" mkdir "%TEMP%\krexion-update"
+set "ZIP_PATH=%TEMP%\krexion-update\krexion.zip"
 if exist "%ZIP_PATH%" del /Q "%ZIP_PATH%" >nul 2>&1
 
-powershell -NoProfile -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $h=@{ 'Authorization'='Bearer %GH_PAT%'; 'User-Agent'='RealFlow-Updater' }; Invoke-WebRequest -Uri '%ZIP_URL%' -OutFile '%ZIP_PATH%' -Headers $h -UseBasicParsing; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
+powershell -NoProfile -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $h=@{ 'Authorization'='Bearer %GH_PAT%'; 'User-Agent'='Krexion-Updater' }; Invoke-WebRequest -Uri '%ZIP_URL%' -OutFile '%ZIP_PATH%' -Headers $h -UseBasicParsing; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
 
 if not exist "%ZIP_PATH%" (
     echo [INFO] PowerShell se fail. Curl se retry...
-    curl.exe -sL -H "Authorization: Bearer %GH_PAT%" -H "User-Agent: RealFlow-Updater" -o "%ZIP_PATH%" "%ZIP_URL%"
+    curl.exe -sL -H "Authorization: Bearer %GH_PAT%" -H "User-Agent: Krexion-Updater" -o "%ZIP_PATH%" "%ZIP_URL%"
 )
 
 if not exist "%ZIP_PATH%" (
@@ -56,10 +56,10 @@ if not exist "%ZIP_PATH%" (
 )
 
 echo [UPDATE] Extract...
-if exist "%TEMP%\realflow-update\extracted" rmdir /S /Q "%TEMP%\realflow-update\extracted" >nul 2>&1
-powershell -NoProfile -Command "Expand-Archive -Path '%ZIP_PATH%' -DestinationPath '%TEMP%\realflow-update\extracted' -Force"
+if exist "%TEMP%\krexion-update\extracted" rmdir /S /Q "%TEMP%\krexion-update\extracted" >nul 2>&1
+powershell -NoProfile -Command "Expand-Archive -Path '%ZIP_PATH%' -DestinationPath '%TEMP%\krexion-update\extracted' -Force"
 
-if not exist "%TEMP%\realflow-update\extracted\%EXTRACTED_FOLDER%" (
+if not exist "%TEMP%\krexion-update\extracted\%EXTRACTED_FOLDER%" (
     color 0C
     echo [ERROR] Extract fail.
     pause
@@ -67,7 +67,7 @@ if not exist "%TEMP%\realflow-update\extracted\%EXTRACTED_FOLDER%" (
 )
 
 echo [UPDATE] Source replace (apne data ko bachate hue)...
-set "SRC=%TEMP%\realflow-update\extracted\%EXTRACTED_FOLDER%"
+set "SRC=%TEMP%\krexion-update\extracted\%EXTRACTED_FOLDER%"
 
 :: Replace backend (sirf code, .env bachao)
 xcopy /E /Y /Q "%SRC%\backend\*" "%~dp0backend\" >nul 2>&1
@@ -81,7 +81,7 @@ copy /Y "%SRC%\LOCAL-STOP.bat" "%~dp0" >nul 2>&1
 copy /Y "%SRC%\LOCAL-UPDATE.bat" "%~dp0" >nul 2>&1
 
 del /Q "%ZIP_PATH%" >nul 2>&1
-rmdir /S /Q "%TEMP%\realflow-update" >nul 2>&1
+rmdir /S /Q "%TEMP%\krexion-update" >nul 2>&1
 
 set "PATH=%PATH%;%ProgramFiles%\nodejs;%LocalAppData%\Programs\Python\Python311;%LocalAppData%\Programs\Python\Python311\Scripts"
 

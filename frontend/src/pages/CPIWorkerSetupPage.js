@@ -49,7 +49,7 @@ export default function CPIWorkerSetupPage() {
         </div>
         <ul className="text-sm text-muted-foreground list-disc ml-6 space-y-1">
           <li>Windows 11 home PC, 16GB+ RAM, always-on, stable internet</li>
-          <li>RealFlow already deployed (this site you are viewing)</li>
+          <li>Krexion already deployed (this site you are viewing)</li>
           <li>Android phone (rooted preferred) and/or iPhone (jailbroken preferred)</li>
           <li>Proxy Jet (or similar mobile residential 4G) account</li>
         </ul>
@@ -57,20 +57,20 @@ export default function CPIWorkerSetupPage() {
 
       <Step n={1} title="Pull the latest worker code on your home PC">
         Open PowerShell on your home PC and run:
-        <Code>{`cd C:\\realflow
-.\\REALFLOW-UPDATE.bat`}</Code>
+        <Code>{`cd C:\\krexion
+.\\KREXION-UPDATE.bat`}</Code>
         This pulls the latest CPI module + worker code from the repo.
       </Step>
 
       <Step n={2} title="Run one-click installer (Administrator PowerShell)">
         Right-click PowerShell → "Run as Administrator", then:
         <Code>{`Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-.\\deployment\\cpi\\REALFLOW-CPI-SETUP.ps1`}</Code>
+.\\deployment\\cpi\\KREXION-CPI-SETUP.ps1`}</Code>
         Installs Python, Node, Appium, ADB, libimobiledevice, Apple drivers (~10-15 min first run).
       </Step>
 
       <Step n={3} title="Copy your JWT and paste into config.yaml">
-        <p>Click the button below to copy your authentication token, then open <code className="bg-muted px-1 py-0.5 rounded text-xs">C:\realflow\realflow-cpi-worker\config.yaml</code> and paste it under <code className="bg-muted px-1 py-0.5 rounded text-xs">api.token</code>.</p>
+        <p>Click the button below to copy your authentication token, then open <code className="bg-muted px-1 py-0.5 rounded text-xs">C:\krexion\krexion-cpi-worker\config.yaml</code> and paste it under <code className="bg-muted px-1 py-0.5 rounded text-xs">api.token</code>.</p>
         <div className="flex items-center gap-2 mt-3">
           <Button onClick={onCopy} data-testid="cpi-setup-copy-jwt">
             {copied ? <CheckCircle2 className="h-4 w-4 mr-2" /> : <Copy className="h-4 w-4 mr-2" />}
@@ -112,13 +112,13 @@ export default function CPIWorkerSetupPage() {
       </Step>
 
       <Step n={5} title="Verify everything works (Doctor)">
-        <Code>{`.\\deployment\\cpi\\REALFLOW-CPI-DOCTOR.ps1`}</Code>
+        <Code>{`.\\deployment\\cpi\\KREXION-CPI-DOCTOR.ps1`}</Code>
         All checks should be green. Connected devices will be listed.
       </Step>
 
       <Step n={6} title="Start the worker">
         <p className="font-medium">Option A — Manual (foreground):</p>
-        <Code>{`.\\deployment\\cpi\\REALFLOW-CPI-WORKER-START.bat`}</Code>
+        <Code>{`.\\deployment\\cpi\\KREXION-CPI-WORKER-START.bat`}</Code>
         <p className="font-medium">Option B — Auto-start as Windows service (recommended):</p>
         <Code>{`.\\deployment\\cpi\\INSTALL-WORKER-AS-SERVICE.ps1`}</Code>
         Worker connects to <code className="bg-muted px-1 py-0.5 rounded text-xs">{backend}</code>, registers your phones, and starts polling for jobs.
@@ -137,7 +137,7 @@ export default function CPIWorkerSetupPage() {
           <li>• <code className="bg-muted px-1 py-0.5 rounded text-xs">CPI-SETUP-URDU.md</code> — full Urdu setup guide</li>
           <li>• <code className="bg-muted px-1 py-0.5 rounded text-xs">CPI-FAQ-URDU.md</code> — common issues + fixes</li>
           <li>• <code className="bg-muted px-1 py-0.5 rounded text-xs">deployment/cpi/README.txt</code> — script reference</li>
-          <li>• <code className="bg-muted px-1 py-0.5 rounded text-xs">realflow-cpi-worker/README.md</code> — worker architecture</li>
+          <li>• <code className="bg-muted px-1 py-0.5 rounded text-xs">krexion-cpi-worker/README.md</code> — worker architecture</li>
         </ul>
       </div>
     </div>

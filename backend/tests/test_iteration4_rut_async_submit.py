@@ -46,11 +46,11 @@ def _load_backend_url() -> str:
 BASE_URL = _load_backend_url()
 API = f"{BASE_URL}/api"
 
-ADMIN_EMAIL = os.environ.get("TEST_ADMIN_EMAIL", "admin@realflow.local")
+ADMIN_EMAIL = os.environ.get("TEST_ADMIN_EMAIL", "admin@krexion.local")
 ADMIN_PASSWORD = os.environ.get("TEST_ADMIN_PASSWORD", "admin123")
 
 RAND = uuid.uuid4().hex[:8]
-USER_EMAIL = f"test_iter4_{RAND}@realflow.local"
+USER_EMAIL = f"test_iter4_{RAND}@krexion.local"
 USER_PASSWORD = "Test12345!"
 
 STATE: Dict[str, Any] = {}

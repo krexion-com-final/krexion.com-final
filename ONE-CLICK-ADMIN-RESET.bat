@@ -1,10 +1,10 @@
 @echo off
 setlocal EnableDelayedExpansion
-title RealFlow - Admin Password Reset
+title Krexion - Admin Password Reset
 color 0E
 
 REM ====================================================================
-REM   RealFlow ONE-CLICK ADMIN PASSWORD RESET
+REM   Krexion ONE-CLICK ADMIN PASSWORD RESET
 REM   ──────────────────────────────────────
 REM   Ye script .env file mein ADMIN_PASSWORD ko reset karega aur
 REM   backend container ko restart karega taake naya password load ho.
@@ -15,16 +15,16 @@ REM ====================================================================
 cls
 echo.
 echo  ============================================================
-echo    RealFlow - ADMIN PASSWORD RESET
+echo    Krexion - ADMIN PASSWORD RESET
 echo  ============================================================
 echo.
 
-REM Auto-detect: agar script kisi RealFlow root mein hai, wahin chalega
+REM Auto-detect: agar script kisi Krexion root mein hai, wahin chalega
 REM Otherwise hardcoded path use karega
 if exist "%~dp0docker-compose.yml" (
     set "ROOT=%~dp0"
 ) else (
-    set "ROOT=F:\online\real flow\real flow amna\realflow-amna-main\realflow-amna-main"
+    set "ROOT=F:\online\real flow\real flow amna\krexion-amna-main\krexion-amna-main"
 )
 
 REM Trailing slash hatao
@@ -68,7 +68,7 @@ echo.
 
 REM ───── Update .env ─────
 echo [2/4] ADMIN_PASSWORD reset kar raha hun to: admin123
-echo        ADMIN_EMAIL: admin@realflow.local
+echo        ADMIN_EMAIL: admin@krexion.local
 
 REM Powershell istemal karo .env ko safely update karne ke liye
 powershell -NoProfile -Command ^
@@ -77,17 +77,17 @@ powershell -NoProfile -Command ^
     "$out = @();" ^
     "$hasEmail=$false; $hasPass=$false;" ^
     "foreach($l in $lines) {" ^
-        "if ($l -match '^\s*ADMIN_EMAIL\s*=') { $out += 'ADMIN_EMAIL=admin@realflow.local'; $hasEmail=$true }" ^
+        "if ($l -match '^\s*ADMIN_EMAIL\s*=') { $out += 'ADMIN_EMAIL=admin@krexion.local'; $hasEmail=$true }" ^
         "elseif ($l -match '^\s*ADMIN_PASSWORD\s*=') { $out += 'ADMIN_PASSWORD=admin123'; $hasPass=$true }" ^
         "else { $out += $l }" ^
     "};" ^
-    "if (-not $hasEmail) { $out += 'ADMIN_EMAIL=admin@realflow.local' };" ^
+    "if (-not $hasEmail) { $out += 'ADMIN_EMAIL=admin@krexion.local' };" ^
     "if (-not $hasPass)  { $out += 'ADMIN_PASSWORD=admin123' };" ^
     "Set-Content -Path $f -Value $out -Encoding ASCII"
 
 if errorlevel 1 (
     echo  [ERROR] .env update fail. Manually edit karein:
-    echo          ADMIN_EMAIL=admin@realflow.local
+    echo          ADMIN_EMAIL=admin@krexion.local
     echo          ADMIN_PASSWORD=admin123
     pause
     exit /b 1
@@ -118,7 +118,7 @@ REM Test login
 echo        Login test kar raha hun...
 curl -s -X POST "http://127.0.0.1:8001/api/admin/login" ^
     -H "Content-Type: application/json" ^
-    -d "{\"email\":\"admin@realflow.local\",\"password\":\"admin123\"}" > "%TEMP%\admin_test.json" 2>nul
+    -d "{\"email\":\"admin@krexion.local\",\"password\":\"admin123\"}" > "%TEMP%\admin_test.json" 2>nul
 
 findstr /C:"access_token" "%TEMP%\admin_test.json" >nul 2>&1
 if errorlevel 1 (
@@ -139,14 +139,14 @@ echo  ============================================================
 echo    PASSWORD RESET COMPLETE!
 echo  ============================================================
 echo.
-echo    Admin Email   : admin@realflow.local
+echo    Admin Email   : admin@krexion.local
 echo    Admin Password: admin123
 echo.
 echo    Ab browser mein:
-echo      1. Apna RealFlow URL kholein
+echo      1. Apna Krexion URL kholein
 echo      2. "Admin Login" pe click karein
 echo      3. Login karein:
-echo            Email   : admin@realflow.local
+echo            Email   : admin@krexion.local
 echo            Password: admin123
 echo.
 echo    NOTE: Login ke baad password change kar lein (Settings se)

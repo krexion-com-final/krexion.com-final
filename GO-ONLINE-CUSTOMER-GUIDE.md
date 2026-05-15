@@ -1,7 +1,7 @@
-# RealFlow — Customer ko Globally Online Karne Ka Tareeqa
+# Krexion — Customer ko Globally Online Karne Ka Tareeqa
 
 ## Aapke Customer Ka Problem
-> "RealFlow mere ghar/office ke PC pe install hai. Main bahar gaya hu — mobile pe app kaise kholun?"
+> "Krexion mere ghar/office ke PC pe install hai. Main bahar gaya hu — mobile pe app kaise kholun?"
 
 ## Solution: GO-ONLINE.bat (One Click)
 
@@ -21,7 +21,7 @@ Customer ke desktop par rakho. Bas.
 
 ### Daily Use (Har Baar Online Karne Ke Liye):
 
-**Step 1**: PC pe RealFlow chalu hai? Check karo:
+**Step 1**: PC pe Krexion chalu hai? Check karo:
 - Browser kholo → `http://localhost:3000`
 - Agar khulta hai → ready ho
 - Agar nahi → Docker Desktop start karo → 1 min wait → wapas try karo
@@ -35,7 +35,7 @@ Customer ke desktop par rakho. Bas.
 +--------------------------------------------------+
 |   LIVE -- ONLINE NOW                             |
 |                                                   |
-|   Your RealFlow is online                        |
+|   Your Krexion is online                        |
 |                                                   |
 |   https://blue-fox-42.trycloudflare.com  [Copy]  |
 |                                                   |
@@ -66,7 +66,7 @@ Customer ke desktop par rakho. Bas.
 
 ### ❌ DON'T:
 - Console window **close mat karo** jab tak online rakhna hai
-- PC band mat karo (RealFlow band ho jayega)
+- PC band mat karo (Krexion band ho jayega)
 - Bhool kar `Ctrl+C` mat dabao (tunnel break ho jayega)
 - Hibernate/Sleep mat hone do PC ko
 
@@ -91,7 +91,7 @@ Tunnel ka matlab "PC ka shortcut internet pe" — agar PC band ho:
 **Solution**:
 - PC ko power settings mein "Never Sleep" karo
 - Hibernate disable karo
-- 24/7 chalane ho to **cloud pe move karo** (RealFlow Render deploy guide dekho)
+- 24/7 chalane ho to **cloud pe move karo** (Krexion Render deploy guide dekho)
 
 ### 🟡 Speed limit
 Tunnel free hai lekin bandwidth share hoti hai:
@@ -102,14 +102,14 @@ Tunnel free hai lekin bandwidth share hoti hai:
 
 ## Common Errors + Fixes
 
-### Error: "RealFlow is NOT running on this PC"
+### Error: "Krexion is NOT running on this PC"
 **Cause**: Docker containers band hain
 **Fix**:
 1. Docker Desktop kholo (Start menu → search Docker)
 2. Whale icon steady hone ka wait karo
 3. Command Prompt kholo:
    ```
-   cd C:\realflow
+   cd C:\krexion
    docker compose up -d
    ```
 4. 30 sec wait → wapas `GO-ONLINE.bat` chalao
@@ -138,7 +138,7 @@ Tunnel free hai lekin bandwidth share hoti hai:
 ## Multi-Device Workflow Example
 
 ### Scenario:
-- Customer ka PC: **ghar mein** (RealFlow install)
+- Customer ka PC: **ghar mein** (Krexion install)
 - Customer ka mobile: **office mein**
 - Customer ki laptop: **dost ke ghar**
 
@@ -168,12 +168,12 @@ Tunnel free hai lekin bandwidth share hoti hai:
 
 ### Lekin ek baar share ki to:
 - Jisko URL pata hai woh login screen tak pohnch jayega
-- Phir RealFlow ka apna admin/user login (email + password) protect karega
-- Agar koi password leak ho jaye → RealFlow admin se password reset karwao
+- Phir Krexion ka apna admin/user login (email + password) protect karega
+- Agar koi password leak ho jaye → Krexion admin se password reset karwao
 
 ### Best practice:
 - URL **trusted log ko hi share** karo (apne aap ko, team members ko)
-- Strong RealFlow passwords use karo
+- Strong Krexion passwords use karo
 - Done ho jane par console close karo
 
 ---
@@ -182,7 +182,7 @@ Tunnel free hai lekin bandwidth share hoti hai:
 
 ```
 +================================================+
-|   RealFlow GO ONLINE -- Quick Card             |
+|   Krexion GO ONLINE -- Quick Card             |
 +================================================+
 |                                                 |
 |   STEP 1: Open Docker Desktop, wait 1 min      |
@@ -212,7 +212,7 @@ Free `trycloudflare.com` URL har baar change hota hai. Permanent professional UR
 1. Customer Cloudflare account banaye
 2. Customer domain khareeda ($10/year)
 3. Named tunnel setup (1-time, 10 min)
-4. Same `realflow-ahmad.online` URL hamesha kaam kare
+4. Same `krexion-ahmad.online` URL hamesha kaam kare
 
 ---
 

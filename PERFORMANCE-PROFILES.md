@@ -1,6 +1,6 @@
-# RealFlow — Performance Profiles (Auto-Tuning)
+# Krexion — Performance Profiles (Auto-Tuning)
 
-> **TL;DR**: RealFlow ka installer aapke PC ki RAM + CPU detect karke 5 profiles mein se best choose karta hai aur Mongo, Backend, Frontend, WSL, aur RUT browser farm — sab automatic tune karta hai. Aapko kuch nahi karna.
+> **TL;DR**: Krexion ka installer aapke PC ki RAM + CPU detect karke 5 profiles mein se best choose karta hai aur Mongo, Backend, Frontend, WSL, aur RUT browser farm — sab automatic tune karta hai. Aapko kuch nahi karna.
 
 ---
 
@@ -36,7 +36,7 @@
 PC Boot
    │
    ▼
-[Install.bat / install-realflow.sh]
+[Install.bat / install-krexion.sh]
    │
    ▼
 detect-hardware.ps1 / .sh   ◄── reads CIM (Win) / /proc/meminfo (Linux)
@@ -66,7 +66,7 @@ but engine caps at the tier-tuned value, preventing OOM
 
 | File | Role |
 |------|------|
-| `scripts/detect-hardware.ps1` | Windows: returns `Get-RealFlowProfile` object with all tuning values |
+| `scripts/detect-hardware.ps1` | Windows: returns `Get-KrexionProfile` object with all tuning values |
 | `scripts/detect-hardware.sh` | Linux/macOS: emits `RF_*` env vars (use with `eval`) |
 | `docker-compose.yml` | Base stack (Mongo + Backend + Frontend + optional Cloudflare Tunnel) |
 | `docker-compose.micro.yml` | Override for ≤ 6 GB PCs |
@@ -74,8 +74,8 @@ but engine caps at the tier-tuned value, preventing OOM
 | `docker-compose.mid.yml` | Override for 11-16 GB PCs |
 | `docker-compose.high.yml` | Override for 17-32 GB PCs |
 | `docker-compose.beast.yml` | Override for > 32 GB PCs / servers |
-| `RealFlow-RETUNE.bat` | Windows: re-detect + re-apply tuning anytime |
-| `RealFlow-RETUNE.sh` | Linux/macOS: same |
+| `Krexion-RETUNE.bat` | Windows: re-detect + re-apply tuning anytime |
+| `Krexion-RETUNE.sh` | Linux/macOS: same |
 
 ---
 
@@ -119,24 +119,24 @@ curl http://localhost:8001/api/diagnostics/hardware-profile
 
 Agar aap tier ko manually override karna chahte ho (e.g. testing on 16 GB but want to simulate 8 GB):
 
-**Windows** — edit `C:\realflow\.env` aur add:
+**Windows** — edit `C:\krexion\.env` aur add:
 ```
 RUT_MAX_CONCURRENCY=2
 RUT_MEM_LIMIT_MB=2048
 ```
 Phir: `docker compose -f docker-compose.yml -f docker-compose.lowram.yml restart backend`
 
-**Linux** — same `.env` change in `/opt/realflow/.env`, phir restart.
+**Linux** — same `.env` change in `/opt/krexion/.env`, phir restart.
 
 ---
 
 ## Re-tune anytime
 
-PC mein RAM badha do (e.g. 8 GB → 16 GB), ya RealFlow ko zyada powerful PC pe move karo — bas:
+PC mein RAM badha do (e.g. 8 GB → 16 GB), ya Krexion ko zyada powerful PC pe move karo — bas:
 
-**Windows**: `RealFlow-RETUNE.bat` pe double-click
+**Windows**: `Krexion-RETUNE.bat` pe double-click
 
-**Linux/macOS**: `sudo bash RealFlow-RETUNE.sh`
+**Linux/macOS**: `sudo bash Krexion-RETUNE.sh`
 
 Script khud:
 1. Naye hardware detect karega
@@ -150,7 +150,7 @@ Script khud:
 
 ### "OOM Killed" message in `docker compose logs`
 RAM kam pad rahi hai. Solution:
-- Run `RealFlow-RETUNE.bat` — agar tier downgrade kare to apply karne do
+- Run `Krexion-RETUNE.bat` — agar tier downgrade kare to apply karne do
 - Ya manually `.env` mein `RUT_MAX_CONCURRENCY=1`, `RUT_MEM_LIMIT_MB=1024` set karo
 
 ### Frontend slow

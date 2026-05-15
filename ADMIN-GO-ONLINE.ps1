@@ -1,13 +1,13 @@
 ﻿# ============================================================
-#  RealFlow ADMIN GO-ONLINE  -  ADMIN ONLY
+#  Krexion ADMIN GO-ONLINE  -  ADMIN ONLY
 # ============================================================
-#  Makes YOUR (admin's) RealFlow accessible from anywhere via
+#  Makes YOUR (admin's) Krexion accessible from anywhere via
 #  a public HTTPS URL, with deep-link to /admin-login.
 #
 #  Customers do NOT need this file. They use GO-ONLINE.bat.
 #
 #  This file:
-#    - Verifies your RealFlow is running locally
+#    - Verifies your Krexion is running locally
 #    - Reads YOUR admin credentials from .env
 #    - Starts a Cloudflare Quick Tunnel
 #    - Opens a control-panel-style popup with everything you need:
@@ -53,10 +53,10 @@ function Show-Error {
 # ============================================================
 function Get-EnvValue {
     param([string]$Key)
-    # Look for .env in script dir first, then C:\realflow\.env, then /app/backend/.env
+    # Look for .env in script dir first, then C:\krexion\.env, then /app/backend/.env
     $candidates = @(
         (Join-Path $ScriptDir ".env"),
-        "C:\realflow\.env",
+        "C:\krexion\.env",
         (Join-Path $ScriptDir "backend\.env")
     )
     foreach ($p in $candidates) {
@@ -74,26 +74,26 @@ function Get-EnvValue {
 
 $adminEmail = Get-EnvValue "ADMIN_EMAIL"
 $adminPass  = Get-EnvValue "ADMIN_PASSWORD"
-if (-not $adminEmail) { $adminEmail = "admin@realflow.local" }
+if (-not $adminEmail) { $adminEmail = "admin@krexion.local" }
 
 # ============================================================
-#  Step 1 -- Verify RealFlow is running
+#  Step 1 -- Verify Krexion is running
 # ============================================================
 Clear-Host
 Write-Big "ADMIN GO-ONLINE -- Step 1 of 3" "Magenta"
 Write-Host "  Checking your admin server is running..." -ForegroundColor White
 
-$realflowUp = $false
+$krexionUp = $false
 try {
     $r = Invoke-WebRequest $LocalAppUrl -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
-    if ($r.StatusCode -eq 200) { $realflowUp = $true }
+    if ($r.StatusCode -eq 200) { $krexionUp = $true }
 } catch {}
 
-if (-not $realflowUp) {
+if (-not $krexionUp) {
     Show-Error `
-        "RealFlow is NOT running on this PC" `
+        "Krexion is NOT running on this PC" `
         "Could not reach $LocalAppUrl" `
-        "1. Open Docker Desktop, wait for whale icon to be steady`r`n  2. Open Command Prompt -> cd C:\realflow -> docker compose up -d`r`n  3. Wait 30 sec`r`n  4. Run ADMIN-GO-ONLINE.bat again"
+        "1. Open Docker Desktop, wait for whale icon to be steady`r`n  2. Open Command Prompt -> cd C:\krexion -> docker compose up -d`r`n  3. Wait 30 sec`r`n  4. Run ADMIN-GO-ONLINE.bat again"
 }
 Write-Host "  OK -- admin server is running at $LocalAppUrl" -ForegroundColor Green
 
@@ -123,7 +123,7 @@ Write-Big "Step 3 of 3 -- Opening admin tunnel" "Magenta"
 Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep 1
 
-$tunnelLog = Join-Path $env:TEMP "realflow-admin-tunnel.log"
+$tunnelLog = Join-Path $env:TEMP "krexion-admin-tunnel.log"
 if (Test-Path $tunnelLog) { Remove-Item $tunnelLog -Force }
 
 $proc = Start-Process -FilePath $CloudflaredExe `
@@ -164,18 +164,18 @@ $adminUrl  = $publicBase + $AdminPath
 #  Build pretty admin control-panel HTML page
 # ============================================================
 $qrApi  = "https://api.qrserver.com/v1/create-qr-code/?size=380x380&color=4f46e5&data=" + [uri]::EscapeDataString($adminUrl)
-$waText = [uri]::EscapeDataString("RealFlow admin panel: $adminUrl")
+$waText = [uri]::EscapeDataString("Krexion admin panel: $adminUrl")
 $waUrl  = "https://wa.me/?text=$waText"
 
-$passHtml = if ($adminPass) { $adminPass } else { "(check C:\realflow\.env file)" }
+$passHtml = if ($adminPass) { $adminPass } else { "(check C:\krexion\.env file)" }
 
-$htmlFile = Join-Path $env:TEMP "realflow-admin-online.html"
+$htmlFile = Join-Path $env:TEMP "krexion-admin-online.html"
 $htmlContent = @"
 <!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>RealFlow Admin -- ONLINE</title>
+<title>Krexion Admin -- ONLINE</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 :root { color-scheme: dark; }
@@ -332,7 +332,7 @@ h1 { margin:0 0 6px; font-size:36px; font-weight:800; letter-spacing:-0.5px;
   <div class="warn">
     <strong>This is YOUR control panel</strong> -- keep this admin URL private.
     Close the console window on your PC to take admin offline.
-    Customers using their own RealFlow installs are NOT affected -- their apps
+    Customers using their own Krexion installs are NOT affected -- their apps
     keep running normally on their own PCs.
   </div>
 </div>
@@ -371,7 +371,7 @@ Clear-Host
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Magenta
 Write-Host "                                                            " -ForegroundColor Magenta
-Write-Host "         REALFLOW ADMIN -- ONLINE NOW                       " -ForegroundColor Magenta
+Write-Host "         KREXION ADMIN -- ONLINE NOW                       " -ForegroundColor Magenta
 Write-Host "                                                            " -ForegroundColor Magenta
 Write-Host "============================================================" -ForegroundColor Magenta
 Write-Host ""
@@ -383,11 +383,11 @@ Write-Host "    Email    : $adminEmail" -ForegroundColor Yellow
 if ($adminPass) {
     Write-Host "    Password : $adminPass" -ForegroundColor Yellow
 } else {
-    Write-Host "    Password : (check C:\realflow\.env -> ADMIN_PASSWORD)" -ForegroundColor Yellow
+    Write-Host "    Password : (check C:\krexion\.env -> ADMIN_PASSWORD)" -ForegroundColor Yellow
 }
 Write-Host ""
 Write-Host "  Status of your business:" -ForegroundColor White
-Write-Host "    - Customers using their own RealFlow installs: UNAFFECTED" -ForegroundColor Green
+Write-Host "    - Customers using their own Krexion installs: UNAFFECTED" -ForegroundColor Green
 Write-Host "    - Their apps keep running on their own PCs" -ForegroundColor Green
 Write-Host "    - Closing this window only affects YOUR admin access" -ForegroundColor Green
 Write-Host ""

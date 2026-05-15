@@ -1,6 +1,6 @@
-# 🔐 RealFlow — Secure USB Installer (5 Security Layers)
+# 🔐 Krexion — Secure USB Installer (5 Security Layers)
 
-USB-portable single file (`RealFlow-INSTALL.bat`). Kisi bhi Windows PC pe double-click karein → 5 security checks pass karein → 10 min mein full deploy.
+USB-portable single file (`Krexion-INSTALL.bat`). Kisi bhi Windows PC pe double-click karein → 5 security checks pass karein → 10 min mein full deploy.
 
 **Repo**: `ronaldsexedwards40-glitch/dynabook` (branch `main`)
 
@@ -70,7 +70,7 @@ GitHub me ek file: **`.installer-status`** (root mein)
 
 Agar PAT compromise ho:
 1. https://github.com/settings/tokens pe jayein
-2. Token "RealFlow Installer" find karein
+2. Token "Krexion Installer" find karein
 3. **Delete** ya **Revoke** click karein
 4. Installer ka Layer 4 fail ho jaye ga → sab installers band
 
@@ -87,10 +87,10 @@ Naya PAT chahiye ho:
 Chat input ke ⬇️ button → **"Save to GitHub"** click karein. Yeh saare latest changes (installer + LOCAL-* scripts + `.installer-status`) repo `dynabook` mein push kar dega.
 
 ### 1. File USB mein daalein
-- `/app/RealFlow-INSTALL.bat` (~10 KB) USB mein copy karein
+- `/app/Krexion-INSTALL.bat` (~10 KB) USB mein copy karein
 - Ya GitHub se direct (raw URL):
   ```
-  https://raw.githubusercontent.com/ronaldsexedwards40-glitch/dynabook/main/RealFlow-INSTALL.bat
+  https://raw.githubusercontent.com/ronaldsexedwards40-glitch/dynabook/main/Krexion-INSTALL.bat
   ```
   (Repo public hai, PAT ke bina download ho jaye gi)
 
@@ -109,7 +109,7 @@ Chat input ke ⬇️ button → **"Save to GitHub"** click karein. Yeh saare lat
 ```
 
 ### 4. Install location
-- Default `C:\realflow` → **ENTER**
+- Default `C:\krexion` → **ENTER**
 
 ### 5. Wait 8-12 minute
 - Python 3.11, Node 20, MongoDB 7 install
@@ -118,7 +118,7 @@ Chat input ke ⬇️ button → **"Save to GitHub"** click karein. Yeh saare lat
 - Browser auto-open `http://localhost:3000`
 
 ### 6. Login
-- `C:\realflow\CREDENTIALS.txt` → admin password copy
+- `C:\krexion\CREDENTIALS.txt` → admin password copy
 - `http://localhost:3000/admin` → login
 
 **Done!** 🎉
@@ -150,9 +150,9 @@ Pehli install ke baad activation key dobara nahi maange. Daily:
 
 | Action | File |
 |---|---|
-| Start | `C:\realflow\LOCAL-START.bat` |
-| Stop | `C:\realflow\LOCAL-STOP.bat` |
-| Update | `C:\realflow\LOCAL-UPDATE.bat` |
+| Start | `C:\krexion\LOCAL-START.bat` |
+| Stop | `C:\krexion\LOCAL-STOP.bat` |
+| Update | `C:\krexion\LOCAL-UPDATE.bat` |
 
 ---
 
@@ -167,10 +167,10 @@ Pehli install ke baad activation key dobara nahi maange. Daily:
 
 | Task | How |
 |---|---|
-| Naye PC pe deploy | USB pe `RealFlow-INSTALL.bat` → key `LENOVOGEN-RF-2026-9X4K2M-SHAN` |
+| Naye PC pe deploy | USB pe `Krexion-INSTALL.bat` → key `LENOVOGEN-RF-2026-9X4K2M-SHAN` |
 | File chori! | GitHub `.installer-status` → `REVOKED` |
 | PAT compromise | Settings → Tokens → Delete |
-| Daily start | `C:\realflow\LOCAL-START.bat` |
-| Admin password | `C:\realflow\CREDENTIALS.txt` |
+| Daily start | `C:\krexion\LOCAL-START.bat` |
+| Admin password | `C:\krexion\CREDENTIALS.txt` |
 
 🎉 **5 security layers active. Aap ka project safe hai.**

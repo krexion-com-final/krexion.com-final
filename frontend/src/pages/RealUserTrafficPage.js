@@ -912,7 +912,7 @@ export default function RealUserTrafficPage() {
         friendly = "Network aborted 3x + 600s recovery poll failed — job DID NOT start. " +
                    "Most likely cause: Cloudflare tunnel down OR backend container restarting. " +
                    "Steps: (1) Check tunnel status (cloudflared logs / Cloudflare dashboard). " +
-                   "(2) `docker compose ps` — is `realflow-backend` healthy? " +
+                   "(2) `docker compose ps` — is `krexion-backend` healthy? " +
                    "(3) Refresh Past Jobs list once more — the job may still appear there.";
       }
       toast.error(friendly);

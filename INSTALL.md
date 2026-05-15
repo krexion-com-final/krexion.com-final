@@ -1,6 +1,6 @@
-# RealFlow — One-Click Deploy (Any Computer)
+# Krexion — One-Click Deploy (Any Computer)
 
-> **Goal**: Aap kisi b PC pe sirf aik file double-click karein aur poora RealFlow stack
+> **Goal**: Aap kisi b PC pe sirf aik file double-click karein aur poora Krexion stack
 > (FastAPI backend + MongoDB + React frontend) automatically install + start ho jaye.
 
 ---
@@ -10,12 +10,12 @@
 ### Method 1 — One-click (recommended)
 
 1. Is repo ko `Save to GitHub` ke baad apne PC pe download karein (ZIP ya `git clone`).
-2. Folder ke andar **`INSTALL-REALFLOW.bat`** ko **double-click** karein.
+2. Folder ke andar **`INSTALL-KREXION.bat`** ko **double-click** karein.
 3. Bas. Script automatically:
    - Administrator privileges maangega (UAC popup → Yes)
    - Docker Desktop install karega (agar nahi hai)
    - Git install karega (agar nahi hai)
-   - Repo ko `C:\realflow` pe clone karega
+   - Repo ko `C:\krexion` pe clone karega
    - `.env` mein strong random passwords generate karega
    - Backend + MongoDB + Frontend containers build + start karega
    - Aapko admin password screen pe dikhayega
@@ -26,7 +26,7 @@ PowerShell ko **As Administrator** open karein aur:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-iwr -UseBasicParsing https://raw.githubusercontent.com/ronaldsexedwards40-glitch/dynabook/main/REALFLOW-DEPLOY.ps1 | iex
+iwr -UseBasicParsing https://raw.githubusercontent.com/ronaldsexedwards40-glitch/dynabook/main/KREXION-DEPLOY.ps1 | iex
 ```
 
 ### After install — open browser
@@ -39,19 +39,19 @@ iwr -UseBasicParsing https://raw.githubusercontent.com/ronaldsexedwards40-glitch
 | **Health check** | `http://localhost:8001/api/diagnostics/health` |
 
 Admin credentials:
-- **Email**: `admin@realflow.local`
-- **Password**: (printed by installer + saved in `C:\realflow\.env` as `ADMIN_PASSWORD`)
+- **Email**: `admin@krexion.local`
+- **Password**: (printed by installer + saved in `C:\krexion\.env` as `ADMIN_PASSWORD`)
 
-### Daily Windows commands (run from `C:\realflow`)
+### Daily Windows commands (run from `C:\krexion`)
 
 | File | What it does |
 |------|--------------|
 | `LOCAL-START.bat`     | Start the stack |
 | `LOCAL-STOP.bat`      | Stop the stack |
 | `LOCAL-UPDATE.bat`    | Pull latest code + rebuild |
-| `REALFLOW-LOGS.bat`   | Live tail logs |
-| `REALFLOW-DOCTOR.bat` | Diagnose issues |
-| `INSTALL-REALFLOW.bat`| Run again for in-place upgrade |
+| `KREXION-LOGS.bat`   | Live tail logs |
+| `KREXION-DOCTOR.bat` | Diagnose issues |
+| `INSTALL-KREXION.bat`| Run again for in-place upgrade |
 
 ---
 
@@ -62,13 +62,13 @@ Admin credentials:
 ```bash
 git clone https://github.com/ronaldsexedwards40-glitch/dynabook.git
 cd dynabook
-sudo bash install-realflow.sh
+sudo bash install-krexion.sh
 ```
 
 ### Method 2 — Direct from internet
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ronaldsexedwards40-glitch/dynabook/main/install-realflow.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/ronaldsexedwards40-glitch/dynabook/main/install-krexion.sh | sudo bash
 ```
 
 (macOS users: install Docker Desktop manually first from <https://www.docker.com/products/docker-desktop>, then run the script without `sudo`.)
@@ -76,7 +76,7 @@ curl -fsSL https://raw.githubusercontent.com/ronaldsexedwards40-glitch/dynabook/
 Script ye sab kar deta hai:
 1. Docker + docker-compose-plugin install (`apt`/`dnf`/`yum`/`pacman` auto-detect)
 2. Git install (agar missing ho)
-3. Repo clone to `/opt/realflow` (ya current dir agar already cloned ho)
+3. Repo clone to `/opt/krexion` (ya current dir agar already cloned ho)
 4. `.env` generate with strong random secrets (saves admin password)
 5. `docker compose build && docker compose up -d`
 6. Health-check loop until backend ready
@@ -85,7 +85,7 @@ Script ye sab kar deta hai:
 ### Daily Linux/macOS commands
 
 ```bash
-cd /opt/realflow                       # ya jis dir mein cloned hai
+cd /opt/krexion                       # ya jis dir mein cloned hai
 
 docker compose ps                       # status
 docker compose logs -f                  # live logs
@@ -103,7 +103,7 @@ docker compose up -d --build            # rebuild + start (after code update)
 │  YOUR PC                                                    │
 │                                                             │
 │   ┌──────────────┐    ┌───────────────┐   ┌─────────────┐   │
-│   │  realflow-   │    │  realflow-    │   │  realflow-  │   │
+│   │  krexion-   │    │  krexion-    │   │  krexion-  │   │
 │   │  frontend    │───▶│  backend      │──▶│  mongo      │   │
 │   │  (nginx +    │    │  (FastAPI +   │   │  (MongoDB 7)│   │
 │   │   React)     │    │   Playwright) │   │             │   │
@@ -134,7 +134,7 @@ Generated automatically — change only if you know what you're doing.
 | `JWT_SECRET_KEY` | Signs all auth tokens. **Rotate = log everyone out**. |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | The single admin account (no DB row needed) |
 | `POSTBACK_TOKEN` | Secret token for affiliate postback URLs |
-| `DB_NAME` | MongoDB database name (default `realflow`) |
+| `DB_NAME` | MongoDB database name (default `krexion`) |
 | `CORS_ORIGINS` | `*` for local; lock down to your domain in production |
 | `TUNNEL_TOKEN` | (optional) Cloudflare Tunnel token → makes your PC reachable publicly. Empty = local-only. |
 | `RESEND_API_KEY` | (optional) Transactional email |

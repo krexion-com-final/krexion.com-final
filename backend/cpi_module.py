@@ -1,12 +1,12 @@
 """
-CPI (Cost-Per-Install) Module for RealFlow
+CPI (Cost-Per-Install) Module for Krexion
 ==========================================
 
 Purpose:
   Cloud-orchestrated CPI install pipeline that runs alongside the existing
   RUT (Real User Traffic) and Form Filler engines. The orchestrator (this
   module) runs in the home-PC backend; actual Android/iOS install execution
-  is performed by a separate `realflow-cpi-worker` process which polls jobs
+  is performed by a separate `krexion-cpi-worker` process which polls jobs
   from this orchestrator and reports results back.
 
 Phase 1 (this file) covers:
@@ -114,7 +114,7 @@ class CPIJobIn(BaseModel):
     user_agents: List[str] = Field(default_factory=list)
     leads: List[Dict[str, str]] = Field(default_factory=list)  # [{email,first,last,phone}, ...]
     settle_seconds: int = 45                                # wait after install before marking "conversion_likely"
-    # Pull from Uploaded Things (RealFlow's existing resource pool)
+    # Pull from Uploaded Things (Krexion's existing resource pool)
     upload_proxy_id: Optional[str] = None
     upload_ua_id: Optional[str] = None
     # Auto-consume used resources after job completes (mirrors RUT behavior)

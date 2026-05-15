@@ -1,10 +1,10 @@
 # ──────────────────────────────────────────────────────────────────────
-# RealFlow — Full Stack Docker Compose
+# Krexion — Full Stack Docker Compose
 # ──────────────────────────────────────────────────────────────────────
 # What it runs:
-#   • realflow-mongo       — MongoDB 7 (data persisted in named volume)
-#   • realflow-backend     — FastAPI + Playwright (your existing backend/)
-#   • realflow-cloudflared — Cloudflare Tunnel (only if TUNNEL_TOKEN set)
+#   • krexion-mongo       — MongoDB 7 (data persisted in named volume)
+#   • krexion-backend     — FastAPI + Playwright (your existing backend/)
+#   • krexion-cloudflared — Cloudflare Tunnel (only if TUNNEL_TOKEN set)
 #
 # Frontend is deployed separately on Vercel.
 # CPI Worker runs natively on Windows (needs USB access to phones).
@@ -13,7 +13,7 @@
 services:
   mongo:
     image: mongo:7
-    container_name: realflow-mongo
+    container_name: krexion-mongo
     restart: unless-stopped
     # WiredTiger cache hard-cap — without this Mongo defaults to 50% of host
     # RAM (~14 GB on a 28 GB WSL!) and is the #1 OOM driver for the stack.
@@ -23,7 +23,7 @@ services:
     volumes:
       - mongo-data:/data/db
     networks:
-      - realflow-net
+      - krexion-net
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ping:1}).ok"]
       interval: 15s
@@ -44,23 +44,23 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: realflow-backend
+    container_name: krexion-backend
     restart: unless-stopped
     depends_on:
       mongo:
         condition: service_healthy
     environment:
       MONGO_URL: "mongodb://mongo:27017"
-      DB_NAME: "${DB_NAME:-realflow}"
+      DB_NAME: "${DB_NAME:-krexion}"
       JWT_SECRET_KEY: "${JWT_SECRET_KEY}"
-      ADMIN_EMAIL: "${ADMIN_EMAIL:-admin@realflow.local}"
+      ADMIN_EMAIL: "${ADMIN_EMAIL:-admin@krexion.local}"
       ADMIN_PASSWORD: "${ADMIN_PASSWORD}"
       POSTBACK_TOKEN: "${POSTBACK_TOKEN}"
-      APP_URL: "${APP_URL:-https://realflow.online}"
-      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-https://api.realflow.online}"
+      APP_URL: "${APP_URL:-https://krexion.com}"
+      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-https://api.krexion.com}"
       CORS_ORIGINS: "${CORS_ORIGINS:-*}"
       RESEND_API_KEY: "${RESEND_API_KEY:-}"
-      RESEND_FROM: "${RESEND_FROM:-no-reply@realflow.online}"
+      RESEND_FROM: "${RESEND_FROM:-no-reply@krexion.com}"
       # Google Sheets API (Service Account) — required by the live gsheet
       # row-deletion feature. Either set GOOGLE_SHEETS_SA_PATH to the
       # mounted JSON file, or paste the JSON content into
@@ -85,7 +85,7 @@ services:
       # GOOGLE_SHEETS_SA_PATH points to.
       - ./backend/secrets:/app/backend/secrets:ro
     networks:
-      - realflow-net
+      - krexion-net
     # Resource caps — Playwright + parallel browser launches + big
     # gsheet/proxy/UA reads can spike RAM. After the 2026-01 ZERO-OOM
     # rebalance: backend is capped at 6 GB (down from 20 GB) and a code-
@@ -133,11 +133,11 @@ services:
   #
   # Notes:
   #   - container_name is intentionally removed so Compose can spawn
-  #     multiple instances (it auto-numbers them realflow-cloudflared-1,
-  #     realflow-cloudflared-2). With container_name set, scaling is
+  #     multiple instances (it auto-numbers them krexion-cloudflared-1,
+  #     krexion-cloudflared-2). With container_name set, scaling is
   #     blocked.
   #   - deploy.replicas is the swarm-mode spec; for plain `docker compose
-  #     up` you need `--scale cloudflared=2`. REALFLOW-FORCE-SYNC.bat
+  #     up` you need `--scale cloudflared=2`. KREXION-FORCE-SYNC.bat
   #     handles this automatically.
   #   - 256 MB cap is plenty — cloudflared idle uses ~30 MB, peaks at
   #     ~80 MB under heavy traffic. 2 replicas = ~160 MB total, well
@@ -150,7 +150,7 @@ services:
       backend:
         condition: service_healthy
     networks:
-      - realflow-net
+      - krexion-net
     profiles:
       - tunnel    # only started when `docker compose --profile tunnel up`
     deploy:
@@ -183,7 +183,7 @@ services:
         # service. Same-origin = no CORS headaches, no host-specific
         # build, no rebuild needed when moving between PCs.
         REACT_APP_BACKEND_URL: ""
-    container_name: realflow-frontend
+    container_name: krexion-frontend
     restart: unless-stopped
     depends_on:
       backend:
@@ -191,7 +191,7 @@ services:
     ports:
       - "3000:80"
     networks:
-      - realflow-net
+      - krexion-net
     deploy:
       resources:
         limits:
@@ -208,5 +208,5 @@ volumes:
   rut-results:
 
 networks:
-  realflow-net:
+  krexion-net:
     driver: bridge

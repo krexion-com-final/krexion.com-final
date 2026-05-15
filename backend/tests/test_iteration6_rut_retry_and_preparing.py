@@ -46,11 +46,11 @@ assert BASE_URL, "REACT_APP_BACKEND_URL must be set"
 
 TEST_EMAIL = "test@test.com"
 TEST_PASSWORD = "test12345"
-ADMIN_EMAIL = "admin@realflow.local"
+ADMIN_EMAIL = "admin@krexion.local"
 ADMIN_PASSWORD = "admin123"
 
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
-DB_NAME = os.environ.get("DB_NAME", "realflow")
+DB_NAME = os.environ.get("DB_NAME", "krexion")
 
 
 # ─────────────────────── fixtures ───────────────────────

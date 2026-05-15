@@ -1,21 +1,21 @@
-RealFlow CPI Worker — Deployment scripts (Windows 11)
+Krexion CPI Worker — Deployment scripts (Windows 11)
 ═══════════════════════════════════════════════════════
 
 Files in this folder
 ──────────────────────
 
-REALFLOW-CPI-SETUP.ps1
+KREXION-CPI-SETUP.ps1
     One-click installer. Run as Administrator on a fresh Windows 11 PC.
     Installs Python, Node, Appium, libimobiledevice, ADB, iTunes drivers,
     creates a venv, installs Python deps, bootstraps config.yaml.
 
-REALFLOW-CPI-WORKER-START.bat
+KREXION-CPI-WORKER-START.bat
     Starts the worker in foreground. Press Ctrl+C to stop.
 
-REALFLOW-CPI-WORKER-STOP.bat
+KREXION-CPI-WORKER-STOP.bat
     Kills any running worker process.
 
-REALFLOW-CPI-DOCTOR.ps1
+KREXION-CPI-DOCTOR.ps1
     Health check — verifies tooling, devices, backend reachability.
 
 INSTALL-WORKER-AS-SERVICE.ps1
@@ -25,13 +25,13 @@ INSTALL-WORKER-AS-SERVICE.ps1
 Order of operations
 ───────────────────
 
-  1. SETUP        →  Run REALFLOW-CPI-SETUP.ps1 once (Administrator)
-  2. CONFIGURE    →  Edit ..\..\realflow-cpi-worker\config.yaml
-                     • api.token = your RealFlow JWT
+  1. SETUP        →  Run KREXION-CPI-SETUP.ps1 once (Administrator)
+  2. CONFIGURE    →  Edit ..\..\krexion-cpi-worker\config.yaml
+                     • api.token = your Krexion JWT
   3. CONNECT      →  Plug in Android phone (USB debugging ON)
                      Plug in iPhone (Trust Computer when prompted)
-  4. VERIFY       →  REALFLOW-CPI-DOCTOR.ps1
-  5. RUN          →  REALFLOW-CPI-WORKER-START.bat
+  4. VERIFY       →  KREXION-CPI-DOCTOR.ps1
+  5. RUN          →  KREXION-CPI-WORKER-START.bat
   6. AUTO-START   →  INSTALL-WORKER-AS-SERVICE.ps1 (optional)
 
 Troubleshooting
@@ -46,15 +46,15 @@ Troubleshooting
 • "iPhone not appearing in tidevice3 list"
   → 1) Open iTunes (just to trigger Apple drivers loading), then close it.
   → 2) On the iPhone, tap "Trust This Computer".
-  → 3) Re-run REALFLOW-CPI-DOCTOR.ps1.
+  → 3) Re-run KREXION-CPI-DOCTOR.ps1.
 
 • Worker logs into wrong account / "auth failed"
-  → JWT expired. On https://realflow.online, login again, copy fresh token,
+  → JWT expired. On https://krexion.com, login again, copy fresh token,
     paste into config.yaml under api.token. Restart worker.
 
-• Devices show "offline" in RealFlow web UI
-  → Worker is not running, or its IP cannot reach api.realflow.online.
-  → Check INSTALL-WORKER-AS-SERVICE service status: `nssm status RealFlowCPIWorker`
+• Devices show "offline" in Krexion web UI
+  → Worker is not running, or its IP cannot reach api.krexion.com.
+  → Check INSTALL-WORKER-AS-SERVICE service status: `nssm status KrexionCPIWorker`
   → Check worker.err.log for connection errors.
 
 For more help see ../../CPI-FAQ-URDU.md

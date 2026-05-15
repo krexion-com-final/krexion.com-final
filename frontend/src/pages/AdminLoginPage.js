@@ -67,7 +67,7 @@ export default function AdminLoginPage() {
               <div className="space-y-2">
                 <Input
                   type="email"
-                  placeholder="admin@realflow.com"
+                  placeholder="admin@krexion.com"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   required

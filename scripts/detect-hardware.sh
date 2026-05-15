@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# RealFlow -- Hardware Detection & Performance Profile Picker (Linux/macOS)
+# Krexion -- Hardware Detection & Performance Profile Picker (Linux/macOS)
 #
 # Outputs env-style key=value lines on stdout. Usage:
 #   eval "$(./scripts/detect-hardware.sh)"
@@ -56,7 +56,7 @@ esac
 # If user passed --human, print a friendly summary instead of env vars
 if [ "${1:-}" = "--human" ]; then
     echo ""
-    echo "  ===== RealFlow Hardware Profile ====="
+    echo "  ===== Krexion Hardware Profile ====="
     echo "  RAM total          : ${RAM_GB} GB"
     echo "  CPU logical cores  : ${CPU_CORES}"
     echo "  Root free space    : ${FREE_DISK_GB} GB"

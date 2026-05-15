@@ -1,10 +1,10 @@
 @echo off
 setlocal EnableDelayedExpansion
-title RealFlow - One Click Upgrade
+title Krexion - One Click Upgrade
 color 0A
 
 REM ====================================================================
-REM   RealFlow ONE-CLICK UPGRADE
+REM   Krexion ONE-CLICK UPGRADE
 REM   ─────────────────────────
 REM   Double-click karo. Bas. Wait and see.
 REM
@@ -17,14 +17,14 @@ REM     5. Status dikhayega
 REM ====================================================================
 
 REM ───── PATHS (aap ke system ke according hardcoded) ─────
-set "OLD_PATH=F:\online\real flow\real flow amna\realflow-amna-main\realflow-amna-main"
-set "NEW_PATH=F:\online\real flow\lenovo real flow\lenovo-realflow-main\lenovo-realflow-main"
-set "BACKUP_ROOT=F:\online\real flow\realflow-backups"
+set "OLD_PATH=F:\online\real flow\real flow amna\krexion-amna-main\krexion-amna-main"
+set "NEW_PATH=F:\online\real flow\lenovo real flow\lenovo-krexion-main\lenovo-krexion-main"
+set "BACKUP_ROOT=F:\online\real flow\krexion-backups"
 
 cls
 echo.
 echo  ============================================================
-echo    RealFlow - ONE CLICK UPGRADE
+echo    Krexion - ONE CLICK UPGRADE
 echo  ============================================================
 echo.
 echo    Old install : %OLD_PATH%
@@ -179,13 +179,13 @@ echo.
 echo    Backup location: %BACKUP_DIR%
 echo.
 echo    Ab kya karein:
-echo      1. Apna RealFlow URL browser mein kholein
-echo      2. Login karein (admin@realflow.local / admin123)
+echo      1. Apna Krexion URL browser mein kholein
+echo      2. Login karein (admin@krexion.local / admin123)
 echo      3. Sidebar mein "CPI Module" dropdown dikhega
 echo      4. Phir CPI Worker setup karein (Android phone connect karne ke liye)
 echo.
-echo    Logs check karne ke liye: REALFLOW-LOGS.bat
-echo    Containers band karne ke liye: REALFLOW-STOP.bat
+echo    Logs check karne ke liye: KREXION-LOGS.bat
+echo    Containers band karne ke liye: KREXION-STOP.bat
 echo.
 echo  ============================================================
 echo.

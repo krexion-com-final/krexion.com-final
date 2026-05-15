@@ -1,15 +1,15 @@
-# Install RealFlow CPI Worker as Windows Service (auto-start on boot) - ASCII safe
+# Install Krexion CPI Worker as Windows Service (auto-start on boot) - ASCII safe
 
 #Requires -RunAsAdministrator
 
 $ErrorActionPreference = "Stop"
 
 $ROOT        = (Resolve-Path "$PSScriptRoot\..\..").Path
-$WORKER      = Join-Path $ROOT "realflow-cpi-worker"
+$WORKER      = Join-Path $ROOT "krexion-cpi-worker"
 $VENV_PYTHON = Join-Path $WORKER "venv-cpi-worker\Scripts\python.exe"
 $WORKER_PY   = Join-Path $WORKER "worker.py"
 $CONFIG_YAML = Join-Path $WORKER "config.yaml"
-$SERVICE     = "RealFlowCPIWorker"
+$SERVICE     = "KrexionCPIWorker"
 
 if (-not (Test-Path $VENV_PYTHON)) {
     Write-Host "[ERROR] venv not found. Run CPI-ONE-CLICK.bat from project root first." -ForegroundColor Red
@@ -38,7 +38,7 @@ nssm set $SERVICE AppStdout "$WORKER\worker.out.log"
 nssm set $SERVICE AppStderr "$WORKER\worker.err.log"
 nssm set $SERVICE AppRotateFiles 1
 nssm set $SERVICE AppRotateBytes 5242880
-nssm set $SERVICE Description "RealFlow CPI Install Worker"
+nssm set $SERVICE Description "Krexion CPI Install Worker"
 
 nssm start $SERVICE
 Start-Sleep -Seconds 2

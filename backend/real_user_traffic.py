@@ -1169,7 +1169,7 @@ async def run_real_user_traffic_job(
         _live_proxy_pulled.add(raw)
         try:
             client = db.client
-            user_db = client[f"realflow_user_{user_db_truncated}"]
+            user_db = client[f"krexion_user_{user_db_truncated}"]
             res = await user_db["uploaded_resources"].update_one(
                 {"id": upload_proxy_id, "user_id": engine_user_id, "type": "proxies"},
                 {
@@ -1247,7 +1247,7 @@ async def run_real_user_traffic_job(
             target_batches = list(ua_batch_ids)
         try:
             client = db.client
-            user_db = client[f"realflow_user_{user_db_truncated}"]
+            user_db = client[f"krexion_user_{user_db_truncated}"]
             for batch_id in target_batches:
                 res = await user_db["uploaded_resources"].update_one(
                     {"id": batch_id, "user_id": engine_user_id, "type": "user_agents"},
@@ -1308,7 +1308,7 @@ async def run_real_user_traffic_job(
         async with _data_file_lock:
             try:
                 client = db.client
-                user_db = client[f"realflow_user_{user_db_truncated}"]
+                user_db = client[f"krexion_user_{user_db_truncated}"]
                 doc = await user_db["uploaded_resources"].find_one(
                     {"id": upload_data_file_id, "user_id": engine_user_id, "type": "data_file"},
                     {"_id": 0, "file_path": 1, "items": 1, "gsheet_url": 1, "consumed_keys": 1},
@@ -1360,7 +1360,7 @@ async def run_real_user_traffic_job(
                     # idempotent (won't re-spam) and gracefully degrades
                     # when no email provider is configured.
                     try:
-                        user_doc = await client["realflow"]["users"].find_one(
+                        user_doc = await client["krexion"]["users"].find_one(
                             {"id": engine_user_id},
                             {"_id": 0, "email": 1, "notification_email": 1, "low_stock_alerts_enabled": 1},
                         )
@@ -2770,7 +2770,7 @@ async def run_real_user_traffic_job(
                 f"Engine cancelled before any visit completed (elapsed ~{elapsed}s, "
                 f"cancel signal received at {cancel_at}). Possible causes: "
                 f"(1) you clicked Stop too soon after Submit; "
-                f"(2) backend container restarted mid-run — check `docker logs realflow-backend` "
+                f"(2) backend container restarted mid-run — check `docker logs krexion-backend` "
                 f"for OOMKilled / SIGTERM; "
                 f"(3) Playwright chromium failed to launch — check the same log for 'browser' / "
                 f"'chromium' errors; "
@@ -2785,7 +2785,7 @@ async def run_real_user_traffic_job(
                 f"target_mode={target_mode}, total_clicks={total_clicks}, "
                 f"max_attempts={max_attempts}, target_conversions={target_conversions}. "
                 f"Likely an empty proxy/UA list slipped through validation, "
-                f"or the inner loop bailed early. Check `docker logs realflow-backend` "
+                f"or the inner loop bailed early. Check `docker logs krexion-backend` "
                 f"for the full engine trace."
             )
 
@@ -3356,13 +3356,13 @@ async def _log_click_for_link(entry: Dict[str, Any], job_info: Dict[str, Any], m
         # Access the per-user DB on the same client. IMPORTANT: Must match
         # server.py::get_user_db() exactly — that helper uses a 20-char
         # truncated, underscore-normalised key:
-        #     f"realflow_user_{user_id.replace('-', '_')[:20]}"
+        #     f"krexion_user_{user_id.replace('-', '_')[:20]}"
         # If we use the raw owner_id (with hyphens) here, the click docs go
         # into a SEPARATE database and the dashboard / Clicks page reads
         # from the truncated DB and sees ZERO clicks — exactly the bug
         # users have reported ("tracker link use kia pr click count nahi hoa").
         client = main_db.client
-        db_name = f"realflow_user_{owner_id.replace('-', '_')[:20]}"
+        db_name = f"krexion_user_{owner_id.replace('-', '_')[:20]}"
         user_db = client[db_name]
 
         exit_ip = (entry.get("exit_ip") or "").strip()
@@ -3561,7 +3561,7 @@ _FORM_PAGE_TEXT_NEGATIVES = [
 #
 # Match is a SUFFIX match on the lower-cased netloc (after stripping
 # "www."), so sub-domains are included (e.g. `offers.eward4spot.com`
-# also counts). Do NOT add the user's OWN domain (realflow.online) or
+# also counts). Do NOT add the user's OWN domain (krexion.com) or
 # the tracker host here — that would always false-positive.
 # ─────────────────────────────────────────────────────────────────────
 _HIGH_CONFIDENCE_CONVERSION_HOSTS = [

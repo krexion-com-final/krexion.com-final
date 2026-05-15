@@ -42,7 +42,7 @@ EXPOSE 8001
 # ────────────────────────────────────────────────────────────────────
 # 2026-01 IMPORTANT — DEFAULT REVERTED FROM 4 → 1 WORKER
 # ────────────────────────────────────────────────────────────────────
-# RealFlow's RUT engine keeps **per-job state in process memory**
+# Krexion's RUT engine keeps **per-job state in process memory**
 # (`RUT_JOBS[job_id]` dict, asyncio.Event objects, ws clients, the
 # memory-pressure throttle counter, etc.) — none of it is serialised
 # to Mongo, only the periodic _persist() snapshot is.
@@ -70,7 +70,7 @@ EXPOSE 8001
 #  • All 6 GB available to the single Playwright pool — far more
 #    headroom for high-concurrency RUT runs (10-20 browsers).
 #  • asyncio + uvloop in one process easily handles thousands of
-#    concurrent HTTP requests for an admin panel like RealFlow
+#    concurrent HTTP requests for an admin panel like Krexion
 #    (typical traffic is <50 RPS, miles below uvicorn's per-worker
 #    limit of 10k+ RPS).
 #

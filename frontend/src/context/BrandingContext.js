@@ -5,8 +5,8 @@ const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 
 const DEFAULT_BRANDING = {
-  app_name: "RealFlow",
-  tagline: "Real Users. Real Results.",
+  app_name: "Krexion",
+  tagline: "Engineered for traffic that converts.",
   logo_url: "",
   favicon_url: "",
   primary_color: "#3B82F6",
@@ -22,7 +22,7 @@ const DEFAULT_BRANDING = {
   muted_color: "#A1A1AA",
   login_bg_url: "",
   admin_email: "",
-  footer_text: "© 2026 RealFlow. All rights reserved.",
+  footer_text: "© 2026 Krexion. All rights reserved.",
   sidebar_style: "dark",
   button_style: "rounded",
   font_family: "Inter"
@@ -80,13 +80,13 @@ function applyBrandingStyles(branding) {
   // ── Respect user's custom theme preference ──────────────────────
   // ThemeContext owns the per-user palette (light / dark / custom).
   // When the user has explicitly picked a theme — i.e. anything saved
-  // under `realflow-theme` in localStorage — we let THAT win and skip
+  // under `krexion-theme` in localStorage — we let THAT win and skip
   // server-branding's color application here. Otherwise the server
   // defaults would clobber the user's chosen palette every time
   // BrandingContext re-fetched.
   let userThemeActive = false;
   try {
-    const raw = localStorage.getItem("realflow-theme");
+    const raw = localStorage.getItem("krexion-theme");
     if (raw) {
       const parsed = JSON.parse(raw);
       // Any saved theme (including 'dark') is a user preference; only

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>RealFlow Admin Toolkit</title>
+<title>Krexion Admin Toolkit</title>
 <style>
   :root{
     --bg:#0a0e1a;--panel:#11172a;--border:#22304a;--text:#e7eefc;--muted:#8aa0c4;
@@ -38,7 +38,7 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>RealFlow Admin Toolkit</h1>
+  <h1>Krexion Admin Toolkit</h1>
   <p class="sub">Local browser tool — koi data internet pe nahi jaata. Sab kuch aap ke browser ke andar compute hota hai.</p>
 
   <!-- TOOL 1: Activation Key Hash Generator -->
@@ -56,7 +56,7 @@
       <button class="copy" onclick="copyText('key-output', event)">Copy</button>
     </div>
     <div class="info">
-      <strong>Kahan paste karein:</strong> <code>RealFlow-INSTALL.bat</code> file mein line dhoondein:<br>
+      <strong>Kahan paste karein:</strong> <code>Krexion-INSTALL.bat</code> file mein line dhoondein:<br>
       <code>set "EXPECTED_HASH=..."</code> — purani hash ko nayi se replace karein → commit → done.
     </div>
   </div>
@@ -80,7 +80,7 @@
     </div>
     <div id="expiry-readable" class="info">Readable date yahan ayega...</div>
     <div class="info">
-      <strong>Kahan paste karein:</strong> <code>RealFlow-INSTALL.bat</code> mein line dhoondein:<br>
+      <strong>Kahan paste karein:</strong> <code>Krexion-INSTALL.bat</code> mein line dhoondein:<br>
       <code>set "EXPIRY_DATE=20260710"</code> — number replace karein → commit → done.
     </div>
   </div>
@@ -138,7 +138,7 @@ async function hashKey(){
 }
 
 function suggestKey(){
-  const parts=['REALFLOW','DYNA','SHAN','KEY','2026','SECURE'];
+  const parts=['KREXION','DYNA','SHAN','KEY','2026','SECURE'];
   const rand=()=>Math.random().toString(36).slice(2,7).toUpperCase();
   const k=`${parts[Math.floor(Math.random()*parts.length)]}-${rand()}-${rand()}-${parts[Math.floor(Math.random()*parts.length)]}`;
   document.getElementById('key-input').value=k;

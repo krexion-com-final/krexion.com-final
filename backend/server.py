@@ -38,7 +38,7 @@ if not mongo_url:
     raise Exception("MONGO_URL environment variable is required!")
 
 # Get database name
-db_name = os.environ.get('DB_NAME', 'realflow')
+db_name = os.environ.get('DB_NAME', 'krexion')
 
 client = AsyncIOMotorClient(
     mongo_url,
@@ -93,7 +93,7 @@ async def get_cached_link(short_code: str):
 # Helper function to get user-specific database
 def get_user_db(user_id: str):
     """Get database for specific main user - sub-users use parent's database"""
-    db_name = f"realflow_user_{user_id.replace('-', '_')[:20]}"
+    db_name = f"krexion_user_{user_id.replace('-', '_')[:20]}"
     return client[db_name]
 
 def get_db_for_user(user: dict):
@@ -112,7 +112,7 @@ def get_db_for_user(user: dict):
 
 
 # ─── Per-user-DB index bootstrap (runs once per process per user) ──────
-# Each user has their own MongoDB database (`realflow_user_<id>`). The
+# Each user has their own MongoDB database (`krexion_user_<id>`). The
 # heavy collections (`uploaded_resources`, `items`, `realuser_jobs`) need
 # indexes for the queries that run on every request — without these,
 # the find+sort on uploads becomes a full collection scan once a user
@@ -230,7 +230,7 @@ async def get_all_click_ips_from_entire_database(force_refresh=False):
     # 2. Get ALL IPs from ALL user-specific databases
     try:
         db_names = await client.list_database_names()
-        user_dbs = [name for name in db_names if name.startswith("realflow_user_")]
+        user_dbs = [name for name in db_names if name.startswith("krexion_user_")]
         
         for db_name in user_dbs[:20]:  # Process max 20 user databases
             try:
@@ -309,7 +309,7 @@ async def debug_search_ip(ip: str):
     # Check ALL user databases
     try:
         all_db_names = await client.list_database_names()
-        user_databases = [name for name in all_db_names if name.startswith("realflow_user_")]
+        user_databases = [name for name in all_db_names if name.startswith("krexion_user_")]
         
         for db_name in user_databases:
             try:
@@ -383,7 +383,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 7 * 24 * 60
 POSTBACK_TOKEN = os.environ.get("POSTBACK_TOKEN", "secure-postback-token-123")
 
 # Admin configuration
-ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@realflow.local")
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@krexion.local")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 
 # Email configuration - Gmail SMTP (primary) or Resend (fallback)
@@ -422,7 +422,7 @@ elif RESEND_API_KEY:
     logger.info("Resend email service configured")
 else:
     logger.warning("No email service configured - emails will be logged only")
-ADMIN_CONTACT_EMAIL = "admin@realflow.local"
+ADMIN_CONTACT_EMAIL = "admin@krexion.local"
 
 # Email sending helper function
 async def send_password_reset_email(to_email: str, user_name: str, reset_token: str, user_type: str = "user"):
@@ -433,7 +433,7 @@ async def send_password_reset_email(to_email: str, user_name: str, reset_token: 
     branding_doc = await main_db.settings.find_one({"key": "branding"})
     branding = branding_doc.get("value", DEFAULT_BRANDING) if branding_doc else DEFAULT_BRANDING
     
-    app_name = branding.get("app_name", "RealFlow")
+    app_name = branding.get("app_name", "Krexion")
     tagline = branding.get("tagline", "Traffic Tracking & Link Management")
     primary_color = branding.get("primary_color", "#3B82F6")
     logo_url = branding.get("logo_url", "")
@@ -608,8 +608,8 @@ DEFAULT_FEATURES = {
 
 # Default branding settings
 DEFAULT_BRANDING = {
-    "app_name": "RealFlow",
-    "tagline": "Real Users. Real Results.",
+    "app_name": "Krexion",
+    "tagline": "Engineered for traffic that converts.",
     "logo_url": "",
     "favicon_url": "",
     "primary_color": "#3B82F6",
@@ -624,8 +624,8 @@ DEFAULT_BRANDING = {
     "text_color": "#FAFAFA",
     "muted_color": "#A1A1AA",
     "login_bg_url": "",
-    "admin_email": "admin@realflow.local",
-    "footer_text": "© 2026 RealFlow. All rights reserved.",
+    "admin_email": "admin@krexion.local",
+    "footer_text": "© 2026 Krexion. All rights reserved.",
     "sidebar_style": "dark",
     "button_style": "rounded",
     "font_family": "Inter",
@@ -2916,7 +2916,7 @@ async def admin_system_check(admin: dict = Depends(get_current_admin)):
         users_count = await main_db.users.count_documents({})
         checks.append({"group": "Database", "name": "users collection", "ok": True, "detail": f"{users_count} users"})
         all_dbs = await client.list_database_names()
-        per_user_dbs = [d for d in all_dbs if d.startswith("realflow_user_")]
+        per_user_dbs = [d for d in all_dbs if d.startswith("krexion_user_")]
         checks.append({"group": "Database", "name": "per-user databases", "ok": True, "detail": f"{len(per_user_dbs)} user DB(s)"})
     except Exception as e:
         checks.append({"group": "Database", "name": "MongoDB connection", "ok": False, "detail": str(e)})
@@ -3065,7 +3065,7 @@ async def admin_get_email_settings(admin: dict = Depends(get_current_admin)):
         "resend_api_key_set": bool(cfg.get("resend_api_key")),
         "resend_api_key_preview": _mask_secret(cfg.get("resend_api_key")),
         "resend_from": cfg.get("resend_from") or "",
-        "sender_name": cfg.get("sender_name") or "RealFlow",
+        "sender_name": cfg.get("sender_name") or "Krexion",
         "sender_email": cfg.get("sender_email") or "",
         "updated_at": cfg.get("updated_at") or "",
     }
@@ -3134,7 +3134,7 @@ async def admin_test_email(
       <table width="560" cellpadding="0" cellspacing="0" style="background:#18181B;border:1px solid #27272A;border-radius:12px;">
         <tr><td style="padding:32px 28px;">
           <h1 style="color:#10B981;margin:0 0 8px 0;font-size:20px;">✓ Email Settings Working</h1>
-          <p style="color:#A1A1AA;margin:0 0 18px 0;font-size:13px;">RealFlow Admin · Test message</p>
+          <p style="color:#A1A1AA;margin:0 0 18px 0;font-size:13px;">Krexion Admin · Test message</p>
           <p style="color:#D4D4D8;margin:0;font-size:14px;line-height:1.6;">
             Aapki email configuration successfully kaam kar rahi hai. Low-stock
             alerts aur dosri notifications ab is account se delivery hongi.
@@ -3148,7 +3148,7 @@ async def admin_test_email(
     """
     result = await send_alert_email(
         to_email=target,
-        subject="✓ RealFlow email settings test",
+        subject="✓ Krexion email settings test",
         html=html,
         db=db,
     )
@@ -3280,7 +3280,7 @@ async def delete_user(user_id: str, admin: dict = Depends(get_current_admin)):
             
             # Also try to clean up user-specific database if it exists
             try:
-                user_db_name = f"realflow_user_{user_id}"
+                user_db_name = f"krexion_user_{user_id}"
                 await client.drop_database(user_db_name)
                 logger.info(f"Dropped user database: {user_db_name}")
             except Exception as db_drop_error:
@@ -8008,7 +8008,7 @@ def _analyze_ua(ua: str) -> dict:
         platform = result.get("os", {}).get("family") or "Unknown"
     result["platform"] = platform
 
-    # 5. Referrer-source guess (what RealFlow will categorise this UA as)
+    # 5. Referrer-source guess (what Krexion will categorise this UA as)
     source_guess = inapp.get("app") or "browser"
     source_map = {
         "tiktok": "TikTok", "instagram": "Instagram", "facebook": "Facebook",
@@ -9574,7 +9574,7 @@ async def get_conversions(user: dict = Depends(get_current_user), limit: int = 1
 async def find_click_across_dbs(clickid: str):
     """Find a click by click_id across the main DB and all per-user DBs.
     Returns (click_doc, source_db) or (None, None) if not found.
-    Clicks are normally written to user-specific DBs (realflow_user_*) by the
+    Clicks are normally written to user-specific DBs (krexion_user_*) by the
     redirect handler, so a simple lookup on main_db is not sufficient.
     """
     # 1. Legacy/main DB first (fast path)
@@ -9585,7 +9585,7 @@ async def find_click_across_dbs(clickid: str):
     try:
         all_db_names = await client.list_database_names()
         for name in all_db_names:
-            if not name.startswith("realflow_user_"):
+            if not name.startswith("krexion_user_"):
                 continue
             user_db_instance = client[name]
             click = await user_db_instance.clicks.find_one({"click_id": clickid}, {"_id": 0})
@@ -10268,7 +10268,7 @@ async def is_ip_duplicate_in_any_database(ip_to_check: str, user_db) -> tuple:
     # 3. Check ALL other user databases
     try:
         all_db_names = await client.list_database_names()
-        user_databases = [name for name in all_db_names if name.startswith("realflow_user_")]
+        user_databases = [name for name in all_db_names if name.startswith("krexion_user_")]
         
         for other_db_name in user_databases:
             try:
@@ -10768,7 +10768,7 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         if not existing_click:
             try:
                 all_db_names = await client.list_database_names()
-                user_databases = [name for name in all_db_names if name.startswith("realflow_user_")]
+                user_databases = [name for name in all_db_names if name.startswith("krexion_user_")]
 
                 for other_db_name in user_databases:
                     if existing_click:
@@ -12618,7 +12618,7 @@ async def _consume_uploads(
 
 # ─────────────────────────────────────────────────────────────────────
 # Visual Recorder — interactive Playwright session that records the
-# user's clicks/typing as a RealFlow automation JSON.
+# user's clicks/typing as a Krexion automation JSON.
 # ─────────────────────────────────────────────────────────────────────
 try:
     import visual_recorder as vr
@@ -13103,7 +13103,7 @@ async def diagnostics_health():
         out["checks"]["active_rut_jobs"] = {
             "status": "ok",
             "value": f"{len(active)} active in this worker",
-            "hint": "Multi-worker: jobs may run on a different worker — check `docker exec realflow-backend python3 -c 'from pymongo import MongoClient; c=MongoClient(...); print(c[\"realflow\"][\"real_user_traffic_jobs\"].count_documents({\"status\":\"running\"}))'`"
+            "hint": "Multi-worker: jobs may run on a different worker — check `docker exec krexion-backend python3 -c 'from pymongo import MongoClient; c=MongoClient(...); print(c[\"krexion\"][\"real_user_traffic_jobs\"].count_documents({\"status\":\"running\"}))'`"
                     if len(active) == 0 else "",
         }
     except Exception as e:
@@ -13200,7 +13200,7 @@ async def diagnostics_hardware_profile():
             "matches_recommendation": actual_concurrency == rut,
         },
         "hint": (
-            "Run RealFlow-RETUNE.bat (Windows) or sudo bash RealFlow-RETUNE.sh "
+            "Run Krexion-RETUNE.bat (Windows) or sudo bash Krexion-RETUNE.sh "
             "(Linux/macOS) to apply the recommended tier."
             if actual_concurrency != rut
             else "Backend is already running with the recommended tuning."
@@ -13350,7 +13350,7 @@ async def diagnostics_repair(current_user: dict = Depends(get_current_user)):
             "name": "mongodb",
             "status": "fail",
             "detail": (
-                f"Mongo unreachable: {str(e)[:150]}. Restart the realflow-mongo "
+                f"Mongo unreachable: {str(e)[:150]}. Restart the krexion-mongo "
                 "container manually via Docker Desktop."
             ),
         })
@@ -13527,7 +13527,7 @@ async def startup_db_indexes():
     #   1. RESUMABLE — `is_resumable` is True AND `processed == 0` AND
     #      `restart_count < 3`. The backend died during prep / before
     #      the engine started a single visit. Re-spawn the BG task.
-    #      This is the common case when the user runs REALFLOW-FORCE-SYNC
+    #      This is the common case when the user runs KREXION-FORCE-SYNC
     #      while a job was queued — they expect the job to survive.
     #   2. PARTIAL RUN — status was "running" with `processed > 0`.
     #      Genuine partial run; preserve results, mark "stopped" with

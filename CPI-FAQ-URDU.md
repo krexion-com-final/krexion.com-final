@@ -38,11 +38,11 @@
 ## 🌐 iOS Proxy Auto-Rotation Setup
 
 ### Q: iOS me proxy auto-rotate kaise ho jab worker ko phone setting me access nahi?
-**A**: RealFlow iss ke liye **local mitmproxy gateway** use karta hai. One-time setup:
+**A**: Krexion iss ke liye **local mitmproxy gateway** use karta hai. One-time setup:
 
 **Step 1**: Home PC pe gateway start karein (background mein):
 ```powershell
-cd C:\realflow\realflow-cpi-worker
+cd C:\krexion\krexion-cpi-worker
 .\venv-cpi-worker\Scripts\activate
 pip install mitmproxy
 mitmdump -s ios_proxy_gateway.py --listen-port 8866
@@ -63,11 +63,11 @@ mitmdump -s ios_proxy_gateway.py --listen-port 8866
 
 ## 🔴 Setup / Install Issues
 
-### Q: `REALFLOW-CPI-SETUP.ps1` chalu hote hi error: "execution of scripts is disabled"
+### Q: `KREXION-CPI-SETUP.ps1` chalu hote hi error: "execution of scripts is disabled"
 **A**: PowerShell execution policy block kar rahi hai. Run as Admin karke yeh paste karein:
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-.\REALFLOW-CPI-SETUP.ps1
+.\KREXION-CPI-SETUP.ps1
 ```
 
 ### Q: Setup script "Chocolatey installation failed" pe atak gaya
@@ -80,7 +80,7 @@ iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocola
 ### Q: `pip install` failed during setup
 **A**: Internet ya Python issue. Manual:
 ```powershell
-cd C:\realflow\realflow-cpi-worker
+cd C:\krexion\krexion-cpi-worker
 .\venv-cpi-worker\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
@@ -149,7 +149,7 @@ adb connect 127.0.0.1:5557
 **A**: Apple ID logged out hai. Settings → App Store → sign in. Worker isi Apple ID se install karega.
 
 ### Q: Apple ID pe "Verification Code Required" 2FA
-**A**: Yeh expected hai monthly/weekly. Apke personal phone pe SMS aayega. RealFlow web UI pe alert dikhega — code paste karein.
+**A**: Yeh expected hai monthly/weekly. Apke personal phone pe SMS aayega. Krexion web UI pe alert dikhega — code paste karein.
 
 ### Q: iPhone pe install start ho jata hai but app open nahi hota / SDK fire nahi karta
 **A**:
@@ -162,12 +162,12 @@ adb connect 127.0.0.1:5557
 ## 🌐 Backend / Auth Issues
 
 ### Q: Worker startup pe "Auth failed: 401"
-**A**: JWT expire ho gaya. realflow.online pe login karein, fresh token copy karein, config.yaml update, worker restart.
+**A**: JWT expire ho gaya. krexion.com pe login karein, fresh token copy karein, config.yaml update, worker restart.
 
-### Q: Worker startup pe "Connection refused" / cannot reach api.realflow.online
+### Q: Worker startup pe "Connection refused" / cannot reach api.krexion.com
 **A**:
 - Cloudflare Tunnel running hai? `cloudflared tunnel info <YOUR_TUNNEL_NAME>`
-- DNS resolve ho raha hai? `nslookup api.realflow.online`
+- DNS resolve ho raha hai? `nslookup api.krexion.com`
 - Backend Docker chal raha? `docker compose ps`
 
 ### Q: Devices "online" dikhe Web UI me but jobs assign nahi ho rahe
@@ -206,25 +206,25 @@ Agar 30% se kam → device upgrade karein (real phone vs emulator), proxy qualit
 
 ## 🛠️ Worker Service Issues
 
-### Q: Service "RealFlowCPIWorker" start nahi ho rahi
+### Q: Service "KrexionCPIWorker" start nahi ho rahi
 **A**:
 ```powershell
-nssm status RealFlowCPIWorker
+nssm status KrexionCPIWorker
 # Agar SERVICE_PAUSED ya STOPPED:
-nssm start RealFlowCPIWorker
+nssm start KrexionCPIWorker
 # Logs check karein:
-Get-Content C:\realflow\realflow-cpi-worker\worker.err.log -Tail 50
+Get-Content C:\krexion\krexion-cpi-worker\worker.err.log -Tail 50
 ```
 
 ### Q: PC reboot ke baad worker auto-start nahi ho raha
 **A**:
 ```powershell
-nssm set RealFlowCPIWorker Start SERVICE_AUTO_START
+nssm set KrexionCPIWorker Start SERVICE_AUTO_START
 ```
 
 ### Q: Worker memory zyada use kar raha hai
 **A**: Normal hai (~200-400MB). Agar 1GB se zyada ho:
-- `nssm restart RealFlowCPIWorker`
+- `nssm restart KrexionCPIWorker`
 - Logs check karein for memory leaks
 
 ---
@@ -262,8 +262,8 @@ nssm set RealFlowCPIWorker Start SERVICE_AUTO_START
 
 ### Sab kuch stop karna hai:
 ```powershell
-nssm stop RealFlowCPIWorker
-.\deployment\cpi\REALFLOW-CPI-WORKER-STOP.bat
+nssm stop KrexionCPIWorker
+.\deployment\cpi\KREXION-CPI-WORKER-STOP.bat
 ```
 
 ### Phones ko clean state me lana:

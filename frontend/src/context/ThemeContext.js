@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback } from "react";
 
-const STORAGE_KEY = "realflow-theme";
+const STORAGE_KEY = "krexion-theme";
 
 // ── Theme presets ────────────────────────────────────────────────
 // Each preset sets ALL the CSS variables that BrandingContext normally

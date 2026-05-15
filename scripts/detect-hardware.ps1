@@ -1,8 +1,8 @@
-# RealFlow -- Hardware Detection & Performance Profile Picker (Windows)
+# Krexion -- Hardware Detection & Performance Profile Picker (Windows)
 #
 # Outputs a single object with detected RAM, CPU cores, free disk +
 # the recommended performance tier. Used by setup-engine.ps1 and
-# RealFlow-RETUNE.bat to pick the right docker-compose override.
+# Krexion-RETUNE.bat to pick the right docker-compose override.
 #
 # Tiers:
 #   MICRO  -- RAM <= 6 GB                  -- 1 RUT worker
@@ -14,7 +14,7 @@
 # CPU cores are a HARD ceiling: actual concurrency = min(tier, cores*2)
 # so on a fast 4-core / 32 GB box you still cap at 8, not 16.
 
-function Get-RealFlowProfile {
+function Get-KrexionProfile {
     $totalRamGB  = [int][math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 0)
     $cpuCores    = (Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum
     if (-not $cpuCores) { $cpuCores = [Environment]::ProcessorCount }
@@ -67,9 +67,9 @@ function Get-RealFlowProfile {
 # When dot-sourced this just defines the function. When run directly
 # (e.g. `powershell -File detect-hardware.ps1`) print a summary.
 if ($MyInvocation.InvocationName -ne ".") {
-    $p = Get-RealFlowProfile
+    $p = Get-KrexionProfile
     Write-Host ""
-    Write-Host "  ===== RealFlow Hardware Profile =====" -ForegroundColor Cyan
+    Write-Host "  ===== Krexion Hardware Profile =====" -ForegroundColor Cyan
     Write-Host "  RAM total            : $($p.TotalRamGB) GB"
     Write-Host "  CPU logical cores    : $($p.CpuCores)"
     Write-Host "  System drive free    : $($p.FreeDiskGB) GB"

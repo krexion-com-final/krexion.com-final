@@ -1,7 +1,7 @@
 ﻿# ============================================================
-#  RealFlow GO ONLINE  -  Quick Tunnel via Cloudflare
+#  Krexion GO ONLINE  -  Quick Tunnel via Cloudflare
 # ============================================================
-#  Makes your local RealFlow accessible from anywhere in the
+#  Makes your local Krexion accessible from anywhere in the
 #  world via a public HTTPS URL.
 #
 #  How it works:
@@ -47,25 +47,25 @@ function Show-Error {
 }
 
 # ============================================================
-#  Step 1 -- Verify RealFlow is running locally
+#  Step 1 -- Verify Krexion is running locally
 # ============================================================
 Clear-Host
-Write-Big "RealFlow GO ONLINE -- Step 1 of 3"
-Write-Host "  Checking that RealFlow is running on this PC..." -ForegroundColor White
+Write-Big "Krexion GO ONLINE -- Step 1 of 3"
+Write-Host "  Checking that Krexion is running on this PC..." -ForegroundColor White
 
-$realflowUp = $false
+$krexionUp = $false
 try {
     $r = Invoke-WebRequest $LocalAppUrl -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
-    if ($r.StatusCode -eq 200) { $realflowUp = $true }
+    if ($r.StatusCode -eq 200) { $krexionUp = $true }
 } catch {}
 
-if (-not $realflowUp) {
+if (-not $krexionUp) {
     Show-Error `
-        "RealFlow is NOT running on this PC" `
+        "Krexion is NOT running on this PC" `
         "Could not reach $LocalAppUrl" `
-        "1. Open Docker Desktop -- wait until the whale icon stops animating`r`n  2. Open Command Prompt -> cd C:\realflow -> docker compose up -d`r`n  3. Wait 30 seconds`r`n  4. Double-click GO-ONLINE.bat again"
+        "1. Open Docker Desktop -- wait until the whale icon stops animating`r`n  2. Open Command Prompt -> cd C:\krexion -> docker compose up -d`r`n  3. Wait 30 seconds`r`n  4. Double-click GO-ONLINE.bat again"
 }
-Write-Host "  OK -- RealFlow is running locally at $LocalAppUrl" -ForegroundColor Green
+Write-Host "  OK -- Krexion is running locally at $LocalAppUrl" -ForegroundColor Green
 Start-Sleep -Seconds 1
 
 # ============================================================
@@ -104,7 +104,7 @@ Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force -Err
 Start-Sleep -Seconds 1
 
 # Start cloudflared as a background process, redirect stdout+stderr to a temp file
-$tunnelLog = Join-Path $env:TEMP "realflow-tunnel.log"
+$tunnelLog = Join-Path $env:TEMP "krexion-tunnel.log"
 if (Test-Path $tunnelLog) { Remove-Item $tunnelLog -Force }
 
 $proc = Start-Process -FilePath $CloudflaredExe `
@@ -149,16 +149,16 @@ if (-not $publicUrl) {
 #  Show beautiful HTML page with URL + QR code
 # ============================================================
 $qrApi = "https://api.qrserver.com/v1/create-qr-code/?size=380x380&data=" + [uri]::EscapeDataString($publicUrl)
-$waText = [uri]::EscapeDataString("My RealFlow is online! Open this link: $publicUrl")
+$waText = [uri]::EscapeDataString("My Krexion is online! Open this link: $publicUrl")
 $waUrl  = "https://wa.me/?text=$waText"
 
-$htmlFile = Join-Path $env:TEMP "realflow-online.html"
+$htmlFile = Join-Path $env:TEMP "krexion.html"
 $htmlContent = @"
 <!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>RealFlow is Online</title>
+<title>Krexion is Online</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 :root { color-scheme: light dark; }
@@ -242,7 +242,7 @@ h1 { margin:0 0 8px; font-size:36px; font-weight:800; letter-spacing:-0.5px; }
 <body>
 <div class="card">
   <div class="badge">LIVE -- ONLINE NOW</div>
-  <h1>Your RealFlow is online</h1>
+  <h1>Your Krexion is online</h1>
   <p class="sub">Open this URL on your mobile, laptop, tablet -- anywhere in the world.</p>
 
   <div class="urlbox">
@@ -300,7 +300,7 @@ Clear-Host
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host "                                                            " -ForegroundColor Green
-Write-Host "         YOUR REALFLOW IS NOW ONLINE!                       " -ForegroundColor Green
+Write-Host "         YOUR KREXION IS NOW ONLINE!                       " -ForegroundColor Green
 Write-Host "                                                            " -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host ""
@@ -314,7 +314,7 @@ Write-Host "------------------------------------------------------------" -Foreg
 Write-Host "  IMPORTANT:" -ForegroundColor Yellow
 Write-Host "    - This URL is TEMPORARY (changes each time you start)" -ForegroundColor Yellow
 Write-Host "    - Tunnel stays ON only while this window is OPEN" -ForegroundColor Yellow
-Write-Host "    - Close this window to take RealFlow offline" -ForegroundColor Yellow
+Write-Host "    - Close this window to take Krexion offline" -ForegroundColor Yellow
 Write-Host "------------------------------------------------------------" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  To STOP: Close this window (Alt + F4) or Ctrl + C" -ForegroundColor Gray
@@ -336,6 +336,6 @@ try {
 } finally {
     try { $proc | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}
     Write-Host ""
-    Write-Host "  RealFlow is now OFFLINE." -ForegroundColor Red
+    Write-Host "  Krexion is now OFFLINE." -ForegroundColor Red
     Start-Sleep -Seconds 3
 }

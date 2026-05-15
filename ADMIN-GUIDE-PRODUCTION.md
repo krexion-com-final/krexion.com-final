@@ -1,6 +1,6 @@
-# RealFlow — Production Admin Guide
+# Krexion — Production Admin Guide
 
-> Yeh guide aap (business owner / admin) ke liye hai. RealFlow ko production mein
+> Yeh guide aap (business owner / admin) ke liye hai. Krexion ko production mein
 > properly manage karne ke liye sab kuch yahan hai.
 
 [Comprehensive Urdu + English production admin guide]
@@ -9,7 +9,7 @@
 
 # 🎯 Admin Role — Aap Kya Kar Sakte Hain
 
-Aap (RealFlow admin) yeh sab kar sakte hain:
+Aap (Krexion admin) yeh sab kar sakte hain:
 - 🔐 **User Management** — naye users approve / reject / suspend karna
 - 🎫 **License Management** — keys issue, extend, revoke, delete karna
 - 💰 **Pricing & Trial Rules** — monthly price, trial days, max PCs configure
@@ -24,7 +24,7 @@ Aap (RealFlow admin) yeh sab kar sakte hain:
 
 ## Option A — Local PC (Quick start, free)
 
-Apne PC pe `RealFlow-EASY-INSTALL.bat` se install karein. Customer install ki tarah hi.
+Apne PC pe `Krexion-EASY-INSTALL.bat` se install karein. Customer install ki tarah hi.
 
 Admin panel: `http://localhost:3000/admin-login`
 
@@ -34,7 +34,7 @@ Admin panel: `http://localhost:3000/admin-login`
 
 Aap PC pe admin panel chala kar mobile se globally access karna chahte hain:
 
-1. PC pe RealFlow chal raha ho
+1. PC pe Krexion chal raha ho
 2. **`ADMIN-GO-ONLINE.bat`** double-click karein (admin only, regular `GO-ONLINE.bat` se different)
 3. Beautiful purple/magenta page khulegi:
    - 🌐 Public URL (auto-deep-linked to `/admin-login`)
@@ -62,12 +62,12 @@ Render.com pe deploy karein — Emergent / local PC se completely independent:
    - "Apply" click karein
 
 4. **15-20 min wait** → 3 services deploy honge:
-   - `realflow-backend` (Docker FastAPI)
-   - `realflow-frontend` (static React)
-   - Aap ka permanent URL: `https://realflow-frontend-XXXX.onrender.com`
+   - `krexion-backend` (Docker FastAPI)
+   - `krexion-frontend` (static React)
+   - Aap ka permanent URL: `https://krexion-frontend-XXXX.onrender.com`
 
 5. **Update DNS** (optional, $10/year):
-   - Own domain (e.g., realflow.online) kharidein
+   - Own domain (e.g., krexion.com) kharidein
    - Render → frontend service → Settings → Custom Domain → add
    - DNS A record → Render's IP
 
@@ -79,7 +79,7 @@ Render.com pe deploy karein — Emergent / local PC se completely independent:
 |----------|------|--------------|
 | Free tier | $0/mo | 24/7 access, 30 sec cold start when idle |
 | Starter | $7/mo | Always-on, no cold start |
-| Own domain | $10/year | realflow.online instead of onrender.com |
+| Own domain | $10/year | krexion.com instead of onrender.com |
 | MongoDB Atlas M0 | Free | 512 MB DB, enough for 1000+ users |
 
 📖 **Full guide**: `ADMIN-URL-SETUP.md` (15 min walkthrough)
@@ -105,7 +105,7 @@ Render.com pe deploy karein — Emergent / local PC se completely independent:
 # Login (get JWT)
 curl -X POST http://YOUR-URL/api/admin/login \
   -H "Content-Type: application/json" \
-  -d '{"email":"admin@realflow.local","password":"admin123"}'
+  -d '{"email":"admin@krexion.local","password":"admin123"}'
 
 # Returns: { "access_token": "eyJ...", "is_admin": true }
 ```
@@ -195,14 +195,14 @@ Pura license list with:
 Stripe removed, all purchases manual:
 
 1. Customer setup wizard → **"Contact Admin to Buy a License"** click karta hai
-2. Customer ka default email client khulta hai pre-filled subject "License Purchase Request — RealFlow" ke saath
+2. Customer ka default email client khulta hai pre-filled subject "License Purchase Request — Krexion" ke saath
 3. Aap (admin) ko email milti hai with customer's PC name + details
 4. Aap customer se payment lete hain (crypto, bank, cash — off-app)
 5. Admin panel khol kar `/admin/licenses` → **"Issue manual license"** button
 6. Email + days daalein → **Issue** click
 7. License key generate ho jati hai → customer ko send karein (WhatsApp / email)
 8. Customer setup wizard → "I have a license key" → paste → Activate
-9. ✅ Done — customer's PC pe RealFlow chal jaye ga
+9. ✅ Done — customer's PC pe Krexion chal jaye ga
 
 ## Bulk Cleanup
 
@@ -254,11 +254,11 @@ curl http://YOUR-URL/api/diagnostics/hardware-profile
 ## Logs (Aap ki PC pe)
 ```powershell
 # Windows
-cd C:\realflow
-.\REALFLOW-LOGS.bat
+cd C:\krexion
+.\KREXION-LOGS.bat
 
 # Linux/macOS
-cd /opt/realflow
+cd /opt/krexion
 docker compose logs -f
 
 # Specific service
@@ -269,7 +269,7 @@ docker compose logs -f mongo
 ## Database Access
 ```powershell
 # Local mongo shell
-docker exec -it realflow-mongo mongosh
+docker exec -it krexion-mongo mongosh
 
 # Or via Compass (GUI):
 # Connection: mongodb://localhost:27017
@@ -281,14 +281,14 @@ docker exec -it realflow-mongo mongosh
 
 ## Main .env Variables
 
-`C:\realflow\.env` (Windows) or `/opt/realflow/.env` (Linux):
+`C:\krexion\.env` (Windows) or `/opt/krexion/.env` (Linux):
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `MONGO_URL` | MongoDB connection | `mongodb://localhost:27017` |
-| `DB_NAME` | Database name | `realflow` |
+| `DB_NAME` | Database name | `krexion` |
 | `JWT_SECRET_KEY` | Auth token signing | (random 32-char) |
-| `ADMIN_EMAIL` | Admin login email | `admin@realflow.local` |
+| `ADMIN_EMAIL` | Admin login email | `admin@krexion.local` |
 | `ADMIN_PASSWORD` | Admin login password | (random 16-char) |
 | `POSTBACK_TOKEN` | Affiliate postback auth | (random) |
 | `RUT_MAX_CONCURRENCY` | Max RUT workers (hard cap) | auto-tuned |
@@ -321,15 +321,15 @@ Live row-delete from Google Sheets:
 
 # 🔄 Updates & Backups
 
-## Update RealFlow
+## Update Krexion
 ```powershell
-cd C:\realflow
-.\REALFLOW-UPDATE.bat
+cd C:\krexion
+.\KREXION-UPDATE.bat
 # Auto-backup mongo before pull
 ```
 
 ```bash
-cd /opt/realflow
+cd /opt/krexion
 git pull
 docker compose up -d --build
 ```
@@ -337,9 +337,9 @@ docker compose up -d --build
 ## Manual Backup
 ```bash
 # Backup mongo
-docker exec realflow-mongo mongodump --out /backup/$(date +%Y%m%d)
+docker exec krexion-mongo mongodump --out /backup/$(date +%Y%m%d)
 # Copy to host
-docker cp realflow-mongo:/backup/$(date +%Y%m%d) ./backup-$(date +%Y%m%d)
+docker cp krexion-mongo:/backup/$(date +%Y%m%d) ./backup-$(date +%Y%m%d)
 
 # Backup uploads
 cp -r ./backend/uploaded_resources ./backup-uploads-$(date +%Y%m%d)
@@ -347,8 +347,8 @@ cp -r ./backend/uploaded_resources ./backup-uploads-$(date +%Y%m%d)
 
 ## Restore Backup
 ```bash
-docker cp ./backup-20260514 realflow-mongo:/restore
-docker exec realflow-mongo mongorestore /restore
+docker cp ./backup-20260514 krexion-mongo:/restore
+docker exec krexion-mongo mongorestore /restore
 ```
 
 ---
@@ -373,9 +373,9 @@ docker compose logs backend | tail -100
 
 ## Problem: Mongo running out of disk
 ```bash
-docker exec realflow-mongo mongosh --eval "db.runCommand({compact:'real_user_traffic_results'})"
+docker exec krexion-mongo mongosh --eval "db.runCommand({compact:'real_user_traffic_results'})"
 # Or delete old jobs:
-docker exec realflow-mongo mongosh realflow --eval "
+docker exec krexion-mongo mongosh krexion --eval "
   db.real_user_traffic_jobs.deleteMany({
     status: 'completed',
     completed_at: { \$lt: new Date(Date.now() - 30*24*60*60*1000) }
@@ -386,7 +386,7 @@ docker exec realflow-mongo mongosh realflow --eval "
 ## Problem: Want to reset admin password
 ```powershell
 # Edit .env
-notepad C:\realflow\.env
+notepad C:\krexion\.env
 # Change ADMIN_PASSWORD line
 # Restart:
 docker compose restart backend
@@ -430,7 +430,7 @@ Health:          http://localhost:8001/api/diagnostics/health
 
 ## Default Credentials (CHANGE!)
 ```
-Email:    admin@realflow.local
+Email:    admin@krexion.local
 Password: admin123 (or from .env)
 ```
 
@@ -449,7 +449,7 @@ docker compose restart
 git pull && docker compose up -d --build
 
 # Backup mongo
-docker exec realflow-mongo mongodump --out /tmp/backup
+docker exec krexion-mongo mongodump --out /tmp/backup
 ```
 
 ---

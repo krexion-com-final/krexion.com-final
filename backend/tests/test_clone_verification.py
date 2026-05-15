@@ -1,5 +1,5 @@
 """
-RealFlow Clone Verification Smoke Test
+Krexion Clone Verification Smoke Test
 Tests core flows after cloning the repo: admin login, user login, admin actions,
 approval flow, RUT engine status, and basic CRUD/list endpoints for approved users.
 """
@@ -12,7 +12,7 @@ import pytest
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://amna-flow-test.preview.emergentagent.com").rstrip("/")
 API = f"{BASE_URL}/api"
 
-ADMIN_EMAIL = "admin@realflow.local"
+ADMIN_EMAIL = "admin@krexion.local"
 ADMIN_PASSWORD = "admin123"
 
 TEST_USER_EMAIL = f"TEST_clone_{uuid.uuid4().hex[:8]}@test.com"

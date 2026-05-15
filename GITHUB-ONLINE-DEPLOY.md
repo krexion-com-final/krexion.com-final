@@ -1,10 +1,10 @@
-# RealFlow — GitHub-Attached Permanent URL Setup
+# Krexion — GitHub-Attached Permanent URL Setup
 
 ## 🎯 Problem aap solve karna chahte ho
 
 > "Emergent preview URL sleep ho jata hai → admin panel band ho jata hai. Mujhe ek aisa URL chahiye jo **directly GitHub se chale**, Emergent ki kabhi zarurat na pade."
 
-**Solution**: RealFlow ko **cloud pe host karo, GitHub se auto-deploy hone do**. Aapke repo ka `main` branch update ho → URL pe app auto-update ho jaye.
+**Solution**: Krexion ko **cloud pe host karo, GitHub se auto-deploy hone do**. Aapke repo ka `main` branch update ho → URL pe app auto-update ho jaye.
 
 ---
 
@@ -12,7 +12,7 @@
 
 ### Why Render?
 - ✅ **GitHub se directly connected** — push karo → 5 min mein deploy
-- ✅ **Permanent URL** — `https://realflow-XXXX.onrender.com` jo kabhi change nahi hoga
+- ✅ **Permanent URL** — `https://krexion-XXXX.onrender.com` jo kabhi change nahi hoga
 - ✅ **HTTPS free** — auto SSL certificate
 - ✅ **24/7 uptime** (paid plan pe), free plan pe ~15 min idle ke baad sleep
 - ✅ **No Emergent dependency**
@@ -44,12 +44,12 @@
    - Region: **Mumbai or Singapore** (closest to Pakistan/India)
    - Tier: **M0 Free**
 4. **Database Access** → Add database user:
-   - Username: `realflow`
+   - Username: `krexion`
    - Password: (generate strong, save it)
 5. **Network Access** → Add IP Address → **"Allow Access From Anywhere"** (`0.0.0.0/0`)
 6. **Connect** → Drivers → copy connection string. Looks like:
    ```
-   mongodb+srv://realflow:<password>@cluster0.xxxxx.mongodb.net/realflow
+   mongodb+srv://krexion:<password>@cluster0.xxxxx.mongodb.net/krexion
    ```
    Replace `<password>` with the password you saved.
 
@@ -72,13 +72,13 @@
 
 ### Step 5: Get your URLs + admin password
 After deploy completes:
-1. Go to: https://dashboard.render.com → click `realflow-frontend`
-2. Top of page shows: `https://realflow-frontend-XXXX.onrender.com` — **THIS IS YOUR PUBLIC URL**
-3. Click `realflow-backend` → **Environment** tab → find `ADMIN_PASSWORD` → copy
-4. Open frontend URL → login → admin@realflow.local / (the password you copied)
+1. Go to: https://dashboard.render.com → click `krexion-frontend`
+2. Top of page shows: `https://krexion-frontend-XXXX.onrender.com` — **THIS IS YOUR PUBLIC URL**
+3. Click `krexion-backend` → **Environment** tab → find `ADMIN_PASSWORD` → copy
+4. Open frontend URL → login → admin@krexion.local / (the password you copied)
 
 ### Step 6: Bookmark + share
-- Save `https://realflow-frontend-XXXX.onrender.com` in your phone bookmarks
+- Save `https://krexion-frontend-XXXX.onrender.com` in your phone bookmarks
 - Share with team / customers
 - Works on mobile, laptop, tablet — anywhere
 
@@ -121,7 +121,7 @@ Steps:
 3. **Root Directory**: `frontend`
 4. **Build Command**: `yarn build`
 5. **Output Directory**: `build`
-6. Env var: `REACT_APP_BACKEND_URL=https://realflow-backend-XXXX.onrender.com`
+6. Env var: `REACT_APP_BACKEND_URL=https://krexion-backend-XXXX.onrender.com`
 7. Deploy
 8. You get URL like `https://dynabook.vercel.app` (custom name available)
 
@@ -155,19 +155,19 @@ If Render's $7/mo backend feels expensive:
 
 ---
 
-## 🏠 Want Your OWN Domain (e.g. realflow.online)?
+## 🏠 Want Your OWN Domain (e.g. krexion.com)?
 
 After cloud deployment is live:
 
 1. **Buy domain** from Namecheap ($10/year) or Cloudflare Registrar
 2. In Cloudflare DNS:
-   - Add CNAME: `app.realflow.online` → `realflow-frontend-XXXX.onrender.com`
-   - Add CNAME: `api.realflow.online` → `realflow-backend-XXXX.onrender.com`
+   - Add CNAME: `app.krexion.com` → `krexion-frontend-XXXX.onrender.com`
+   - Add CNAME: `api.krexion.com` → `krexion-backend-XXXX.onrender.com`
 3. In Render dashboard → Settings → Custom Domain:
-   - Frontend: add `app.realflow.online`
-   - Backend: add `api.realflow.online`
+   - Frontend: add `app.krexion.com`
+   - Backend: add `api.krexion.com`
 4. Render auto-issues SSL certificate (~5 min)
-5. Update frontend env var `REACT_APP_BACKEND_URL=https://api.realflow.online`
+5. Update frontend env var `REACT_APP_BACKEND_URL=https://api.krexion.com`
 6. Done — professional URL working
 
 ---
@@ -201,7 +201,7 @@ After cloud deployment is live:
 
 ### Phase 2 (When you have 5+ customers):
 1. Upgrade Render backend to $7/mo (always-on, no sleep)
-2. Buy `realflow.online` domain ($10/year)
+2. Buy `krexion.com` domain ($10/year)
 3. Set up custom subdomain
 
 ### Phase 3 (When revenue justifies):
@@ -222,7 +222,7 @@ A: Yes! Emergent for active development, Render for production. Same GitHub repo
 **Q: What if I update code? Customers need to re-install?**
 A: No! That's the magic of cloud deployment. You push to GitHub → Render auto-deploys → customers see update on next page refresh.
 
-**Q: RealFlow has Playwright (300 MB chromium). Will it fit in Render free?**
+**Q: Krexion has Playwright (300 MB chromium). Will it fit in Render free?**
 A: Free tier has 512 MB RAM and limited disk. **MIGHT** work for MICRO tier (1 RUT worker). For 2+ workers, you'll need paid plans.
 
 **Q: What about CPI worker?**

@@ -22,7 +22,7 @@ if not BASE_URL:
                 BASE_URL = line.split("=", 1)[1].strip().rstrip("/")
                 break
 
-ADMIN_EMAIL = "admin@realflow.local"
+ADMIN_EMAIL = "admin@krexion.local"
 ADMIN_PASSWORD = "admin123"
 
 VALID_TIERS = {"MICRO", "LOW", "MID", "HIGH", "BEAST"}
@@ -194,8 +194,8 @@ class TestCompanionFilesExist:
         "/app/docker-compose.mid.yml",
         "/app/docker-compose.high.yml",
         "/app/docker-compose.beast.yml",
-        "/app/RealFlow-RETUNE.bat",
-        "/app/RealFlow-RETUNE.sh",
+        "/app/Krexion-RETUNE.bat",
+        "/app/Krexion-RETUNE.sh",
         "/app/PERFORMANCE-PROFILES.md",
     ])
     def test_file_exists_non_empty(self, path):

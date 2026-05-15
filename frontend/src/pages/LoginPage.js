@@ -193,7 +193,7 @@ export default function LoginPage() {
         <div className="hidden lg:flex flex-col justify-center w-1/2 pr-12 animate-fadeIn">
           <div className="mb-4">
             <h1 className="text-white text-6xl font-bold mb-2">
-              {branding.app_name || "REALFLOW"}
+              {branding.app_name || "KREXION"}
             </h1>
             <p className="text-gray-400 text-sm">EST 2025</p>
           </div>

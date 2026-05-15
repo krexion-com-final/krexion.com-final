@@ -1,6 +1,6 @@
 @echo off
 REM ======================================================================
-REM   REALFLOW CPI - PROXY BRIDGE DIAGNOSTIC & AUTO-FIX
+REM   KREXION CPI - PROXY BRIDGE DIAGNOSTIC & AUTO-FIX
 REM   Tests every layer step-by-step. No worker restart needed for tests.
 REM ======================================================================
 
@@ -13,11 +13,11 @@ exit /b
 
 :MAIN
 setlocal EnableDelayedExpansion
-title RealFlow CPI - Proxy Bridge Diagnostic
+title Krexion CPI - Proxy Bridge Diagnostic
 color 0E
 cls
 
-set "ROOT=F:\online\real flow\lenovo real flow\lenovo-realflow-main\lenovo-realflow-main\realflow-cpi-worker"
+set "ROOT=F:\online\real flow\lenovo real flow\lenovo-krexion-main\lenovo-krexion-main\krexion-cpi-worker"
 set "VENV=%ROOT%\venv-cpi-worker\Scripts\python.exe"
 
 echo.
@@ -28,13 +28,13 @@ echo.
 
 REM [1/8] Check files exist
 echo [1/8] Code files check
-if not exist "%ROOT%\realflow_cpi_worker\proxy_bridge.py" (
+if not exist "%ROOT%\krexion_cpi_worker\proxy_bridge.py" (
     echo        [FAIL] proxy_bridge.py NOT FOUND. Patch nahi laga.
     echo        Fix: Save to GitHub, fresh download, re-extract project.
     pause & exit /b 1
 )
 echo        [OK] proxy_bridge.py mojood
-findstr /C:"get_bridge" "%ROOT%\realflow_cpi_worker\android_engine.py" >nul
+findstr /C:"get_bridge" "%ROOT%\krexion_cpi_worker\android_engine.py" >nul
 if errorlevel 1 (
     echo        [FAIL] android_engine.py mein bridge integration nahi
     echo        Fix: Pichle PowerShell patch script ko phir chalao.
@@ -62,7 +62,7 @@ REM [4/8] Start bridge in background and test
 echo [4/8] Starting bridge ^& testing local connectivity
 start /B "" "%VENV%" -c "import asyncio; \
 import sys; sys.path.insert(0,r'%ROOT%'); \
-from realflow_cpi_worker.proxy_bridge import ProxyBridge; \
+from krexion_cpi_worker.proxy_bridge import ProxyBridge; \
 async def main(): \
  b=ProxyBridge(8788); await b.start(); \
  b.set_upstream('260202i9bQO-resi-UK-ip-534707743:eeTlJJ6Ot7gzPYG@eu.proxy-jet.io:1010'); \
@@ -78,8 +78,8 @@ echo.
 
 REM [5/8] Open firewall port
 echo [5/8] Windows Firewall port 8788
-powershell -NoProfile -Command "Get-NetFirewallRule -DisplayName 'RealFlow CPI Proxy Bridge' -ErrorAction SilentlyContinue | Remove-NetFirewallRule" 2>nul
-powershell -NoProfile -Command "New-NetFirewallRule -DisplayName 'RealFlow CPI Proxy Bridge' -Direction Inbound -LocalPort 8788 -Protocol TCP -Action Allow -Profile Any" >nul 2>&1
+powershell -NoProfile -Command "Get-NetFirewallRule -DisplayName 'Krexion CPI Proxy Bridge' -ErrorAction SilentlyContinue | Remove-NetFirewallRule" 2>nul
+powershell -NoProfile -Command "New-NetFirewallRule -DisplayName 'Krexion CPI Proxy Bridge' -Direction Inbound -LocalPort 8788 -Protocol TCP -Action Allow -Profile Any" >nul 2>&1
 echo        [OK] Firewall rule recreated
 echo.
 

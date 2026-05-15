@@ -65,7 +65,7 @@ export default function AdminDashboard() {
     resend_api_key_set: false,
     resend_api_key_preview: "",
     resend_from: "",
-    sender_name: "RealFlow",
+    sender_name: "Krexion",
     sender_email: "",
     updated_at: "",
   });
@@ -74,7 +74,7 @@ export default function AdminDashboard() {
   const [emailTestTo, setEmailTestTo] = useState("");
   const [emailHelpOpen, setEmailHelpOpen] = useState(false);
   const [branding, setBranding] = useState({
-    app_name: "RealFlow",
+    app_name: "Krexion",
     tagline: "Real Users. Real Results.",
     logo_url: "",
     favicon_url: "",
@@ -697,7 +697,7 @@ export default function AdminDashboard() {
           <div className="flex items-center gap-3">
             <Shield className="w-8 h-8 text-[#EF4444]" />
             <div>
-              <h1 className="text-xl font-bold text-white">RealFlow Admin</h1>
+              <h1 className="text-xl font-bold text-white">Krexion Admin</h1>
               <p className="text-xs text-[#A1A1AA]">System Administration</p>
             </div>
           </div>
@@ -1190,7 +1190,7 @@ export default function AdminDashboard() {
                         id="app_name"
                         value={branding.app_name}
                         onChange={(e) => handleBrandingChange("app_name", e.target.value)}
-                        placeholder="RealFlow"
+                        placeholder="Krexion"
                         className="bg-[var(--brand-card)] border-[var(--brand-border)]"
                         data-testid="branding-app-name"
                       />
@@ -1224,7 +1224,7 @@ export default function AdminDashboard() {
                         id="footer_text"
                         value={branding.footer_text}
                         onChange={(e) => handleBrandingChange("footer_text", e.target.value)}
-                        placeholder="© 2026 RealFlow. All rights reserved."
+                        placeholder="© 2026 Krexion. All rights reserved."
                         className="bg-[var(--brand-card)] border-[var(--brand-border)]"
                         data-testid="branding-footer-text"
                       />
@@ -1531,7 +1531,7 @@ export default function AdminDashboard() {
                         </div>
                       )}
                       <div>
-                        <h4 className="font-bold text-white">{branding.app_name || "RealFlow"}</h4>
+                        <h4 className="font-bold text-white">{branding.app_name || "Krexion"}</h4>
                         <p className="text-xs text-[#A1A1AA]">{branding.tagline || "Traffic Tracking"}</p>
                       </div>
                     </div>
@@ -1551,7 +1551,7 @@ export default function AdminDashboard() {
                         Secondary Button
                       </Button>
                     </div>
-                    <p className="text-xs text-[#52525B] mt-4">{branding.footer_text || "© 2026 RealFlow. All rights reserved."}</p>
+                    <p className="text-xs text-[#52525B] mt-4">{branding.footer_text || "© 2026 Krexion. All rights reserved."}</p>
                   </div>
                 </div>
               </CardContent>
@@ -1945,7 +1945,7 @@ export default function AdminDashboard() {
                              className="text-blue-300 hover:underline inline-flex items-center gap-1">
                             myaccount.google.com/apppasswords <ExternalLink size={11} />
                           </a>{" "}
-                          → "App: Mail" → "Device: Other" → naam: "RealFlow"
+                          → "App: Mail" → "Device: Other" → naam: "Krexion"
                         </li>
                         <li>16-character password copy karen (jaise <span className="font-mono text-zinc-200">abcd efgh ijkl mnop</span>)</li>
                         <li>Yahan provider <span className="text-zinc-200">Gmail</span> select karen, email + 16-char password paste karen, Save click karen</li>
@@ -1970,7 +1970,7 @@ export default function AdminDashboard() {
                              className="text-blue-300 hover:underline inline-flex items-center gap-1">
                             resend.com/api-keys <ExternalLink size={11} />
                           </a>{" "}
-                          → "Create API Key" → naam: "RealFlow", Permission: "Sending access"
+                          → "Create API Key" → naam: "Krexion", Permission: "Sending access"
                         </li>
                         <li>Apna domain verify karen ya default <span className="font-mono text-zinc-200">onboarding@resend.dev</span> use karen (testing ke liye)</li>
                         <li>Yahan provider <span className="text-zinc-200">Resend</span> select karen, API key + From-email paste karen, Save</li>
@@ -2116,7 +2116,7 @@ export default function AdminDashboard() {
                     <Input
                       value={emailCfg.sender_name}
                       onChange={(e) => setEmailCfg({ ...emailCfg, sender_name: e.target.value })}
-                      placeholder="RealFlow Alerts"
+                      placeholder="Krexion Alerts"
                       className="bg-[var(--brand-card-elevated)] border-[var(--brand-border)]"
                       data-testid="email-sender-name"
                     />

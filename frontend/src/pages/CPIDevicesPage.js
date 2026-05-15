@@ -67,7 +67,7 @@ export default function CPIDevicesPage() {
           <AlertCircle className="h-10 w-10 mx-auto text-muted-foreground" />
           <div className="text-sm text-muted-foreground">No devices registered yet.</div>
           <div className="text-xs text-muted-foreground max-w-md mx-auto">
-            Run <code className="bg-muted px-1 py-0.5 rounded">REALFLOW-CPI-WORKER-START.bat</code> on your home PC.
+            Run <code className="bg-muted px-1 py-0.5 rounded">KREXION-CPI-WORKER-START.bat</code> on your home PC.
             The worker will detect connected Android (adb) and iOS (libimobiledevice) devices and register them automatically.
           </div>
         </div>

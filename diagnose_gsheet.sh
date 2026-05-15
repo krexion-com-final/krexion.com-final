@@ -1,7 +1,7 @@
 #!/bin/bash
-# RealFlow Live Google Sheet Diagnostic Script
+# Krexion Live Google Sheet Diagnostic Script
 # Run this on your production server (WSL / Linux container shell):
-#   docker exec -it realflow-backend bash -c "$(cat diagnose_gsheet.sh)"
+#   docker exec -it krexion-backend bash -c "$(cat diagnose_gsheet.sh)"
 # OR if you have shell access on the host:
 #   bash diagnose_gsheet.sh
 
@@ -56,7 +56,7 @@ try:
             print(f'   - {t[\"title\"]} ({t[\"row_count\"]} rows)')
         if not tabs:
             print('   ⚠️  ZERO tabs returned. Likely SA is loaded but the sheet is NOT shared as Editor.')
-            print('       Open your sheet → Share → add: realflow-bot@rpa-data-test.iam.gserviceaccount.com → Editor')
+            print('       Open your sheet → Share → add: krexion-bot@rpa-data-test.iam.gserviceaccount.com → Editor')
     else:
         print('❌ gsheet_writer is NOT enabled. Check env vars + SA file path.')
 except Exception as e:
@@ -75,7 +75,7 @@ from pymongo import MongoClient
 url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
 client = MongoClient(url)
 # Find ALL user-scoped DBs
-db_names = [d for d in client.list_database_names() if d.startswith('realflow_user_')]
+db_names = [d for d in client.list_database_names() if d.startswith('krexion_user_')]
 print(f'Found {len(db_names)} user database(s)')
 total_uploads = 0
 gsheet_uploads = 0
@@ -112,7 +112,7 @@ echo "  WARNING:server:gsheet live delete proxy failed: ... write disabled ..."
 echo "    → SA env var / file not set"
 echo
 echo "Recent backend log (last 30 lines, filtered):"
-docker logs realflow-backend --tail 100 2>/dev/null | grep -iE "gsheet|live delete|sa_path|write_enabled" | tail -30 || \
+docker logs krexion-backend --tail 100 2>/dev/null | grep -iE "gsheet|live delete|sa_path|write_enabled" | tail -30 || \
   tail -n 100 /var/log/supervisor/backend.err.log 2>/dev/null | grep -iE "gsheet|live delete" | tail -30 || \
   echo "  (no matching log lines yet — run a small RUT job first, then check)"
 

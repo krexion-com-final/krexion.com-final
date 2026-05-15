@@ -1,7 +1,7 @@
-# RealFlow — PRD / Project Memory
+# Krexion — PRD / Project Memory
 
 ## Source
-- **GitHub**: https://github.com/realflow-online/realflow.online (owner: user)
+- **GitHub**: https://github.com/krexion/krexion.com (owner: user)
 - Cloned into `/app/` on 2026-05-15. Git remote `origin` configured, branch `main`.
 
 ## Stack
@@ -10,7 +10,7 @@
 - **DB**: MongoDB 7
 
 ## Default Credentials (dev)
-- Admin: `admin@realflow.local` / `admin123` (login at `/admin`)
+- Admin: `admin@krexion.local` / `admin123` (login at `/admin`)
 - Test User: `testuser1@gmail.com` / `Test12345`
 
 ---

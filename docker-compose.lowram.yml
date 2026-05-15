@@ -1,5 +1,5 @@
 # ──────────────────────────────────────────────────────────────────
-#  RealFlow — LOW-RAM OVERRIDE  (tuned for 8 GB laptops like the
+#  Krexion — LOW-RAM OVERRIDE  (tuned for 8 GB laptops like the
 #  Dynabook L50-G / similar i5 / Ryzen 5 8 GB ultrabooks)
 #
 #  How to use:
@@ -58,9 +58,9 @@ services:
       # Forward the rest from .env (already done by base compose, but
       # re-stating here so this override is self-contained)
       MONGO_URL:        "mongodb://mongo:27017"
-      DB_NAME:          "${DB_NAME:-realflow}"
+      DB_NAME:          "${DB_NAME:-krexion}"
       JWT_SECRET_KEY:   "${JWT_SECRET_KEY}"
-      ADMIN_EMAIL:      "${ADMIN_EMAIL:-admin@realflow.local}"
+      ADMIN_EMAIL:      "${ADMIN_EMAIL:-admin@krexion.local}"
       ADMIN_PASSWORD:   "${ADMIN_PASSWORD}"
       POSTBACK_TOKEN:   "${POSTBACK_TOKEN}"
       APP_URL:          "${APP_URL:-http://localhost:3000}"

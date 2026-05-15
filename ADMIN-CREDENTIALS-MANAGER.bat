@@ -1,37 +1,37 @@
 @echo off
 setlocal EnableDelayedExpansion
-title RealFlow - Admin Credentials Manager
+title Krexion - Admin Credentials Manager
 color 0B
 
 REM ====================================================================
-REM   RealFlow ADMIN CREDENTIALS MANAGER (v2 - smart folder detection)
-REM   Auto-detects the folder where realflow-backend container was created.
+REM   Krexion ADMIN CREDENTIALS MANAGER (v2 - smart folder detection)
+REM   Auto-detects the folder where krexion-backend container was created.
 REM ====================================================================
 
 cls
 echo.
 echo  ============================================================
-echo    RealFlow - ADMIN CREDENTIALS MANAGER
+echo    Krexion - ADMIN CREDENTIALS MANAGER
 echo  ============================================================
 echo.
 
 REM ───── Smart project root detection ─────
-REM Priority 1: Find folder where running realflow-backend container was started from
+REM Priority 1: Find folder where running krexion-backend container was started from
 REM Priority 2: Hardcoded OLD install path
 REM Priority 3: Script's own directory
 set "ROOT="
 set "DETECTED_FROM=none"
 
 REM Try to detect from existing container
-for /f "usebackq delims=" %%p in (`docker inspect realflow-backend --format "{{ index .Config.Labels \"com.docker.compose.project.working_dir\" }}" 2^>nul`) do (
+for /f "usebackq delims=" %%p in (`docker inspect krexion-backend --format "{{ index .Config.Labels \"com.docker.compose.project.working_dir\" }}" 2^>nul`) do (
     set "ROOT=%%p"
     set "DETECTED_FROM=running container"
 )
 
 REM If not found, try OLD hardcoded path
 if "%ROOT%"=="" (
-    if exist "F:\online\real flow\real flow amna\realflow-amna-main\realflow-amna-main\docker-compose.yml" (
-        set "ROOT=F:\online\real flow\real flow amna\realflow-amna-main\realflow-amna-main"
+    if exist "F:\online\real flow\real flow amna\krexion-amna-main\krexion-amna-main\docker-compose.yml" (
+        set "ROOT=F:\online\real flow\real flow amna\krexion-amna-main\krexion-amna-main"
         set "DETECTED_FROM=hardcoded OLD path"
     )
 )
@@ -50,7 +50,7 @@ if "%ROOT:~-1%"=="/" set "ROOT=%ROOT:~0,-1%"
 
 if "%ROOT%"=="" (
     echo  [ERROR] Project root nahi mila. Manually .env edit karein:
-    echo            F:\online\real flow\real flow amna\realflow-amna-main\realflow-amna-main\.env
+    echo            F:\online\real flow\real flow amna\krexion-amna-main\krexion-amna-main\.env
     pause & exit /b 1
 )
 
@@ -132,7 +132,7 @@ echo.
 
 :ASK_EMAIL
 set "NEW_EMAIL="
-set /p "NEW_EMAIL=   Naya Admin Email (e.g. admin@realflow.local): "
+set /p "NEW_EMAIL=   Naya Admin Email (e.g. admin@krexion.local): "
 if "%NEW_EMAIL%"=="" (
     echo    Email khali nahi ho sakta. Dobara likhain.
     goto ASK_EMAIL
@@ -168,7 +168,7 @@ if /I not "%OK%"=="y" (
 goto APPLY
 
 :QUICKRESET
-set "NEW_EMAIL=admin@realflow.local"
+set "NEW_EMAIL=admin@krexion.local"
 set "NEW_PASS=admin123"
 echo.
 echo    Quick reset:
@@ -245,9 +245,9 @@ if errorlevel 1 (
 
 REM ── Stop conflicting backend container if exists ──
 echo [3/5] Existing backend container check...
-for /f "usebackq delims=" %%c in (`docker ps -a --filter "name=^realflow-backend$" --format "{{.Names}}" 2^>nul`) do (
+for /f "usebackq delims=" %%c in (`docker ps -a --filter "name=^krexion-backend$" --format "{{.Names}}" 2^>nul`) do (
     echo        Found: %%c - removing to avoid name conflict...
-    docker rm -f realflow-backend >nul 2>&1
+    docker rm -f krexion-backend >nul 2>&1
 )
 echo        OK
 echo.
@@ -288,7 +288,7 @@ echo.
 echo    Admin Email   : %NEW_EMAIL%
 echo    Admin Password: %NEW_PASS%
 echo.
-echo    Browser mein RealFlow URL kholein - Admin Login - login karein.
+echo    Browser mein Krexion URL kholein - Admin Login - login karein.
 echo    Backup: %ENV_FILE%.bak-!TS!
 echo.
 echo  ============================================================

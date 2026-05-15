@@ -1,5 +1,5 @@
 """
-RealFlow — License & Subscription Module
+Krexion — License & Subscription Module
 ========================================
 
 A self-contained FastAPI router that handles:
@@ -94,7 +94,7 @@ def _gen_license_key() -> str:
 def _default_config() -> Dict[str, Any]:
     return {
         "id": "global",
-        "product_name": "RealFlow",
+        "product_name": "Krexion",
         "monthly_price": 29.0,
         "currency": "usd",
         "trial_days": 7,
@@ -103,7 +103,7 @@ def _default_config() -> Dict[str, Any]:
         # Manual purchase flow — installer shows these to customers
         # instead of a Stripe checkout button. Aap admin panel se
         # globally edit kar sakte hain.
-        "admin_contact_email": "admin@realflow.local",
+        "admin_contact_email": "admin@krexion.local",
         "admin_contact_message": (
             "To purchase a license, please email the admin with your name, "
             "company (optional), and preferred payment method (crypto / "
@@ -144,7 +144,7 @@ async def _maybe_notify(subject: str, body: str) -> None:
     """Fire-and-forget email to admin if helper is bound."""
     try:
         if _send_email:
-            admin_email = os.environ.get("ADMIN_EMAIL") or "admin@realflow.local"
+            admin_email = os.environ.get("ADMIN_EMAIL") or "admin@krexion.local"
             await _send_email(to=admin_email, subject=subject, body=body)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"License notification email failed: {e}")
@@ -263,7 +263,7 @@ async def start_trial(body: StartTrialRequest):
     }
     await _db.licenses.insert_one(lic.copy())
     await _maybe_notify(
-        subject=f"[RealFlow] New trial: {body.email}",
+        subject=f"[Krexion] New trial: {body.email}",
         body=f"License key: {key}\nTrial ends: {_iso(lic['trial_ends_at'])}\nMachine: {_get_machine_label(lic)}",
     )
     return {"license_key": key, "reused": False, "trial_ends_at": _iso(lic["trial_ends_at"])}
@@ -312,7 +312,7 @@ async def activate(body: ActivateRequest):
     lic.update(update)
 
     await _maybe_notify(
-        subject=f"[RealFlow] License activated: {lic['email']}",
+        subject=f"[Krexion] License activated: {lic['email']}",
         body=f"Key: {body.license_key}\nMachine: {body.machine_label or body.machine_id[:12]}\nStatus: {lic.get('status')}",
     )
     return {"ok": True, "license": _public_license(lic)}
@@ -320,7 +320,7 @@ async def activate(body: ActivateRequest):
 
 @license_router.post("/license/validate")
 async def validate(body: ValidateRequest):
-    """Called by the locally-running RealFlow app on startup +
+    """Called by the locally-running Krexion app on startup +
     every N hours. Returns current authoritative status."""
     cfg = await get_config()
     if not cfg["enabled"]:

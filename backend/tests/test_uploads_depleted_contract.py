@@ -32,7 +32,7 @@ import httpx
 import pytest
 
 BASE_URL = (os.environ.get("REACT_APP_BACKEND_URL") or "http://localhost:8001").rstrip("/")
-ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@realflow.local")
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@krexion.local")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 
 # Ensure backend importable for direct _consume_uploads invocation

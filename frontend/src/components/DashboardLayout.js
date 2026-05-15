@@ -139,7 +139,7 @@ export default function DashboardLayout({ children }) {
             branding.logo_url ? (
               <img src={branding.logo_url} alt={branding.app_name} className="h-8 object-contain" data-testid="app-logo" />
             ) : (
-              <h1 className="text-xl font-bold bg-gradient-to-r from-white to-[#4F7FFF] bg-clip-text text-transparent" data-testid="app-logo">{branding.app_name || "RealFlow"}</h1>
+              <h1 className="text-xl font-bold bg-gradient-to-r from-white to-[#4F7FFF] bg-clip-text text-transparent" data-testid="app-logo">{branding.app_name || "Krexion"}</h1>
             )
           )}
           <Button

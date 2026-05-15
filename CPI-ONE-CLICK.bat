@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================================
-REM   REALFLOW CPI - ONE CLICK (FINAL - Android + iOS READY)
+REM   KREXION CPI - ONE CLICK (FINAL - Android + iOS READY)
 REM   ═══════════════════════════════════════════════════════════
 REM   * Zero external dependencies (all PowerShell inline)
 REM   * Zero user prompts during install (JWT asked at end only)
@@ -31,20 +31,20 @@ exit /b
 
 :MAIN
 setlocal EnableDelayedExpansion
-title RealFlow CPI - FINAL Setup (Android + iOS)
+title Krexion CPI - FINAL Setup (Android + iOS)
 color 0A
 cls
 
 echo.
 echo  ================================================================
-echo    REALFLOW CPI - FINAL SETUP (Android + iOS)
+echo    KREXION CPI - FINAL SETUP (Android + iOS)
 echo    No more errors. No more prompts. Just wait.
 echo  ================================================================
 echo.
 
 set "ROOT=%~dp0"
 if "!ROOT:~-1!"=="\" set "ROOT=!ROOT:~0,-1!"
-set "WORKER=!ROOT!\realflow-cpi-worker"
+set "WORKER=!ROOT!\krexion-cpi-worker"
 set "CONFIG=!WORKER!\config.yaml"
 set "CONFIG_EX=!WORKER!\config.example.yaml"
 
@@ -54,7 +54,7 @@ echo    Log     : !LOG!
 echo.
 
 if not exist "!WORKER!" (
-    echo  [FATAL] realflow-cpi-worker folder nahi mila.
+    echo  [FATAL] krexion-cpi-worker folder nahi mila.
     echo          Is script ko fresh GitHub download ke ROOT mein rakhain.
     pause & exit /b 1
 )
@@ -166,10 +166,10 @@ powershell -NoProfile -Command ^
         "$lines = Get-Content $f;" ^
         "$out = @(); $found = $false;" ^
         "foreach ($l in $lines) {" ^
-            "if ($l -match '^\s*backend_url\s*:') { $out += 'backend_url: \"https://api.realflow.online\"'; $found = $true }" ^
+            "if ($l -match '^\s*backend_url\s*:') { $out += 'backend_url: \"https://api.krexion.com\"'; $found = $true }" ^
             "else { $out += $l }" ^
         "};" ^
-        "if (-not $found) { $out += 'backend_url: \"https://api.realflow.online\"' };" ^
+        "if (-not $found) { $out += 'backend_url: \"https://api.krexion.com\"' };" ^
         "Set-Content -Path $f -Value $out -Encoding UTF8" ^
     "} catch {}"
 echo        backend_url set.
@@ -179,8 +179,8 @@ echo    ================================================================
 echo    JWT Token chahiye (one-time setup)
 echo    ================================================================
 echo    Browser kholein:
-echo      https://realflow.online/admin
-echo    Login (admin@realflow.local / admin123)
+echo      https://krexion.com/admin
+echo    Login (admin@krexion.local / admin123)
 echo    Sidebar -^> CPI Module -^> CPI Worker Setup -^> JWT Token Copy
 echo    ================================================================
 echo.
@@ -235,10 +235,10 @@ REM ================================================================
 echo [9/9] Worker startup...
 echo.
 
-set "WORKER_BAT=!ROOT!\deployment\cpi\REALFLOW-CPI-WORKER-START.bat"
+set "WORKER_BAT=!ROOT!\deployment\cpi\KREXION-CPI-WORKER-START.bat"
 if exist "!WORKER_BAT!" (
     echo    Starting CPI Worker in new terminal window...
-    start "RealFlow CPI Worker" cmd /k "!WORKER_BAT!"
+    start "Krexion CPI Worker" cmd /k "!WORKER_BAT!"
     echo    [OK] Worker window open ho gayi.
 ) else (
     echo    Worker start script nahi mila: !WORKER_BAT!
@@ -270,13 +270,13 @@ echo      2. "Trust This Computer" -^> Trust
 echo      3. Keep screen unlocked first few seconds
 echo.
 echo    VERIFY:
-echo      Web UI: https://realflow.online/admin
+echo      Web UI: https://krexion.com/admin
 echo      -^> CPI Module -^> CPI Devices page
 echo      -^> Connected phones "Online" dikhne chahiye
 echo.
 echo    MANAGE WORKER:
-echo      Start : !ROOT!\deployment\cpi\REALFLOW-CPI-WORKER-START.bat
-echo      Stop  : !ROOT!\deployment\cpi\REALFLOW-CPI-WORKER-STOP.bat
+echo      Start : !ROOT!\deployment\cpi\KREXION-CPI-WORKER-START.bat
+echo      Stop  : !ROOT!\deployment\cpi\KREXION-CPI-WORKER-STOP.bat
 echo.
 echo    Log: !LOG!
 echo  ================================================================

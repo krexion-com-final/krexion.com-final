@@ -1,15 +1,15 @@
-# RealFlow — Production Installation Guide for Users
+# Krexion — Production Installation Guide for Users
 
-> Yeh guide aap (end-user) ke liye hai. Apne PC pe RealFlow install karne ke liye sirf
+> Yeh guide aap (end-user) ke liye hai. Apne PC pe Krexion install karne ke liye sirf
 > yeh 5 minute padhein. Koi technical knowledge ki zaroorat nahi.
 
 [English version below — اردو ‎version پہلے]
 
 ---
 
-## 🌟 RealFlow Kya Hai?
+## 🌟 Krexion Kya Hai?
 
-RealFlow aik **all-in-one self-hosted traffic + conversion automation platform** hai:
+Krexion aik **all-in-one self-hosted traffic + conversion automation platform** hai:
 - 🌐 **Real User Traffic (RUT)** — anti-detect Chromium browser farm
 - 📝 **Form Filler** — automated lead/SOI form submission
 - 📲 **CPI Module** — Cost-Per-Install pipeline for Android + iPhone
@@ -37,7 +37,7 @@ Aap kahin se bhi mobile/laptop se access kar sakte ho (One-Click GO-ONLINE featu
 
 2. ZIP ko extract karein (kisi bhi folder mein, e.g. Desktop pe)
 
-3. Folder ke andar `RealFlow-Setup` folder open karein
+3. Folder ke andar `Krexion-Setup` folder open karein
 
 4. **`Install.bat`** ko **double-click** karein
 
@@ -49,13 +49,13 @@ Aap kahin se bhi mobile/laptop se access kar sakte ho (One-Click GO-ONLINE featu
    - Docker Desktop install karega (agar nahi hai)
    - Git install karega (agar nahi hai)
    - WSL2 setup karega (auto-tuned for your RAM)
-   - Code download karega (`C:\realflow`)
+   - Code download karega (`C:\krexion`)
    - Random strong passwords generate karega
    - Docker containers build + start karega
 
-8. 15-30 minute baad green **"OPEN REALFLOW"** button aaye ga → click → browser khul jaye ga
+8. 15-30 minute baad green **"OPEN KREXION"** button aaye ga → click → browser khul jaye ga
 
-9. ✅ **Done!** RealFlow `http://localhost:3000` pe chal raha hai
+9. ✅ **Done!** Krexion `http://localhost:3000` pe chal raha hai
 
 ### 💡 Tip: Hardware Auto-Tuning
 Wizard automatically aap ke PC ka RAM/CPU detect karta hai aur **5 tiers** mein se best chunta hai:
@@ -76,7 +76,7 @@ Wizard automatically aap ke PC ka RAM/CPU detect karta hai aur **5 tiers** mein 
 ### Steps:
 
 1. Repo download karein (same as above)
-2. Folder ke andar **`RealFlow-EASY-INSTALL.bat`** ko **double-click** karein
+2. Folder ke andar **`Krexion-EASY-INSTALL.bat`** ko **double-click** karein
 3. UAC → Yes → wait 15-30 minute → done
 4. Browser automatically khul jaye ga `http://localhost:3000` pe
 
@@ -93,7 +93,7 @@ Wizard automatically aap ke PC ka RAM/CPU detect karta hai aur **5 tiers** mein 
 2. Yeh command paste karein aur Enter:
    ```powershell
    Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-   iwr -useb https://raw.githubusercontent.com/ronaldsexedwards40-glitch/dynabook/main/REALFLOW-DEPLOY.ps1 | iex
+   iwr -useb https://raw.githubusercontent.com/ronaldsexedwards40-glitch/dynabook/main/KREXION-DEPLOY.ps1 | iex
    ```
 
 3. Script automatically sab install karega (Docker, Git, code, containers)
@@ -111,8 +111,8 @@ Install ke baad:
 | Field | Value |
 |-------|-------|
 | **URL** | `http://localhost:3000/admin-login` |
-| **Email** | `admin@realflow.local` |
-| **Password** | Installer ne console pe print kiya tha (random) — `C:\realflow\.env` mein bhi save hai (`ADMIN_PASSWORD=` line) |
+| **Email** | `admin@krexion.local` |
+| **Password** | Installer ne console pe print kiya tha (random) — `C:\krexion\.env` mein bhi save hai (`ADMIN_PASSWORD=` line) |
 
 ⚠️ **Password kahin save zaroor kar lein!** First login ke baad change karne ke liye Settings → Profile.
 
@@ -124,7 +124,7 @@ PC ghar pe hai aur aap bahar? **GO-ONLINE.bat** se duniya bhar se access kar sak
 
 ### Steps:
 
-1. PC pe `C:\realflow\GO-ONLINE.bat` ko **double-click** karein
+1. PC pe `C:\krexion\GO-ONLINE.bat` ko **double-click** karein
 
 2. Script automatically Cloudflare tunnel banaye gi (free, no signup)
 
@@ -147,15 +147,15 @@ PC ghar pe hai aur aap bahar? **GO-ONLINE.bat** se duniya bhar se access kar sak
 
 # 🛠️ Daily Operations (After install)
 
-PC pe `C:\realflow\` folder ke andar yeh files double-click karein:
+PC pe `C:\krexion\` folder ke andar yeh files double-click karein:
 
 | File | Kya karta hai |
 |------|---------------|
-| `LOCAL-START.bat` | RealFlow start karta hai |
-| `LOCAL-STOP.bat` | RealFlow stop karta hai |
+| `LOCAL-START.bat` | Krexion start karta hai |
+| `LOCAL-STOP.bat` | Krexion stop karta hai |
 | `LOCAL-UPDATE.bat` | Latest code download + rebuild |
-| `REALFLOW-LOGS.bat` | Live logs dekhne ke liye |
-| `REALFLOW-DOCTOR.bat` | Issues diagnose karne ke liye |
+| `KREXION-LOGS.bat` | Live logs dekhne ke liye |
+| `KREXION-DOCTOR.bat` | Issues diagnose karne ke liye |
 | `GO-ONLINE.bat` | Public URL banane ke liye |
 | `ADMIN-GO-ONLINE.bat` | Admin panel ke liye separate URL (admin only) |
 
@@ -182,15 +182,15 @@ taskkill /PID <PID> /F
 **Solution**:
 ```powershell
 # Windows PowerShell:
-Get-Content C:\realflow\.env | Select-String "ADMIN_PASSWORD"
+Get-Content C:\krexion\.env | Select-String "ADMIN_PASSWORD"
 # Ya:
-notepad C:\realflow\.env
+notepad C:\krexion\.env
 # (ADMIN_PASSWORD line dekhein)
 ```
 
 ### ❌ Problem 5: 8 GB RAM PC pe slow chal raha hai
 **Solution**: Already auto-tuned for low RAM. Manual retune:
-- Double-click `RealFlow-RETUNE.bat`
+- Double-click `Krexion-RETUNE.bat`
 - Ya `DYNABOOK-8GB-GUIDE.md` padhein
 
 ### ❌ Problem 6: License key expired/revoked
@@ -243,7 +243,7 @@ Overall stats, recent activity, system health
 
 | Resource | Link |
 |----------|------|
-| 📖 Full User Guide | `REALFLOW-USER-GUIDE.md` (in repo) |
+| 📖 Full User Guide | `KREXION-USER-GUIDE.md` (in repo) |
 | 📖 CPI Setup Guide (Urdu) | `CPI-SETUP-URDU.md` |
 | 📖 8 GB PC Guide | `DYNABOOK-8GB-GUIDE.md` |
 | 📖 Performance Profiles | `PERFORMANCE-PROFILES.md` |
@@ -257,8 +257,8 @@ Overall stats, recent activity, system health
 Install karne ke baad yeh check karein:
 
 - [ ] `http://localhost:3000` browser mein khulta hai
-- [ ] Login page dikhta hai (RealFlow logo + EST 2025 badge)
-- [ ] Admin login (admin@realflow.local + password from .env) successful
+- [ ] Login page dikhta hai (Krexion logo + EST 2025 badge)
+- [ ] Admin login (admin@krexion.local + password from .env) successful
 - [ ] Dashboard load hota hai (no errors)
 - [ ] `docker compose ps` se 3 containers RUNNING (frontend, backend, mongo)
 - [ ] Health check: `http://localhost:8001/api/diagnostics/health` → `200 OK`
@@ -272,17 +272,17 @@ Agar yeh sab tick hain → **🎉 Aap ready hain!**
 ⚠️ **WARNING: Yeh sara data delete kar dega!**
 
 ```powershell
-cd C:\realflow
+cd C:\krexion
 docker compose down -v
 cd C:\
-Remove-Item -Recurse -Force C:\realflow
+Remove-Item -Recurse -Force C:\krexion
 ```
 
 Ya complete fresh restart ke liye:
 ```powershell
-cd C:\realflow
+cd C:\krexion
 docker compose down -v
-.\REALFLOW-EASY-INSTALL.bat
+.\KREXION-EASY-INSTALL.bat
 ```
 
 ---
@@ -307,11 +307,11 @@ Future mein code update karne ke liye:
 
 ```powershell
 # Windows:
-cd C:\realflow
-.\REALFLOW-UPDATE.bat
+cd C:\krexion
+.\KREXION-UPDATE.bat
 
 # Linux/macOS:
-cd /opt/realflow
+cd /opt/krexion
 git pull
 docker compose up -d --build
 ```
