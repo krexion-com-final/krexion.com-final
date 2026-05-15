@@ -73,3 +73,38 @@
 - Add custom-API endpoint test before save
 - Per-user progress isolation already done; consider per-session-id for multi-tab UX
 - Surface auto-disabled state in `/api/admin/api-settings/status` summary card
+
+
+---
+
+## 2026-05-15 (later) — Public Landing + Crypto Frontend + Resend
+
+### Added
+- **Public Landing Page** (`/app/frontend/src/pages/HomePage.js`) — new route at `/` with hero, 6 feature cards, live pricing pulled from `/api/crypto/plans`, FAQ accordion, payment-flow walkthrough, CTA strip. Logged-in users get auto-redirected to `/dashboard`.
+- **Resend Email Integration** — `/app/backend/email_service.py` (new) provides `send_welcome_email`, `send_license_email`, `send_rejection_email`. Wired via dispatcher in `server.py` → `crypto_payment_module._send_email`. HTML templates use brand colors (#A78BFA on dark). Non-blocking via `asyncio.to_thread`. Env keys: `RESEND_API_KEY`, `SENDER_EMAIL`, `SUPPORT_EMAIL`.
+- **Crypto checkout customer emails** on order create (welcome), approve (license key delivery), reject (with reason).
+- **Customer installer (`Krexion-User-Package/INSTALL.bat`, `README.txt`)** — post-install messages updated to direct users to `https://krexion.com/pricing` to purchase a license via USDT-TRC20 (no more "ask admin on WhatsApp").
+
+### Changed
+- Routing: `/` is now public HomePage. Dashboard moved to `/dashboard`. Updated `App.js`, `LoginPage.js` (post-login → `/dashboard`), `DashboardLayout.js` (sidebar Dashboard link), and `FeatureRoute` fallbacks.
+- `CryptoOrdersPage.js` — testing agent hot-fixed admin token localStorage key mismatch (now reads `adminToken` → `admin_token` → `token` fallback).
+
+### Deployed (Production VPS — krexion.com)
+- rsync’d backend (`email_service.py`, `crypto_payment_module.py`, `server.py`) + frontend (`App.js`, `HomePage.js`, `LoginPage.js`, `PricingPage.js`, `CheckoutPage.js`, `OrderStatusPage.js`, `CryptoOrdersPage.js`, `DashboardLayout.js`) + installer files to `/opt/krexion/`.
+- Appended `RESEND_API_KEY`/`SENDER_EMAIL`/`SUPPORT_EMAIL` to `/opt/krexion/backend/.env`.
+- `docker compose up -d --build backend frontend` — both containers rebuilt and running healthy.
+- Verified: `https://krexion.com/api/crypto/plans` returns 4 plans; `https://krexion.com/` renders new HomePage; backend log: `Resend email service enabled`.
+
+### Tested
+- Backend: 14/14 pytest pass — `/app/backend/tests/test_iteration7_crypto_payment.py` (plans, orders, TxID, admin approve/reject, license KRX format, dup TxID 409, admin auth gate).
+- Email: live Resend send to `us9661626@gmail.com` returned real Resend id (verified inbox). Sandbox restriction: only verified address receives mail — verify a domain at `resend.com/domains` and update `SENDER_EMAIL` to unlock all customers.
+- Frontend: HomePage + Pricing + Checkout + OrderStatus + Admin Crypto Orders flows all green.
+
+### Backlog (next)
+- **P0**: Verify `krexion.com` (or sub-domain `mail.krexion.com`) on Resend dashboard, then change `SENDER_EMAIL=Krexion <noreply@krexion.com>` so customer emails actually deliver to non-verified addresses. Until then only `us9661626@gmail.com` receives test mail.
+- **P1**: Add license-key entry step inside the local register flow on installed customer instances (currently they create an account locally but the license isn't bound to their email yet).
+- **P1**: Expose a public `/download` page that serves the latest `Krexion-User-Package.zip`.
+- **P2**: Standardize admin-token localStorage key project-wide (one helper `getAdminToken()`).
+- **P2**: Add "Resend License Email" button to admin Crypto Orders panel.
+- **P2**: License expiry reminder cron (7d / 1d before expires) using `send_email`.
+- **P3**: Replace inline FAQ with markdown-driven content; add testimonials section once we have real users.
