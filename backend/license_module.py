@@ -86,9 +86,9 @@ def _as_aware(dt: Any) -> Optional[datetime]:
 
 
 def _gen_license_key() -> str:
-    """Format: RFLW-XXXX-XXXX-XXXX-XXXX (20 chars + 4 dashes)."""
+    """Format: KRX-XXXX-XXXX-XXXX-XXXX (19 chars + 4 dashes)."""
     raw = uuid.uuid4().hex.upper()[:16]
-    return "RFLW-" + "-".join(raw[i : i + 4] for i in range(0, 16, 4))
+    return "KRX-" + "-".join(raw[i : i + 4] for i in range(0, 16, 4))
 
 
 def _default_config() -> Dict[str, Any]:

@@ -12963,6 +12963,32 @@ try:
 except Exception as _lic_err:  # noqa: BLE001
     logger.error(f"License module failed to load: {_lic_err}")
 
+# ─── Crypto Payment module (USDT-TRC20 manual approve) ────────────────
+try:
+    from crypto_payment_module import crypto_router, _bind as _crypto_bind, seed_defaults as _seed_crypto
+
+    async def _crypto_admin(request: Request):
+        return await get_current_admin(request)
+
+    _crypto_bind(
+        main_db=main_db,
+        get_current_admin=_crypto_admin,
+        send_email=None,
+    )
+    app.include_router(crypto_router)
+
+    @app.on_event("startup")
+    async def _seed_crypto_defaults():
+        try:
+            await _seed_crypto()
+        except Exception as _e:
+            logger.warning(f"Crypto seed failed: {_e}")
+
+    logger.info("Crypto Payment module loaded — /api/crypto/* + /api/admin/crypto/*")
+except Exception as _cp_err:  # noqa: BLE001
+    logger.error(f"Crypto Payment module failed to load: {_cp_err}")
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
