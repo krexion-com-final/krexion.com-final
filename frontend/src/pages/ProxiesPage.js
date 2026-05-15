@@ -573,21 +573,23 @@ export default function ProxiesPage() {
       
       const result = response.data;
       toast.success(
-        `Done! Alive: ${result.alive}, Dead: ${result.dead}, Duplicate: ${result.duplicate}, VPN: ${result.vpn}`
+        `Done! Alive: ${result.alive}, Dead: ${result.dead}, Duplicate: ${result.duplicate}, VPN: ${result.vpn}. Click "View Last Summary" to see details.`,
+        { duration: 6000 }
       );
       
-      // Fetch updated proxies and show summary
+      // Fetch updated proxies and prepare summary (but don't auto-open dialog)
       const proxiesResponse = await axios.get(`${API}/proxies`, {
         headers: { Authorization: `Bearer ${localStorage.getItem("token")}` }
       });
       const updatedProxies = proxiesResponse.data;
       setProxies(updatedProxies);
       
-      // Generate and show bulk test summary
+      // Generate bulk test summary — store it, user can open via button
       const testedProxies = updatedProxies.filter(p => p.status === 'alive' || p.status === 'dead');
       const summary = generateBulkTestSummary(testedProxies);
       setBulkTestResults(summary);
-      setShowBulkTestSummary(true);
+      // Do NOT auto-open dialog — its backdrop blocks delete/test buttons
+      // setShowBulkTestSummary(true);
       
     } catch (error) {
       console.error("Bulk test error:", error);
@@ -932,6 +934,17 @@ export default function ProxiesPage() {
                 <Copy size={16} className="mr-2" />
                 Copy Unique Alive
               </Button>
+              {bulkTestResults && !isBulkTesting && (
+                <Button
+                  variant="outline"
+                  onClick={() => setShowBulkTestSummary(true)}
+                  className="border-[#3B82F6] text-[#3B82F6] hover:bg-[#3B82F6]/10"
+                  data-testid="view-last-summary-button"
+                >
+                  <RefreshCw size={16} className="mr-2" />
+                  View Last Summary
+                </Button>
+              )}
               {isBulkTesting ? (
                 <Button variant="destructive" onClick={stopTesting} data-testid="stop-testing-button">
                   <Square size={16} className="mr-2" />

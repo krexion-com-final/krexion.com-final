@@ -17,6 +17,12 @@
 
 ## Implemented changes (2026-05-15)
 
+### Bug fix #1 — Delete button blocked after bulk test
+- **Root cause**: `testAllProxies` was auto-opening the "Bulk Test Results Summary" dialog. The dialog's full-screen backdrop (`fixed inset-0 z-50 bg-black/80`) intercepted pointer events on the proxy table, blocking delete/test buttons.
+- **Fix**: Removed auto-open (`setShowBulkTestSummary(true)` commented out). Toast now informs user; summary still computed and stored.
+- **Added**: "View Last Summary" outline button (blue) appears in action bar whenever `bulkTestResults` is available and no bulk test is running. User clicks manually to view the summary modal.
+- **Verified end-to-end** via playwright: 5 → 4 rows after one delete; no force-click needed; `Dialogs open after bulk test: 0`.
+
 ### Backend (`backend/server.py`)
 1. **Enriched `DEFAULT_API_SETTINGS`** with per-API:
    - `tier` (`free` / `paid`)
