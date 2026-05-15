@@ -527,11 +527,26 @@ export default function AdminDashboard() {
         { [field]: value },
         { headers: { Authorization: `Bearer ${getAdminToken()}` } }
       );
-      setApiSettings(prev => ({
-        ...prev,
-        [apiKey]: { ...prev[apiKey], [field]: value }
-      }));
-      toast.success(`${apiSettings[apiKey]?.name || apiKey} updated`);
+      // Backend returns full settings (with possible auto-disable cascade)
+      if (response.data?.all_settings) {
+        setApiSettings(response.data.all_settings);
+      } else {
+        setApiSettings(prev => ({
+          ...prev,
+          [apiKey]: { ...prev[apiKey], [field]: value }
+        }));
+      }
+      const autoDisabled = response.data?.auto_disabled || [];
+      if (autoDisabled.length > 0) {
+        toast.success(
+          `${apiSettings[apiKey]?.name || apiKey} enabled. Free APIs auto-disabled: ${autoDisabled.join(", ")}`,
+          { duration: 5000 }
+        );
+      } else {
+        toast.success(`${apiSettings[apiKey]?.name || apiKey} updated`);
+      }
+      // Refresh status to reflect any cascaded changes
+      refreshApiStatus();
     } catch (error) {
       toast.error("Failed to update API setting");
     }
@@ -1650,10 +1665,15 @@ export default function AdminDashboard() {
                     const isRateLimited = statusInfo?.rate_limited || false;
                     const isLimitReached = statusInfo?.limit_reached || false;
                     const usagePercent = statusInfo?.usage_percent || 0;
+                    const tier = config.tier || (config.is_custom ? "custom" : "free");
+                    const isPaidTier = tier === "paid";
+                    const hasApiKey = !!(config.api_key && String(config.api_key).trim());
+                    const isAutoDisabled = !!config.auto_disabled_by;
                     
                     return (
                     <div 
                       key={apiKey} 
+                      data-testid={`api-card-${apiKey}`}
                       className={`p-4 rounded-lg border ${
                         isLimitReached ? 'bg-[#1a0808] border-[#EF4444]/30' :
                         isRateLimited ? 'bg-[#1a1408] border-[#F59E0B]/30' : 
@@ -1669,8 +1689,12 @@ export default function AdminDashboard() {
                               config.enabled ? 'text-[#22C55E]' : 'text-[#52525B]'
                             }`} />
                             <h3 className="font-semibold text-white">{config.name}</h3>
-                            {config.is_custom && (
+                            {config.is_custom ? (
                               <Badge className="bg-[#8B5CF6] text-xs">Custom</Badge>
+                            ) : isPaidTier ? (
+                              <Badge className="bg-[#F59E0B] text-black text-xs font-semibold">PAID</Badge>
+                            ) : (
+                              <Badge className="bg-[#3B82F6] text-xs font-semibold">FREE</Badge>
                             )}
                             {isLimitReached ? (
                               <Badge className="bg-[#EF4444] text-xs">
@@ -1686,7 +1710,24 @@ export default function AdminDashboard() {
                               </Badge>
                             )}
                             <span className="text-xs text-[#52525B]">Priority: {config.priority}</span>
+                            {config.signup_url && (
+                              <a
+                                href={config.signup_url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-xs text-[#3B82F6] hover:text-[#60A5FA] inline-flex items-center gap-1"
+                                data-testid={`api-signup-${apiKey}`}
+                              >
+                                Get API key <ExternalLink size={11} />
+                              </a>
+                            )}
                           </div>
+
+                          {isAutoDisabled && (
+                            <div className="mb-3 p-2 rounded-md bg-[#1a1408] border border-[#F59E0B]/30 text-xs text-[#F59E0B]">
+                              ⚠ Auto-disabled because <strong>{apiSettings[config.auto_disabled_by]?.name || config.auto_disabled_by}</strong> (paid) is active. Toggle this back on to re-enable.
+                            </div>
+                          )}
                           
                           {/* Usage Progress Bar */}
                           {config.enabled && statusInfo && (
@@ -1717,7 +1758,17 @@ export default function AdminDashboard() {
                             </div>
                           )}
                           
-                          <p className="text-sm text-[#A1A1AA] mb-3">{config.description}</p>
+                          <p className="text-sm text-[#A1A1AA] mb-3 leading-relaxed">{config.description}</p>
+                          {isPaidTier && !hasApiKey && (
+                            <p className="text-xs text-[#F59E0B] mb-3">
+                              ℹ This API requires an API key. Enter your key below to enable it (free APIs will auto-disable when enabled).
+                            </p>
+                          )}
+                          {isPaidTier && hasApiKey && config.enabled && (
+                            <p className="text-xs text-[#22C55E] mb-3">
+                              ✓ Paid API active. Free-tier APIs have been auto-disabled to use your higher quota.
+                            </p>
+                          )}
                           {isLimitReached && (
                             <p className="text-xs text-[#EF4444] mb-3">
                               🚫 Daily limit reached! System will automatically use the next available API.
@@ -1737,17 +1788,21 @@ export default function AdminDashboard() {
                                 onChange={(e) => handleApiSettingChange(apiKey, "endpoint", e.target.value)}
                                 className="bg-[var(--brand-card)] border-[var(--brand-border)] text-sm"
                                 placeholder="API endpoint URL"
+                                data-testid={`api-endpoint-${apiKey}`}
                               />
                             </div>
                             <div className="space-y-2">
-                              <Label className="text-xs text-[#71717A]">API Key (if required)</Label>
+                              <Label className="text-xs text-[#71717A]">
+                                API Key {isPaidTier ? <span className="text-[#F59E0B]">(required)</span> : <span className="text-[#71717A]">(optional)</span>}
+                              </Label>
                               <div className="relative">
                                 <Input
                                   type={showApiKey[apiKey] ? "text" : "password"}
                                   value={config.api_key || ""}
                                   onChange={(e) => handleApiSettingChange(apiKey, "api_key", e.target.value)}
                                   className="bg-[var(--brand-card)] border-[var(--brand-border)] text-sm pr-10"
-                                  placeholder="Enter API key"
+                                  placeholder={isPaidTier ? "Paste your API key here" : "Enter API key (optional)"}
+                                  data-testid={`api-key-input-${apiKey}`}
                                 />
                                 <button
                                   type="button"
@@ -1765,6 +1820,7 @@ export default function AdminDashboard() {
                           <Switch
                             checked={config.enabled}
                             onCheckedChange={(checked) => handleApiSettingChange(apiKey, "enabled", checked)}
+                            data-testid={`api-toggle-${apiKey}`}
                           />
                           <Button
                             variant="outline"
@@ -1772,6 +1828,7 @@ export default function AdminDashboard() {
                             onClick={() => handleTestApi(apiKey)}
                             disabled={testingApi === apiKey}
                             className="border-[var(--brand-border)]"
+                            data-testid={`api-test-${apiKey}`}
                           >
                             {testingApi === apiKey ? (
                               <RefreshCw size={14} className="animate-spin" />
@@ -1802,13 +1859,38 @@ export default function AdminDashboard() {
                   )}
                 </div>
                 
-                {/* Info Box */}
+                {/* Info Box: How priority + auto-fallback works */}
                 <div className="mt-6 p-4 bg-[var(--brand-card)] rounded-lg border border-[var(--brand-border)]">
-                  <h4 className="font-medium text-white mb-2">How API Priority Works</h4>
-                  <p className="text-sm text-[#A1A1AA]">
-                    APIs are checked in order of priority (lowest number first). If one API fails or times out, 
-                    the next enabled API is used. Disable APIs you don't need to speed up VPN detection.
-                  </p>
+                  <h4 className="font-medium text-white mb-2 flex items-center gap-2">
+                    <Activity size={16} className="text-[#3B82F6]" />
+                    How VPN Detection Works (Auto-Fallback)
+                  </h4>
+                  <ol className="text-sm text-[#A1A1AA] list-decimal list-inside space-y-1">
+                    <li>APIs are tried in <strong className="text-white">priority order</strong> (lowest number first).</li>
+                    <li>If an API hits its <strong className="text-white">daily limit</strong>, it is skipped automatically — the next enabled API takes over so checking <em>never stops</em>.</li>
+                    <li>If an API returns a <strong className="text-white">rate-limit error</strong>, it is paused for 1 hour then retried.</li>
+                    <li>When you add a <strong className="text-[#F59E0B]">PAID</strong> API key and enable it, all <strong className="text-[#3B82F6]">FREE</strong> APIs are <em>auto-disabled</em> so your paid quota is used. Toggle them back on any time.</li>
+                    <li>Disabled APIs are <strong className="text-white">never called</strong> — toggle is the master switch.</li>
+                  </ol>
+                </div>
+
+                {/* Info Box: Step-by-step paid API setup */}
+                <div className="mt-4 p-4 bg-[var(--brand-card)] rounded-lg border border-[#F59E0B]/30">
+                  <h4 className="font-medium text-white mb-3 flex items-center gap-2">
+                    <Key size={16} className="text-[#F59E0B]" />
+                    How to add a Paid API (Step by Step)
+                  </h4>
+                  <ol className="text-sm text-[#A1A1AA] list-decimal list-inside space-y-2">
+                    <li>Pick a provider above (ProxyCheck.io, IPQualityScore, Scamalytics, IPHub) and click its <strong className="text-[#3B82F6]">"Get API key"</strong> link to sign up on their website.</li>
+                    <li>After signing up, copy your <strong className="text-white">API key</strong> from the provider's dashboard.</li>
+                    <li>Paste the key into the <strong className="text-white">"API Key"</strong> input on the matching card above.</li>
+                    <li>Flip the <strong className="text-white">toggle ON</strong> for that API. Free APIs will automatically be disabled and your paid quota will take over.</li>
+                    <li>Click the <strong className="text-white">test button</strong> (🧪 icon) next to the toggle to confirm the key works.</li>
+                    <li>Done — proxy checks will now use your paid API. If your paid quota ever runs out, re-enable any free API to use as a backup.</li>
+                  </ol>
+                  <div className="mt-3 pt-3 border-t border-[var(--brand-border)] text-xs text-[#71717A]">
+                    💡 Tip: You can keep multiple paid APIs enabled at once — they will be tried in priority order so you get automatic fallback between paid services too.
+                  </div>
                 </div>
               </CardContent>
             </Card>

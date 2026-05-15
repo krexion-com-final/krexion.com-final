@@ -63,67 +63,69 @@ export default function ProxiesPage() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const stopTestingRef = useRef(false);
   
-  // Check My IP state
-  const [myIpData, setMyIpData] = useState(null);
-  const [checkingMyIp, setCheckingMyIp] = useState(false);
-  const [showMyIpDialog, setShowMyIpDialog] = useState(false);
-  const [userRealIps, setUserRealIps] = useState({ ipv4: null, ipv6: null, inDatabase: [] }); // Store user's real IPs
+  // Bulk test live progress (polled from backend)
+  const [progress, setProgress] = useState({
+    status: "idle",
+    total: 0,
+    checked: 0,
+    parallel_active: 0,
+    alive: 0,
+    dead: 0,
+    duplicate: 0,
+    elapsed_seconds: 0,
+    percent: 0,
+  });
+  const progressPollRef = useRef(null);
   
   // Bulk test results summary state
   const [bulkTestResults, setBulkTestResults] = useState(null);
   const [showBulkTestSummary, setShowBulkTestSummary] = useState(false);
 
-  // Check My IP function - calls debug-ip endpoint and stores user's real IPs
-  const checkMyIp = async () => {
-    setCheckingMyIp(true);
-    try {
-      const response = await axios.get(`${API}/debug-ip`);
-      setMyIpData(response.data);
-      
-      // Store user's real IPs for later use in proxy testing
-      const userIps = {
-        ipv4: response.data.your_detected_ips?.ipv4 || null,
-        ipv6: response.data.your_detected_ips?.ipv6 || null,
-        inDatabase: response.data.database_check?.your_ips_already_in_database || []
+  // Poll live progress while a bulk test is running
+  useEffect(() => {
+    if (isBulkTesting) {
+      const poll = async () => {
+        try {
+          const res = await axios.get(`${API}/proxies/test-progress`, {
+            headers: { Authorization: `Bearer ${localStorage.getItem("token")}` }
+          });
+          setProgress(res.data);
+        } catch (err) {
+          // silent — keep last known state
+        }
       };
-      setUserRealIps(userIps);
-      
-      setShowMyIpDialog(true);
-      
-      const hasBlockedIp = response.data.database_check?.your_ips_already_in_database?.length > 0;
-      if (hasBlockedIp) {
-        toast.warning("Your IPs are in database! Proxies won't help until you clear these IPs.");
-      } else {
-        toast.success("Your IPs are unique - safe to use proxies!");
+      poll();
+      progressPollRef.current = setInterval(poll, 500);
+    } else {
+      if (progressPollRef.current) {
+        clearInterval(progressPollRef.current);
+        progressPollRef.current = null;
       }
-    } catch (error) {
-      toast.error("Failed to check your IP");
-    } finally {
-      setCheckingMyIp(false);
     }
-  };
+    return () => {
+      if (progressPollRef.current) {
+        clearInterval(progressPollRef.current);
+        progressPollRef.current = null;
+      }
+    };
+  }, [isBulkTesting]);
   
-  // Generate bulk test summary - considers both proxy IPs AND user's real IPs
-  const generateBulkTestSummary = (testedProxies, userIps) => {
+  // Generate bulk test summary - using only proxy IP data (no user-real-IP dependency)
+  const generateBulkTestSummary = (testedProxies) => {
     const allIps = new Map(); // IP -> { count, proxies, isUnique }
-    
-    // Check if user's real IPs are in database (this affects ALL proxies)
-    const userIpBlocked = userIps.inDatabase.length > 0;
     
     testedProxies.forEach(proxy => {
       // Add IPv4
       if (proxy.detected_ipv4 || proxy.detected_ip) {
         const ipv4 = proxy.detected_ipv4 || proxy.detected_ip;
         if (!allIps.has(ipv4)) {
-          // Proxy is only truly unique if BOTH proxy IP is unique AND user's real IPs are unique
           const proxyIsDuplicate = proxy.is_duplicate_click || proxy.is_duplicate;
           allIps.set(ipv4, { 
             type: 'IPv4 (Proxy Exit)', 
             count: 0, 
             proxies: [], 
-            isDuplicate: proxyIsDuplicate || userIpBlocked,
-            matchedIp: proxy.duplicate_matched_ip,
-            blockedByUserIp: userIpBlocked && !proxyIsDuplicate
+            isDuplicate: proxyIsDuplicate,
+            matchedIp: proxy.duplicate_matched_ip
           });
         }
         const entry = allIps.get(ipv4);
@@ -139,9 +141,8 @@ export default function ProxiesPage() {
             type: 'IPv6 (Proxy Exit)', 
             count: 0, 
             proxies: [], 
-            isDuplicate: proxyIsDuplicate || userIpBlocked,
-            matchedIp: proxy.duplicate_matched_ip,
-            blockedByUserIp: userIpBlocked && !proxyIsDuplicate
+            isDuplicate: proxyIsDuplicate,
+            matchedIp: proxy.duplicate_matched_ip
           });
         }
         const entry = allIps.get(proxy.detected_ipv6);
@@ -149,30 +150,6 @@ export default function ProxiesPage() {
         entry.proxies.push(proxy.proxy_string);
       }
     });
-    
-    // Add user's real IPs to the summary
-    if (userIps.ipv4) {
-      const isInDb = userIps.inDatabase.includes(userIps.ipv4);
-      allIps.set(userIps.ipv4 + '_user', {
-        type: 'IPv4 (Your Real IP)',
-        ip: userIps.ipv4,
-        count: 'ALL',
-        proxies: ['Affects all proxies - this is YOUR IP'],
-        isDuplicate: isInDb,
-        isUserIp: true
-      });
-    }
-    if (userIps.ipv6) {
-      const isInDb = userIps.inDatabase.includes(userIps.ipv6);
-      allIps.set(userIps.ipv6 + '_user', {
-        type: 'IPv6 (Your Real IP - LEAKS!)',
-        ip: userIps.ipv6,
-        count: 'ALL',
-        proxies: ['Affects all proxies - this IP leaks through proxies!'],
-        isDuplicate: isInDb,
-        isUserIp: true
-      });
-    }
     
     // Convert to array and separate unique vs duplicate
     const uniqueIps = [];
@@ -573,24 +550,6 @@ export default function ProxiesPage() {
   };
 
   const testAllProxies = async () => {
-    // First, check user's real IP if not already done
-    let currentUserIps = userRealIps;
-    if (!currentUserIps.ipv4 && !currentUserIps.ipv6) {
-      toast.info("Checking your IP first...");
-      try {
-        const ipResponse = await axios.get(`${API}/debug-ip`);
-        currentUserIps = {
-          ipv4: ipResponse.data.your_detected_ips?.ipv4 || null,
-          ipv6: ipResponse.data.your_detected_ips?.ipv6 || null,
-          inDatabase: ipResponse.data.database_check?.your_ips_already_in_database || []
-        };
-        setUserRealIps(currentUserIps);
-        setMyIpData(ipResponse.data);
-      } catch (err) {
-        console.error("Failed to check user IP:", err);
-      }
-    }
-    
     stopTestingRef.current = false;
     setIsBulkTesting(true);
     
@@ -624,9 +583,9 @@ export default function ProxiesPage() {
       const updatedProxies = proxiesResponse.data;
       setProxies(updatedProxies);
       
-      // Generate and show bulk test summary - pass user's real IPs
+      // Generate and show bulk test summary
       const testedProxies = updatedProxies.filter(p => p.status === 'alive' || p.status === 'dead');
-      const summary = generateBulkTestSummary(testedProxies, currentUserIps);
+      const summary = generateBulkTestSummary(testedProxies);
       setBulkTestResults(summary);
       setShowBulkTestSummary(true);
       
@@ -742,119 +701,6 @@ export default function ProxiesPage() {
 
   return (
     <div className="space-y-6" data-testid="proxies-page">
-      {/* Check My IP Dialog */}
-      <Dialog open={showMyIpDialog} onOpenChange={setShowMyIpDialog}>
-        <DialogContent className="bg-[var(--brand-card)] border-[var(--brand-border)] max-w-lg">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Globe className="text-[#3B82F6]" size={20} />
-              Your Current IP Status
-            </DialogTitle>
-            <DialogDescription>
-              Check your IPv4 and IPv6 addresses before using proxies
-            </DialogDescription>
-          </DialogHeader>
-          
-          {myIpData && (
-            <div className="space-y-4">
-              {/* Status Banner */}
-              <div className={`p-4 rounded-lg flex items-center gap-3 ${
-                myIpData.database_check?.would_be_blocked 
-                  ? 'bg-[#EF4444]/10 border border-[#EF4444]/30' 
-                  : 'bg-[#22C55E]/10 border border-[#22C55E]/30'
-              }`}>
-                {myIpData.database_check?.would_be_blocked ? (
-                  <>
-                    <AlertTriangle className="text-[#EF4444]" size={24} />
-                    <div>
-                      <p className="font-medium text-[#EF4444]">Warning: Some IPs Already Used</p>
-                      <p className="text-sm text-[#A1A1AA]">Your IPv4 or IPv6 is in the database</p>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <CheckCircle className="text-[#22C55E]" size={24} />
-                    <div>
-                      <p className="font-medium text-[#22C55E]">All Clear!</p>
-                      <p className="text-sm text-[#A1A1AA]">Your IPs are unique - safe to use proxies</p>
-                    </div>
-                  </>
-                )}
-              </div>
-              
-              {/* Your IPs */}
-              <div className="space-y-3">
-                <h4 className="text-sm font-medium text-white">Your Detected IPs:</h4>
-                
-                <div className="grid gap-2">
-                  {/* IPv4 */}
-                  <div className="flex items-center justify-between p-3 bg-[var(--brand-card)] rounded-lg">
-                    <div>
-                      <p className="text-xs text-[#A1A1AA]">IPv4</p>
-                      <p className="font-mono text-sm text-white">{myIpData.your_detected_ips?.ipv4 || "Not detected"}</p>
-                    </div>
-                    {myIpData.your_detected_ips?.ipv4 && (
-                      myIpData.database_check?.your_ips_already_in_database?.includes(myIpData.your_detected_ips.ipv4) ? (
-                        <Badge className="bg-[#EF4444]">In Database</Badge>
-                      ) : (
-                        <Badge className="bg-[#22C55E]">Unique</Badge>
-                      )
-                    )}
-                  </div>
-                  
-                  {/* IPv6 */}
-                  <div className="flex items-center justify-between p-3 bg-[var(--brand-card)] rounded-lg">
-                    <div>
-                      <p className="text-xs text-[#A1A1AA]">IPv6</p>
-                      <p className="font-mono text-xs text-white break-all">{myIpData.your_detected_ips?.ipv6 || "Not detected"}</p>
-                    </div>
-                    {myIpData.your_detected_ips?.ipv6 && (
-                      myIpData.database_check?.your_ips_already_in_database?.includes(myIpData.your_detected_ips.ipv6) ? (
-                        <Badge className="bg-[#EF4444]">In Database</Badge>
-                      ) : (
-                        <Badge className="bg-[#22C55E]">Unique</Badge>
-                      )
-                    )}
-                  </div>
-                </div>
-              </div>
-              
-              {/* IPs in Database */}
-              {myIpData.database_check?.your_ips_already_in_database?.length > 0 && (
-                <div className="p-3 bg-[#EF4444]/10 rounded-lg">
-                  <p className="text-sm font-medium text-[#EF4444] mb-2">IPs Already in Database:</p>
-                  {myIpData.database_check.your_ips_already_in_database.map((ip, i) => (
-                    <p key={i} className="font-mono text-xs text-[#EF4444]">{ip}</p>
-                  ))}
-                </div>
-              )}
-              
-              {/* Unique IPs */}
-              {myIpData.database_check?.your_ips_NOT_in_database?.length > 0 && (
-                <div className="p-3 bg-[#22C55E]/10 rounded-lg">
-                  <p className="text-sm font-medium text-[#22C55E] mb-2">Unique IPs (Not in Database):</p>
-                  {myIpData.database_check.your_ips_NOT_in_database.map((ip, i) => (
-                    <p key={i} className="font-mono text-xs text-[#22C55E]">{ip}</p>
-                  ))}
-                </div>
-              )}
-              
-              {/* Info */}
-              <div className="text-xs text-[#A1A1AA] p-3 bg-[var(--brand-card)] rounded-lg">
-                <p className="font-medium text-white mb-1">How to use:</p>
-                <ol className="list-decimal list-inside space-y-1">
-                  <li>Check your IP status above (both IPv4 and IPv6)</li>
-                  <li>If any IP is "In Database", links will show duplicate</li>
-                  <li>Test your proxies to find unique IPv4 AND IPv6 exit IPs</li>
-                  <li>Use proxy with unique IPs to open links</li>
-                </ol>
-                <p className="mt-2 text-[#3B82F6]">Note: Both IPv4 AND IPv6 are checked for duplicates!</p>
-              </div>
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
-      
       {/* Bulk Test Summary Dialog */}
       <Dialog open={showBulkTestSummary} onOpenChange={setShowBulkTestSummary}>
         <DialogContent className="bg-[var(--brand-card)] border-[var(--brand-border)] max-w-2xl max-h-[80vh] overflow-y-auto">
@@ -870,54 +716,6 @@ export default function ProxiesPage() {
           
           {bulkTestResults && (
             <div className="space-y-4">
-              {/* User's Real IP Warning - Show first if any are in database */}
-              {userRealIps.inDatabase.length > 0 && (
-                <div className="p-4 bg-[#EF4444]/10 border border-[#EF4444]/30 rounded-lg">
-                  <div className="flex items-center gap-2 mb-2">
-                    <AlertTriangle className="text-[#EF4444]" size={20} />
-                    <p className="font-medium text-[#EF4444]">Your Real IP is in Database!</p>
-                  </div>
-                  <p className="text-sm text-[#A1A1AA] mb-2">
-                    Even with unique proxy IPs, links will show "Duplicate" because your real IPv6 leaks through proxies.
-                  </p>
-                  <div className="space-y-1">
-                    {userRealIps.inDatabase.map((ip, i) => (
-                      <p key={i} className="font-mono text-xs text-[#EF4444]">⚠️ {ip}</p>
-                    ))}
-                  </div>
-                  <p className="text-xs text-[#F59E0B] mt-2">
-                    Solution: Delete clicks with this IP from Clicks page, or disable IPv6 on your device.
-                  </p>
-                </div>
-              )}
-              
-              {/* User's Real IPs Status */}
-              <div className="p-3 bg-[var(--brand-card)] rounded-lg">
-                <p className="text-sm font-medium text-white mb-2">Your Real IPs (from Check My IP):</p>
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="flex items-center justify-between p-2 bg-[var(--brand-card)] rounded">
-                    <span className="text-xs text-[#A1A1AA]">IPv4:</span>
-                    <span className="font-mono text-xs text-white">{userRealIps.ipv4 || "Not detected"}</span>
-                    {userRealIps.ipv4 && (
-                      userRealIps.inDatabase.includes(userRealIps.ipv4) 
-                        ? <Badge className="bg-[#EF4444] text-[10px] ml-2">Duplicate</Badge>
-                        : <Badge className="bg-[#22C55E] text-[10px] ml-2">Unique</Badge>
-                    )}
-                  </div>
-                  <div className="flex items-center justify-between p-2 bg-[var(--brand-card)] rounded">
-                    <span className="text-xs text-[#A1A1AA]">IPv6:</span>
-                    <span className="font-mono text-xs text-white truncate max-w-[120px]" title={userRealIps.ipv6 || ""}>
-                      {userRealIps.ipv6 ? (userRealIps.ipv6.length > 15 ? userRealIps.ipv6.substring(0, 15) + '...' : userRealIps.ipv6) : "Not detected"}
-                    </span>
-                    {userRealIps.ipv6 && (
-                      userRealIps.inDatabase.includes(userRealIps.ipv6) 
-                        ? <Badge className="bg-[#EF4444] text-[10px] ml-2">Duplicate</Badge>
-                        : <Badge className="bg-[#22C55E] text-[10px] ml-2">Unique</Badge>
-                    )}
-                  </div>
-                </div>
-              </div>
-              
               {/* Stats Overview */}
               <div className="grid grid-cols-4 gap-3">
                 <div className="p-3 bg-[var(--brand-card)] rounded-lg text-center">
@@ -929,22 +727,22 @@ export default function ProxiesPage() {
                   <p className="text-xs text-[#A1A1AA]">Alive</p>
                 </div>
                 <div className="p-3 bg-[#3B82F6]/10 rounded-lg text-center">
-                  <p className="text-2xl font-bold text-[#3B82F6]">{bulkTestResults.uniqueIps.filter(ip => !ip.isUserIp).length}</p>
+                  <p className="text-2xl font-bold text-[#3B82F6]">{bulkTestResults.uniqueIps.length}</p>
                   <p className="text-xs text-[#A1A1AA]">Unique Proxy IPs</p>
                 </div>
                 <div className="p-3 bg-[#EF4444]/10 rounded-lg text-center">
-                  <p className="text-2xl font-bold text-[#EF4444]">{bulkTestResults.duplicateIps.filter(ip => !ip.isUserIp).length}</p>
+                  <p className="text-2xl font-bold text-[#EF4444]">{bulkTestResults.duplicateIps.length}</p>
                   <p className="text-xs text-[#A1A1AA]">Duplicate Proxy IPs</p>
                 </div>
               </div>
               
-              {/* Unique IPs Section - Only proxy IPs */}
-              {bulkTestResults.uniqueIps.filter(ip => !ip.isUserIp).length > 0 && userRealIps.inDatabase.length === 0 && (
+              {/* Unique IPs Section */}
+              {bulkTestResults.uniqueIps.length > 0 && (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <h4 className="text-sm font-medium text-[#22C55E] flex items-center gap-2">
                       <CheckCircle size={16} />
-                      Unique Proxy IPs ({bulkTestResults.uniqueIps.filter(ip => !ip.isUserIp).length}) - Safe to use!
+                      Unique Proxy IPs ({bulkTestResults.uniqueIps.length}) - Safe to use!
                     </h4>
                     <Button
                       variant="outline"
@@ -952,7 +750,6 @@ export default function ProxiesPage() {
                       className="border-[#22C55E] text-[#22C55E] h-7 text-xs"
                       onClick={() => {
                         const uniqueProxyStrings = bulkTestResults.uniqueIps
-                          .filter(ip => !ip.isUserIp)
                           .flatMap(ip => ip.proxies)
                           .filter((v, i, a) => a.indexOf(v) === i)
                           .join("\n");
@@ -965,11 +762,11 @@ export default function ProxiesPage() {
                     </Button>
                   </div>
                   <div className="max-h-40 overflow-y-auto space-y-1 p-2 bg-[#22C55E]/5 rounded-lg">
-                    {bulkTestResults.uniqueIps.filter(ip => !ip.isUserIp).map((ipData, i) => (
+                    {bulkTestResults.uniqueIps.map((ipData, i) => (
                       <div key={i} className="flex items-center justify-between p-2 bg-[var(--brand-card)] rounded text-xs">
                         <div className="flex items-center gap-2">
                           <Badge className="bg-[#22C55E]/20 text-[#22C55E] text-[10px]">{ipData.type}</Badge>
-                          <span className="font-mono text-white">{(ipData.ip || '').replace('_user', '').length > 30 ? (ipData.ip || '').replace('_user', '').substring(0, 30) + '...' : (ipData.ip || '').replace('_user', '')}</span>
+                          <span className="font-mono text-white">{(ipData.ip || '').length > 30 ? (ipData.ip || '').substring(0, 30) + '...' : (ipData.ip || '')}</span>
                         </div>
                         <span className="text-[#A1A1AA]">{ipData.count} proxy(s)</span>
                       </div>
@@ -978,35 +775,19 @@ export default function ProxiesPage() {
                 </div>
               )}
               
-              {/* Warning if user IP is blocked */}
-              {bulkTestResults.uniqueIps.filter(ip => !ip.isUserIp).length > 0 && userRealIps.inDatabase.length > 0 && (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <h4 className="text-sm font-medium text-[#F59E0B] flex items-center gap-2">
-                      <AlertTriangle size={16} />
-                      Proxy IPs are Unique BUT Your Real IP is Blocked
-                    </h4>
-                  </div>
-                  <div className="p-3 bg-[#F59E0B]/10 rounded-lg text-sm text-[#F59E0B]">
-                    These proxy IPs are unique, but your real IPv6 will leak and cause "Duplicate IP" error.
-                    Clear your IP from database first!
-                  </div>
-                </div>
-              )}
-              
-              {/* Duplicate IPs Section - Only proxy IPs */}
-              {bulkTestResults.duplicateIps.filter(ip => !ip.isUserIp).length > 0 && (
+              {/* Duplicate IPs Section */}
+              {bulkTestResults.duplicateIps.length > 0 && (
                 <div className="space-y-2">
                   <h4 className="text-sm font-medium text-[#EF4444] flex items-center gap-2">
                     <AlertTriangle size={16} />
-                    Duplicate Proxy IPs ({bulkTestResults.duplicateIps.filter(ip => !ip.isUserIp).length}) - Already in database
+                    Duplicate Proxy IPs ({bulkTestResults.duplicateIps.length}) - Already in database
                   </h4>
                   <div className="max-h-40 overflow-y-auto space-y-1 p-2 bg-[#EF4444]/5 rounded-lg">
-                    {bulkTestResults.duplicateIps.filter(ip => !ip.isUserIp).map((ipData, i) => (
+                    {bulkTestResults.duplicateIps.map((ipData, i) => (
                       <div key={i} className="flex items-center justify-between p-2 bg-[var(--brand-card)] rounded text-xs">
                         <div className="flex items-center gap-2">
                           <Badge className="bg-[#EF4444]/20 text-[#EF4444] text-[10px]">{ipData.type}</Badge>
-                          <span className="font-mono text-white">{(ipData.ip || '').replace('_user', '').length > 30 ? (ipData.ip || '').replace('_user', '').substring(0, 30) + '...' : (ipData.ip || '').replace('_user', '')}</span>
+                          <span className="font-mono text-white">{(ipData.ip || '').length > 30 ? (ipData.ip || '').substring(0, 30) + '...' : (ipData.ip || '')}</span>
                         </div>
                         <span className="text-[#A1A1AA]">{ipData.count} proxy(s)</span>
                       </div>
@@ -1040,18 +821,6 @@ export default function ProxiesPage() {
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-bold">Proxy Management</h2>
         <div className="flex gap-2 flex-wrap items-center">
-          {/* Check My IP Button - Always visible */}
-          <Button 
-            variant="outline" 
-            onClick={checkMyIp}
-            disabled={checkingMyIp}
-            className="border-[#8B5CF6] text-[#8B5CF6] hover:bg-[#8B5CF6]/10"
-            data-testid="check-my-ip-button"
-          >
-            <Globe size={16} className={`mr-2 ${checkingMyIp ? 'animate-spin' : ''}`} />
-            {checkingMyIp ? "Checking..." : "Check My IP"}
-          </Button>
-          
           {selectedProxies.length > 0 && (
             <>
               <span className="text-sm text-[#3B82F6] font-medium px-3 py-1 bg-[#3B82F6]/10 rounded-md" data-testid="selected-count">
@@ -1292,6 +1061,99 @@ export default function ProxiesPage() {
             </CardContent>
           </Card>
         </div>
+      )}
+
+      {/* ── Live System Processing card (visible during bulk test) ─────────── */}
+      {isBulkTesting && (
+        <Card
+          className="bg-gradient-to-r from-[#1a0b2e] via-[#0f0418] to-[#1a0b2e] border-[#8B5CF6]/40 overflow-hidden"
+          data-testid="system-processing-card"
+        >
+          <CardContent className="p-0">
+            {/* Top progress bar */}
+            <div className="relative h-2 bg-[#1a0b2e]">
+              <div
+                className="absolute top-0 left-0 h-full bg-gradient-to-r from-[#8B5CF6] via-[#A78BFA] to-[#C4B5FD] transition-all duration-300 ease-out"
+                style={{ width: `${progress.percent}%` }}
+                data-testid="progress-bar-fill"
+              />
+            </div>
+
+            <div className="flex items-center justify-between flex-wrap gap-6 px-6 py-5">
+              {/* Left: spinner + label */}
+              <div className="flex items-center gap-4 min-w-[280px]">
+                <div className="w-14 h-14 rounded-full bg-[#8B5CF6]/15 border border-[#8B5CF6]/40 flex items-center justify-center shrink-0">
+                  <RefreshCw className="text-[#A78BFA] animate-spin" size={26} />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-xl font-bold text-white">System Processing</h3>
+                    <span
+                      className="text-sm font-semibold text-[#A78BFA] bg-[#8B5CF6]/15 px-2 py-0.5 rounded-md border border-[#8B5CF6]/30"
+                      data-testid="progress-percent"
+                    >
+                      {progress.percent}%
+                    </span>
+                  </div>
+                  <p className="text-xs text-[#A1A1AA] mt-0.5">
+                    Parallel batch test active across distributed workers
+                  </p>
+                </div>
+              </div>
+
+              {/* Right: stats */}
+              <div className="flex items-center gap-10">
+                <div className="text-center">
+                  <p className="text-[10px] tracking-widest uppercase text-[#71717A] mb-1">
+                    Parallel Active
+                  </p>
+                  <p
+                    className="text-3xl font-bold text-white tabular-nums"
+                    data-testid="parallel-active"
+                  >
+                    {progress.parallel_active}
+                  </p>
+                </div>
+                <div className="text-center">
+                  <p className="text-[10px] tracking-widest uppercase text-[#71717A] mb-1">
+                    Checked
+                  </p>
+                  <p
+                    className="text-3xl font-bold text-white tabular-nums"
+                    data-testid="checked-count"
+                  >
+                    {progress.checked}
+                    <span className="text-[#71717A] text-lg font-normal"> / {progress.total}</span>
+                  </p>
+                </div>
+                <div className="text-center">
+                  <p className="text-[10px] tracking-widest uppercase text-[#71717A] mb-1">
+                    Time Elapsed
+                  </p>
+                  <p
+                    className="text-3xl font-bold text-[#A78BFA] tabular-nums"
+                    data-testid="time-elapsed"
+                  >
+                    {progress.elapsed_seconds}s
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Footer: live result counters */}
+            <div className="flex items-center justify-center gap-6 px-6 py-2 bg-[#0f0418]/60 border-t border-[#8B5CF6]/15 text-xs">
+              <span className="text-[#A1A1AA]">
+                Alive: <span className="text-[#22C55E] font-semibold">{progress.alive}</span>
+              </span>
+              <span className="text-[#A1A1AA]">
+                Dead: <span className="text-[#EF4444] font-semibold">{progress.dead}</span>
+              </span>
+              <span className="text-[#A1A1AA]">
+                Duplicate: <span className="text-[#F59E0B] font-semibold">{progress.duplicate}</span>
+              </span>
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       <Card className="bg-[var(--brand-card)] border-[var(--brand-border)]">

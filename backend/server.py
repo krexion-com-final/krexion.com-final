@@ -663,7 +663,9 @@ DEFAULT_API_SETTINGS = {
         "api_key": "",
         "endpoint": "http://proxycheck.io/v2/",
         "priority": 1,
-        "description": "VPN/Proxy detection service (free tier available)"
+        "tier": "free",
+        "signup_url": "https://proxycheck.io/dashboard/",
+        "description": "What it does: Detects if an IP is a VPN, public proxy, residential proxy, TOR exit node, or datacenter hosting. Returns proxy=yes/no + type (VPN/Proxy/Hosting/TOR). Free tier: 1,000 IP checks/day (no API key). Paid: 10,000–unlimited/day with key."
     },
     "ipapi": {
         "name": "IP-API.com",
@@ -671,7 +673,9 @@ DEFAULT_API_SETTINGS = {
         "api_key": "",
         "endpoint": "http://ip-api.com/json/",
         "priority": 2,
-        "description": "Geolocation and proxy detection (free tier available)"
+        "tier": "free",
+        "signup_url": "https://members.ip-api.com/",
+        "description": "What it does: Geolocation (country, city, region, ISP) + flags 'proxy' and 'hosting' (datacenter). Most reliable free service. Free tier: 45 requests/minute (~10,000/day) over HTTP, no API key needed. Paid: unlimited HTTPS with key."
     },
     "scamalytics": {
         "name": "Scamalytics",
@@ -679,7 +683,9 @@ DEFAULT_API_SETTINGS = {
         "api_key": "",
         "endpoint": "https://scamalytics.com/ip/",
         "priority": 3,
-        "description": "Fraud score detection (requires API key)"
+        "tier": "paid",
+        "signup_url": "https://scamalytics.com/ip/api",
+        "description": "What it does: Returns a fraud risk score (0-100) based on VPN/proxy/abuse history. Most accurate for detecting fraudulent traffic sources. REQUIRES API KEY. Free trial: 5,000 IPs/month. Paid plans from $39/mo (50k IPs)."
     },
     "ipqualityscore": {
         "name": "IPQualityScore",
@@ -687,7 +693,9 @@ DEFAULT_API_SETTINGS = {
         "api_key": "",
         "endpoint": "https://ipqualityscore.com/api/json/ip/",
         "priority": 4,
-        "description": "Advanced fraud detection (requires API key)"
+        "tier": "paid",
+        "signup_url": "https://www.ipqualityscore.com/create-account",
+        "description": "What it does: Most advanced — detects VPN, proxy, TOR, bots, datacenter IPs, plus fraud_score (0-100). Industry standard for ad-fraud protection. REQUIRES API KEY. Free tier: 5,000 lookups/month. Paid from $50/mo (50k+ lookups)."
     },
     "iphub": {
         "name": "IPHub",
@@ -695,7 +703,9 @@ DEFAULT_API_SETTINGS = {
         "api_key": "",
         "endpoint": "http://v2.api.iphub.info/ip/",
         "priority": 5,
-        "description": "IP intelligence service (requires API key)"
+        "tier": "paid",
+        "signup_url": "https://iphub.info/register",
+        "description": "What it does: Returns block score (0=residential, 1=non-residential, 2=hosting/VPN). Simple and reliable VPN/datacenter detection. REQUIRES API KEY. Free tier: 1,000 requests/day. Paid from $9/mo (10k/day)."
     }
 }
 
@@ -5344,6 +5354,24 @@ async def update_api_setting(api_key: str, update: APISettingUpdate, admin: dict
     
     current_settings[api_key]["updated_at"] = datetime.now(timezone.utc).isoformat()
     
+    # ── Auto-disable free APIs when a PAID API has an API key + enabled ───────
+    # When admin adds key to a paid-tier API and enables it, automatically
+    # disable free-tier APIs so the paid one takes over.
+    auto_disabled = []
+    current_api = current_settings[api_key]
+    is_paid_tier = current_api.get("tier") == "paid"
+    has_key = bool(str(current_api.get("api_key") or "").strip())
+    is_enabled = bool(current_api.get("enabled"))
+    if is_paid_tier and has_key and is_enabled:
+        for other_key, other_cfg in current_settings.items():
+            if other_key == api_key:
+                continue
+            if other_cfg.get("tier") == "free" and other_cfg.get("enabled"):
+                current_settings[other_key]["enabled"] = False
+                current_settings[other_key]["auto_disabled_by"] = api_key
+                current_settings[other_key]["updated_at"] = datetime.now(timezone.utc).isoformat()
+                auto_disabled.append(other_key)
+    
     # Save to database
     await main_db.settings.update_one(
         {"key": "api_settings"},
@@ -5351,8 +5379,13 @@ async def update_api_setting(api_key: str, update: APISettingUpdate, admin: dict
         upsert=True
     )
     
-    logger.info(f"API setting '{api_key}' updated by admin")
-    return {"message": f"API setting '{api_key}' updated successfully", "setting": current_settings[api_key]}
+    logger.info(f"API setting '{api_key}' updated by admin (auto-disabled: {auto_disabled})")
+    return {
+        "message": f"API setting '{api_key}' updated successfully",
+        "setting": current_settings[api_key],
+        "auto_disabled": auto_disabled,
+        "all_settings": current_settings
+    }
 
 @api_router.post("/admin/api-settings")
 async def create_custom_api(api_data: CustomAPICreate, admin: dict = Depends(get_current_admin)):
@@ -10028,11 +10061,30 @@ async def bulk_test_proxies(
     results = {"tested": 0, "alive": 0, "dead": 0, "duplicate": 0, "vpn": 0, "errors": 0}
     proxy_items = list(all_proxies.items())
     
+    # ── Initialise bulk-test progress for this user ───────────────────────────
+    progress_key = user["id"]
+    _bulk_test_progress[progress_key] = {
+        "status": "running",
+        "total": len(proxy_items),
+        "checked": 0,
+        "parallel_active": 0,
+        "alive": 0,
+        "dead": 0,
+        "duplicate": 0,
+        "vpn": 0,
+        "started_at": time.time(),
+        "elapsed_seconds": 0,
+    }
+    progress_lock = asyncio.Lock()
+    
     # Process in parallel batches
     for i in range(0, len(proxy_items), batch_size):
         batch = proxy_items[i:i + batch_size]
         
         async def test_single(proxy_id, db_source, proxy):
+            # progress: a worker has started
+            async with progress_lock:
+                _bulk_test_progress[progress_key]["parallel_active"] += 1
             try:
                 result = await _test_proxy_fast(proxy["proxy_string"], proxy["proxy_type"], timeout)
                 
@@ -10089,9 +10141,28 @@ async def bulk_test_proxies(
                 target_db = user_db if db_source == "user_db" else db
                 await target_db.proxies.update_one({"id": proxy_id}, {"$set": update_data})
                 
+                # progress: worker finished one proxy
+                async with progress_lock:
+                    p = _bulk_test_progress[progress_key]
+                    p["parallel_active"] = max(0, p["parallel_active"] - 1)
+                    p["checked"] += 1
+                    if result["status"] == "alive":
+                        p["alive"] += 1
+                    else:
+                        p["dead"] += 1
+                    if is_duplicate_click:
+                        p["duplicate"] += 1
+                    p["elapsed_seconds"] = round(time.time() - p["started_at"], 1)
+                
                 return {"status": result["status"], "is_duplicate": is_duplicate_click, "is_vpn": is_vpn, "error": False}
             except Exception as e:
                 logger.error(f"Proxy test error for {proxy_id}: {str(e)}")
+                async with progress_lock:
+                    p = _bulk_test_progress[progress_key]
+                    p["parallel_active"] = max(0, p["parallel_active"] - 1)
+                    p["checked"] += 1
+                    p["dead"] += 1
+                    p["elapsed_seconds"] = round(time.time() - p["started_at"], 1)
                 return {"status": "dead", "is_duplicate": False, "is_vpn": False, "error": True}
         
         # Run batch concurrently
@@ -10116,10 +10187,40 @@ async def bulk_test_proxies(
                 if r.get("is_vpn"):
                     results["vpn"] += 1
     
+    # mark progress complete
+    if progress_key in _bulk_test_progress:
+        p = _bulk_test_progress[progress_key]
+        p["status"] = "completed"
+        p["parallel_active"] = 0
+        p["elapsed_seconds"] = round(time.time() - p["started_at"], 1)
+    
     return {
         "message": f"Tested {results['tested']} proxies",
         **results
     }
+
+# ── Live progress tracker for bulk proxy testing (per-user, in-memory) ─────────
+_bulk_test_progress: Dict[str, Dict[str, Any]] = {}
+
+@api_router.get("/proxies/test-progress")
+async def get_bulk_test_progress(user: dict = Depends(get_current_user_with_fresh_data)):
+    """Return live progress of the current user's bulk proxy test."""
+    p = _bulk_test_progress.get(user["id"])
+    if not p:
+        return {
+            "status": "idle",
+            "total": 0,
+            "checked": 0,
+            "parallel_active": 0,
+            "alive": 0,
+            "dead": 0,
+            "duplicate": 0,
+            "vpn": 0,
+            "elapsed_seconds": 0,
+            "percent": 0,
+        }
+    percent = int(round((p["checked"] / p["total"]) * 100)) if p["total"] > 0 else 0
+    return {**p, "percent": min(100, percent)}
 
 # CORE FUNCTION: Check if IP is duplicate - USED BY BOTH PROXY TEST AND LINK REDIRECT
 # ONLY CHECKS IPv4 - IPv6 is completely ignored
