@@ -705,6 +705,16 @@ export default function AdminDashboard() {
             <Button
               variant="outline"
               size="sm"
+              onClick={() => window.location.href = "/admin/crypto-orders"}
+              data-testid="goto-crypto-orders-btn"
+              className="border-[#A78BFA]/40 text-[#A78BFA] hover:bg-[#A78BFA]/10"
+            >
+              <DollarSign size={16} className="mr-2" />
+              Crypto Orders
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
               onClick={() => window.location.href = "/admin/licenses"}
               data-testid="goto-licenses-btn"
               className="border-[var(--brand-border)]"

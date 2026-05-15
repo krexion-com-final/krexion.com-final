@@ -36,6 +36,10 @@ import AdminDashboard from "./pages/AdminDashboard";
 import LicenseAdminPage from "./pages/LicenseAdminPage";
 import AnimationDemoPage from "./pages/AnimationDemoPage";
 import BackgroundPreviewPage from "./pages/BackgroundPreviewPage";
+import PricingPage from "./pages/PricingPage";
+import CheckoutPage from "./pages/CheckoutPage";
+import OrderStatusPage from "./pages/OrderStatusPage";
+import CryptoOrdersPage from "./pages/CryptoOrdersPage";
 import { Toaster } from "./components/ui/sonner";
 import { BrandingProvider } from "./context/BrandingContext";
 import { ThemeProvider } from "./context/ThemeContext";
@@ -106,6 +110,14 @@ function App() {
             <Route path="/admin" element={<AdminLoginPage />} />
             <Route path="/animation-demo" element={<AnimationDemoPage />} />
             <Route path="/bg-preview" element={<BackgroundPreviewPage />} />
+            <Route path="/pricing" element={<PricingPage />} />
+            <Route path="/checkout/:planId" element={<CheckoutPage />} />
+            <Route path="/order/:orderId" element={<OrderStatusPage />} />
+            <Route path="/admin/crypto-orders" element={
+              <AdminRoute>
+                <CryptoOrdersPage />
+              </AdminRoute>
+            } />
             <Route path="/admin/dashboard" element={
               <AdminRoute>
                 <AdminDashboard />
