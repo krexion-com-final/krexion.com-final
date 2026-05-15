@@ -156,7 +156,7 @@ export default function LoginPage() {
       localStorage.setItem("token", response.data.access_token);
       localStorage.setItem("user", JSON.stringify(response.data.user));
       toast.success("Login successful!");
-      navigate("/");
+      navigate("/dashboard");
     } catch (error) {
       toast.error(error.response?.data?.detail || "Invalid credentials");
     } finally {
@@ -172,7 +172,7 @@ export default function LoginPage() {
       localStorage.setItem("token", response.data.access_token);
       localStorage.setItem("user", JSON.stringify(response.data.user));
       toast.success("Registration successful!");
-      navigate("/");
+      navigate("/dashboard");
     } catch (error) {
       toast.error(error.response?.data?.detail || "Registration failed");
     } finally {

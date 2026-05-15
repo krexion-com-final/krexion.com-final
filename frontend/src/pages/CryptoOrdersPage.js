@@ -28,7 +28,7 @@ export default function CryptoOrdersPage() {
   const [verifyResult, setVerifyResult] = useState(null);
   const [rejectDialog, setRejectDialog] = useState({ open: false, order: null, reason: "" });
 
-  const adminToken = localStorage.getItem("admin_token") || localStorage.getItem("token");
+  const adminToken = localStorage.getItem("adminToken") || localStorage.getItem("admin_token") || localStorage.getItem("token");
 
   const fetchOrders = useCallback(async () => {
     setLoading(true);

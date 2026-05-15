@@ -66,7 +66,7 @@ export default function DashboardLayout({ children }) {
 
   // Build navigation based on user's enabled features
   const allNavItems = [
-    { name: "Dashboard", path: "/", icon: LayoutDashboard, feature: null }, // Always show dashboard
+    { name: "Dashboard", path: "/dashboard", icon: LayoutDashboard, feature: null }, // Always show dashboard
     { name: "Links", path: "/links", icon: Link2, feature: "links" },
     { name: "Clicks", path: "/clicks", icon: MousePointerClick, feature: "clicks" },
     { name: "Traffic Sources", path: "/referrers", icon: TrendingUp, feature: "clicks" },

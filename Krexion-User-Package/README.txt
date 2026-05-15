@@ -56,8 +56,10 @@ INSTALL KE BAAD KYA KARNA HAI?
   4. Setup wizard khulega
 
   5. License key chahiye?
-     - Admin se WhatsApp pe maangein
-     - Aap ka email batayein admin ko
+     - https://krexion.com/pricing par jaa kar USDT-TRC20 se khareedein
+     - Plan select karein → wallet pe USDT bhejein → TxID submit karein
+     - Verification ke baad license key email pe milegi (30 minute ke andar)
+     - Wohi license key Krexion mein daal kar activate karein
      - Admin license key send karega
      - "I have a license key" click karein
      - Key paste karein

@@ -12966,14 +12966,32 @@ except Exception as _lic_err:  # noqa: BLE001
 # ─── Crypto Payment module (USDT-TRC20 manual approve) ────────────────
 try:
     from crypto_payment_module import crypto_router, _bind as _crypto_bind, seed_defaults as _seed_crypto
+    from email_service import (
+        send_license_email as _send_license_email,
+        send_rejection_email as _send_rejection_email,
+        send_welcome_email as _send_welcome_email,
+    )
 
     async def _crypto_admin(request: Request):
         return await get_current_admin(request)
 
+    async def _crypto_email_dispatch(kind: str, **kwargs):
+        """Dispatcher that the crypto module calls. Maps `kind` to a Resend template."""
+        try:
+            if kind == "license":
+                return await _send_license_email(**kwargs)
+            if kind == "rejection":
+                return await _send_rejection_email(**kwargs)
+            if kind == "welcome":
+                return await _send_welcome_email(**kwargs)
+        except Exception as _ee:  # noqa: BLE001
+            logger.warning(f"Email dispatch failed (kind={kind}): {_ee}")
+        return {"ok": False, "error": f"unknown kind {kind}"}
+
     _crypto_bind(
         main_db=main_db,
         get_current_admin=_crypto_admin,
-        send_email=None,
+        send_email=_crypto_email_dispatch,
     )
     app.include_router(crypto_router)
 

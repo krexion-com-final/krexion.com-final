@@ -141,8 +141,10 @@ echo  #              SUCCESS! KREXION READY HAI                        #
 echo  #                                                                 #
 echo  #   Browser khud khul gayi hai - Register page pe                 #
 echo  #                                                                 #
-echo  #   Naya account banayein                                         #
-echo  #   Phir admin se license key maangein                            #
+echo  #   1. Naya account banayein                                      #
+echo  #   2. License key https://krexion.com/pricing se khareedein      #
+echo  #      (USDT-TRC20 — 30 min mein email pe milegi)                 #
+echo  #   3. License key Krexion mein daalein, ready!                   #
 echo  #                                                                 #
 echo  ###################################################################
 echo.

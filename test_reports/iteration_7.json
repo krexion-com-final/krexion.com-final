@@ -1,0 +1,46 @@
+{
+  "summary": "Full e2e of Krexion crypto-payment + Resend email + new public HomePage. Backend: wrote /app/backend/tests/test_iteration7_crypto_payment.py — 14/14 pytest pass covering plans, wallet env, order create/get/expire, TxID submit + 422-short + 409-duplicate, admin auth gate, admin list/approve/reject, license-key KRX format. Email: Resend wired correctly — verified address (us9661626@gmail.com) shows '[email sent]' INFO in backend logs with a real Resend id; unverified addresses fail with the EXPECTED sandbox restriction message — order endpoints still return 200 (matches review request known-limitation). Frontend: HomePage at / renders KREXION logo, hero, 6 feature cards, pricing plans pulled from API (Trial/Starter/Pro/Business all visible), 'See plans' CTA → /pricing; /pricing 'Get started' on Trial → /checkout/trial; checkout form submit creates order and navigates to /order/ORD-XXX; order page shows correct wallet address (TPT9ja87EdGhcRJz2bR6rqhFfrjm1edWTR), QR, 3 USDT amount, 30-min timer, and TxID input. Admin /admin login works (token persisted as 'adminToken'); /admin/crypto-orders renders correctly after my one-line fix below — all 5 tabs (Awaiting/Pending/Approved/Rejected/All) visible plus an Expired stat card.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/crypto/orders/create + approve + reject", "issue": "Resend emails to non-verified addresses fail (sandbox restriction). Documented limitation — order endpoints still return 200. To send to all addresses, verify a domain at resend.com/domains and update SENDER_EMAIL in backend/.env from onboarding@resend.dev to a verified domain address."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "CryptoOrdersPage", "issue": "Was reading admin token from localStorage key 'admin_token' while AdminLoginPage and the rest of the app use 'adminToken' (camelCase). Caused immediate 'Session expired. Please login again.' redirect when navigating to /admin/crypto-orders even after a successful admin login.", "selector": "/app/frontend/src/pages/CryptoOrdersPage.js line 31", "priority": "HIGH"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration7_crypto_payment.py",
+    "/app/test_reports/pytest/iteration7_results.xml"
+  ],
+  "action_items": [
+    "(P2) Verify a sender domain on Resend (resend.com/domains) and change SENDER_EMAIL in /app/backend/.env to an address on that domain so production customers (not just us9661626@gmail.com) receive welcome/license/rejection emails. Until then, only the verified inbox will actually receive mail; everything else is logged as 'email failed: You can only send testing emails to your own email address'.",
+    "(P3) Consider standardising the admin-token localStorage key project-wide ('adminToken') and removing the 'admin_token'/'token' fallbacks in CryptoOrdersPage now that they cause confusion. The hot-fix I applied keeps backward compatibility, but a single source of truth (e.g., shared helper getAdminToken()) would be cleaner.",
+    "(P3) In crypto_payment_module.py, '_serialize_order' is called with a possibly-None argument inside admin_approve flow if the update fails; harmless today but worth a guard. Also consider returning 401/403 consistently — current admin gate is 503 if dep not bound (only matters during dev startup race)."
+  ],
+  "critical_code_review_comments": [
+    "crypto_payment_module.py is well structured: pydantic validation on every endpoint (min/max len, gt=0 on amounts), explicit status transitions (pending→submitted→approved/rejected/expired), 409 on duplicate TxID across orders, 400 on double-approve, _serialize_order strips _id everywhere — no ObjectId leaks.",
+    "License key format conforms to spec: KRX-XXXX-XXXX-XXXX-XXXX (uppercase hex, regex-verified in test).",
+    "email_service.send_email is safely non-raising and runs Resend SDK via asyncio.to_thread — won't block the order endpoint.",
+    "HomePage/PricingPage/CheckoutPage/OrderStatusPage are fully implemented (not scaffolds as earlier handoff note said). All four render and integrate with backend.",
+    "Public / now lands on HomePage; dashboard moved to /dashboard correctly — login redirect target should be confirmed by the main agent if not already (couldn't fully test without a logged-in user).",
+    "Single hot-fixable bug found: CryptoOrdersPage localStorage key mismatch ('admin_token' vs 'adminToken'). Fixed in place with backward-compatible fallback."
+  ],
+  "updated_files": [
+    "/app/frontend/src/pages/CryptoOrdersPage.js (one-line localStorage key fallback added: reads 'adminToken' first, then 'admin_token', then 'token')",
+    "/app/backend/tests/test_iteration7_crypto_payment.py (new — 14 test cases)"
+  ],
+  "success_rate": {
+    "backend": "100% (14/14)",
+    "frontend": "100% on critical paths verified (HomePage render, pricing→checkout→order navigation, wallet address match, admin login + admin crypto-orders page after fix)"
+  },
+  "test_credentials": "Admin: admin@krexion.local / admin123 (from /app/memory/test_credentials.md). Resend verified inbox for actual mail delivery: us9661626@gmail.com.",
+  "seed_data_creation": "Several TEST_ orders + 1 approved order with license + 1 rejected order created in db.crypto_orders during run. License inserted into db.licenses with source='crypto-order'. Safe to leave (test prefix in customer_name='TEST ...').",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Re-run: REACT_APP_BACKEND_URL=https://flow-staging-6.preview.emergentagent.com pytest /app/backend/tests/test_iteration7_crypto_payment.py -v. Gotchas: (1) admin login response token key is 'access_token' OR 'token' — accept both. (2) Public order endpoints accept any plan_id present in DEFAULT_PLANS (trial/starter/pro/business). (3) TxID min_length=10 → submitting <10 chars returns 422 (FastAPI/pydantic), not 400. (4) Resend in sandbox mode → expect email failures for non-verified addresses; that's logged as ERROR but order endpoints still return 200 — do NOT treat as bug. (5) Frontend admin-token localStorage key is 'adminToken' (camelCase) — must match across all admin pages. (6) Frontend public landing changed: '/' now = HomePage, dashboard = '/dashboard'."
+}

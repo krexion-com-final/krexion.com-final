@@ -40,6 +40,7 @@ import PricingPage from "./pages/PricingPage";
 import CheckoutPage from "./pages/CheckoutPage";
 import OrderStatusPage from "./pages/OrderStatusPage";
 import CryptoOrdersPage from "./pages/CryptoOrdersPage";
+import HomePage from "./pages/HomePage";
 import { Toaster } from "./components/ui/sonner";
 import { BrandingProvider } from "./context/BrandingContext";
 import { ThemeProvider } from "./context/ThemeContext";
@@ -52,6 +53,11 @@ if (typeof document !== 'undefined') {
 function PrivateRoute({ children }) {
   const token = localStorage.getItem("token");
   return token ? children : <Navigate to="/login" />;
+}
+
+function PublicHome() {
+  const token = localStorage.getItem("token");
+  return token ? <Navigate to="/dashboard" replace /> : <HomePage />;
 }
 
 function AdminRoute({ children }) {
@@ -69,11 +75,11 @@ function FeatureRoute({ children, feature }) {
   if (feature === "settings") {
     // Sub-users can NEVER access settings
     if (isSubUser) {
-      return <Navigate to="/" replace />;
+      return <Navigate to="/dashboard" replace />;
     }
     // Main users can access unless explicitly set to false
     if (features.settings === false) {
-      return <Navigate to="/" replace />;
+      return <Navigate to="/dashboard" replace />;
     }
     return children;
   }
@@ -90,7 +96,7 @@ function FeatureRoute({ children, feature }) {
       explicit === true ||
       (explicit === undefined && LEGACY_IMPORT_GROUP.has(feature) && features.import_data === true);
     if (!hasAccess) {
-      return <Navigate to="/" replace />;
+      return <Navigate to="/dashboard" replace />;
     }
   }
   
@@ -123,6 +129,7 @@ function App() {
                 <AdminDashboard />
               </AdminRoute>
             } />
+            <Route path="/" element={<PublicHome />} />
             <Route path="/admin/licenses" element={
               <AdminRoute>
                 <LicenseAdminPage />
@@ -134,7 +141,7 @@ function App() {
                 <PrivateRoute>
                   <DashboardLayout>
                     <Routes>
-                      <Route path="/" element={<Dashboard />} />
+                      <Route path="/dashboard" element={<Dashboard />} />
                       <Route path="/links" element={
                         <FeatureRoute feature="links">
                           <LinksPage />

@@ -285,6 +285,20 @@ async def create_order(body: OrderCreate):
         "rejected_at": None,
     }
     await _db.crypto_orders.insert_one(doc)
+
+    # Welcome email (non-blocking, best-effort)
+    if _send_email:
+        try:
+            await _send_email(
+                kind="welcome",
+                customer_email=doc["customer_email"],
+                customer_name=doc["customer_name"],
+                order_id=order_id,
+                plan_name=doc["plan_name"],
+            )
+        except Exception:
+            pass
+
     return _serialize_order(doc)
 
 
@@ -476,20 +490,15 @@ async def admin_approve_order(order_id: str, note: Optional[str] = None, admin: 
     # Send email if helper available
     if _send_email:
         try:
-            subject = f"Your Krexion License is Ready — {order['plan_name']}"
-            body = (
-                f"Hi {order['customer_name']},\n\n"
-                f"Thank you for your purchase!\n\n"
-                f"Plan: {order['plan_name']}\n"
-                f"License Key: {license_key}\n"
-                f"Duration: {order['duration_days']} day(s)\n\n"
-                f"Download the Krexion installer + setup guide:\n"
-                f"https://krexion.com/download\n\n"
-                f"Enter your license key when prompted during installation.\n\n"
-                f"Need help? Reply to this email.\n\n"
-                f"— Krexion Team"
+            await _send_email(
+                kind="license",
+                customer_email=order["customer_email"],
+                customer_name=order["customer_name"],
+                plan_name=order["plan_name"],
+                license_key=license_key,
+                duration_days=int(order["duration_days"]),
+                order_id=order_id,
             )
-            await _send_email(order["customer_email"], subject, body)
         except Exception as e:
             logger.warning(f"License email failed: {e}")
 
@@ -516,16 +525,13 @@ async def admin_reject_order(order_id: str, body: RejectRequest, admin: dict = _
 
     if _send_email:
         try:
-            subject = "Your Krexion Order Was Rejected"
-            email_body = (
-                f"Hi {order['customer_name']},\n\n"
-                f"We were unable to verify your payment for Order #{order_id}.\n\n"
-                f"Reason: {body.reason}\n\n"
-                f"If you believe this is a mistake, please reply to this email "
-                f"with your TxID and we'll look into it.\n\n"
-                f"— Krexion Team"
+            await _send_email(
+                kind="rejection",
+                customer_email=order["customer_email"],
+                customer_name=order["customer_name"],
+                order_id=order_id,
+                reason=body.reason,
             )
-            await _send_email(order["customer_email"], subject, email_body)
         except Exception:
             pass
 
