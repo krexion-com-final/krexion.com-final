@@ -267,6 +267,33 @@ IS_DIGITALOCEAN = os.environ.get("DIGITALOCEAN_APP", "").lower() == "true"
 api_prefix = "" if IS_DIGITALOCEAN else "/api"
 api_router = APIRouter(prefix=api_prefix)
 
+# ─── Cloud vs Local mode gating ───────────────────────────────────────
+# When KREXION_MODE=cloud, the server is the public krexion.com edge.
+# Heavy CPU/bandwidth features (proxy batch tests, real-user-traffic,
+# form-filler, visual-recorder live engine) are blocked and customers
+# are pointed to the desktop installer that runs everything on their
+# own PC. Cloud handles ONLY: auth, licensing, link redirects, sync API,
+# admin panel, marketing site, and light dashboard read-only views.
+KREXION_MODE = os.environ.get("KREXION_MODE", "local").lower().strip()
+IS_CLOUD = KREXION_MODE == "cloud"
+
+CLOUD_HEAVY_FEATURE_MSG = (
+    "This feature runs on your own PC for full speed and unlimited scale. "
+    "Download the Krexion desktop app (free with your license) at "
+    "https://krexion.com/download — login with the same email & password, "
+    "and run unlimited proxy checks, real-user-traffic, form filler, etc. "
+    "without any cloud limits."
+)
+
+def require_local_mode():
+    """FastAPI dependency: block heavy operations when running on the cloud
+    edge. Customers run them on their local Krexion install instead."""
+    if IS_CLOUD:
+        raise HTTPException(status_code=423, detail=CLOUD_HEAVY_FEATURE_MSG)
+    return True
+
+
+
 # Health check endpoint (no prefix needed)
 @app.get("/health")
 async def health_check():
@@ -275,6 +302,19 @@ async def health_check():
         "admin_email_configured": ADMIN_EMAIL,
         "mongo_connected": bool(mongo_url)
     }
+
+
+# Public deployment-mode endpoint — frontend uses this to decide whether
+# to show "install desktop app" banners for heavy features.
+@app.get("/api/mode")
+@app.get("/mode")
+async def get_mode():
+    return {
+        "mode": KREXION_MODE,           # "cloud" or "local"
+        "is_cloud": IS_CLOUD,
+        "download_url": "https://krexion.com/download" if IS_CLOUD else None,
+    }
+
 
 # Debug endpoint to search for a specific IP in ALL databases
 @app.get("/debug-search-ip/{ip}")
@@ -3445,6 +3485,7 @@ async def form_filler_create_job(
     use_proxies: bool = Form(False),
     file: Optional[UploadFile] = File(None),
     user: dict = Depends(get_current_user),
+    _cloud_gate: bool = Depends(require_local_mode),
 ):
     """
     Create a Form Filler job. The request is multipart/form-data.
@@ -4428,6 +4469,7 @@ async def rut_create_job(
     # IP check to happen at the tracker endpoint itself.
     force_tracker_url: bool = Form(False),
     user: dict = Depends(get_current_user_with_fresh_data),
+    _cloud_gate: bool = Depends(require_local_mode),
 ):
     """Kick off a real-user-traffic run. Combines real-traffic + optional form-fill.
 
@@ -5632,7 +5674,11 @@ async def clear_api_rate_limits(admin: dict = Depends(get_current_admin)):
 # ==================== IP LIST IMPORT ====================
 
 @api_router.post("/clicks/import-ips")
-async def import_clicks_from_ips(data: IPListImport, user: dict = Depends(get_current_user_with_fresh_data)):
+async def import_clicks_from_ips(
+    data: IPListImport,
+    user: dict = Depends(get_current_user_with_fresh_data),
+    _cloud_gate: bool = Depends(require_local_mode),
+):
     """Import clicks from a list of IP addresses. Link is optional. Supports unlimited IPs."""
     check_user_feature(user, "import_traffic")
     
@@ -5791,7 +5837,11 @@ class BulkTrafficGenerate(BaseModel):
     countries: Optional[List[str]] = None  # Optional: specific countries
 
 @api_router.post("/clicks/import-bulk")
-async def import_bulk_clicks(data: BulkClickImport, user: dict = Depends(get_current_user_with_fresh_data)):
+async def import_bulk_clicks(
+    data: BulkClickImport,
+    user: dict = Depends(get_current_user_with_fresh_data),
+    _cloud_gate: bool = Depends(require_local_mode),
+):
     """
     Import bulk clicks with full details: IP, User Agent, Country.
     Each click will have proper device/browser detection from user agent.
@@ -10024,7 +10074,8 @@ async def _test_proxy_with_proxycheck(proxy_string: str, proxy_type: str, timeou
 @api_router.post("/proxies/bulk-test")
 async def bulk_test_proxies(
     data: dict,
-    user: dict = Depends(get_current_user_with_fresh_data)
+    user: dict = Depends(get_current_user_with_fresh_data),
+    _cloud_gate: bool = Depends(require_local_mode),
 ):
     """Ultra-fast bulk proxy testing with optimized duplicate check"""
     check_user_feature(user, "proxies")
@@ -10287,7 +10338,8 @@ async def is_ip_duplicate_in_any_database(ip_to_check: str, user_db) -> tuple:
 async def test_proxy(
     proxy_id: str, 
     user: dict = Depends(get_current_user_with_fresh_data),
-    skip_vpn: bool = False
+    skip_vpn: bool = False,
+    _cloud_gate: bool = Depends(require_local_mode),
 ):
     check_user_feature(user, "proxies")
     
@@ -12635,7 +12687,11 @@ class VRStartReq(BaseModel):
 
 
 @api_router.post("/visual-recorder/start")
-async def vr_start(req: VRStartReq, user: dict = Depends(get_current_user)):
+async def vr_start(
+    req: VRStartReq,
+    user: dict = Depends(get_current_user),
+    _cloud_gate: bool = Depends(require_local_mode),
+):
     check_user_feature(user, "real_user_traffic")
     if vr is None:
         raise HTTPException(status_code=500, detail="Visual recorder module not available")
