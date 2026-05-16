@@ -2780,6 +2780,19 @@ async def admin_login(credentials: AdminLogin):
     access_token = create_access_token(data={"sub": credentials.email, "is_admin": True})
     return {"access_token": access_token, "token_type": "bearer", "is_admin": True}
 
+
+@api_router.get("/admin/sync/heartbeats")
+async def admin_list_heartbeats(admin: dict = Depends(get_current_admin)):
+    """List active customer local installs (heartbeats in last 24h)."""
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    items = await db.sync_heartbeats.find(
+        {"last_seen": {"$gte": cutoff}},
+        {"_id": 0},
+    ).sort("last_seen", -1).to_list(1000)
+    return {"count": len(items), "heartbeats": items}
+
+
 @api_router.get("/admin/users", response_model=List[UserResponse])
 async def get_all_users(admin: dict = Depends(get_current_admin)):
     """Get all registered users with sub-user count"""
@@ -13099,6 +13112,30 @@ try:
     logger.info("Crypto Payment module loaded — /api/crypto/* + /api/admin/crypto/*")
 except Exception as _cp_err:  # noqa: BLE001
     logger.error(f"Crypto Payment module failed to load: {_cp_err}")
+
+
+# ─── Sync module (cloud↔local hybrid bridge) ──────────────────────────
+try:
+    from sync_module import sync_router, _bind as _sync_bind
+    _sync_bind(main_db=main_db, get_db_for_user=get_db_for_user)
+    app.include_router(sync_router)
+    logger.info("Sync module loaded — endpoints under /api/sync/*")
+except Exception as _sync_err:  # noqa: BLE001
+    logger.error(f"Sync module failed to load: {_sync_err}")
+
+
+# ─── Sync daemon (LOCAL install only — pushes/pulls to cloud edge) ────
+try:
+    import sync_client as _sync_client
+
+    @app.on_event("startup")
+    async def _start_sync_daemon():
+        try:
+            _sync_client.start_if_local(main_db, get_db_for_user)
+        except Exception as _se:  # noqa: BLE001
+            logger.warning(f"Sync daemon startup failed: {_se}")
+except Exception as _sce:  # noqa: BLE001
+    logger.error(f"Sync client failed to import: {_sce}")
 
 
 app.add_middleware(

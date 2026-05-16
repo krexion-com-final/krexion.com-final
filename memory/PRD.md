@@ -176,3 +176,32 @@ User concern: 100 users × 1000 proxies = 100k parallel checks would bankrupt th
 - **P2**: Hide heavy menu items in sidebar when cloud mode.
 - **P3**: Affiliate / Referral system (USDT commissions).
 - **P3**: Cloudflare Worker for `/r/xxx` (when >1M clicks/day).
+
+
+---
+
+## 2026-05-16 — Sync API (Phase 2 — cloud↔local bridge)
+
+### Implemented
+- **Cloud endpoints (`/api/sync/*`)** in new `sync_module.py`, auth via `X-Krexion-License` header → license → user mapping:
+  - `POST /api/sync/links` — local pushes link config; cloud upserts → `/r/<short_code>` redirects work.
+  - `GET /api/sync/clicks/pull?since=&limit=` — paginated pull of unack'd clicks.
+  - `POST /api/sync/clicks/ack` — mark clicks as locally stored.
+  - `POST /api/sync/heartbeat` — install presence (hostname/version/platform/ip).
+  - `GET /api/sync/status` — diagnostic snapshot.
+  - `GET /api/sync/ping` — public no-auth reachability probe.
+- **Local sync daemon** `sync_client.py` — runs only when `KREXION_MODE=local`. Cycle every `SYNC_INTERVAL_SEC=30s`: heartbeat → push active links → pull clicks (≤5k per cycle) → ack. Auto-discovers license key from local DB if env not set.
+- **Admin** `GET /api/admin/sync/heartbeats` + new UI page `/admin/sync-heartbeats` (`SyncHeartbeatsPage.js`) — live table of installs, status (online <2 min / offline), version, IP, last-seen; auto-refresh 30s; stats cards.
+
+### Production verified
+- Heartbeat → admin sees it
+- Push link `prod-sync-001` → `https://krexion.com/r/prod-sync-001` → 302 redirect → click queued
+- Status: links_in_cloud=1, pending_clicks=1, last_heartbeat populated
+
+### Backlog
+- **P1**: Force "change password on first login" for auto-created accounts.
+- **P1**: Customer portal `/account` — orders, licenses, sync diagnostics widget, re-download.
+- **P2**: Hide heavy menu items in sidebar when cloud mode.
+- **P2**: "Resend License Email" admin button + expiry-reminder cron (7d/1d).
+- **P3**: Affiliate / Referral system (USDT commissions).
+- **P3**: Cloudflare Worker in front of `/r/<short>` (>1M clicks/day scale).
