@@ -110,7 +110,7 @@ PROBLEM AA RAHA HAI?
   Installation kuch der ke baad stuck dikhe?
     - INTEZAR KAREIN! Heartbeat message dikhe to kaam chal raha hai
     - "wsl --update" 5-15 min le sakta hai (silent download)
-    - "Docker download" 3-10 min le sakta hai
+    - "Krexion runtime download" 3-10 min le sakta hai
     - "Containers build" 5-15 min le sakta hai
     - Yeh sab NORMAL hai - 30 min tak wait karein
   

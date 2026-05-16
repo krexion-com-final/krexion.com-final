@@ -106,6 +106,42 @@ function Set-DockerHidden {
     foreach ($s in $shortcuts) {
         if (Test-Path $s) { Remove-Item $s -Force -ErrorAction SilentlyContinue }
     }
+
+    # Force Windows to NEVER show the Docker Desktop tray icon. By default
+    # Windows shows new app tray icons until the user reorders them. Setting
+    # NotifyIconSettings.IsPromoted=0 hides Docker's whale icon completely.
+    try {
+        $tray = "HKCU:\Control Panel\NotifyIconSettings"
+        if (Test-Path $tray) {
+            Get-ChildItem $tray -ErrorAction SilentlyContinue | ForEach-Object {
+                try {
+                    $exe = (Get-ItemProperty -Path $_.PSPath -Name "ExecutablePath" -ErrorAction SilentlyContinue).ExecutablePath
+                    if ($exe -and ($exe -match "Docker Desktop\\.*\.exe$" -or $exe -match "com\.docker\.")) {
+                        Set-ItemProperty -Path $_.PSPath -Name "IsPromoted" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+                    }
+                } catch { }
+            }
+        }
+    } catch { }
+
+    # Also remove Docker Desktop from Windows startup folder so its whale
+    # icon doesn't appear after every reboot. The com.docker.service
+    # Windows service (which is what we actually need) keeps running
+    # regardless and the backend container talks to it directly.
+    try {
+        $startupShortcut = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\Docker Desktop.lnk"
+        if (Test-Path $startupShortcut) { Remove-Item $startupShortcut -Force -ErrorAction SilentlyContinue }
+    } catch { }
+
+    # Disable Docker Desktop auto-start via the Run registry key so it
+    # never opens its tray icon on boot. We start it on-demand when the
+    # customer runs Krexion via Start-DockerSilent.
+    try {
+        $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+        if (Get-ItemProperty -Path $runKey -Name "Docker Desktop" -ErrorAction SilentlyContinue) {
+            Remove-ItemProperty -Path $runKey -Name "Docker Desktop" -Force -ErrorAction SilentlyContinue
+        }
+    } catch { }
 }
 
 function Wait-Docker {
@@ -307,11 +343,11 @@ if ($wslSuccess) {
             Show-Ok "WSL kernel installed via MSI"
         } else {
             Show-Warn "MSI download fail after 3 attempts - continuing anyway"
-            Show-Warn "Docker shayad fir bhi kaam karega - aage check karenge"
+            Show-Warn "Krexion engine shayad fir bhi kaam karega - aage check karenge"
         }
     } catch {
         Show-Warn ("MSI install error: " + $_.Exception.Message)
-        Show-Warn "Continuing - Docker pe test karenge"
+        Show-Warn "Continuing - Krexion engine pe test karenge"
     }
 }
 
@@ -739,6 +775,19 @@ try {
     }
     $sc.Save()
     Show-Ok "Desktop shortcut: Krexion.url"
+} catch { }
+
+# Add Krexion to Windows startup so the app auto-opens on every boot —
+# customer experiences pure Krexion (Docker stays headless in background).
+try {
+    $startupDir = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
+    if (-not (Test-Path $startupDir)) { New-Item -ItemType Directory -Path $startupDir -Force | Out-Null }
+    $startupLnk = Join-Path $startupDir "Krexion.url"
+    $wsh2 = New-Object -ComObject WScript.Shell
+    $sc2 = $wsh2.CreateShortcut($startupLnk)
+    $sc2.TargetPath = "http://localhost:3000/login"
+    $sc2.Save()
+    Show-Ok "Auto-start configured (Krexion opens on Windows login)"
 } catch { }
 
 # Re-apply hidden settings + clean up any Docker shortcuts created by the installer

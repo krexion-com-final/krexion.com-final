@@ -119,7 +119,7 @@ KAB OFFLINE HOTA HAI?
   - Console window close kiya
   - PC band ho gayi
   - Internet disconnect ho gaya
-  - C:\krexion ka Docker stop kiya
+  - C:\krexion ka Krexion service stop kiya
   - PC sleep / hibernation mein gayi
 
 

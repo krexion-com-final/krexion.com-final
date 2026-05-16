@@ -55,17 +55,17 @@ PROBLEM 4: "Reboot required" message
     5. Installation continue ho jayegi
 
 
-PROBLEM 5: Docker stuck pe "Starting..." aata hai
-====================================================
+PROBLEM 5: Krexion engine stuck pe "Starting..." aata hai
+============================================================
 
-  Wajah: WSL2 kernel update zaroori hai
+  Wajah: System engine update zaroori hai
 
   Solution: Installer khud 3 baar fix try karta hai. 
   Agar phir bhi fail:
     1. PC restart karein
-    2. Docker Desktop Start Menu se kholein
-    3. Whale icon GREEN hone ka wait karein (3-5 min)
-    4. INSTALL.bat dobara chalayein
+    2. KREXION.bat / Krexion shortcut se app dobara start karein
+    3. 3-5 min wait karein engine warm-up ke liye
+    4. Phir bhi issue ho to https://krexion.com/support pe contact karein
 
 
 PROBLEM 6: "CPU virtualization disabled" error

@@ -26,7 +26,6 @@ docker compose pull >> "%KREXION_DIR%\updater.log" 2>&1
 
 REM Rebuild + restart
 docker compose up -d --build >> "%KREXION_DIR%\updater.log" 2>&1
-
 if errorlevel 1 (
     echo [%DATE% %TIME%] Update FAILED >> "%KREXION_DIR%\updater.log"
     exit /b 1
