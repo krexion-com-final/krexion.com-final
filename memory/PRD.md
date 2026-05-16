@@ -138,3 +138,41 @@
 - **P2**: "Resend License Email" admin button + license expiry reminder cron (7d/1d before).
 - **P2**: Polish local install Setup Wizard for full Krexion branding.
 - **P3**: Versioned installer ZIPs + CHANGELOG on download page.
+
+
+---
+
+## 2026-05-16 — Hybrid Architecture (Cloud edge + Local heavy)
+
+### Why
+User concern: 100 users × 1000 proxies = 100k parallel checks would bankrupt the server budget. Customer's PC must carry heavy load.
+
+### Implemented
+- **`KREXION_MODE` env** (`cloud` or `local`). Production VPS = `cloud`.
+- **`require_local_mode` dep** added to heavy endpoints (returns HTTP 423 in cloud):
+  - `/api/proxies/bulk-test`, `/api/proxies/{id}/test`
+  - `/api/real-user-traffic/jobs` (POST), `/api/form-filler/jobs` (POST)
+  - `/api/visual-recorder/start`
+  - `/api/clicks/import-ips`, `/api/clicks/import-bulk`
+- **Public `/api/mode`** — frontend reads deployment mode.
+- **Frontend `CloudModeBanner`** — every dashboard page shows banner with "Get desktop app" CTA; dismissable per session.
+- **Global axios 423 interceptor** — shows sonner toast with Download action when a blocked feature is invoked.
+- **Installer `.env`** writes `KREXION_MODE=local`, `KREXION_CLOUD_URL=https://krexion.com`, `LICENSE_SERVER_URL=https://krexion.com` (ready for sync layer).
+- **Installer ZIP v1.0.1** repackaged; SHA256 `f8057d43…b7991cb` updated on `/download`.
+
+### Architecture
+| Layer | Runs on | Handles |
+|-------|---------|---------|
+| Cloud edge (krexion.com) | VPS | Auth, licensing, payment, marketing, `/r/xxx` redirects, customer portal, light dashboard |
+| Local install | Customer PC | Proxy checks, RUT, Form Filler, CPI, full dashboard, full data |
+
+100 customers × 1000 proxy checks = 100k checks on 100 PCs (not yours).
+
+### Backlog
+- **P1**: Sync API (Phase 2) — `POST /api/sync/links`, `GET /api/sync/clicks/pull?since=`, `POST /api/sync/heartbeat`; local daemon every 30s.
+- **P1**: Force "change password on first login" for auto-created accounts.
+- **P1**: Customer portal `/account` — orders, licenses, machine bindings.
+- **P2**: "Resend License Email" admin button + expiry-reminder cron (7d/1d).
+- **P2**: Hide heavy menu items in sidebar when cloud mode.
+- **P3**: Affiliate / Referral system (USDT commissions).
+- **P3**: Cloudflare Worker for `/r/xxx` (when >1M clicks/day).

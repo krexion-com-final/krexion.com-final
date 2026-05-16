@@ -45,6 +45,8 @@ import DownloadPage from "./pages/DownloadPage";
 import { Toaster } from "./components/ui/sonner";
 import { BrandingProvider } from "./context/BrandingContext";
 import { ThemeProvider } from "./context/ThemeContext";
+import { ModeProvider } from "./context/ModeContext";
+import "./utils/cloudGateInterceptor";
 
 // Apply blue theme to body
 if (typeof document !== 'undefined') {
@@ -108,6 +110,7 @@ function App() {
   return (
     <BrandingProvider>
       <ThemeProvider>
+        <ModeProvider>
         <div className="App">
         <BrowserRouter>
           <Routes>
@@ -264,6 +267,7 @@ function App() {
         </BrowserRouter>
         <Toaster position="bottom-left" />
       </div>
+      </ModeProvider>
       </ThemeProvider>
     </BrandingProvider>
   );

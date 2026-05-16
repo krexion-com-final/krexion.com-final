@@ -7,6 +7,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { useBranding } from "../context/BrandingContext";
 import ThemeToggle from "./ThemeToggle";
 import WavyBackground from "./WavyBackground";
+import CloudModeBanner from "./CloudModeBanner";
 import axios from "axios";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -330,7 +331,9 @@ export default function DashboardLayout({ children }) {
           </div>
         </header>
 
-        <main className="flex-1 overflow-auto p-6" data-testid="main-content" style={{ backgroundColor: 'transparent' }}>
+        <main className="flex-1 overflow-auto data-testid-main" data-testid="main-content" style={{ backgroundColor: 'transparent' }}>
+          <CloudModeBanner />
+          <div className="p-6">
           <AnimatePresence mode="wait">
             <motion.div
               key={location.pathname}
@@ -342,6 +345,7 @@ export default function DashboardLayout({ children }) {
               {children}
             </motion.div>
           </AnimatePresence>
+          </div>
         </main>
       </div>
     </div>

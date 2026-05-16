@@ -534,8 +534,10 @@ $envLines = @(
     "SMTP_USER=",
     "SMTP_PASSWORD=",
     "GOOGLE_SHEETS_SA_PATH=",
-    "LICENSE_SERVER_URL=",
+    "LICENSE_SERVER_URL=https://krexion.com",
     "LICENSE_KEY=",
+    "KREXION_MODE=local",
+    "KREXION_CLOUD_URL=https://krexion.com",
     ("IS_CUSTOMER_INSTALL=" + $CustomerMode.ToString().ToLower())
 )
 $envLines | Set-Content -Path $envPath -Encoding ASCII -Force

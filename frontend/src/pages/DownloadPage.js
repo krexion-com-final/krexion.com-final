@@ -7,8 +7,8 @@ import {
 import { toast } from "sonner";
 
 const INSTALLER_URL = "/Krexion-User-Package.zip";
-const INSTALLER_SHA256 = "bc2157a21ec7c57a4b2307824c4780dde67702ddbd679e5a6505e005bdbf9560";
-const INSTALLER_VERSION = "1.0.0";
+const INSTALLER_SHA256 = "f8057d43bd50ded0b9b497e2fe7ae9b546defb2687866494e13879c04b7991cb";
+const INSTALLER_VERSION = "1.0.1";
 
 export default function DownloadPage() {
   const copyHash = async () => {
