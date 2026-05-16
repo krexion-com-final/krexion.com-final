@@ -41,6 +41,7 @@ import CheckoutPage from "./pages/CheckoutPage";
 import OrderStatusPage from "./pages/OrderStatusPage";
 import CryptoOrdersPage from "./pages/CryptoOrdersPage";
 import HomePage from "./pages/HomePage";
+import DownloadPage from "./pages/DownloadPage";
 import { Toaster } from "./components/ui/sonner";
 import { BrandingProvider } from "./context/BrandingContext";
 import { ThemeProvider } from "./context/ThemeContext";
@@ -117,6 +118,7 @@ function App() {
             <Route path="/animation-demo" element={<AnimationDemoPage />} />
             <Route path="/bg-preview" element={<BackgroundPreviewPage />} />
             <Route path="/pricing" element={<PricingPage />} />
+            <Route path="/download" element={<DownloadPage />} />
             <Route path="/checkout/:planId" element={<CheckoutPage />} />
             <Route path="/order/:orderId" element={<OrderStatusPage />} />
             <Route path="/admin/crypto-orders" element={

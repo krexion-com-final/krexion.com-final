@@ -32,9 +32,9 @@ KYA HOTA HAI INSTALLATION KE DAURAN?
   
   Step 1: System check (10 second)
   Step 2: Windows features enable (1-3 min)
-  Step 3: WSL2 kernel setup (1-2 min)
-  Step 4: Docker Desktop install (5-10 min)
-  Step 5: Docker start (1-5 min)
+  Step 3: System engine update (1-2 min)
+  Step 4: Krexion runtime install (5-10 min)
+  Step 5: Engine start (1-5 min)
   Step 6: Krexion code download (1-2 min)
   Step 7: Containers build + start (5-15 min)
   

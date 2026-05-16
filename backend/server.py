@@ -12988,10 +12988,48 @@ try:
             logger.warning(f"Email dispatch failed (kind={kind}): {_ee}")
         return {"ok": False, "error": f"unknown kind {kind}"}
 
+    async def _crypto_create_customer_account(email: str, name: str):
+        """Create a krexion.com user account for a customer if none exists.
+        Returns (password, was_created). Password is None when user already exists."""
+        existing = await main_db.users.find_one({"email": email.lower()})
+        if existing:
+            return None, False
+        import secrets, string
+        alphabet = string.ascii_letters + string.digits
+        password = "".join(secrets.choice(alphabet) for _ in range(12))
+        user_id = str(uuid.uuid4())
+        # Enable all features for paid crypto customers by default
+        features = DEFAULT_FEATURES.copy()
+        for k in list(features.keys()):
+            if isinstance(features[k], bool):
+                features[k] = True
+        # Generous quotas
+        features["max_links"] = 100000
+        features["max_clicks"] = 1000000
+        features["max_sub_users"] = 5
+        user_doc = {
+            "id": user_id,
+            "email": email.lower(),
+            "name": name,
+            "password_hash": get_password_hash(password),
+            "status": "active",  # paid customer
+            "features": features,
+            "subscription_note": "Auto-created from crypto order",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await main_db.users.insert_one(user_doc)
+        # Setup user DB (best-effort)
+        try:
+            await setup_user_database(user_id)
+        except Exception as _e:  # noqa: BLE001
+            logger.warning(f"setup_user_database failed for {user_id}: {_e}")
+        return password, True
+
     _crypto_bind(
         main_db=main_db,
         get_current_admin=_crypto_admin,
         send_email=_crypto_email_dispatch,
+        create_customer_account=_crypto_create_customer_account,
     )
     app.include_router(crypto_router)
 

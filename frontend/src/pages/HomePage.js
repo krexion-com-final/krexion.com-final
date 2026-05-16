@@ -97,6 +97,7 @@ export default function HomePage() {
           <nav className="hidden md:flex items-center gap-7 text-sm">
             <a href="#features" className="text-[#A1A1AA] hover:text-white transition">Features</a>
             <a href="#pricing" className="text-[#A1A1AA] hover:text-white transition">Pricing</a>
+            <Link to="/download" className="text-[#A1A1AA] hover:text-white transition" data-testid="nav-download">Download</Link>
             <a href="#faq" className="text-[#A1A1AA] hover:text-white transition">FAQ</a>
             <Link to="/login" className="text-[#A1A1AA] hover:text-white transition" data-testid="nav-login">Login</Link>
             <Link to="/pricing" className="bg-white text-black px-4 py-1.5 rounded-md font-medium hover:bg-gray-200 transition" data-testid="nav-get-started">
@@ -331,6 +332,7 @@ export default function HomePage() {
           </div>
           <div className="flex items-center gap-5">
             <Link to="/pricing" className="hover:text-white">Pricing</Link>
+            <Link to="/download" className="hover:text-white">Download</Link>
             <Link to="/login" className="hover:text-white">Login</Link>
             <a href="mailto:support@krexion.com" className="hover:text-white">Support</a>
           </div>

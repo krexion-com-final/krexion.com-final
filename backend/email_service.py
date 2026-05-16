@@ -118,8 +118,32 @@ async def send_license_email(
     license_key: str,
     duration_days: int,
     order_id: str,
+    account_password: Optional[str] = None,
+    account_was_created: bool = False,
 ) -> dict:
     subject = f"Your Krexion License is Ready — {plan_name}"
+
+    creds_block_html = ""
+    creds_block_text = ""
+    if account_was_created and account_password:
+        creds_block_html = f"""
+      <table cellpadding="0" cellspacing="0" width="100%" style="margin:18px 0;background:#0a0a0f;border:1px solid rgba(34,197,94,0.3);border-radius:10px;">
+        <tr><td style="padding:18px;">
+          <div style="font-size:10px;text-transform:uppercase;letter-spacing:2px;color:#22C55E;margin-bottom:10px;">Your Account Login</div>
+          <table cellpadding="0" cellspacing="0" width="100%" style="font-size:13px;">
+            <tr><td style="padding:2px 0;width:90px;color:#A1A1AA;">Email:</td><td style="color:#ffffff;font-family:Consolas,monospace;">{customer_email}</td></tr>
+            <tr><td style="padding:2px 0;color:#A1A1AA;">Password:</td><td style="color:#ffffff;font-family:Consolas,monospace;">{account_password}</td></tr>
+          </table>
+          <div style="font-size:11px;color:#71717A;margin-top:10px;">Login at <a href="https://{DOMAIN}/login" style="color:#A78BFA;text-decoration:none;">{DOMAIN}/login</a> to view orders, re-download installer & manage your license. You can change this password anytime in Settings.</div>
+        </td></tr>
+      </table>"""
+        creds_block_text = (
+            f"\n\nYour account login:\n"
+            f"  Email:    {customer_email}\n"
+            f"  Password: {account_password}\n"
+            f"  Login:    https://{DOMAIN}/login\n"
+        )
+
     inner = f"""
       <p>Hi {customer_name},</p>
       <p>Thanks for your purchase! Your payment has been verified and your license is now active.</p>
@@ -129,12 +153,13 @@ async def send_license_email(
           <div style="font-family:Consolas,Menlo,monospace;font-size:18px;font-weight:700;color:#A78BFA;word-break:break-all;">{license_key}</div>
         </td></tr>
       </table>
+      {creds_block_html}
       <table cellpadding="0" cellspacing="0" width="100%" style="margin:10px 0;font-size:13px;color:#A1A1AA;">
         <tr><td style="padding:4px 0;width:140px;">Plan:</td><td style="color:#ffffff;font-weight:600;">{plan_name}</td></tr>
         <tr><td style="padding:4px 0;">Duration:</td><td style="color:#ffffff;">{duration_days} day(s)</td></tr>
         <tr><td style="padding:4px 0;">Order ID:</td><td style="color:#ffffff;font-family:monospace;">{order_id}</td></tr>
       </table>
-      <p style="margin-top:18px;">Download Krexion and enter your license key when prompted during setup.</p>
+      <p style="margin-top:18px;">Download Krexion and enter your license key in the Setup Wizard during first run.</p>
     """
     body = (
         f"Hi {customer_name},\n\n"
@@ -142,8 +167,9 @@ async def send_license_email(
         f"License Key: {license_key}\n"
         f"Plan: {plan_name}\n"
         f"Duration: {duration_days} day(s)\n"
-        f"Order ID: {order_id}\n\n"
-        f"Download: https://{DOMAIN}/download\n\n"
+        f"Order ID: {order_id}\n"
+        f"{creds_block_text}"
+        f"\nDownload: https://{DOMAIN}/download\n\n"
         f"Need help? Reply to this email.\n— Krexion Team"
     )
     html = _wrap_html(

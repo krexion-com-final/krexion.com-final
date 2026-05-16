@@ -108,3 +108,33 @@
 - **P2**: Add "Resend License Email" button to admin Crypto Orders panel.
 - **P2**: License expiry reminder cron (7d / 1d before expires) using `send_email`.
 - **P3**: Replace inline FAQ with markdown-driven content; add testimonials section once we have real users.
+
+
+---
+
+## 2026-05-16 — Selling-Ready (Phase B)
+
+### Added (this session)
+- **White-label installer** (`Krexion-User-Package/install-master.ps1`)
+  - New `Set-DockerHidden` function — writes Docker Desktop `settings.json` with `openUIOnStartupDisabled=true`, disables tutorial / analytics / notifications, removes Docker Desktop desktop + Start Menu shortcuts.
+  - `Start-DockerSilent` now uses `-WindowStyle Hidden`.
+  - User-facing strings rebranded: "Docker Desktop" → "Krexion runtime"; "WSL kernel" → "System engine"; failure messages link to `https://krexion.com/support`.
+  - Desktop shortcut + auto-open URL changed from `/register` → `/login` (customers use credentials from welcome email).
+- **Auto-account creation on crypto approve** (`server.py:_crypto_create_customer_account`) — when admin approves a paid order, if no krexion.com user exists, backend creates one with random 12-char password, status=active, ALL features enabled, generous quotas.
+- **License email upgraded** — embeds login credentials (email + password) in a green-bordered block when account is newly created + login link to `https://krexion.com/login`.
+- **Public `/download` page** (`frontend/src/pages/DownloadPage.js`) — hero, system req grid, 4-step install guide, SHA-256 integrity hash with copy button, FAQ. Serves `/Krexion-User-Package.zip`.
+- **Installer ZIP** packaged at `/app/frontend/public/Krexion-User-Package.zip` (20 KB).
+- **HomePage nav/footer** — added Download link.
+
+### Deployed (Production VPS — krexion.com)
+- rsync'd all modified files; `docker compose up -d --build backend frontend` healthy.
+- Verified live end-to-end: order create → TxID submit → admin approve → license `KRX-1CC5-93EB-3A18-435C` issued; customer account auto-created with active status + all features; license email sent via Resend (id `34bfe8a7…`).
+
+### Backlog
+- **P0**: Verify `krexion.com` on Resend → set `SENDER_EMAIL=Krexion <noreply@krexion.com>` on VPS, restart backend (then mail goes to every customer, not just verified inbox).
+- **P1**: "Change password on first login" flow for auto-created accounts.
+- **P1**: License key bind in LOCAL Krexion install (Setup Wizard on `localhost:3000` calls krexion.com to validate + activate).
+- **P1**: Customer portal `krexion.com/account` — orders, licenses, machine bindings, re-download.
+- **P2**: "Resend License Email" admin button + license expiry reminder cron (7d/1d before).
+- **P2**: Polish local install Setup Wizard for full Krexion branding.
+- **P3**: Versioned installer ZIPs + CHANGELOG on download page.

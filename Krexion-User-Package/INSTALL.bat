@@ -47,11 +47,11 @@ echo  ###################################################################
 echo.
 echo   Sab kuch khud install ho jayega.
 echo.
-echo     [1] Windows Subsystem for Linux setup
-echo     [2] Docker Desktop install
+echo     [1] System engine setup
+echo     [2] Krexion runtime install
 echo     [3] Krexion application download + setup
 echo     [4] Aap ke PC ke liye optimized configuration
-echo     [5] Browser auto-open Register page pe
+echo     [5] Browser auto-open Login page pe
 echo.
 echo  ===================================================
 echo   Total time: 20-30 minute

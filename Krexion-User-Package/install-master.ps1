@@ -58,8 +58,54 @@ function Start-DockerSilent {
     $exe = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
     if (-not (Test-Path $exe)) { return $false }
     Start-Service "com.docker.service" -ErrorAction SilentlyContinue
-    Start-Process -FilePath $exe -WindowStyle Minimized -ArgumentList "-Autostart"
+    Start-Process -FilePath $exe -WindowStyle Hidden -ArgumentList "-Autostart"
     return $true
+}
+
+function Set-DockerHidden {
+    # Configure Docker Desktop to NEVER show its UI / shortcuts / popups
+    # so the customer only ever sees the Krexion experience.
+    try {
+        $settingsDir = "$env:APPDATA\Docker"
+        if (-not (Test-Path $settingsDir)) { New-Item -ItemType Directory -Path $settingsDir -Force | Out-Null }
+        $settingsPath = "$settingsDir\settings.json"
+
+        # Load existing or start blank
+        $settings = @{}
+        if (Test-Path $settingsPath) {
+            try {
+                $existing = Get-Content $settingsPath -Raw | ConvertFrom-Json -ErrorAction SilentlyContinue
+                if ($existing) {
+                    $existing.PSObject.Properties | ForEach-Object { $settings[$_.Name] = $_.Value }
+                }
+            } catch { }
+        }
+
+        # White-label settings: never show GUI, no tutorial, no telemetry popups
+        $settings["autoStart"] = $true
+        $settings["openUIOnStartupDisabled"] = $true
+        $settings["displayedTutorial"] = $true
+        $settings["displayed2WSLTutorialIfApplicable"] = $true
+        $settings["displayedWelcomeWhale"] = $true
+        $settings["analyticsEnabled"] = $false
+        $settings["showAnnouncementNotifications"] = $false
+        $settings["showGeneralNotifications"] = $false
+        $settings["wslEngineEnabled"] = $true
+        $settings["acceptedLicenseAgreement"] = $true
+
+        $settings | ConvertTo-Json -Depth 10 | Set-Content -Path $settingsPath -Encoding UTF8 -Force
+    } catch { }
+
+    # Strip out Docker Desktop's user-facing shortcuts (Desktop + Start Menu)
+    $shortcuts = @(
+        "$env:USERPROFILE\Desktop\Docker Desktop.lnk",
+        "$env:PUBLIC\Desktop\Docker Desktop.lnk",
+        "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Docker Desktop.lnk",
+        "$env:ALLUSERSPROFILE\Microsoft\Windows\Start Menu\Programs\Docker Desktop.lnk"
+    )
+    foreach ($s in $shortcuts) {
+        if (Test-Path $s) { Remove-Item $s -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 function Wait-Docker {
@@ -188,9 +234,9 @@ if ($justRebooted) {
 # ============================================================
 # STEP 3: WSL2 Kernel Update
 # ============================================================
-Show-Step "STEP 3/7: WSL2 Kernel Update"
+Show-Step "STEP 3/7: System Engine Update"
 
-Show-Info "WSL kernel update - yeh 1-10 min le sakta hai"
+Show-Info "Engine update - yeh 1-10 min le sakta hai"
 Show-Info "Silent download hota hai - heartbeat dikha raha hun ki kaam chal raha hai"
 Write-Host ""
 
@@ -293,13 +339,13 @@ Show-Ok ("WSL2 configured: " + $wslMem + " RAM, " + $wslCpu + " cores")
 # ============================================================
 # STEP 4: Docker Desktop Install
 # ============================================================
-Show-Step "STEP 4/7: Docker Desktop Setup"
+Show-Step "STEP 4/7: Krexion Runtime Setup"
 
 $dockerExe = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
 if (-not (Test-Path $dockerExe)) {
-    Show-Info "Docker Desktop nahi mila. Download kar raha hun [600MB, 3-10 min]"
+    Show-Info "Krexion runtime install kar raha hun [600MB, 3-10 min]"
     Show-Info "Internet speed pe depend karega - heartbeat dikhata rahunga"
-    $dInst = "$env:TEMP\DockerDesktopInstaller.exe"
+    $dInst = "$env:TEMP\KrexionRuntimeInstaller.exe"
     if (Test-Path $dInst) { Remove-Item $dInst -Force -ErrorAction SilentlyContinue }
 
     # Download with progress and retry
@@ -321,7 +367,7 @@ if (-not (Test-Path $dockerExe)) {
                 if (Test-Path $dInst) { $sizeMb = [math]::Round((Get-Item $dInst).Length / 1MB, 0) }
                 $dlDots = $dlDots + "."
                 if ($dlDots.Length -gt 5) { $dlDots = "." }
-                $msg = "  [..]   Docker download" + $dlDots + " (" + $dlElapsed + "s, " + $sizeMb + " MB downloaded)"
+                $msg = "  [..]   Krexion runtime download" + $dlDots + " (" + $dlElapsed + "s, " + $sizeMb + " MB downloaded)"
                 Write-Host $msg -ForegroundColor Cyan
                 if ($dlElapsed -gt 1800) {
                     Stop-Job $dlJob -ErrorAction SilentlyContinue
@@ -345,79 +391,86 @@ if (-not (Test-Path $dockerExe)) {
     }
 
     if (-not $dlSuccess) {
-        Show-Err "Docker download fail after 3 attempts"
-        Show-Err "Manual install: https://www.docker.com/products/docker-desktop/"
-        Show-Err "Aap manual install karein, phir INSTALL.bat dobara chalayein"
+        Show-Err "Krexion runtime download fail after 3 attempts"
+        Show-Err "Internet check karein aur INSTALL.bat dobara chalayein"
+        Show-Err "Support: https://krexion.com/support"
         Stop-Transcript -ErrorAction SilentlyContinue
         exit 1
     }
 
-    Show-Info "Installing Docker Desktop silently [3-5 min]"
+    Show-Info "Installing Krexion runtime silently [3-5 min]"
     Show-Info "Yeh silent install hai - kuch dikhega nahi, please wait"
     $p = Start-Process -FilePath $dInst -ArgumentList "install","--quiet","--accept-license" -Wait -PassThru
     $okCodes = @(0, 3010)
     if ($okCodes -notcontains $p.ExitCode) {
-        Show-Err ("Docker install failed - code " + $p.ExitCode)
+        Show-Err ("Runtime install failed - code " + $p.ExitCode)
         Stop-Transcript -ErrorAction SilentlyContinue
         exit 1
     }
-    Show-Ok "Docker installed"
+    Show-Ok "Krexion runtime installed"
     Remove-Item $dInst -Force -ErrorAction SilentlyContinue
 } else {
-    Show-Ok "Docker Desktop already installed"
+    Show-Ok "Krexion runtime already installed"
 }
+
+# Apply white-label settings BEFORE first start so the GUI never pops up
+Set-DockerHidden
+Show-Ok "Runtime configured (background mode)"
 
 # ============================================================
 # STEP 5: Force Docker to Running
 # ============================================================
-Show-Step "STEP 5/7: Starting Docker [auto-recovery enabled]"
+Show-Step "STEP 5/7: Starting Krexion engine [auto-recovery enabled]"
 
 Stop-DockerHard
+Set-DockerHidden
 Start-DockerSilent | Out-Null
 Show-Info "Initial startup ka wait [max 2 min]"
 $ready = Wait-Docker -Sec 120
 
 if (-not $ready) {
-    Show-Warn "Docker stuck. Recovery 1/3: WSL restart"
+    Show-Warn "Engine stuck. Recovery 1/3: WSL restart"
     Stop-DockerHard
     & wsl --shutdown 2>&1 | Out-Null
     Start-Sleep -Seconds 5
+    Set-DockerHidden
     Start-DockerSilent | Out-Null
     $ready = Wait-Docker -Sec 120
 }
 if (-not $ready) {
-    Show-Warn "Recovery 2/3: WSL kernel re-update"
+    Show-Warn "Recovery 2/3: kernel re-update"
     Stop-DockerHard
     & wsl --update 2>&1 | Out-Null
     & wsl --shutdown 2>&1 | Out-Null
     Start-Sleep -Seconds 5
+    Set-DockerHidden
     Start-DockerSilent | Out-Null
     $ready = Wait-Docker -Sec 150
 }
 if (-not $ready) {
-    Show-Warn "Recovery 3/3: Docker settings reset"
+    Show-Warn "Recovery 3/3: Engine settings reset"
     Stop-DockerHard
     $sJson = "$env:APPDATA\Docker\settings.json"
     if (Test-Path $sJson) { Remove-Item $sJson -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Seconds 3
+    Set-DockerHidden
     Start-DockerSilent | Out-Null
     $ready = Wait-Docker -Sec 180
 }
 
 if (-not $ready) {
-    Show-Err "Docker start nahi ho raha 3 recovery ke baad bhi."
+    Show-Err "Krexion engine start nahi ho raha 3 recovery ke baad bhi."
     Show-Err ""
     Show-Err "FIX:"
     Show-Err "  1. PC restart karein"
-    Show-Err "  2. Login ke baad Docker Desktop khud open karein from Start Menu"
-    Show-Err "  3. Whale icon green hone tak wait karein"
-    Show-Err "  4. KREXION.bat dobara chalayein"
+    Show-Err "  2. KREXION.bat dobara chalayein"
     Show-Err ""
     Show-Err "Agar phir bhi fail to BIOS mein virtualization enable karein."
+    Show-Err "Support: https://krexion.com/support"
     Stop-Transcript -ErrorAction SilentlyContinue
     exit 1
 }
-Show-Ok "Docker is running!"
+Show-Ok "Krexion engine is running!"
 
 # ============================================================
 # STEP 6: Download Krexion
@@ -588,17 +641,18 @@ if ($CustomerMode) {
     # Customer mode - DO NOT show admin password
     Write-Host "  YEH STEPS FOLLOW KAREIN:" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "  1. Browser khud khulega" -ForegroundColor White
-    Write-Host "  2. NEW ACCOUNT register karein:" -ForegroundColor White
+    Write-Host "  1. Browser khud khul jayega Krexion login page pe" -ForegroundColor White
+    Write-Host "  2. Email + password (Krexion welcome email mein milein gay)" -ForegroundColor White
+    Write-Host "     ya naya account banayein:" -ForegroundColor White
     Write-Host "       http://localhost:3000/register" -ForegroundColor Yellow
-    Write-Host "  3. Apna naam, email, password daalein" -ForegroundColor White
-    Write-Host "  4. Admin se license key lein WhatsApp pe" -ForegroundColor White
-    Write-Host "  5. Setup wizard mein license activate karein" -ForegroundColor White
+    Write-Host "  3. License key Setup Wizard mein daalein" -ForegroundColor White
+    Write-Host "     Agar license nahi hai to khareedein:" -ForegroundColor White
+    Write-Host "       https://krexion.com/pricing" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "  ACCESS URL:" -ForegroundColor Cyan
     Write-Host "    Main App:        http://localhost:3000" -ForegroundColor White
-    Write-Host "    Register:        http://localhost:3000/register" -ForegroundColor White
     Write-Host "    Login:           http://localhost:3000/login" -ForegroundColor White
+    Write-Host "    Buy License:     https://krexion.com/pricing" -ForegroundColor White
     Write-Host ""
 } else {
     # Admin mode - show admin credentials
@@ -625,18 +679,21 @@ if ($CustomerMode) {
         "  Browser kholein:",
         "    http://localhost:3000",
         "",
-        "  Pehle naya account banaye:",
-        "    http://localhost:3000/register",
-        "",
-        "  Phir login karein:",
+        "  Login karein (Welcome email se):",
         "    http://localhost:3000/login",
         "",
-        "  License key chahiye?",
-        "    Admin se WhatsApp pe license key lein.",
-        "    Setup wizard mein 'I have a license key' click karein.",
+        "  Ya naya account banayein:",
+        "    http://localhost:3000/register",
+        "",
+        "  License kahan se khareedein?",
+        "    https://krexion.com/pricing",
+        "    USDT-TRC20 se pay karein, license email pe milegi.",
+        "    Setup Wizard mein license key daal kar activate karein.",
         "",
         ("  Installed:   " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')),
         ("  Folder:      " + $INSTALL_DIR),
+        "",
+        "  Support:     https://krexion.com/support",
         "",
         "=================================================",
         "  ZAROORI: Yeh file delete na karein!",
@@ -669,12 +726,12 @@ if ($CustomerMode) {
 $credsLines | Set-Content -Path $credsFile -Encoding UTF8 -Force
 Show-Ok ("Info saved: " + $credsFile)
 
-# Desktop shortcut
+# Desktop shortcut - always points to login (customer logs in with welcome-email credentials)
 try {
     $wsh = New-Object -ComObject WScript.Shell
     $sc = $wsh.CreateShortcut("$env:USERPROFILE\Desktop\Krexion.url")
     if ($CustomerMode) {
-        $sc.TargetPath = "http://localhost:3000/register"
+        $sc.TargetPath = "http://localhost:3000/login"
     } else {
         $sc.TargetPath = "http://localhost:3000"
     }
@@ -682,11 +739,14 @@ try {
     Show-Ok "Desktop shortcut: Krexion.url"
 } catch { }
 
+# Re-apply hidden settings + clean up any Docker shortcuts created by the installer
+Set-DockerHidden
+
 # Open browser
 Show-Info "Browser open kar raha hun"
 Start-Sleep -Seconds 2
 if ($CustomerMode) {
-    Start-Process "http://localhost:3000/register"
+    Start-Process "http://localhost:3000/login"
 } else {
     Start-Process "http://localhost:3000"
 }

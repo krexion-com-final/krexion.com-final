@@ -50,14 +50,16 @@ _db: Any = None
 _get_current_admin: Any = None
 _issue_license: Any = None  # callable(email, plan_id, days, source) -> license_key
 _send_email: Any = None
+_create_customer_account: Any = None  # callable(email, name) -> (password|None, created_bool)
 
 
-def _bind(*, main_db, get_current_admin, issue_license=None, send_email=None) -> None:
-    global _db, _get_current_admin, _issue_license, _send_email
+def _bind(*, main_db, get_current_admin, issue_license=None, send_email=None, create_customer_account=None) -> None:
+    global _db, _get_current_admin, _issue_license, _send_email, _create_customer_account
     _db = main_db
     _get_current_admin = get_current_admin
     _issue_license = issue_license
     _send_email = send_email
+    _create_customer_account = create_customer_account
 
 
 def _now() -> datetime:
@@ -487,6 +489,18 @@ async def admin_approve_order(order_id: str, note: Optional[str] = None, admin: 
         }}
     )
 
+    # Auto-create customer account on krexion.com (so they can log in to portal)
+    account_password = None
+    account_was_created = False
+    if _create_customer_account:
+        try:
+            account_password, account_was_created = await _create_customer_account(
+                email=order["customer_email"],
+                name=order["customer_name"],
+            )
+        except Exception as e:
+            logger.warning(f"Auto-account creation failed: {e}")
+
     # Send email if helper available
     if _send_email:
         try:
@@ -498,6 +512,8 @@ async def admin_approve_order(order_id: str, note: Optional[str] = None, admin: 
                 license_key=license_key,
                 duration_days=int(order["duration_days"]),
                 order_id=order_id,
+                account_password=account_password,        # only set when newly created
+                account_was_created=account_was_created,
             )
         except Exception as e:
             logger.warning(f"License email failed: {e}")
