@@ -47,13 +47,16 @@ export default function DownloadPage() {
       <section className="max-w-5xl mx-auto px-6 pt-20 pb-10 text-center">
         <div className="inline-flex items-center gap-2 bg-white/5 border border-white/10 rounded-full px-4 py-1.5 mb-6 text-xs">
           <Download size={12} className="text-[#A78BFA]" />
-          Version {INSTALLER_VERSION} — Windows 10/11 (64-bit)
+          Optional desktop install • Version {INSTALLER_VERSION} • Windows 10/11 (64-bit)
         </div>
         <h1 className="text-5xl sm:text-6xl font-bold tracking-tight mb-5 leading-tight">
           Download <span className="text-[#A78BFA]">Krexion</span>
         </h1>
-        <p className="text-lg text-[#A1A1AA] max-w-2xl mx-auto mb-9">
-          One installer. Everything self-hosted on your PC. Your license, your data, your rules.
+        <p className="text-lg text-[#A1A1AA] max-w-2xl mx-auto mb-3">
+          The Krexion dashboard works fully online at <Link to="/login" className="text-white underline hover:text-[#A78BFA]">krexion.com/login</Link>.
+        </p>
+        <p className="text-sm text-[#71717A] max-w-xl mx-auto mb-9">
+          This installer is only needed if you want to run heavy local features like Real User Traffic, Form Filler, or CPI Worker on your own PC.
         </p>
 
         <a

@@ -10,41 +10,49 @@ const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
 const FEATURES = [
   {
+    icon: Globe,
+    title: "Cloud Dashboard — Login Anywhere",
+    desc: "Manage links, clicks and campaigns from any browser, any device. Your dashboard at krexion.com, not stuck on one PC.",
+  },
+  {
     icon: Activity,
-    title: "Real Browser Traffic",
-    desc: "Drive genuine, human-like clicks through real Chrome instances — not headless bots.",
+    title: "Always-On Tracking Links",
+    desc: "Every link you generate lives at krexion.com/r/xxx — clicks keep flowing even when your computer is off, sleeping, or unplugged.",
   },
   {
     icon: Layers,
     title: "Massive Proxy Pool",
-    desc: "Plug in residential, ISP, or mobile proxies. Built-in checker validates them at scale.",
+    desc: "Plug in residential, ISP, or mobile proxies. Built-in checker validates them at scale across parallel batches.",
   },
   {
     icon: Cpu,
     title: "CPI Job Orchestrator",
-    desc: "Run Cost-Per-Install campaigns across distributed worker devices with smart routing.",
+    desc: "Run Cost-Per-Install campaigns across distributed worker devices with smart routing and per-device fingerprinting.",
   },
   {
     icon: Shield,
-    title: "Form Filler + RUT",
-    desc: "Auto-fill landing pages and emulate Real User Traffic patterns to stay under radar.",
-  },
-  {
-    icon: Globe,
-    title: "Geo & Carrier Targeting",
-    desc: "Target by country, ISP, carrier, device, and browser fingerprint with surgical precision.",
+    title: "Form Filler + Real User Traffic",
+    desc: "Auto-fill landing pages and emulate genuine human patterns through Chrome — not headless bots.",
   },
   {
     icon: MailCheck,
     title: "Email Validation Suite",
-    desc: "Verify deliverability, separate cleaned lists, and feed only valid leads forward.",
+    desc: "Verify deliverability, separate cleaned lists, and feed only valid leads into your campaigns.",
   },
 ];
 
 const FAQS = [
   {
+    q: "Do I need to install anything?",
+    a: "No — Krexion runs fully online at krexion.com. Login, generate links, view clicks, manage campaigns from any browser. The optional desktop installer (krexion.com/download) is only for heavy local features like Real User Traffic and Form Filler.",
+  },
+  {
+    q: "Will my links die if I turn off my computer?",
+    a: "Never. All your links live on the krexion.com cloud — they keep tracking clicks 24/7 regardless of whether your PC is on, off, sleeping, or in a different country.",
+  },
+  {
     q: "How does payment work?",
-    a: "We accept USDT (TRC-20) only. Pick a plan, send USDT to the wallet shown at checkout, paste your TxID, and your license is delivered to your email within 30 minutes after admin verification.",
+    a: "We accept USDT (TRC-20) only. Pick a plan, send USDT to the wallet shown at checkout, paste your TxID, and your license + login credentials are delivered to your email within 30 minutes.",
   },
   {
     q: "Do I need a credit card or bank?",
@@ -52,7 +60,7 @@ const FAQS = [
   },
   {
     q: "How many PCs can I activate?",
-    a: "Starter: 1 PC. Pro: 3 PCs. Business: 10 PCs. Trial: 1 PC. Each license is tied to specific machine fingerprints.",
+    a: "Cloud dashboard works on unlimited devices. For the optional desktop install: Starter 1 PC, Pro 3 PCs, Business 10 PCs, Trial 1 PC. Each install is tied to specific machine fingerprints.",
   },
   {
     q: "Can I get a refund?",
@@ -61,10 +69,6 @@ const FAQS = [
   {
     q: "What if my payment is underpaid?",
     a: "We'll mark the order as rejected with the exact shortfall. Send the difference, resubmit your TxID, and we'll approve it.",
-  },
-  {
-    q: "Is Krexion safe to run on my machine?",
-    a: "Krexion runs locally inside its own sandboxed Chromium. It doesn't touch your system browser, cookies, or saved logins.",
   },
 ];
 
@@ -114,7 +118,7 @@ export default function HomePage() {
       <section className="max-w-7xl mx-auto px-6 pt-24 pb-20 text-center">
         <div className="inline-flex items-center gap-2 bg-white/5 border border-white/10 rounded-full px-4 py-1.5 mb-7 text-xs">
           <Zap size={12} className="text-[#A78BFA]" />
-          Now accepting USDT — no bank, no credit card, instant activation
+          Cloud + Self-host • Pay with USDT • Links live 24/7
         </div>
         <h1 className="text-5xl sm:text-6xl lg:text-7xl font-extrabold tracking-tight leading-[1.05] mb-6">
           Real traffic.<br/>
@@ -123,8 +127,8 @@ export default function HomePage() {
           </span>
         </h1>
         <p className="text-lg text-[#A1A1AA] max-w-2xl mx-auto mb-9 leading-relaxed">
-          Krexion drives genuine, browser-based traffic through real Chrome — backed by a massive
-          proxy pool, smart targeting, and a CPI orchestrator built for affiliates and growth teams.
+          Manage your tracking, links and campaigns from anywhere in the world.
+          Your <span className="text-white font-semibold">krexion.com</span> links stay live 24/7 — even when your PC is off.
         </p>
         <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
           <Link
@@ -308,17 +312,25 @@ export default function HomePage() {
       <section className="max-w-5xl mx-auto px-6 pb-20">
         <div className="bg-gradient-to-br from-[#1e1530] to-[#0a0a0f] border border-[#A78BFA]/30 rounded-2xl p-10 text-center">
           <Lock className="mx-auto mb-4 text-[#A78BFA]" size={28} />
-          <h2 className="text-2xl sm:text-3xl font-bold mb-3">Ready to send real traffic?</h2>
+          <h2 className="text-2xl sm:text-3xl font-bold mb-3">Start in under 5 minutes</h2>
           <p className="text-[#A1A1AA] text-sm mb-6 max-w-lg mx-auto">
-            Try Krexion for 1 day at just 3 USDT. No commitment, no auto-renewal.
+            Try Krexion for 1 day at just 3 USDT. Pay → check email → login at <span className="text-white font-semibold">krexion.com/login</span>. That's it.
           </p>
-          <Link
-            to="/pricing"
-            className="bg-[#A78BFA] text-black font-semibold px-8 py-3 rounded-lg hover:bg-[#C4B5FD] transition inline-flex items-center gap-2"
-            data-testid="footer-cta-pricing"
-          >
-            Start your trial <ArrowRight size={16} />
-          </Link>
+          <div className="flex flex-col sm:flex-row gap-3 justify-center">
+            <Link
+              to="/pricing"
+              className="bg-[#A78BFA] text-black font-semibold px-8 py-3 rounded-lg hover:bg-[#C4B5FD] transition inline-flex items-center justify-center gap-2"
+              data-testid="footer-cta-pricing"
+            >
+              Start your trial <ArrowRight size={16} />
+            </Link>
+            <Link
+              to="/login"
+              className="border border-white/15 px-8 py-3 rounded-lg hover:bg-white/5 transition inline-flex items-center justify-center gap-2 text-sm"
+            >
+              I already have a license
+            </Link>
+          </div>
         </div>
       </section>
 
