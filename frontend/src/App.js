@@ -43,6 +43,7 @@ import CryptoOrdersPage from "./pages/CryptoOrdersPage";
 import HomePage from "./pages/HomePage";
 import DownloadPage from "./pages/DownloadPage";
 import SyncHeartbeatsPage from "./pages/SyncHeartbeatsPage";
+import ReleasesAdminPage from "./pages/ReleasesAdminPage";
 import { Toaster } from "./components/ui/sonner";
 import { BrandingProvider } from "./context/BrandingContext";
 import { ThemeProvider } from "./context/ThemeContext";
@@ -133,6 +134,11 @@ function App() {
             <Route path="/admin/sync-heartbeats" element={
               <AdminRoute>
                 <SyncHeartbeatsPage />
+              </AdminRoute>
+            } />
+            <Route path="/admin/releases" element={
+              <AdminRoute>
+                <ReleasesAdminPage />
               </AdminRoute>
             } />
             <Route path="/admin/dashboard" element={

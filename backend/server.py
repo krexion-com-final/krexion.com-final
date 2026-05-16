@@ -13124,6 +13124,25 @@ except Exception as _sync_err:  # noqa: BLE001
     logger.error(f"Sync module failed to load: {_sync_err}")
 
 
+# ─── Releases / Auto-update module ────────────────────────────────────
+try:
+    from releases_module import (
+        _bind as _rel_bind,
+        _build_admin_endpoints,
+        _build_customer_endpoints,
+    )
+    _rel_bind(
+        main_db=main_db,
+        get_current_admin=get_current_admin,
+        get_current_user=get_current_user,
+    )
+    app.include_router(_build_admin_endpoints(get_current_admin))
+    app.include_router(_build_customer_endpoints(get_current_user))
+    logger.info("Releases module loaded — /api/admin/releases + /api/system/*")
+except Exception as _rel_err:  # noqa: BLE001
+    logger.error(f"Releases module failed to load: {_rel_err}")
+
+
 # ─── Sync daemon (LOCAL install only — pushes/pulls to cloud edge) ────
 try:
     import sync_client as _sync_client

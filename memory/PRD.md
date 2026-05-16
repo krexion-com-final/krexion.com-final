@@ -198,6 +198,47 @@ User concern: 100 users × 1000 proxies = 100k parallel checks would bankrupt th
 - Push link `prod-sync-001` → `https://krexion.com/r/prod-sync-001` → 302 redirect → click queued
 - Status: links_in_cloud=1, pending_clicks=1, last_heartbeat populated
 
+
+---
+
+## 2026-05-16 — Auto-Update / Releases System
+
+### Why
+User wants: admin publishes a new version → every customer's local install gets a notification banner → one-click "Install update" → containers rebuild on their PC respecting their existing feature access.
+
+### Implemented
+- **Backend** `releases_module.py`:
+  - `VERSION` file (semver) per install, parseable comparator.
+  - Admin (JWT) CRUD: `POST/GET/PATCH/DELETE /api/admin/releases`
+  - Customer (license-auth): `GET /api/system/latest-version`
+  - Public (no-auth lite): `GET /api/system/public-latest`, `GET /api/system/version`
+  - Local-only trigger: `POST /api/system/install-update` (admin-user required) — drops a JSON flag at `/data/update_requested.flag`
+- **Host updater** `Krexion-User-Package/UPDATE-WATCHER.bat` — registered as a Windows scheduled task by the installer (every 1 min). When flag file exists → `docker compose pull` + `docker compose up -d --build` → removes flag.
+- **docker-compose.yml** now mounts `./data:/data` into backend so the flag is visible host-side.
+- **Frontend**:
+  - `UpdateBanner.js` — polls `/api/system/public-latest` every 10 min. Shows colored banner per severity (info=purple, recommended=blue, critical=red & non-dismissable). Modal with full release notes + "Install update" button.
+  - `ReleasesAdminPage.js` (`/admin/releases`) — full CRUD UI for publishing/editing/deleting releases.
+  - Admin Dashboard top bar links: Releases + Customer Installs.
+- **Installer** registers `KrexionUpdateWatcher` scheduled task with `schtasks` during install.
+- **Bumped current VERSION to `1.0.2`**, packaged installer ZIP v1.0.2 (SHA256 `f37db8a9…721e`).
+
+### Fixed during this work
+- Caddy network connectivity post-rebuild: `docker-compose.yml networks` now has `name: krexion-net` (was project-prefixed → caused 502 after rebuild).
+- Backend container missing env vars: `env_file: ./backend/.env` added to backend service; removed explicit `${VAR}` overrides in `environment:` block that were nuking the env_file values with empty strings. ADMIN_PASSWORD, RESEND_API_KEY, KREXION_MODE, USDT_WALLET_TRC20, SENDER_EMAIL etc now flow through correctly.
+
+### Production verification
+- v1.0.3 release published via admin API — `/api/system/public-latest` returns `update_available: true`.
+- Logged-in customer dashboard at `https://krexion.com/dashboard` shows BOTH banners simultaneously: cloud-mode banner (purple, "Get desktop app") + update banner (blue, "RECOMMENDED UPDATE v1.0.3 — View & install").
+
+### Backlog
+- **P1**: Wire the actual download/extraction step in the host updater (currently relies on `docker compose pull` which assumes images come from a registry — for local-built images we'd need to git-pull or fetch a release ZIP and rebuild). For now the watcher simply rebuilds existing source which is enough if customer pulls updates via git on `/opt/krexion`.
+- **P1**: Force "change password on first login" for auto-created accounts.
+- **P1**: Customer portal `/account` — orders, license, machine bindings, re-download.
+- **P2**: Hide heavy menu items in sidebar when cloud mode.
+- **P2**: "Resend License Email" admin button + expiry-reminder cron.
+- **P3**: Affiliate / Referral system.
+- **P3**: Cloudflare Worker for `/r/<short>` redirects (>1M clicks/day scale).
+
 ### Backlog
 - **P1**: Force "change password on first login" for auto-created accounts.
 - **P1**: Customer portal `/account` — orders, licenses, sync diagnostics widget, re-download.

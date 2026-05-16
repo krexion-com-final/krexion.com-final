@@ -715,6 +715,26 @@ export default function AdminDashboard() {
             <Button
               variant="outline"
               size="sm"
+              onClick={() => window.location.href = "/admin/releases"}
+              data-testid="goto-releases-btn"
+              className="border-[#A78BFA]/40 text-[#A78BFA] hover:bg-[#A78BFA]/10"
+            >
+              <Settings size={16} className="mr-2" />
+              Releases
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => window.location.href = "/admin/sync-heartbeats"}
+              data-testid="goto-sync-heartbeats-btn"
+              className="border-[var(--brand-border)]"
+            >
+              <RefreshCw size={16} className="mr-2" />
+              Customer Installs
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
               onClick={() => window.location.href = "/admin/licenses"}
               data-testid="goto-licenses-btn"
               className="border-[var(--brand-border)]"

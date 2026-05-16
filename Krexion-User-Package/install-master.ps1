@@ -753,6 +753,26 @@ if ($CustomerMode) {
     Start-Process "http://localhost:3000"
 }
 
+# Register Update Watcher scheduled task (runs every 1 minute) so
+# "Install update" inside the app can trigger a host-side docker rebuild.
+try {
+    $watcherBat = Join-Path $INSTALL_DIR "UPDATE-WATCHER.bat"
+    if (Test-Path $watcherBat) {
+        $taskName = "KrexionUpdateWatcher"
+        # Remove any prior version of the task
+        schtasks /Delete /TN $taskName /F 2>$null | Out-Null
+        # Re-register: run every 1 minute, highest privileges, no user interaction
+        $action  = "cmd /c set KREXION_DIR=$INSTALL_DIR && `"$watcherBat`""
+        schtasks /Create /TN $taskName /TR $action /SC MINUTE /MO 1 /RL HIGHEST /F | Out-Null
+        # Make sure the data folder exists for the flag file
+        $dataDir = Join-Path $INSTALL_DIR "data"
+        if (-not (Test-Path $dataDir)) { New-Item -ItemType Directory -Path $dataDir -Force | Out-Null }
+        Show-Ok "Auto-update watcher enabled (runs every 1 min)"
+    }
+} catch {
+    Show-Warn "Could not register update watcher task: $($_.Exception.Message)"
+}
+
 Write-Host ""
 Write-Host "  Mubarak ho! Krexion chal raha hai." -ForegroundColor Green
 Write-Host ""

@@ -8,6 +8,7 @@ import { useBranding } from "../context/BrandingContext";
 import ThemeToggle from "./ThemeToggle";
 import WavyBackground from "./WavyBackground";
 import CloudModeBanner from "./CloudModeBanner";
+import UpdateBanner from "./UpdateBanner";
 import axios from "axios";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -333,6 +334,7 @@ export default function DashboardLayout({ children }) {
 
         <main className="flex-1 overflow-auto data-testid-main" data-testid="main-content" style={{ backgroundColor: 'transparent' }}>
           <CloudModeBanner />
+          <UpdateBanner />
           <div className="p-6">
           <AnimatePresence mode="wait">
             <motion.div

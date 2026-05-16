@@ -49,17 +49,18 @@ services:
     depends_on:
       mongo:
         condition: service_healthy
+    # Load ALL backend/.env keys (RESEND_API_KEY, ADMIN_EMAIL/PASSWORD,
+    # USDT wallet, KREXION_MODE, SUPPORT_EMAIL, etc.) automatically.
+    # The `environment:` block below still acts as fall-back defaults +
+    # overrides for keys we want compose to manage.
+    env_file:
+      - ./backend/.env
     environment:
       MONGO_URL: "mongodb://mongo:27017"
       DB_NAME: "${DB_NAME:-krexion}"
-      JWT_SECRET_KEY: "${JWT_SECRET_KEY}"
-      ADMIN_EMAIL: "${ADMIN_EMAIL:-admin@krexion.local}"
-      ADMIN_PASSWORD: "${ADMIN_PASSWORD}"
-      POSTBACK_TOKEN: "${POSTBACK_TOKEN}"
       APP_URL: "${APP_URL:-https://krexion.com}"
       PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-https://api.krexion.com}"
       CORS_ORIGINS: "${CORS_ORIGINS:-*}"
-      RESEND_API_KEY: "${RESEND_API_KEY:-}"
       RESEND_FROM: "${RESEND_FROM:-no-reply@krexion.com}"
       # Google Sheets API (Service Account) — required by the live gsheet
       # row-deletion feature. Either set GOOGLE_SHEETS_SA_PATH to the
@@ -84,6 +85,11 @@ services:
       # here makes it readable from inside the container at the path
       # GOOGLE_SHEETS_SA_PATH points to.
       - ./backend/secrets:/app/backend/secrets:ro
+      # Update-flag dir: when the user clicks "Install update" in the UI
+      # the backend writes /data/update_requested.flag (inside the container)
+      # which the host UPDATE-WATCHER.bat scheduled task picks up and
+      # triggers docker compose up -d --build on the host.
+      - ./data:/data
     networks:
       - krexion-net
     # Resource caps — Playwright + parallel browser launches + big
