@@ -9,7 +9,7 @@ import { toast } from "sonner";
 import WavyBackground from "../components/WavyBackground";
 
 const INSTALLER_URL = "/Krexion-User-Package.zip";
-const INSTALLER_SHA256 = "a9287fd57248d7d58cc33a0359b879d54d4f12594364e4a94f96a797f0364c2d";
+const INSTALLER_SHA256 = "09034792c657e1010d350fc4fab6ee7c2c5b890e3a830f5a28146bc1b1f47196";
 const INSTALLER_VERSION = "1.0.4";
 
 export default function DownloadPage() {
@@ -42,6 +42,7 @@ export default function DownloadPage() {
           <nav className="flex items-center gap-5 text-sm">
             <Link to="/pricing" className="text-zinc-400 hover:text-white">Pricing</Link>
             <Link to="/download" className="text-white">Download</Link>
+            <Link to="/guide" className="text-zinc-400 hover:text-white">Guide</Link>
             <Link to="/login" className="text-zinc-400 hover:text-white">Login</Link>
           </nav>
         </div>
@@ -218,6 +219,7 @@ export default function DownloadPage() {
           </div>
           <div className="flex items-center gap-5">
             <Link to="/pricing" className="hover:text-white">Pricing</Link>
+            <Link to="/guide" className="hover:text-white">Guide</Link>
             <Link to="/login" className="hover:text-white">Login</Link>
             <a href="mailto:support@krexion.com" className="hover:text-white">Support</a>
           </div>

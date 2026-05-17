@@ -239,10 +239,25 @@ User wants: admin publishes a new version → every customer's local install get
 - **P3**: Affiliate / Referral system.
 - **P3**: Cloudflare Worker for `/r/<short>` redirects (>1M clicks/day scale).
 
+---
+
+## 2026-05-17 — Guide Page Wired + Installer ZIP Repackaged
+
+### Done
+- **`/guide` route wired** in `App.js` (import + Route). GuidePage was already fully built (TOC, 10 sections, Steps, Boxes, FAQs in Roman Urdu/Hindi).
+- **Guide nav links added** to HomePage (top + footer), DownloadPage (top + footer), PricingPage (top).
+- **`INSTALL.bat` repackaged** into `/app/frontend/public/Krexion-User-Package.zip` (25,411 bytes, 9 files). New SHA256: `09034792c657e1010d350fc4fab6ee7c2c5b890e3a830f5a28146bc1b1f47196` — updated on DownloadPage.
+- All 4 robustness checks present in shipped INSTALL.bat: ZIP-extract detection, self-elevate via PowerShell, PS-blocked detection, missing-file detection. Logs to Desktop\Krexion-Install-Log.txt.
+
+### Verified
+- `/guide` returns HTTP 200; page renders end-to-end (screenshot captured).
+- `/Krexion-User-Package.zip` serves 25411-byte new build via Cloudflare.
+
 ### Backlog
-- **P1**: Force "change password on first login" for auto-created accounts.
-- **P1**: Customer portal `/account` — orders, licenses, sync diagnostics widget, re-download.
-- **P2**: Hide heavy menu items in sidebar when cloud mode.
-- **P2**: "Resend License Email" admin button + expiry-reminder cron (7d/1d).
+- **P1**: Legal pages (Terms / Privacy / Refund).
+- **P1**: "Change password on first login" flow for auto-created accounts.
+- **P1**: Customer portal `/account` page (orders, licenses, machine bindings).
+- **P2**: Resend License Email admin button + expiry reminder cron (7d/1d).
 - **P3**: Affiliate / Referral system (USDT commissions).
-- **P3**: Cloudflare Worker in front of `/r/<short>` (>1M clicks/day scale).
+- **P3**: Cloudflare Worker for `/r/<short>` redirects (scale).
+

@@ -103,6 +103,7 @@ export default function HomePage() {
             <a href="#features" className="text-zinc-400 hover:text-white transition">Features</a>
             <a href="#pricing" className="text-zinc-400 hover:text-white transition">Pricing</a>
             <Link to="/download" className="text-zinc-400 hover:text-white transition" data-testid="nav-download">Download</Link>
+            <Link to="/guide" className="text-zinc-400 hover:text-white transition" data-testid="nav-guide">Guide</Link>
             <a href="#faq" className="text-zinc-400 hover:text-white transition">FAQ</a>
             <Link to="/login" className="text-zinc-400 hover:text-white transition" data-testid="nav-login">Login</Link>
             <Link
@@ -456,6 +457,7 @@ export default function HomePage() {
           <div className="flex items-center gap-5">
             <Link to="/pricing" className="hover:text-white transition">Pricing</Link>
             <Link to="/download" className="hover:text-white transition">Download</Link>
+            <Link to="/guide" className="hover:text-white transition">Guide</Link>
             <Link to="/login" className="hover:text-white transition">Login</Link>
             <a href="mailto:support@krexion.com" className="hover:text-white transition">Support</a>
           </div>

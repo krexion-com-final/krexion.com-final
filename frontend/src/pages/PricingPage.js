@@ -33,6 +33,8 @@ export default function PricingPage() {
           <nav className="flex items-center gap-6 text-sm">
             <a href="/" className="text-[#A1A1AA] hover:text-white transition">Home</a>
             <a href="/pricing" className="text-white">Pricing</a>
+            <a href="/download" className="text-[#A1A1AA] hover:text-white transition">Download</a>
+            <a href="/guide" className="text-[#A1A1AA] hover:text-white transition">Guide</a>
             <a href="/login" className="text-[#A1A1AA] hover:text-white transition">Login</a>
             <a href="/login" className="bg-white text-black px-4 py-1.5 rounded-md font-medium hover:bg-gray-200 transition" data-testid="header-signup-button">
               Sign Up
