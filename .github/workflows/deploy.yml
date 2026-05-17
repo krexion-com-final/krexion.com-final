@@ -1,8 +1,8 @@
 name: Deploy to VPS
 
-# When does this run?
-#   1. Automatically — every push to main (Save to GitHub triggers this)
-#   2. Manually — GitHub → Actions tab → "Deploy to VPS" → Run workflow (the button)
+# Triggers:
+#   1. Auto — every push to main (Save to GitHub)
+#   2. Manual — Actions tab → "Deploy to VPS" → Run workflow
 on:
   push:
     branches: [main]
@@ -10,11 +10,43 @@ on:
 
 jobs:
   deploy:
-    name: SSH into VPS and rebuild containers
+    name: Sync source + rebuild containers
     runs-on: ubuntu-latest
 
     steps:
-      - name: Deploy via SSH
+      # Step 1: Checkout the LATEST code from THIS repo on the runner
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Rebuild the customer installer ZIP from the source folder.
+      # ZIPs are gitignored, so we always rebuild here on the runner.
+      - name: Rebuild Krexion-User-Package.zip
+        run: |
+          if [ -d "Krexion-User-Package" ]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq zip
+            rm -f frontend/public/Krexion-User-Package.zip
+            ( cd Krexion-User-Package && zip -r ../frontend/public/Krexion-User-Package.zip . -x "*.DS_Store" )
+            ls -la frontend/public/Krexion-User-Package.zip
+            sha256sum frontend/public/Krexion-User-Package.zip
+          fi
+
+      # Step 3: rsync ALL source code from the GitHub runner to the VPS.
+      # This avoids the "VPS pulls from wrong git remote" problem entirely.
+      # Excludes: .env files (protected), node_modules, __pycache__, .git
+      - name: Sync source code to VPS via rsync
+        uses: burnett01/rsync-deployments@7.0.1
+        with:
+          switches: -avzr --delete --exclude='.env' --exclude='node_modules' --exclude='__pycache__' --exclude='*.pyc' --exclude='.git' --exclude='build' --exclude='dist' --exclude='_backup_*' --exclude='visual_recorder_sessions' --exclude='uploads' --exclude='form_filler_screenshots' --exclude='*.zip' --exclude-from='.deployignore'
+          path: ./
+          remote_path: /opt/krexion/
+          remote_host: ${{ secrets.VPS_HOST }}
+          remote_user: ${{ secrets.VPS_USER }}
+          remote_port: ${{ secrets.VPS_PORT || '22' }}
+          remote_key: ${{ secrets.VPS_SSH_KEY }}
+
+      # Step 4: SSH into VPS to rebuild ZIP (on VPS for correct paths),
+      # then force-rebuild frontend container without cache, restart.
+      - name: Rebuild containers on VPS
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -27,90 +59,64 @@ jobs:
             set -e
             cd /opt/krexion
             echo "===================================================="
-            echo "  KREXION AUTO-DEPLOY started at $(date)"
+            echo "  KREXION DEPLOY @ $(date)"
             echo "===================================================="
 
-            # 1. Save any local-only changes (env etc.) and pull latest code
-            echo ">> Pulling latest code from GitHub..."
-            git stash --include-untracked || true
-            git fetch origin main
-            git reset --hard origin/main
-            git stash pop || true
-
-            # 2. REBUILD installer ZIP from source folder.
-            #    The ZIP itself is .gitignored, so we re-zip the
-            #    Krexion-User-Package/ directory (which IS in git) on every
-            #    deploy. This keeps install-master.ps1 + INSTALL.bat changes
-            #    automatically flowing to customers without any manual step.
-            echo ">> Rebuilding Krexion-User-Package.zip from source..."
+            # Re-build the installer ZIP from synced source files
+            echo ">> Rebuilding installer ZIP..."
+            command -v zip >/dev/null 2>&1 || (apt-get update && apt-get install -y zip)
+            rm -f frontend/public/Krexion-User-Package.zip
             if [ -d "Krexion-User-Package" ]; then
-              # Make sure zip command is installed
-              command -v zip >/dev/null 2>&1 || apt-get update && apt-get install -y zip
-              rm -f frontend/public/Krexion-User-Package.zip
               ( cd Krexion-User-Package && zip -r ../frontend/public/Krexion-User-Package.zip . -x "*.DS_Store" >/dev/null )
               SRC_SHA=$(sha256sum frontend/public/Krexion-User-Package.zip | awk '{print $1}')
               SIZE=$(stat -c%s frontend/public/Krexion-User-Package.zip)
-              echo "   Built ZIP: ${SIZE} bytes, SHA256: $SRC_SHA"
-            else
-              echo "::warning::Krexion-User-Package/ folder not found, skipping ZIP rebuild"
-              SRC_SHA="(skipped)"
+              echo "   Built: ${SIZE} bytes, SHA256: $SRC_SHA"
             fi
 
-            # 3. Stop frontend so old container doesn't hold stale image
-            echo ">> Stopping old frontend container..."
+            # Stop + remove old frontend container, untag old image,
+            # then rebuild with NO cache (forces fresh React build).
+            echo ">> Force-rebuilding frontend container..."
             docker compose stop frontend || true
             docker compose rm -f frontend || true
-
-            # 4. Force a CLEAN rebuild of frontend (no layer cache).
-            #    Without --no-cache, Docker reuses old COPY layers and the
-            #    new HomePage/Guide/installer ZIP never reaches production.
-            echo ">> Rebuilding frontend WITHOUT cache..."
+            docker rmi krexion-frontend 2>/dev/null || true
             docker compose build --no-cache --pull frontend
-
-            # 5. Backend can keep its cache (faster)
-            echo ">> Rebuilding backend..."
             docker compose build backend
 
-            # 6. Bring everything up
-            echo ">> Starting all containers..."
+            # Bring everything up
+            echo ">> Starting containers..."
             docker compose up -d frontend backend
 
-            # 7. Wait for frontend to be healthy
-            echo ">> Waiting for frontend to come online..."
-            for i in 1 2 3 4 5 6 7 8 9 10; do
-              if docker compose ps frontend | grep -qE "Up|running"; then
-                echo "   Frontend is up (attempt $i)"
+            # Wait for frontend to be healthy
+            for i in $(seq 1 15); do
+              if curl -fsS http://localhost:3000/ > /dev/null 2>&1; then
+                echo "   Frontend responding (attempt $i)"
                 break
               fi
-              sleep 3
+              sleep 2
             done
 
-            # 8. Verify the served ZIP matches what we just built.
-            if [ "$SRC_SHA" != "(skipped)" ]; then
-              echo ">> Verifying production ZIP matches source..."
+            # Verify production matches source
+            echo ">> Verifying production..."
+            sleep 5
+            PROD_SHA=$(curl -sL "https://krexion.com/Krexion-User-Package.zip?nocache=$(date +%s)" | sha256sum | awk '{print $1}')
+            echo "   Source SHA:     $SRC_SHA"
+            echo "   Production SHA: $PROD_SHA"
+            if [ "$SRC_SHA" = "$PROD_SHA" ]; then
+              echo "   ✓ MATCH — new installer is live"
+            else
+              echo "::warning::ZIP mismatch — Caddy proxy may be caching. Restarting Caddy..."
+              docker compose restart caddy || true
               sleep 5
-              PROD_SHA=$(curl -sL https://krexion.com/Krexion-User-Package.zip | sha256sum | awk '{print $1}')
-              echo "   Source SHA:     $SRC_SHA"
-              echo "   Production SHA: $PROD_SHA"
-              if [ "$SRC_SHA" = "$PROD_SHA" ]; then
-                echo "   ✓ MATCH — new installer is live on krexion.com"
-              else
-                echo "   ✗ MISMATCH — restarting frontend and retrying..."
-                docker compose restart frontend
-                sleep 10
-                PROD_SHA=$(curl -sL https://krexion.com/Krexion-User-Package.zip | sha256sum | awk '{print $1}')
-                echo "   Production SHA (after restart): $PROD_SHA"
-                if [ "$SRC_SHA" != "$PROD_SHA" ]; then
-                  echo "::error::ZIP still doesn't match. Check Cloudflare cache or proxy in front of Caddy."
-                  exit 1
-                fi
-                echo "   ✓ MATCH (after restart)"
+              PROD_SHA=$(curl -sL "https://krexion.com/Krexion-User-Package.zip?nocache=$(date +%s)" | sha256sum | awk '{print $1}')
+              if [ "$SRC_SHA" != "$PROD_SHA" ]; then
+                echo "::error::ZIP still mismatched. Check Caddy or CDN."
+                exit 1
               fi
+              echo "   ✓ MATCH (after Caddy restart)"
             fi
 
-            # 9. Final status
-            echo ">> Container status:"
+            # Final status
             docker compose ps
             echo "===================================================="
-            echo "  DEPLOY COMPLETE at $(date)"
+            echo "  DEPLOY COMPLETE @ $(date)"
             echo "===================================================="

@@ -1,0 +1,16 @@
+.git/
+node_modules/
+__pycache__/
+*.pyc
+.DS_Store
+*.zip
+build/
+dist/
+_backup_*/
+visual_recorder_sessions/
+uploads/
+form_filler_screenshots/
+.env
+*.log
+tests/
+venv/
