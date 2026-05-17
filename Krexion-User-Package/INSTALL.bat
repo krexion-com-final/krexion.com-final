@@ -194,32 +194,13 @@ echo  [OK] Installer files found
 echo.
 
 REM ───────────────────────────────────────────────────────────────────
-REM  CHECK 5: PowerShell execution test (catches Group Policy locks
-REM  and Antivirus blocks before the long install starts).
+REM  CHECK 5 (REMOVED): PowerShell execution pre-check.
+REM  The pre-check was blocking customers whose PowerShell actually
+REM  works fine. If PowerShell is truly broken, install-master.ps1
+REM  itself will fail and we capture its EXITCODE below — that gives
+REM  the customer a real error from PowerShell instead of a false
+REM  positive from the >nul redirection.
 REM ───────────────────────────────────────────────────────────────────
-powershell -NoProfile -ExecutionPolicy Bypass -Command "exit 0" >nul 2>&1
-if %errorlevel% neq 0 (
-    color 0C
-    echo.
-    echo  ===================================================
-    echo   ERROR: PowerShell scripts blocked on this PC!
-    echo  ===================================================
-    echo.
-    echo  Wajah: Group Policy / Antivirus / Windows S Mode
-    echo.
-    echo  Solution:
-    echo    1. Antivirus temporarily disable karein
-    echo    2. Windows S Mode hai to use exit karein
-    echo       (Settings ^> Activation ^> Switch out of S mode)
-    echo    3. Phir INSTALL.bat dobara chalayein
-    echo.
-    echo  Window khuli rahegi.
-    echo.
-    pause
-    exit /b 1
-)
-echo  [OK] PowerShell scripts allowed
-echo.
 
 echo  ===================================================
 echo   Ab installer chal raha hai...
@@ -232,9 +213,21 @@ REM  Run install-master.ps1 in CUSTOMER MODE
 REM  We log stderr+stdout to the desktop log file via PowerShell so
 REM  customer never has to find a hidden TEMP file when troubleshooting.
 REM ───────────────────────────────────────────────────────────────────
-powershell -NoProfile -ExecutionPolicy Bypass -Command "& { try { & '%PS_FILE%' -CustomerMode *>&1 | Tee-Object -FilePath '%LOG%' -Append; exit $LASTEXITCODE } catch { Write-Host $_.Exception.Message; exit 99 } }"
+echo Calling install-master.ps1... >> "%LOG%"
+echo PS_FILE=%PS_FILE% >> "%LOG%"
 
+REM Try the standard PowerShell first; if it fails to even launch
+REM (errorlevel 9009 = "not recognized as a command"), fall back to
+REM pwsh.exe (PowerShell 7) which some users have installed.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& { try { & '%PS_FILE%' -CustomerMode *>&1 | Tee-Object -FilePath '%LOG%' -Append; exit $LASTEXITCODE } catch { Write-Host ('FATAL: ' + $_.Exception.Message); exit 99 } }"
 set "EXITCODE=%errorlevel%"
+
+if %EXITCODE% equ 9009 (
+    echo PowerShell not found at default path, trying pwsh.exe... >> "%LOG%"
+    pwsh -NoProfile -ExecutionPolicy Bypass -Command "& { try { & '%PS_FILE%' -CustomerMode *>&1 | Tee-Object -FilePath '%LOG%' -Append; exit $LASTEXITCODE } catch { Write-Host ('FATAL: ' + $_.Exception.Message); exit 99 } }"
+    set "EXITCODE=!errorlevel!"
+)
+
 echo. >> "%LOG%"
 echo Installer exited: code=%EXITCODE% at %DATE% %TIME% >> "%LOG%"
 
