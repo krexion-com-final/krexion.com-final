@@ -19,7 +19,7 @@ cd /d "%KREXION_DIR%" 2>nul || exit /b 0
 set FLAG=%KREXION_DIR%\data\update_requested.flag
 if not exist "%FLAG%" exit /b 0
 
-echo [%DATE% %TIME%] Krexion update flag detected — starting update >> "%KREXION_DIR%\updater.log"
+echo [%DATE% %TIME%] Krexion update flag detected - starting update >> "%KREXION_DIR%\updater.log"
 
 REM Pull any new images (no-op if customer builds locally)
 docker compose pull >> "%KREXION_DIR%\updater.log" 2>&1

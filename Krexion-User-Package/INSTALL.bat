@@ -15,7 +15,7 @@ REM #                                                                 #
 REM ###################################################################
 setlocal EnableDelayedExpansion
 
-REM ─── Setup transcript file on Desktop so customer always sees logs ──
+REM --- Setup transcript file on Desktop so customer always sees logs --
 set "DESKTOP=%USERPROFILE%\Desktop"
 if not exist "%DESKTOP%" set "DESKTOP=%PUBLIC%\Desktop"
 set "LOG=%DESKTOP%\Krexion-Install-Log.txt"
@@ -26,12 +26,12 @@ mode con: cols=100 lines=40
 color 0B
 cls
 
-REM ───────────────────────────────────────────────────────────────────
+REM -------------------------------------------------------------------
 REM  CHECK 1: Are we running from inside a ZIP / temp folder?
 REM  Windows extracts ZIP contents to %TEMP%\Temp1_xxx when user
 REM  double-clicks BAT *inside* the ZIP. That sandbox path makes the
 REM  install fail mid-way because files vanish. Detect + tell customer.
-REM ───────────────────────────────────────────────────────────────────
+REM -------------------------------------------------------------------
 echo %~dp0| findstr /I /C:"\Temp1_" /C:"\Temp\Temp" /C:"\AppData\Local\Temp" >nul
 if %errorlevel% equ 0 (
     cls
@@ -61,11 +61,11 @@ if %errorlevel% equ 0 (
     exit /b 1
 )
 
-REM ───────────────────────────────────────────────────────────────────
+REM -------------------------------------------------------------------
 REM  CHECK 2: Admin rights via UAC.
 REM  We use net session as it's the most reliable admin-detection
 REM  primitive that works on every Windows 10/11 SKU.
-REM ───────────────────────────────────────────────────────────────────
+REM -------------------------------------------------------------------
 net session >nul 2>&1
 if %errorlevel% neq 0 (
     echo.
@@ -132,9 +132,9 @@ echo   Detailed log:  %LOG%
 echo.
 timeout /t 5 /nobreak >nul
 
-REM ───────────────────────────────────────────────────────────────────
+REM -------------------------------------------------------------------
 REM  CHECK 3: Internet connectivity
-REM ───────────────────────────────────────────────────────────────────
+REM -------------------------------------------------------------------
 echo  [..] Internet check kar raha hun...
 ping -n 1 github.com >nul 2>&1
 set "INET=%errorlevel%"
@@ -161,9 +161,9 @@ if %INET% neq 0 (
 echo  [OK] Internet working
 echo.
 
-REM ───────────────────────────────────────────────────────────────────
+REM -------------------------------------------------------------------
 REM  CHECK 4: install-master.ps1 file present
-REM ───────────────────────────────────────────────────────────────────
+REM -------------------------------------------------------------------
 set "PS_FILE=%~dp0install-master.ps1"
 
 if not exist "%PS_FILE%" (
@@ -181,7 +181,7 @@ if not exist "%PS_FILE%" (
     echo.
     echo  Solution:
     echo    1. https://krexion.com/download se naya ZIP download karein
-    echo    2. Right-click → "Extract All..." → Extract
+    echo    2. Right-click -> "Extract All..." -> Extract
     echo    3. Extract hue folder mein jaayein
     echo    4. INSTALL.bat double-click karein
     echo.
@@ -193,14 +193,14 @@ if not exist "%PS_FILE%" (
 echo  [OK] Installer files found
 echo.
 
-REM ───────────────────────────────────────────────────────────────────
+REM -------------------------------------------------------------------
 REM  CHECK 5 (REMOVED): PowerShell execution pre-check.
 REM  The pre-check was blocking customers whose PowerShell actually
 REM  works fine. If PowerShell is truly broken, install-master.ps1
-REM  itself will fail and we capture its EXITCODE below — that gives
+REM  itself will fail and we capture its EXITCODE below - that gives
 REM  the customer a real error from PowerShell instead of a false
 REM  positive from the >nul redirection.
-REM ───────────────────────────────────────────────────────────────────
+REM -------------------------------------------------------------------
 
 echo  ===================================================
 echo   Ab installer chal raha hai...
@@ -208,11 +208,11 @@ echo   Please wait 20-30 minutes
 echo  ===================================================
 echo.
 
-REM ───────────────────────────────────────────────────────────────────
+REM -------------------------------------------------------------------
 REM  Run install-master.ps1 in CUSTOMER MODE
 REM  We log stderr+stdout to the desktop log file via PowerShell so
 REM  customer never has to find a hidden TEMP file when troubleshooting.
-REM ───────────────────────────────────────────────────────────────────
+REM -------------------------------------------------------------------
 echo Calling install-master.ps1... >> "%LOG%"
 echo PS_FILE=%PS_FILE% >> "%LOG%"
 

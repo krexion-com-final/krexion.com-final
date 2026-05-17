@@ -151,7 +151,7 @@ if ($dockerWorking) {
 }
 
 # ============================================================
-# CHECK 4: Krexion Folder Exists — AUTO-RECOVER if missing
+# CHECK 4: Krexion Folder Exists - AUTO-RECOVER if missing
 # ============================================================
 DSection "CHECK 4/8: Krexion Folder"
 if (Test-Path $INSTALL_DIR) {
@@ -254,7 +254,7 @@ if (Test-Path $INSTALL_DIR) {
 }
 
 # ============================================================
-# CHECK 5: .env File — auto-create if missing
+# CHECK 5: .env File - auto-create if missing
 # ============================================================
 DSection "CHECK 5/8: Configuration File"
 $envPath = "$INSTALL_DIR\.env"
@@ -287,7 +287,7 @@ if (Test-Path $envPath) {
 }
 
 # ============================================================
-# CHECK 6: Containers Running — auto build + start with legacy cleanup
+# CHECK 6: Containers Running - auto build + start with legacy cleanup
 # ============================================================
 DSection "CHECK 6/8: Krexion Containers"
 if (-not $dockerWorking) {

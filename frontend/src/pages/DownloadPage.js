@@ -9,7 +9,7 @@ import { toast } from "sonner";
 import WavyBackground from "../components/WavyBackground";
 
 const INSTALLER_URL = "/Krexion-User-Package.zip";
-const INSTALLER_SHA256 = "5d2db9c46c12606316b15c446b06e5a95e8e07207a6bc5a84c5854c27c2641d0";
+const INSTALLER_SHA256 = "b21b9f7d7803d3748dfa3e41d5d5a5eee4127b3b592bf2a56395275f6a1502bc";
 const INSTALLER_VERSION = "1.0.4";
 
 export default function DownloadPage() {
