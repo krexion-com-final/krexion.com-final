@@ -151,23 +151,110 @@ if ($dockerWorking) {
 }
 
 # ============================================================
-# CHECK 4: Krexion Folder Exists
+# CHECK 4: Krexion Folder Exists — AUTO-RECOVER if missing
 # ============================================================
 DSection "CHECK 4/8: Krexion Folder"
 if (Test-Path $INSTALL_DIR) {
     DOk "Krexion folder mojood hai"
 } else {
     DErr "C:\krexion folder missing"
-    DFix "INSTALL.bat dobara chalayein"
+    DFix "Khud download karke recovery kar raha hun (5-10 min)..."
     $problemsFound++
-    Write-Host ""
-    Write-Host "  Doctor stop. INSTALL.bat dobara chalayein pehle." -ForegroundColor Red
-    Read-Host "Press Enter to close"
-    exit 1
+
+    # ----- Download source ZIP from GitHub (handles 301 redirects) -----
+    $zipPath = "$env:TEMP\krexion-recover.zip"
+    $extPath = "$env:TEMP\krexion-recover-ext"
+    if (Test-Path $zipPath) { Remove-Item $zipPath -Force -ErrorAction SilentlyContinue }
+    if (Test-Path $extPath) { Remove-Item $extPath -Recurse -Force -ErrorAction SilentlyContinue }
+
+    $dlOk = $false
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        DInfo ("Download attempt " + $attempt + "/3 - 50MB lagta hai 1-2 min")
+        try {
+            Invoke-WebRequest -Uri $REPO_ZIP_URL -OutFile $zipPath -UseBasicParsing -TimeoutSec 600 -MaximumRedirection 5
+            if ((Test-Path $zipPath) -and ((Get-Item $zipPath).Length -gt 1000000)) {
+                $dlOk = $true
+                break
+            }
+        } catch {
+            DWarn ("Attempt " + $attempt + " failed: " + $_.Exception.Message)
+            Start-Sleep -Seconds 5
+        }
+    }
+
+    if (-not $dlOk) {
+        DErr "Download fail ho raha hai - internet check karein"
+        DFix "WiFi restart karein, mobile hotspot try karein, phir Doctor chalayein"
+        Write-Host ""
+        Read-Host "Press Enter to close"
+        exit 1
+    }
+    DOk "Download complete"
+
+    # ----- Extract ZIP -----
+    DInfo "Extract kar raha hun..."
+    try {
+        Expand-Archive -Path $zipPath -DestinationPath $extPath -Force -ErrorAction Stop
+    } catch {
+        DErr ("Extract failed: " + $_.Exception.Message)
+        Read-Host "Press Enter to close"
+        exit 1
+    }
+
+    $inner = Get-ChildItem $extPath -Directory | Select-Object -First 1
+    if (-not $inner) {
+        DErr "ZIP empty hai - corrupt download"
+        Read-Host "Press Enter to close"
+        exit 1
+    }
+
+    # ----- Move to C:\krexion -----
+    try {
+        Move-Item -Path $inner.FullName -Destination $INSTALL_DIR -Force -ErrorAction Stop
+        DOk ("Folder created: " + $INSTALL_DIR)
+    } catch {
+        DErr ("Move failed: " + $_.Exception.Message)
+        Read-Host "Press Enter to close"
+        exit 1
+    }
+    Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+    Remove-Item $extPath -Recurse -Force -ErrorAction SilentlyContinue
+
+    # ----- Generate .env with random secrets -----
+    DInfo "Configuration .env file bana raha hun..."
+    function New-RandStr { param([int]$L=24)
+        $chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        -join (1..$L | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
+    }
+    $envContent = @(
+        "MONGO_URL=mongodb://mongo:27017",
+        "DB_NAME=krexion",
+        ("JWT_SECRET_KEY=" + (New-RandStr 32)),
+        "ADMIN_EMAIL=admin@krexion.local",
+        ("ADMIN_PASSWORD=" + (New-RandStr 16)),
+        ("POSTBACK_TOKEN=" + (New-RandStr 24)),
+        "CORS_ORIGINS=*",
+        "RUT_MEM_LIMIT_MB=4096",
+        "RUT_MAX_CONCURRENCY=4",
+        "RESEND_API_KEY=",
+        "SMTP_USER=",
+        "SMTP_PASSWORD=",
+        "GOOGLE_SHEETS_SA_PATH=",
+        "LICENSE_SERVER_URL=https://krexion.com",
+        "LICENSE_KEY=",
+        "KREXION_MODE=local",
+        "KREXION_CLOUD_URL=https://krexion.com",
+        "IS_CUSTOMER_INSTALL=true"
+    )
+    $envContent | Set-Content -Path "$INSTALL_DIR\.env" -Encoding ASCII -Force
+    DOk ".env file created"
+    $fixesApplied++
+
+    DInfo "Recovery complete - aage ke checks chalayein ge"
 }
 
 # ============================================================
-# CHECK 5: .env File
+# CHECK 5: .env File — auto-create if missing
 # ============================================================
 DSection "CHECK 5/8: Configuration File"
 $envPath = "$INSTALL_DIR\.env"
@@ -175,12 +262,32 @@ if (Test-Path $envPath) {
     DOk ".env file mojood hai"
 } else {
     DErr ".env file missing"
-    DFix "INSTALL.bat dobara chalayein"
-    $problemsFound++
+    DFix "Auto-generating .env with secure random secrets..."
+    function New-RandStr2 { param([int]$L=24)
+        $chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        -join (1..$L | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
+    }
+    @(
+        "MONGO_URL=mongodb://mongo:27017",
+        "DB_NAME=krexion",
+        ("JWT_SECRET_KEY=" + (New-RandStr2 32)),
+        "ADMIN_EMAIL=admin@krexion.local",
+        ("ADMIN_PASSWORD=" + (New-RandStr2 16)),
+        ("POSTBACK_TOKEN=" + (New-RandStr2 24)),
+        "CORS_ORIGINS=*",
+        "RUT_MEM_LIMIT_MB=4096",
+        "RUT_MAX_CONCURRENCY=4",
+        "LICENSE_SERVER_URL=https://krexion.com",
+        "KREXION_MODE=local",
+        "KREXION_CLOUD_URL=https://krexion.com",
+        "IS_CUSTOMER_INSTALL=true"
+    ) | Set-Content -Path $envPath -Encoding ASCII -Force
+    DOk ".env file created"
+    $fixesApplied++
 }
 
 # ============================================================
-# CHECK 6: Containers Running
+# CHECK 6: Containers Running — auto build + start with legacy cleanup
 # ============================================================
 DSection "CHECK 6/8: Krexion Containers"
 if (-not $dockerWorking) {
@@ -196,38 +303,70 @@ if (-not $dockerWorking) {
         DWarn "Containers band hain - start kar raha hun..."
         $problemsFound++
 
-        DFix "Containers up kar raha hun..."
+        # ----- Legacy container cleanup (avoid name conflicts from old installs) -----
+        DFix "Pehle purane legacy containers clean kar raha hun..."
+        foreach ($proj in @("realflow", "krexion", "krexion-user-package")) {
+            & docker compose -p $proj down --remove-orphans --volumes 2>&1 | Out-Null
+        }
+        $legacyContainers = @(
+            "realflow-mongo","realflow-backend","realflow-frontend","realflow-caddy","realflow-redis","realflow-worker",
+            "krexion-mongo","krexion-backend","krexion-frontend","krexion-caddy","krexion-redis","krexion-worker"
+        )
+        foreach ($n in $legacyContainers) { & docker rm -f $n 2>&1 | Out-Null }
+        foreach ($net in @("realflow-net","krexion-net","realflow_realflow-net","krexion_krexion-net")) {
+            & docker network rm $net 2>&1 | Out-Null
+        }
+        DOk "Legacy cleanup done"
 
+        # ----- Detect RAM tier compose file -----
         $composeArgs = @("-f", "docker-compose.yml")
         $os = Get-CimInstance Win32_OperatingSystem
         $ram = [math]::Round(($os.TotalVisibleMemorySize / 1MB), 1)
         if (($ram -le 10) -and (Test-Path "docker-compose.lowram.yml")) {
             $composeArgs += @("-f", "docker-compose.lowram.yml")
+            DInfo "Low-RAM profile use kar raha hun"
         } elseif (($ram -le 16) -and (Test-Path "docker-compose.mid.yml")) {
             $composeArgs += @("-f", "docker-compose.mid.yml")
+            DInfo "Mid-tier profile use kar raha hun"
+        } elseif (($ram -gt 32) -and (Test-Path "docker-compose.beast.yml")) {
+            $composeArgs += @("-f", "docker-compose.beast.yml")
+            DInfo "Beast profile use kar raha hun"
+        } elseif (($ram -gt 16) -and (Test-Path "docker-compose.high.yml")) {
+            $composeArgs += @("-f", "docker-compose.high.yml")
+            DInfo "High-tier profile use kar raha hun"
         }
 
-        & docker compose @composeArgs up -d 2>&1 | Out-String | Out-Null
+        # ----- Build (this is the long step: 5-15 min) -----
+        DFix "Containers build kar raha hun - YEH 5-15 MIN LE SAKTA HAI..."
+        & docker compose @composeArgs build 2>&1 | Out-String | Out-Null
+        $buildExit = $LASTEXITCODE
 
-        Start-Sleep -Seconds 10
+        if ($buildExit -ne 0) {
+            DErr "Build fail hua - PC restart karein phir doctor dobara"
+            Pop-Location
+            Read-Host "Press Enter to close"
+            exit 1
+        }
+        DOk "Build complete"
+
+        # ----- Start (with conflict-cleanup retry) -----
+        DFix "Containers start kar raha hun..."
+        & docker compose @composeArgs up -d 2>&1 | Out-String | Out-Null
+        $upExit = $LASTEXITCODE
+        if ($upExit -ne 0) {
+            DWarn "First start fail - conflicting containers clean karke retry"
+            foreach ($n in $legacyContainers) { & docker rm -f $n 2>&1 | Out-Null }
+            Start-Sleep -Seconds 3
+            & docker compose @composeArgs up -d 2>&1 | Out-String | Out-Null
+        }
+
+        Start-Sleep -Seconds 15
         $containers2 = & docker compose ps --format json 2>&1 | Out-String
         if ($containers2 -match '"State":"running"') {
             DOk "Containers started!"
             $fixesApplied++
         } else {
-            DWarn "Containers start mein issue - rebuild try kar raha hun..."
-            DFix "Building containers fresh..."
-            & docker compose @composeArgs build 2>&1 | Out-String | Out-Null
-            & docker compose @composeArgs up -d 2>&1 | Out-String | Out-Null
-            Start-Sleep -Seconds 30
-            $containers3 = & docker compose ps --format json 2>&1 | Out-String
-            if ($containers3 -match '"State":"running"') {
-                DOk "Rebuild successful!"
-                $fixesApplied++
-            } else {
-                DErr "Containers fix nahi hue"
-                DFix "Try: 1) PC restart karein 2) INSTALL.bat dobara"
-            }
+            DErr "Containers start nahi hue - PC restart karein phir doctor"
         }
     }
     Pop-Location
