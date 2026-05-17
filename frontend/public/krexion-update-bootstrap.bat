@@ -1,149 +1,145 @@
 @echo off
 REM ============================================================
-REM Krexion - One-Time Update Bootstrap (v2 - bulletproof)
-REM ------------------------------------------------------------
-REM Yeh script DIRECTLY rebuild karta hai - flag file pe depend
-REM nahi karta. Plus saari output Desktop pe log file mein
-REM jaati hai, taa k agar script crash ho to wajah pata chal jaye.
+REM Krexion - One-Time Update Bootstrap (v3 - flat, no tricks)
 REM ============================================================
 
-REM Force the window to stay open NO MATTER WHAT happens below.
-REM This prevents the "popup khulte hi band" problem completely.
-cmd /k call "%~f0" :run
-exit /b 0
+title Krexion Bootstrap - DO NOT CLOSE
+color 0B
 
-:run
 echo.
 echo  ===================================================
-echo   Krexion - One-Time Update Bootstrap v2
+echo   KREXION BOOTSTRAP v3 - shoro
+echo   %DATE% %TIME%
 echo  ===================================================
 echo.
 
-REM Log everything to Desktop so customer can attach it on failure
-set LOG=%USERPROFILE%\Desktop\Krexion-Bootstrap-Log.txt
-echo === Krexion Bootstrap started at %DATE% %TIME% === > "%LOG%"
-echo USERPROFILE=%USERPROFILE% >> "%LOG%"
+set "LOG=%USERPROFILE%\Desktop\Krexion-Bootstrap-Log.txt"
+echo === %DATE% %TIME% === > "%LOG%"
 
-REM Find Krexion install dir (case-insensitive on Windows)
+echo  Step 1/6: Install dir dhoond raha hun...
 set "KREXION_DIR=C:\Krexion"
 if not exist "%KREXION_DIR%\docker-compose.yml" (
     if exist "C:\krexion\docker-compose.yml" set "KREXION_DIR=C:\krexion"
 )
-echo KREXION_DIR=%KREXION_DIR% >> "%LOG%"
-echo  Install dir: %KREXION_DIR%
-echo.
+echo  KREXION_DIR=%KREXION_DIR%
+echo  KREXION_DIR=%KREXION_DIR% >> "%LOG%"
 
 if not exist "%KREXION_DIR%\docker-compose.yml" (
-    echo  [X] Krexion install nahi mila ^(C:\Krexion ya C:\krexion mein^).
+    echo.
+    echo  [X] Krexion install nahi mila C:\Krexion ya C:\krexion mein.
     echo  [X] Krexion install missing >> "%LOG%"
     echo.
     echo  Solution: Krexion-User-Package se INSTALL.bat dobara chalayein.
-    goto end
+    echo.
+    pause
+    exit /b 1
 )
+echo  [OK] Install mil gaya
+echo.
 
-REM Verify admin rights
+echo  Step 2/6: Admin rights check...
 net session >nul 2>&1
 if errorlevel 1 (
-    echo  [X] Yeh window admin rights se nahi chal rahi.
+    echo.
+    echo  [X] Admin rights nahi hain.
     echo  [X] Not admin >> "%LOG%"
     echo.
-    echo  Solution: File pe right-click karein, "Run as administrator"
-    echo            select karein, phir dobara try karein.
-    goto end
+    echo  Solution: Yeh file pe right-click -^> "Run as administrator"
+    echo.
+    pause
+    exit /b 1
 )
 echo  [OK] Admin rights confirmed
 echo  Admin OK >> "%LOG%"
+echo.
 
-REM Verify docker is reachable
+echo  Step 3/6: Docker engine check...
 docker version >nul 2>&1
 if errorlevel 1 (
+    echo.
     echo  [X] Docker engine running nahi hai.
     echo  [X] Docker not running >> "%LOG%"
     echo.
     echo  Solution:
-    echo    1. System tray mein "Krexion runtime" icon look karein
-    echo    2. Right-click - Start / Resume
+    echo    1. System tray mein "Krexion runtime" icon dhoondein
+    echo    2. Right-click -^> Start / Resume
     echo    3. 30 sec wait karein
-    echo    4. Phir yeh file dobara chalayein.
-    goto end
+    echo    4. Phir yeh file dobara chalayein
+    echo.
+    pause
+    exit /b 1
 )
 echo  [OK] Docker running
 echo  Docker OK >> "%LOG%"
+echo.
 
 cd /d "%KREXION_DIR%"
-if errorlevel 1 (
-    echo  [X] Cannot cd to %KREXION_DIR%
-    echo  [X] cd failed >> "%LOG%"
-    goto end
-)
 
-echo.
-echo  ===================================================
-echo   Krexion update shoro kar raha hun ^(5-15 min^)...
-echo  ===================================================
-echo.
-echo  Pyaarse wait karein - yeh window khud band nahi hogi.
-echo  Aap dosri kaam karein, yeh background mein chalti rahegi.
-echo.
-
-REM Step 1: Pull any pre-built images (no-op for our build-from-source flow)
-echo  [1/3] docker compose pull...
-echo === Step 1: docker compose pull === >> "%LOG%"
+echo  Step 4/6: docker compose pull...
+echo === pull start === >> "%LOG%"
 docker compose pull >> "%LOG%" 2>&1
-echo  [OK] Pull complete
+echo  [OK] Pull khatam ^(skipped if no images^)
+echo.
 
-REM Step 2: Build (this is the long step - 5-15 min)
-echo  [2/3] docker compose build ^(5-15 min - yeh sabse lambi step hai^)...
-echo === Step 2: docker compose build === >> "%LOG%"
+echo  Step 5/6: docker compose build ^(5-15 min lambi step^)
+echo  Yeh sabse lambi step hai. Wait karein - window khud rahegi.
+echo === build start === >> "%LOG%"
 docker compose build >> "%LOG%" 2>&1
 if errorlevel 1 (
-    echo  [X] Build failed - log file Desktop pe dekhein:
-    echo      %LOG%
-    echo  [X] Build failed >> "%LOG%"
-    goto end
+    echo.
+    echo  [X] Build fail ho gaya.
+    echo.
+    echo  Wajah ke liye log file dekhein:
+    echo    %LOG%
+    echo.
+    echo  Yeh log file mujhe attach kar k bhejein.
+    echo.
+    pause
+    exit /b 1
 )
-echo  [OK] Build complete
+echo  [OK] Build khatam
+echo.
 
-REM Step 3: Restart containers (legacy cleanup first to avoid name conflicts)
-echo  [3/3] docker compose up -d ^(containers restart^)...
-echo === Step 3: legacy cleanup + up === >> "%LOG%"
-docker rm -f realflow-mongo realflow-backend realflow-frontend realflow-caddy realflow-redis 2>nul
-docker rm -f krexion-mongo krexion-backend krexion-frontend krexion-caddy krexion-redis 2>nul
+echo  Step 6/6: Containers restart...
+echo === legacy cleanup === >> "%LOG%"
+docker rm -f realflow-mongo realflow-backend realflow-frontend realflow-caddy realflow-redis >nul 2>&1
+docker rm -f krexion-mongo krexion-backend krexion-frontend krexion-caddy krexion-redis >nul 2>&1
+
+echo === up start === >> "%LOG%"
 docker compose up -d >> "%LOG%" 2>&1
 if errorlevel 1 (
-    echo  [X] Start failed - retrying after cleanup...
+    echo.
+    echo  [X] First start fail - cleanup karke retry...
     docker compose down --remove-orphans >> "%LOG%" 2>&1
     timeout /t 3 /nobreak >nul
     docker compose up -d >> "%LOG%" 2>&1
     if errorlevel 1 (
-        echo  [X] Start failed permanently - check log:
+        echo  [X] Start permanently fail - log check karein:
         echo      %LOG%
-        goto end
+        echo.
+        pause
+        exit /b 1
     )
 )
 echo  [OK] Containers running
 
-REM Clean up the legacy update flag (so we don't loop on next watcher run)
-if exist "%KREXION_DIR%\data\update_requested.flag" del /f "%KREXION_DIR%\data\update_requested.flag" 2>nul
+REM Clean up legacy flag file
+if exist "%KREXION_DIR%\data\update_requested.flag" del /f "%KREXION_DIR%\data\update_requested.flag" >nul 2>&1
 
 echo.
 echo  ===================================================
-echo    UPDATE COMPLETE - Krexion v1.1.0 ready hai!
+echo    UPDATE COMPLETE - v1.1.0 ready!
 echo  ===================================================
 echo.
-echo  Ab krexion.com pe browser open karein, F5 refresh karein.
+echo  Ab krexion.com pe browser open karein.
+echo  F5 refresh karein.
+echo.
 echo  Header mein green "PC connected" badge dikhna chahye.
 echo.
 echo  Aage se updates direct krexion.com Update button se honge.
-echo  Yeh bootstrap file phir kabhi nahi chahye.
 echo.
 echo  Log file: %LOG%
 echo.
-
-:end
-echo.
-echo  ===================================================
-echo  Window khuli rahegi - press kuch ka close karein.
 echo  ===================================================
 pause
 exit /b 0
