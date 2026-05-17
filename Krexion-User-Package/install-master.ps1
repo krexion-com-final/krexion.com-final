@@ -516,7 +516,7 @@ Show-Step "STEP 6/7: Downloading Krexion"
 if (Test-Path $INSTALL_DIR) {
     Show-Info "Purana install clean kar raha hun"
     Push-Location $INSTALL_DIR
-    & docker compose down 2>&1 | Out-Null
+    & docker compose down --remove-orphans --volumes 2>&1 | Out-Null
     Pop-Location
     & takeown.exe /f $INSTALL_DIR /r /d Y 2>&1 | Out-Null
     & icacls.exe $INSTALL_DIR /grant ($env:USERNAME + ":F") /T /Q 2>&1 | Out-Null
@@ -525,8 +525,31 @@ if (Test-Path $INSTALL_DIR) {
         Start-Sleep -Seconds 3
         Remove-Item -Path $INSTALL_DIR -Recurse -Force -ErrorAction SilentlyContinue
     }
-    Show-Ok "Cleaned old install"
+    Show-Ok "Cleaned old install folder"
 }
+
+# ───────────────────────────────────────────────────────────────────
+# Force-remove ANY legacy container/network/project from previous
+# installs (e.g. older "realflow-mongo" still running from a v2 build).
+# Without this, the next "docker compose up -d" hits a name conflict
+# and the install dies at Step 7 — exactly what customer logs showed.
+# ───────────────────────────────────────────────────────────────────
+Show-Info "Legacy containers cleanup (agar pehle ka koi install tha)"
+foreach ($proj in @("realflow", "krexion", "krexion-user-package")) {
+    & docker compose -p $proj down --remove-orphans --volumes 2>&1 | Out-Null
+}
+$legacyContainers = @(
+    "realflow-mongo", "realflow-backend", "realflow-frontend", "realflow-caddy", "realflow-redis", "realflow-worker",
+    "krexion-mongo", "krexion-backend", "krexion-frontend", "krexion-caddy", "krexion-redis", "krexion-worker"
+)
+foreach ($n in $legacyContainers) {
+    & docker rm -f $n 2>&1 | Out-Null
+}
+# Drop any orphan networks the previous project may have left behind
+foreach ($net in @("realflow-net", "krexion-net", "realflow_realflow-net", "krexion_krexion-net")) {
+    & docker network rm $net 2>&1 | Out-Null
+}
+Show-Ok "Legacy cleanup done"
 
 $zip = "$env:TEMP\krexion.zip"
 $ext = "$env:TEMP\krexion-extract"
@@ -645,8 +668,28 @@ Show-Ok "Build complete"
 
 Show-Info "Containers start kar raha hun"
 & docker compose @composeArgs up -d 2>&1 | Tee-Object -FilePath $LOG_FILE -Append
-if ($LASTEXITCODE -ne 0) {
+$upExit = $LASTEXITCODE
+if ($upExit -ne 0) {
+    # Most common cause: a stale container with the same name from an
+    # older install (e.g. "realflow-mongo") that survived our Step 6
+    # cleanup. Force-remove anything that might conflict, then retry.
+    Show-Warn "First start fail hua - conflicting containers clean kar ke retry karta hun"
+    foreach ($n in $legacyContainers) {
+        & docker rm -f $n 2>&1 | Out-Null
+    }
+    & docker compose @composeArgs down --remove-orphans 2>&1 | Out-Null
+    Start-Sleep -Seconds 3
+    Show-Info "Retry: containers start kar raha hun"
+    & docker compose @composeArgs up -d 2>&1 | Tee-Object -FilePath $LOG_FILE -Append
+    $upExit = $LASTEXITCODE
+}
+if ($upExit -ne 0) {
     Show-Err ("Start failed. Log: " + $LOG_FILE)
+    Show-Err "Common fixes:"
+    Show-Err "  1. Krexion runtime (Docker Desktop) tray icon ko quit + restart karein"
+    Show-Err "  2. PC restart karein"
+    Show-Err "  3. INSTALL.bat dobara chalayein"
+    Show-Err "Support: support@krexion.com (yeh log file attach karein)"
     Pop-Location
     Stop-Transcript -ErrorAction SilentlyContinue
     exit 1
