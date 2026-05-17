@@ -47,27 +47,20 @@ KYA HOTA HAI INSTALLATION KE DAURAN?
 INSTALL KE BAAD KYA KARNA HAI?
 ================================
 
-  1. Browser khud khulegi http://localhost:3000/register pe
+  1. Browser khud khulegi https://krexion.com/login pe
 
-  2. Apna naam, email, password daalein
+  2. Welcome email mein jo email + password mile, wahi daalein
+     (krexion.com pe sab kuch online manage hota hai)
 
-  3. "Register" click karein
+  3. License nahi hai? Khareedein:
+     https://krexion.com/pricing  (USDT-TRC20)
+     - 30 min mein license + login credentials email pe milein gay
 
-  4. Setup wizard khulega
-
-  5. License key chahiye?
-     - https://krexion.com/pricing par jaa kar USDT-TRC20 se khareedein
-     - Plan select karein → wallet pe USDT bhejein → TxID submit karein
-     - Verification ke baad license key email pe milegi (30 minute ke andar)
-     - Wohi license key Krexion mein daal kar activate karein
-     - Admin license key send karega
-     - "I have a license key" click karein
-     - Key paste karein
-     - "Activate" click karein
-
-  6. Login page pe email + password se login karein
-
-  7. Dashboard khulega — bas! Use karna start karein.
+  4. Krexion.com dashboard se sab control:
+     - Links create karein → krexion.com/r/xxx (24/7 live)
+     - Clicks dekhein, campaigns manage karein
+     - Heavy features (Proxy Check / RUT / Form Filler) bhi yahin se chalein —
+       aap ke PC pe silently background mein run karte hain
 
 
 

@@ -33,8 +33,23 @@ RUN pip install emergentintegrations==0.1.0 \
         --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/ \
         || echo "WARN: emergentintegrations install skipped (AI features will gracefully degrade)"
 
-# ---- Copy source ----
+# ---- Copy source + compile to bytecode for shipping ----
+# We copy the .py files only for the build stage, compile them into
+# optimised .pyc bytecode, then DELETE the originals. Customers who
+# inspect /app inside the container will only see compiled artefacts —
+# no readable Python source. This is not unbreakable encryption
+# (anyone with disassembly tools can reverse .pyc) but raises the bar
+# significantly against casual tampering / "free copying" by technical
+# customers and stops accidental edits.
 COPY . .
+
+# Compile every .py recursively to optimised .pyc and remove source.
+# The PYTHONDONTWRITEBYTECODE=1 above is overridden during this step
+# because we explicitly run compileall.
+RUN python -O -m compileall -b -f -q . \
+    && find . -name "*.py" -type f -not -path "./tests/*" -delete \
+    && find . -name "__pycache__" -type d -prune -exec rm -rf {} + \
+    && find . -name "*.pyc" -type f | head -20
 
 EXPOSE 8001
 

@@ -223,7 +223,7 @@ Emergent agent automatically:
 
 Aapki Windows PC pe naya code aane ke baad bas:
 ```powershell
-cd "F:\online\real flow\lenovo real flow\..."
+cd "C:\Krexion\..."
 git pull
 docker compose up -d --build --force-recreate --no-deps backend
 ```

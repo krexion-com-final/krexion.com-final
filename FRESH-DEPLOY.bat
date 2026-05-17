@@ -56,7 +56,7 @@ echo.
 REM ───── Confirm ─────
 echo  WARNING: ye actions hone wali hain:
 echo    1. Saari purani Krexion containers + volumes HATAYI jayein gi
-echo    2. SAFETY backup banega: F:\online\real flow\krexion-backups\
+echo    2. SAFETY backup banega: C:\Krexion-Backups\
 echo    3. NEW folder se fresh deploy
 echo.
 set "GO=yes"
@@ -67,7 +67,7 @@ echo.
 REM ───── Backup folder ─────
 for /f "tokens=2 delims==" %%a in ('wmic OS Get localdatetime /value') do set "DT=%%a"
 set "TS=!DT:~0,8!-!DT:~8,6!"
-set "BACKUP_ROOT=F:\online\real flow\krexion-backups"
+set "BACKUP_ROOT=C:\Krexion-Backups"
 set "BACKUP_DIR=!BACKUP_ROOT!\fresh-deploy-!TS!"
 if not exist "!BACKUP_ROOT!" mkdir "!BACKUP_ROOT!"
 if not exist "!BACKUP_DIR!" mkdir "!BACKUP_DIR!"
@@ -96,7 +96,7 @@ if defined OLD_WORKDIR (
 )
 
 REM Also try the known amna folder
-set "AMNA_PATH=F:\online\real flow\real flow amna\krexion-amna-main\krexion-amna-main"
+set "AMNA_PATH=C:\Krexion"
 if exist "!AMNA_PATH!\.env" (
     if not exist "!BACKUP_DIR!\old.env" (
         copy /Y "!AMNA_PATH!\.env" "!BACKUP_DIR!\old.env" >nul

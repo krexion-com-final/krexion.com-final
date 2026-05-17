@@ -644,7 +644,7 @@ Ek master spreadsheet, multiple tabs (e.g. `Proxies`, `UAs`, `Leads-CA`, `Leads-
 ### **Step 5: File ko sahi jagah rakhen**
 1. Apni Windows PC pe project folder kholen:
    ```
-   F:\online\real flow\lenovo real flow\lenovo-krexion-main\lenovo-krexion-main\backend\
+   C:\Krexion\backend\
    ```
 2. **`secrets`** folder banayen (agar nahi hai)
 3. Downloaded JSON file ko rename karen: **`gsheets-sa.json`**

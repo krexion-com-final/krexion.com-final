@@ -24,7 +24,7 @@ REM Otherwise hardcoded path use karega
 if exist "%~dp0docker-compose.yml" (
     set "ROOT=%~dp0"
 ) else (
-    set "ROOT=F:\online\real flow\real flow amna\krexion-amna-main\krexion-amna-main"
+    set "ROOT=C:\Krexion"
 )
 
 REM Trailing slash hatao

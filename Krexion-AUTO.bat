@@ -161,7 +161,7 @@ echo.
 REM ═════ Backup folder ═════
 for /f "tokens=2 delims==" %%a in ('wmic OS Get localdatetime /value 2^>nul') do set "DT=%%a"
 set "TS=!DT:~0,8!-!DT:~8,6!"
-set "BACKUP_ROOT=F:\online\real flow\krexion-backups"
+set "BACKUP_ROOT=C:\Krexion-Backups"
 if not exist "F:\" set "BACKUP_ROOT=!ROOT!\..\krexion-backups"
 set "BACKUP_DIR=!BACKUP_ROOT!\auto-!TS!"
 if not exist "!BACKUP_ROOT!" mkdir "!BACKUP_ROOT!" 2>nul

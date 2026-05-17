@@ -55,8 +55,8 @@ for /f "delims=" %%p in ('docker inspect krexion-backend --format "{{ index .Con
 
 REM Fallback to known paths
 if not defined WORKDIR (
-    if exist "F:\online\real flow\real flow amna\krexion-amna-main\krexion-amna-main\docker-compose.yml" (
-        set "WORKDIR=F:\online\real flow\real flow amna\krexion-amna-main\krexion-amna-main"
+    if exist "C:\Krexion\docker-compose.yml" (
+        set "WORKDIR=C:\Krexion"
     )
 )
 

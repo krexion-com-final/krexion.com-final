@@ -17,7 +17,7 @@ title Krexion CPI - Proxy Bridge Diagnostic
 color 0E
 cls
 
-set "ROOT=F:\online\real flow\lenovo real flow\lenovo-krexion-main\lenovo-krexion-main\krexion-cpi-worker"
+set "ROOT=C:\Krexion\krexion-cpi-worker"
 set "VENV=%ROOT%\venv-cpi-worker\Scripts\python.exe"
 
 echo.

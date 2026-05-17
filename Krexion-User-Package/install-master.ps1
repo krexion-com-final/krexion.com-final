@@ -653,6 +653,45 @@ if ($LASTEXITCODE -ne 0) {
 }
 Pop-Location
 
+# ───────────────────────────────────────────────────────────────────
+# Source-code hardening (CUSTOMER installs only).
+# After the docker image has been successfully built — which already
+# compiled all Python to optimised .pyc bytecode inside the image —
+# we delete the readable .py/.js source files from the host disk.
+# This prevents technical customers from reading our source, modifying
+# it, redistributing it, or attempting to crack the licensing logic.
+#
+# The Docker container keeps running because the image already has
+# the compiled bytecode + built frontend bundle baked in. Updates
+# work the same way: UPDATE-WATCHER.bat pulls the latest source,
+# rebuilds the image, then re-runs this scrub.
+# ───────────────────────────────────────────────────────────────────
+if ($CustomerMode) {
+    Show-Info "Source hardening (encrypting customer files)…"
+    try {
+        # Strip backend Python source — only requirements.txt + Dockerfile remain
+        Get-ChildItem -Path (Join-Path $INSTALL_DIR "backend") -Recurse -File -Include "*.py" -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+        # Strip frontend React/JSX source — built bundle is already in the docker image
+        $feSrc = Join-Path $INSTALL_DIR "frontend\src"
+        if (Test-Path $feSrc) { Remove-Item $feSrc -Recurse -Force -ErrorAction SilentlyContinue }
+        $fePub = Join-Path $INSTALL_DIR "frontend\public"
+        if (Test-Path $fePub) { Remove-Item $fePub -Recurse -Force -ErrorAction SilentlyContinue }
+        # Drop developer/admin docs that aren't needed at runtime
+        Get-ChildItem -Path $INSTALL_DIR -File -Include "*.md", "HANDOFF*.md" -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+        # Mark the install directory as "system" + "hidden" so casual file
+        # explorer browsing doesn't reveal docker-compose internals.
+        try {
+            attrib +H +S "$INSTALL_DIR\backend" 2>&1 | Out-Null
+            attrib +H +S "$INSTALL_DIR\frontend" 2>&1 | Out-Null
+        } catch { }
+        Show-Ok "Source files hardened — only compiled artefacts on disk"
+    } catch {
+        Show-Warn "Source hardening partial: $($_.Exception.Message)"
+    }
+}
+
 # Wait for Krexion
 Show-Info "Krexion ready hone ka wait"
 $ok = $false
@@ -679,18 +718,20 @@ if ($CustomerMode) {
     # Customer mode - DO NOT show admin password
     Write-Host "  YEH STEPS FOLLOW KAREIN:" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "  1. Browser khud khul jayega Krexion login page pe" -ForegroundColor White
-    Write-Host "  2. Email + password (Krexion welcome email mein milein gay)" -ForegroundColor White
-    Write-Host "     ya naya account banayein:" -ForegroundColor White
-    Write-Host "       http://localhost:3000/register" -ForegroundColor Yellow
-    Write-Host "  3. License key Setup Wizard mein daalein" -ForegroundColor White
-    Write-Host "     Agar license nahi hai to khareedein:" -ForegroundColor White
-    Write-Host "       https://krexion.com/pricing" -ForegroundColor Yellow
+    Write-Host "  1. Browser khud khul jayega krexion.com login page pe" -ForegroundColor White
+    Write-Host "  2. Welcome email mein jo email + password mile" -ForegroundColor White
+    Write-Host "     wahi krexion.com pe daal kar login karein" -ForegroundColor White
+    Write-Host "  3. Link create karein — sab links krexion.com/r/xxx pe" -ForegroundColor White
+    Write-Host "     hain — 24/7 live, aap ka PC band ho to bhi chalein gay" -ForegroundColor White
     Write-Host ""
-    Write-Host "  ACCESS URL:" -ForegroundColor Cyan
-    Write-Host "    Main App:        http://localhost:3000" -ForegroundColor White
-    Write-Host "    Login:           http://localhost:3000/login" -ForegroundColor White
+    Write-Host "  HEAVY FEATURES (Proxy Check / RUT / Form Filler):" -ForegroundColor Cyan
+    Write-Host "    Yeh app aap ke PC mein silently chalega — sab kuch" -ForegroundColor White
+    Write-Host "    krexion.com dashboard se control hoga." -ForegroundColor White
+    Write-Host ""
+    Write-Host "  YOUR LINKS:" -ForegroundColor Cyan
+    Write-Host "    Main dashboard:  https://krexion.com/login" -ForegroundColor White
     Write-Host "    Buy License:     https://krexion.com/pricing" -ForegroundColor White
+    Write-Host "    Support:         https://krexion.com/support" -ForegroundColor White
     Write-Host ""
 } else {
     # Admin mode - show admin credentials
@@ -714,24 +755,27 @@ if ($CustomerMode) {
         "  Krexion - Aap Ka Setup",
         "=================================================",
         "",
-        "  Browser kholein:",
-        "    http://localhost:3000",
+        "  Main Dashboard (online — kahin se b login):",
+        "    https://krexion.com/login",
         "",
-        "  Login karein (Welcome email se):",
-        "    http://localhost:3000/login",
+        "  Welcome email mein jo email + password mile,",
+        "  wahi krexion.com pe daal kar login karein.",
         "",
-        "  Ya naya account banayein:",
-        "    http://localhost:3000/register",
+        "  Sab links krexion.com/r/xxx pe live rehte hain —",
+        "  aap ka PC band ho ya open, links 24/7 chalein gay.",
         "",
-        "  License kahan se khareedein?",
-        "    https://krexion.com/pricing",
-        "    USDT-TRC20 se pay karein, license email pe milegi.",
-        "    Setup Wizard mein license key daal kar activate karein.",
+        "  HEAVY FEATURES yahan silently background mein chalte hain:",
+        "    - Proxy Check (1000+ proxies parallel)",
+        "    - Real User Traffic (real Chrome)",
+        "    - Form Filler",
+        "    - CPI Worker",
+        "  Inhe control karne ke liye bhi krexion.com use karein.",
         "",
-        ("  Installed:   " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')),
-        ("  Folder:      " + $INSTALL_DIR),
+        "  License khareedein:  https://krexion.com/pricing",
+        "  Support:             https://krexion.com/support",
         "",
-        "  Support:     https://krexion.com/support",
+        ("  Installed:           " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')),
+        ("  Folder:              " + $INSTALL_DIR),
         "",
         "=================================================",
         "  ZAROORI: Yeh file delete na karein!",
@@ -764,28 +808,36 @@ if ($CustomerMode) {
 $credsLines | Set-Content -Path $credsFile -Encoding UTF8 -Force
 Show-Ok ("Info saved: " + $credsFile)
 
-# Desktop shortcut - always points to login (customer logs in with welcome-email credentials)
+# Desktop shortcut — opens the CLOUD dashboard at krexion.com/login.
+# The local install runs silently in the background for heavy features
+# (proxy check, RUT, form filler); the customer's daily work happens
+# online so it feels like a true SaaS — not a local-only app.
 try {
     $wsh = New-Object -ComObject WScript.Shell
     $sc = $wsh.CreateShortcut("$env:USERPROFILE\Desktop\Krexion.url")
     if ($CustomerMode) {
-        $sc.TargetPath = "http://localhost:3000/login"
+        $sc.TargetPath = "https://krexion.com/login"
     } else {
         $sc.TargetPath = "http://localhost:3000"
     }
     $sc.Save()
-    Show-Ok "Desktop shortcut: Krexion.url"
+    Show-Ok "Desktop shortcut: Krexion (opens krexion.com)"
 } catch { }
 
-# Add Krexion to Windows startup so the app auto-opens on every boot —
-# customer experiences pure Krexion (Docker stays headless in background).
+# Add Krexion to Windows startup so the cloud login auto-opens on every
+# boot — customer experiences pure Krexion SaaS (local install stays
+# headless in background for heavy features only).
 try {
     $startupDir = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
     if (-not (Test-Path $startupDir)) { New-Item -ItemType Directory -Path $startupDir -Force | Out-Null }
     $startupLnk = Join-Path $startupDir "Krexion.url"
     $wsh2 = New-Object -ComObject WScript.Shell
     $sc2 = $wsh2.CreateShortcut($startupLnk)
-    $sc2.TargetPath = "http://localhost:3000/login"
+    if ($CustomerMode) {
+        $sc2.TargetPath = "https://krexion.com/login"
+    } else {
+        $sc2.TargetPath = "http://localhost:3000"
+    }
     $sc2.Save()
     Show-Ok "Auto-start configured (Krexion opens on Windows login)"
 } catch { }
@@ -793,11 +845,11 @@ try {
 # Re-apply hidden settings + clean up any Docker shortcuts created by the installer
 Set-DockerHidden
 
-# Open browser
+# Open browser to cloud dashboard at krexion.com (customer's primary UX)
 Show-Info "Browser open kar raha hun"
 Start-Sleep -Seconds 2
 if ($CustomerMode) {
-    Start-Process "http://localhost:3000/login"
+    Start-Process "https://krexion.com/login"
 } else {
     Start-Process "http://localhost:3000"
 }

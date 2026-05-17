@@ -17,9 +17,9 @@ REM     5. Status dikhayega
 REM ====================================================================
 
 REM ───── PATHS (aap ke system ke according hardcoded) ─────
-set "OLD_PATH=F:\online\real flow\real flow amna\krexion-amna-main\krexion-amna-main"
-set "NEW_PATH=F:\online\real flow\lenovo real flow\lenovo-krexion-main\lenovo-krexion-main"
-set "BACKUP_ROOT=F:\online\real flow\krexion-backups"
+set "OLD_PATH=C:\Krexion"
+set "NEW_PATH=C:\Krexion"
+set "BACKUP_ROOT=C:\Krexion-Backups"
 
 cls
 echo.

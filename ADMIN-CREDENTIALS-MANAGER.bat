@@ -30,8 +30,8 @@ for /f "usebackq delims=" %%p in (`docker inspect krexion-backend --format "{{ i
 
 REM If not found, try OLD hardcoded path
 if "%ROOT%"=="" (
-    if exist "F:\online\real flow\real flow amna\krexion-amna-main\krexion-amna-main\docker-compose.yml" (
-        set "ROOT=F:\online\real flow\real flow amna\krexion-amna-main\krexion-amna-main"
+    if exist "C:\Krexion\docker-compose.yml" (
+        set "ROOT=C:\Krexion"
         set "DETECTED_FROM=hardcoded OLD path"
     )
 )
@@ -50,7 +50,7 @@ if "%ROOT:~-1%"=="/" set "ROOT=%ROOT:~0,-1%"
 
 if "%ROOT%"=="" (
     echo  [ERROR] Project root nahi mila. Manually .env edit karein:
-    echo            F:\online\real flow\real flow amna\krexion-amna-main\krexion-amna-main\.env
+    echo            C:\Krexion\.env
     pause & exit /b 1
 )
 
