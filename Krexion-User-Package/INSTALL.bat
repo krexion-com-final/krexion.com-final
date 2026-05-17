@@ -1,42 +1,112 @@
 @echo off
 REM ###################################################################
 REM #                                                                 #
-REM #          KREXION - INSTALL KAREIN                              #
+REM #          KREXION - AAP KA INSTALLER                            #
 REM #                                                                 #
-REM #  Bas yeh file double-click karein. Aur kuch nahi.               #
+REM #  Bas yeh file pe DOUBLE-CLICK karein. Bas.                      #
 REM #                                                                 #
 REM #  - UAC popup aaye to "YES" click karein                         #
 REM #  - 20-30 minute wait karein                                     #
-REM #  - Browser khud khulega                                         #
-REM #  - Register page pe naya account banayein                       #
+REM #  - Browser khud khulega https://krexion.com pe                  #
+REM #                                                                 #
+REM #  Window ABHI band NAHI hogi. Agar koi error aaye to             #
+REM #  aap easily padh paayenge.                                      #
 REM #                                                                 #
 REM ###################################################################
+setlocal EnableDelayedExpansion
 
-REM Self-elevate to Admin
-fltmc >nul 2>&1
-if %errorLevel% neq 0 (
+REM ─── Setup transcript file on Desktop so customer always sees logs ──
+set "DESKTOP=%USERPROFILE%\Desktop"
+if not exist "%DESKTOP%" set "DESKTOP=%PUBLIC%\Desktop"
+set "LOG=%DESKTOP%\Krexion-Install-Log.txt"
+
+REM Make the BAT log everything by piping to tee-like behaviour later
+title Krexion Installer
+mode con: cols=100 lines=40
+color 0B
+cls
+
+REM ───────────────────────────────────────────────────────────────────
+REM  CHECK 1: Are we running from inside a ZIP / temp folder?
+REM  Windows extracts ZIP contents to %TEMP%\Temp1_xxx when user
+REM  double-clicks BAT *inside* the ZIP. That sandbox path makes the
+REM  install fail mid-way because files vanish. Detect + tell customer.
+REM ───────────────────────────────────────────────────────────────────
+echo %~dp0| findstr /I /C:"\Temp1_" /C:"\Temp\Temp" /C:"\AppData\Local\Temp" >nul
+if %errorlevel% equ 0 (
+    cls
+    color 0C
+    echo.
+    echo  ###################################################################
+    echo  #                                                                 #
+    echo  #              ZIP FILE EXTRACT NAHI KI!                         #
+    echo  #                                                                 #
+    echo  ###################################################################
+    echo.
+    echo   Aap ne ZIP file ke ANDAR se INSTALL.bat click kiya hai.
+    echo   Yeh ZIP ke andar nahi chalta. Pehle PROPERLY extract karein:
+    echo.
+    echo     1. Krexion-User-Package.zip pe RIGHT-CLICK karein
+    echo     2. "Extract All..." click karein
+    echo     3. "Extract" button click karein
+    echo     4. Naye folder ke ANDER jayein
+    echo     5. PHIR INSTALL.bat double-click karein
+    echo.
+    echo  ===================================================
+    echo   Yeh window khuli rahegi - jab samajh aa jaye
+    echo   to koi bhi key dabayein band karne ke liye.
+    echo  ===================================================
+    echo.
+    pause
+    exit /b 1
+)
+
+REM ───────────────────────────────────────────────────────────────────
+REM  CHECK 2: Admin rights via UAC.
+REM  We use net session as it's the most reliable admin-detection
+REM  primitive that works on every Windows 10/11 SKU.
+REM ───────────────────────────────────────────────────────────────────
+net session >nul 2>&1
+if %errorlevel% neq 0 (
     echo.
     echo  ===================================================
     echo   Administrator rights chahiye.
-    echo   UAC popup pe "YES" dabayein.
+    echo   UAC popup pe "YES" / "Haan" click karein.
     echo  ===================================================
     echo.
-    powershell -Command "Start-Process -FilePath '%~f0' -Verb RunAs" >nul 2>&1
-    if %errorLevel% neq 0 (
+    echo   Agar koi popup nahi aata, ya "No" press kiya gaya:
+    echo     1. INSTALL.bat pe RIGHT-CLICK karein
+    echo     2. "Run as administrator" select karein
+    echo.
+    echo  Window 8 second mein UAC trigger karegi...
+    timeout /t 4 /nobreak >nul
+
+    REM Self-elevate via PowerShell
+    powershell -NoProfile -Command "try { Start-Process -FilePath '%~f0' -Verb RunAs -ErrorAction Stop } catch { exit 1 }"
+    if !errorlevel! neq 0 (
         echo.
-        echo  UAC popup fail hua.
-        echo  Solution: Right-click karein "Run as administrator"
+        color 0C
+        echo  ===================================================
+        echo   UAC popup cancel kiya gaya - install ruk gaya.
+        echo  ===================================================
+        echo.
+        echo  Solution:
+        echo    1. INSTALL.bat pe RIGHT-CLICK karein
+        echo    2. "Run as administrator" select karein
+        echo    3. UAC popup pe "YES" / "Haan" click karein
+        echo.
+        echo  Yeh window khuli rahegi. Koi bhi key dabayein band karne ke liye.
         echo.
         pause
     )
     exit /b 0
 )
 
-title Krexion Installer - Wait Karein
-mode con: cols=100 lines=40
-color 0B
-cls
+REM We are now elevated. Start logging from here onwards.
+echo Krexion installer started: %DATE% %TIME% > "%LOG%" 2>nul
+echo Folder: %~dp0 >> "%LOG%" 2>nul
 
+cls
 echo.
 echo  ###################################################################
 echo  #                                                                 #
@@ -51,19 +121,27 @@ echo     [1] System engine setup
 echo     [2] Krexion runtime install
 echo     [3] Krexion application download + setup
 echo     [4] Aap ke PC ke liye optimized configuration
-echo     [5] Browser auto-open Login page pe
+echo     [5] Browser auto-open https://krexion.com/login
 echo.
 echo  ===================================================
 echo   Total time: 20-30 minute
-echo   Coffee/Chai piyen, sab automatic hai
+echo   Coffee/Chai piyen, sab automatic hai.
 echo  ===================================================
+echo.
+echo   Detailed log:  %LOG%
 echo.
 timeout /t 5 /nobreak >nul
 
-REM Check internet
+REM ───────────────────────────────────────────────────────────────────
+REM  CHECK 3: Internet connectivity
+REM ───────────────────────────────────────────────────────────────────
 echo  [..] Internet check kar raha hun...
 ping -n 1 github.com >nul 2>&1
-if %errorLevel% neq 0 (
+set "INET=%errorlevel%"
+echo Internet check exit code: %INET% >> "%LOG%"
+
+if %INET% neq 0 (
+    color 0C
     echo.
     echo  ===================================================
     echo   ERROR: Internet connection nahi hai!
@@ -72,7 +150,10 @@ if %errorLevel% neq 0 (
     echo  Solution:
     echo    1. WiFi check karein
     echo    2. Mobile hotspot try karein
-    echo    3. Phir dobara INSTALL.bat chalayein
+    echo    3. Browser kholein, kuch bhi load karein
+    echo    4. Phir dobara INSTALL.bat chalayein
+    echo.
+    echo  Yeh window khuli rahegi. Koi bhi key dabayein band karne ke liye.
     echo.
     pause
     exit /b 1
@@ -80,73 +161,128 @@ if %errorLevel% neq 0 (
 echo  [OK] Internet working
 echo.
 
-REM Use bundled install-master.ps1 (in same folder)
+REM ───────────────────────────────────────────────────────────────────
+REM  CHECK 4: install-master.ps1 file present
+REM ───────────────────────────────────────────────────────────────────
 set "PS_FILE=%~dp0install-master.ps1"
 
 if not exist "%PS_FILE%" (
+    color 0C
     echo.
     echo  ===================================================
     echo   ERROR: install-master.ps1 file missing!
     echo  ===================================================
     echo.
-    echo  Yeh file aap ke folder mein honi chahiye.
+    echo  Aap ka folder: %~dp0
+    echo.
+    echo  Yeh file aap ke folder mein honi chahiye:
+    echo    - INSTALL.bat
+    echo    - install-master.ps1   ^<-- yeh missing hai
     echo.
     echo  Solution:
-    echo    1. ZIP file ko PROPERLY extract karein
-    echo    2. Folder mein dono files honi chahiye:
-    echo       - INSTALL.bat
-    echo       - install-master.ps1
-    echo    3. INSTALL.bat dobara chalayein
+    echo    1. https://krexion.com/download se naya ZIP download karein
+    echo    2. Right-click → "Extract All..." → Extract
+    echo    3. Extract hue folder mein jaayein
+    echo    4. INSTALL.bat double-click karein
     echo.
-    echo  Agar ZIP file kharab hai, admin se naya ZIP maangein.
+    echo  Yeh window khuli rahegi. Koi bhi key dabayein band karne ke liye.
     echo.
     pause
     exit /b 1
 )
-
 echo  [OK] Installer files found
 echo.
+
+REM ───────────────────────────────────────────────────────────────────
+REM  CHECK 5: PowerShell execution test (catches Group Policy locks
+REM  and Antivirus blocks before the long install starts).
+REM ───────────────────────────────────────────────────────────────────
+powershell -NoProfile -ExecutionPolicy Bypass -Command "exit 0" >nul 2>&1
+if %errorlevel% neq 0 (
+    color 0C
+    echo.
+    echo  ===================================================
+    echo   ERROR: PowerShell scripts blocked on this PC!
+    echo  ===================================================
+    echo.
+    echo  Wajah: Group Policy / Antivirus / Windows S Mode
+    echo.
+    echo  Solution:
+    echo    1. Antivirus temporarily disable karein
+    echo    2. Windows S Mode hai to use exit karein
+    echo       (Settings ^> Activation ^> Switch out of S mode)
+    echo    3. Phir INSTALL.bat dobara chalayein
+    echo.
+    echo  Window khuli rahegi.
+    echo.
+    pause
+    exit /b 1
+)
+echo  [OK] PowerShell scripts allowed
+echo.
+
 echo  ===================================================
 echo   Ab installer chal raha hai...
 echo   Please wait 20-30 minutes
 echo  ===================================================
 echo.
 
-REM Run the installer in CUSTOMER MODE
-powershell -ExecutionPolicy Bypass -NoProfile -File "%PS_FILE%" -CustomerMode
+REM ───────────────────────────────────────────────────────────────────
+REM  Run install-master.ps1 in CUSTOMER MODE
+REM  We log stderr+stdout to the desktop log file via PowerShell so
+REM  customer never has to find a hidden TEMP file when troubleshooting.
+REM ───────────────────────────────────────────────────────────────────
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& { try { & '%PS_FILE%' -CustomerMode *>&1 | Tee-Object -FilePath '%LOG%' -Append; exit $LASTEXITCODE } catch { Write-Host $_.Exception.Message; exit 99 } }"
 
 set "EXITCODE=%errorlevel%"
+echo. >> "%LOG%"
+echo Installer exited: code=%EXITCODE% at %DATE% %TIME% >> "%LOG%"
 
 if %EXITCODE% neq 0 (
+    color 0C
     echo.
     echo  ===================================================
     echo   Installation problem hui ^(error code: %EXITCODE%^)
     echo  ===================================================
     echo.
-    echo   Log files yahan hain:
-    echo     %TEMP%\krexion-install.log
-    echo     %TEMP%\krexion-transcript.log
+    echo   Detailed log Desktop pe save hua hai:
+    echo     %LOG%
     echo.
-    echo   Yeh dono files admin ko WhatsApp pe bhejen
-    echo   (jin se aap ne yeh package liya hai).
+    echo   Support contact:  https://krexion.com/support
+    echo   Email karein:     support@krexion.com
+    echo   Yeh "Krexion-Install-Log.txt" file Desktop se attach karein.
+    echo.
+    echo  Window khuli rahegi. Koi bhi key dabayein band karne ke liye.
     echo.
     pause
     exit /b %EXITCODE%
 )
 
+cls
+color 0A
 echo.
 echo  ###################################################################
 echo  #                                                                 #
-echo  #              SUCCESS! KREXION READY HAI                        #
+echo  #              MUBARAK HO! KREXION READY HAI                     #
 echo  #                                                                 #
-echo  #   Browser khud khul gayi hai - Register page pe                 #
+echo  #   Browser khud khul gaya hai - https://krexion.com pe          #
 echo  #                                                                 #
-echo  #   1. Naya account banayein                                      #
-echo  #   2. License key https://krexion.com/pricing se khareedein      #
-echo  #      (USDT-TRC20 — 30 min mein email pe milegi)                 #
-echo  #   3. License key Krexion mein daalein, ready!                   #
+echo  #   1. Welcome email mein jo email + password mile,               #
+echo  #      wahi krexion.com pe daal kar login karein.                 #
+echo  #                                                                 #
+echo  #   2. Sab kuch online manage hota hai - links 24/7 live.        #
+echo  #                                                                 #
+echo  #   3. Heavy features (Proxy/RUT/Form Filler) aap ke PC pe       #
+echo  #      silently chalein gay - krexion.com se control hoga.       #
+echo  #                                                                 #
+echo  #   License nahi hai? Khareedein:                                 #
+echo  #      https://krexion.com/pricing                                #
 echo  #                                                                 #
 echo  ###################################################################
 echo.
-pause
+echo  Detailed log Desktop pe save hua hai (delete kar sakte hain):
+echo    %LOG%
+echo.
+echo  Yeh window 30 second mein khud band ho jaayegi.
+timeout /t 30 /nobreak >nul
 exit /b 0
