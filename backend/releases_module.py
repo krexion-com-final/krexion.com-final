@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 logger = logging.getLogger(__name__)
 releases_router = APIRouter(tags=["releases"])
@@ -209,13 +209,32 @@ def _build_customer_endpoints(get_user_dep):
         }
 
     @router.post("/api/system/install-update")
-    async def trigger_update(user: dict = Depends(get_user_dep)):
-        """Customer (must be admin/owner of the local install) clicks
-        Update → we drop a flag file the host updater script picks up.
-        Only enabled on LOCAL mode."""
+    async def trigger_update(request: Request, user: dict = Depends(get_user_dep)):
+        """Customer clicks Update → flag is written so the host updater
+        rebuilds containers.
+
+        Three modes:
+          - LOCAL install: writes flag directly (original behaviour)
+          - CLOUD edge (krexion.com): bridges the call to the user's local
+            PC via the bridge_module, so the customer never has to leave
+            krexion.com or open localhost.
+          - LOCAL receiving a bridge-relayed call: writes flag directly
+            (recognised via X-Krexion-Bridge-Job header).
+        """
         mode = (os.environ.get("KREXION_MODE") or "local").lower()
-        if mode != "local":
-            raise HTTPException(403, "Self-update is only available on local installs")
+        is_bridge_relay = bool(request.headers.get("X-Krexion-Bridge-Job"))
+
+        if mode != "local" and not is_bridge_relay:
+            # We're on the cloud edge. Bridge the call to the user's local PC.
+            try:
+                from bridge_module import enqueue_bridge_job  # local import to avoid circular load
+            except Exception:
+                raise HTTPException(503, "Self-update bridge unavailable on this server")
+            return await enqueue_bridge_job(
+                user, "system/self-update", {},
+                wait_for_result=True, wait_timeout=25,
+            )
+
         if not user.get("is_admin"):
             raise HTTPException(403, "Only the admin user can trigger updates")
         try:
@@ -224,9 +243,10 @@ def _build_customer_endpoints(get_user_dep):
                 "requested_at": _now_iso(),
                 "requested_by": user.get("email") or user.get("id"),
                 "current_version": current_version(),
+                "via_bridge": is_bridge_relay,
             }
             UPDATE_FLAG_FILE.write_text(json.dumps(payload), encoding="utf-8")
-            logger.info(f"[update] flag written: {UPDATE_FLAG_FILE} by {payload['requested_by']}")
+            logger.info(f"[update] flag written: {UPDATE_FLAG_FILE} by {payload['requested_by']} bridge={is_bridge_relay}")
         except Exception as e:  # noqa: BLE001
             raise HTTPException(500, f"Could not write update flag: {e}")
         return {

@@ -182,6 +182,9 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
         "rut/status": ("GET", "/api/rut/status"),
         "form-filler/start": ("POST", "/api/form-filler/start"),
         "form-filler/status": ("GET", "/api/form-filler/status"),
+        # Self-update — cloud UpdateBanner click ends up here so customer
+        # never has to open localhost.
+        "system/self-update": ("POST", "/api/system/install-update"),
     }
     if feature not in feature_routes:
         return {"status": "failed", "error": f"unknown feature: {feature}"}

@@ -22,6 +22,7 @@ export default function UpdateBanner() {
   const [showModal, setShowModal] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [dismissed, setDismissed] = useState(false);
+  const [showBootstrapHelp, setShowBootstrapHelp] = useState(false);
 
   const fetchLatest = async () => {
     try {
@@ -68,13 +69,43 @@ export default function UpdateBanner() {
         {},
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      toast.success(r.data?.message || "Update started — Krexion will restart shortly.");
+      // Bridge response: { job_id, status: 'pending' | 'done', ... }
+      if (r.data?.job_id && r.data?.status === "pending") {
+        toast.info(
+          "Update request aap ke PC pe bheji gayi hai. 1-2 minute mein update shoro hoga. Yeh page automatically reload hoga.",
+          { duration: 12000 }
+        );
+        // Optimistic: refresh after enough time for rebuild
+        setTimeout(() => window.location.reload(), 120000);
+      } else {
+        toast.success(r.data?.message || "Update started — Krexion will restart shortly.");
+        setTimeout(() => window.location.reload(), 90000);
+      }
       setShowModal(false);
-      // After ~90s the new version should be live → reload
-      setTimeout(() => window.location.reload(), 90000);
     } catch (e) {
-      const detail = e.response?.data?.detail || "Update failed";
-      toast.error(detail);
+      const detail = e.response?.data?.detail;
+      // Bridge: local PC offline
+      if (
+        e.response?.status === 503 &&
+        detail &&
+        typeof detail === "object" &&
+        detail.code === "local_pc_offline"
+      ) {
+        toast.error(
+          "Aap ka PC offline hai. PC on karein, 1 min wait karein, phir Update dobara click karein.",
+          { duration: 10000 }
+        );
+      } else if (
+        e.response?.status === 403 &&
+        typeof detail === "string" &&
+        detail.toLowerCase().includes("local installs")
+      ) {
+        // This is the v1.0.4 bootstrap case - local PC doesn't have
+        // the bridge worker yet. Show one-time recovery instructions.
+        setShowBootstrapHelp(true);
+      } else {
+        toast.error(detail || "Update failed");
+      }
     } finally {
       setInstalling(false);
     }
@@ -196,6 +227,77 @@ export default function UpdateBanner() {
                   </>
                 )}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {showBootstrapHelp && (
+        <div
+          className="fixed inset-0 z-[100] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+          data-testid="bootstrap-help-modal"
+        >
+          <div className="bg-[#0f0a18] border border-[#3B82F6]/40 rounded-2xl w-full max-w-lg max-h-[85vh] overflow-hidden flex flex-col shadow-2xl">
+            <div className="px-6 py-5 border-b border-white/10 flex items-start justify-between gap-3">
+              <div>
+                <div className="text-[10px] uppercase tracking-widest font-bold mb-1.5 inline-block px-2 py-0.5 rounded bg-[#3B82F6]/20 text-[#3B82F6]">
+                  One-time setup
+                </div>
+                <h3 className="text-lg font-bold text-white">Pehla update - sirf 1 step</h3>
+                <p className="text-xs text-[#71717A] mt-1">
+                  Aap ka PC abhi v1.0.4 pe hai. Bridge worker v1.1.0 mein add hua hai. Yeh 1 baar manual step karna hai - aage se sab kuch yahin krexion.com se hoga.
+                </p>
+              </div>
+              <button
+                onClick={() => setShowBootstrapHelp(false)}
+                className="text-[#71717A] hover:text-white p-1"
+                data-testid="bootstrap-close"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="px-6 py-5 overflow-auto flex-1 text-sm text-[#D4D4D8]">
+              <ol className="space-y-3 list-decimal list-inside">
+                <li>
+                  Neeche se{" "}
+                  <a
+                    href="/krexion-update-bootstrap.bat"
+                    download
+                    data-testid="bootstrap-download"
+                    className="text-[#3B82F6] hover:underline font-semibold"
+                  >
+                    krexion-update-bootstrap.bat
+                  </a>{" "}
+                  download karein.
+                </li>
+                <li>
+                  Downloaded file ko apne PC ke <strong>Desktop pe rakhein</strong>.
+                </li>
+                <li>
+                  File pe <strong>right-click</strong> kar ke <strong>"Run as administrator"</strong> select karein.
+                </li>
+                <li>
+                  Window mein "[OK] Update flag written" dikhega - Enter dabayein.
+                </li>
+                <li>
+                  Aap ka PC <strong>5-10 minute</strong> mein update kar le ga (background mein, kuch karna nahi).
+                </li>
+                <li>
+                  Update khatam hone ke baad krexion.com refresh karein - header mein <strong>green "PC connected"</strong> badge dikhega.
+                </li>
+              </ol>
+              <div className="mt-5 p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs">
+                <strong>Aage se</strong> - is page ka "Install update" button direct kaam karega. Yeh bootstrap step phir kabhi nahi karna padega.
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-white/10 flex items-center justify-end gap-3 bg-white/[0.02]">
+              <a
+                href="/krexion-update-bootstrap.bat"
+                download
+                data-testid="bootstrap-download-btn"
+                className="inline-flex items-center gap-2 font-bold px-5 py-2.5 rounded-lg bg-[#3B82F6] text-black hover:bg-[#60A5FA] transition"
+              >
+                <Download size={15} /> Download bootstrap.bat
+              </a>
             </div>
           </div>
         </div>
