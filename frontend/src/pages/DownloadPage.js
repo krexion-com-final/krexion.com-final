@@ -1,10 +1,12 @@
 import React from "react";
 import { Link } from "react-router-dom";
+import { motion } from "framer-motion";
 import {
   Sparkles, Download, Shield, Cpu, HardDrive, Wifi,
   Check, Copy, ArrowRight, Lock,
 } from "lucide-react";
 import { toast } from "sonner";
+import WavyBackground from "../components/WavyBackground";
 
 const INSTALLER_URL = "/Krexion-User-Package.zip";
 const INSTALLER_SHA256 = "96ba63c0c2ccb00fc42d1a01a849bda3b707daed0dfe1acf299e1c81ef472844";
@@ -21,24 +23,26 @@ export default function DownloadPage() {
   };
 
   return (
-    <div className="min-h-screen bg-[#0a0a0f] text-white" data-testid="download-page">
-      {/* Ambient backdrop */}
-      <div className="pointer-events-none fixed inset-0 -z-10 opacity-60">
-        <div className="absolute -top-32 -left-32 w-[520px] h-[520px] rounded-full bg-[#8B5CF6]/20 blur-[140px]" />
-        <div className="absolute top-1/3 -right-40 w-[460px] h-[460px] rounded-full bg-[#22C55E]/15 blur-[140px]" />
+    <div className="min-h-screen bg-black text-white relative" data-testid="download-page">
+      <WavyBackground />
+
+      {/* Ambient backdrop — blue glow */}
+      <div className="pointer-events-none fixed inset-0 -z-10">
+        <div className="absolute -top-32 -left-32 w-[520px] h-[520px] rounded-full bg-blue-500/15 blur-[140px]" />
+        <div className="absolute top-1/3 -right-40 w-[460px] h-[460px] rounded-full bg-cyan-500/10 blur-[140px]" />
       </div>
 
       {/* Nav */}
-      <header className="border-b border-white/5 backdrop-blur-md sticky top-0 z-50 bg-[#0a0a0f]/70">
+      <header className="border-b border-white/5 backdrop-blur-md sticky top-0 z-50 bg-black/70">
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2" data-testid="download-logo">
-            <Sparkles className="text-[#A78BFA]" size={22} />
+            <Sparkles className="text-blue-400" size={22} />
             <span className="text-xl font-bold tracking-tight">KREXION</span>
           </Link>
           <nav className="flex items-center gap-5 text-sm">
-            <Link to="/pricing" className="text-[#A1A1AA] hover:text-white">Pricing</Link>
+            <Link to="/pricing" className="text-zinc-400 hover:text-white">Pricing</Link>
             <Link to="/download" className="text-white">Download</Link>
-            <Link to="/login" className="text-[#A1A1AA] hover:text-white">Login</Link>
+            <Link to="/login" className="text-zinc-400 hover:text-white">Login</Link>
           </nav>
         </div>
       </header>
@@ -46,14 +50,14 @@ export default function DownloadPage() {
       {/* Hero */}
       <section className="max-w-5xl mx-auto px-6 pt-20 pb-10 text-center">
         <div className="inline-flex items-center gap-2 bg-white/5 border border-white/10 rounded-full px-4 py-1.5 mb-6 text-xs">
-          <Download size={12} className="text-[#A78BFA]" />
+          <Download size={12} className="text-[#3B82F6]" />
           Optional desktop install • Version {INSTALLER_VERSION} • Windows 10/11 (64-bit)
         </div>
         <h1 className="text-5xl sm:text-6xl font-bold tracking-tight mb-5 leading-tight">
-          Download <span className="text-[#A78BFA]">Krexion</span>
+          Download <span className="text-[#3B82F6]">Krexion</span>
         </h1>
         <p className="text-lg text-[#A1A1AA] max-w-2xl mx-auto mb-3">
-          The Krexion dashboard works fully online at <Link to="/login" className="text-white underline hover:text-[#A78BFA]">krexion.com/login</Link>.
+          The Krexion dashboard works fully online at <Link to="/login" className="text-white underline hover:text-[#3B82F6]">krexion.com/login</Link>.
         </p>
         <p className="text-sm text-[#71717A] max-w-xl mx-auto mb-9">
           This installer is only needed if you want to run heavy local features like Real User Traffic, Form Filler, or CPI Worker on your own PC.
@@ -63,7 +67,7 @@ export default function DownloadPage() {
           href={INSTALLER_URL}
           download="Krexion-User-Package.zip"
           data-testid="download-installer-button"
-          className="inline-flex items-center gap-3 bg-[#A78BFA] text-black font-bold px-10 py-4 rounded-xl hover:bg-[#C4B5FD] transition shadow-2xl shadow-[#8B5CF6]/30"
+          className="inline-flex items-center gap-3 bg-[#3B82F6] text-black font-bold px-10 py-4 rounded-xl hover:bg-[#60A5FA] transition shadow-2xl shadow-[#2563EB]/30"
         >
           <Download size={20} />
           Download installer (.zip)
@@ -77,7 +81,7 @@ export default function DownloadPage() {
 
       {/* Pre-checks */}
       <section className="max-w-5xl mx-auto px-6 py-10">
-        <h2 className="text-sm uppercase tracking-widest text-[#A78BFA] mb-4 text-center">System requirements</h2>
+        <h2 className="text-sm uppercase tracking-widest text-[#3B82F6] mb-4 text-center">System requirements</h2>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {[
             { icon: HardDrive, t: "20 GB free disk", d: "SSD recommended" },
@@ -86,7 +90,7 @@ export default function DownloadPage() {
             { icon: Wifi, t: "Stable internet", d: "For first-time install" },
           ].map((s, i) => (
             <div key={i} className="bg-white/[0.03] border border-white/10 rounded-xl p-5 text-center">
-              <s.icon size={20} className="text-[#A78BFA] mx-auto mb-2" />
+              <s.icon size={20} className="text-[#3B82F6] mx-auto mb-2" />
               <div className="font-semibold text-sm mb-1">{s.t}</div>
               <div className="text-xs text-[#71717A]">{s.d}</div>
             </div>
@@ -118,7 +122,7 @@ export default function DownloadPage() {
               },
             ].map((step, i) => (
               <li key={i} className="flex gap-4">
-                <div className="shrink-0 w-9 h-9 rounded-full bg-[#A78BFA] text-black font-bold flex items-center justify-center text-sm">
+                <div className="shrink-0 w-9 h-9 rounded-full bg-[#3B82F6] text-black font-bold flex items-center justify-center text-sm">
                   {i + 1}
                 </div>
                 <div className="flex-1 pt-1">
@@ -136,7 +140,7 @@ export default function DownloadPage() {
                 <span className="font-semibold text-[#F59E0B]">No license yet?</span>{" "}
                 <span className="text-[#A1A1AA]">
                   Buy one at{" "}
-                  <Link to="/pricing" className="text-[#A78BFA] hover:text-white underline">
+                  <Link to="/pricing" className="text-[#3B82F6] hover:text-white underline">
                     krexion.com/pricing
                   </Link>{" "}
                   starting at 3 USDT for a 1-day trial.
@@ -155,7 +159,7 @@ export default function DownloadPage() {
             <span className="text-sm font-semibold">File integrity (SHA-256)</span>
           </div>
           <div className="flex items-center gap-2 bg-[#0a0a0f] border border-white/10 rounded-md p-3 font-mono text-[11px] sm:text-xs break-all">
-            <span className="flex-1 text-[#A78BFA]">{INSTALLER_SHA256}</span>
+            <span className="flex-1 text-[#3B82F6]">{INSTALLER_SHA256}</span>
             <button
               onClick={copyHash}
               className="text-[#71717A] hover:text-white shrink-0"
@@ -166,7 +170,7 @@ export default function DownloadPage() {
             </button>
           </div>
           <p className="text-xs text-[#71717A] mt-3">
-            Verify with PowerShell: <code className="bg-white/5 px-1.5 py-0.5 rounded text-[#A78BFA]">Get-FileHash -Algorithm SHA256 Krexion-User-Package.zip</code>
+            Verify with PowerShell: <code className="bg-white/5 px-1.5 py-0.5 rounded text-[#3B82F6]">Get-FileHash -Algorithm SHA256 Krexion-User-Package.zip</code>
           </p>
         </div>
       </section>
@@ -186,7 +190,7 @@ export default function DownloadPage() {
             },
             {
               q: "I lost my license email — what now?",
-              a: <>Login at <Link to="/login" className="text-[#A78BFA]">krexion.com/login</Link> with the credentials we emailed; your license is shown there. Or email <a href="mailto:support@krexion.com" className="text-[#A78BFA]">support@krexion.com</a>.</>,
+              a: <>Login at <Link to="/login" className="text-[#3B82F6]">krexion.com/login</Link> with the credentials we emailed; your license is shown there. Or email <a href="mailto:support@krexion.com" className="text-[#3B82F6]">support@krexion.com</a>.</>,
             },
             {
               q: "Does Krexion run after PC restart?",
@@ -208,7 +212,7 @@ export default function DownloadPage() {
       <footer className="border-t border-white/5">
         <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-[#71717A]">
           <div className="flex items-center gap-2">
-            <Sparkles className="text-[#A78BFA]" size={14} />
+            <Sparkles className="text-[#3B82F6]" size={14} />
             <span className="font-semibold text-white">KREXION</span>
             <span>© {new Date().getFullYear()}</span>
           </div>

@@ -1,76 +1,75 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import axios from "axios";
+import { motion } from "framer-motion";
 import {
-  Sparkles, Zap, Shield, Globe, ArrowRight, Check, ChevronDown,
-  Activity, Layers, Cpu, Lock, MailCheck,
+  Globe, Activity, Layers, Cpu, Shield, MailCheck,
+  ArrowRight, Check, ChevronDown, Zap, Lock, Sparkles,
 } from "lucide-react";
+import WavyBackground from "../components/WavyBackground";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
+// Brand blue (matches dashboard / login page)
+const BLUE = "#3B82F6";
+
 const FEATURES = [
-  {
-    icon: Globe,
-    title: "Cloud Dashboard — Login Anywhere",
-    desc: "Manage links, clicks and campaigns from any browser, any device. Your dashboard at krexion.com, not stuck on one PC.",
-  },
-  {
-    icon: Activity,
-    title: "Always-On Tracking Links",
-    desc: "Every link you generate lives at krexion.com/r/xxx — clicks keep flowing even when your computer is off, sleeping, or unplugged.",
-  },
-  {
-    icon: Layers,
-    title: "Massive Proxy Pool",
-    desc: "Plug in residential, ISP, or mobile proxies. Built-in checker validates them at scale across parallel batches.",
-  },
-  {
-    icon: Cpu,
-    title: "CPI Job Orchestrator",
-    desc: "Run Cost-Per-Install campaigns across distributed worker devices with smart routing and per-device fingerprinting.",
-  },
-  {
-    icon: Shield,
-    title: "Form Filler + Real User Traffic",
-    desc: "Auto-fill landing pages and emulate genuine human patterns through Chrome — not headless bots.",
-  },
-  {
-    icon: MailCheck,
-    title: "Email Validation Suite",
-    desc: "Verify deliverability, separate cleaned lists, and feed only valid leads into your campaigns.",
-  },
+  { icon: Globe, title: "Cloud Dashboard — Login Anywhere",
+    desc: "Manage links, clicks and campaigns from any browser, any device. Your dashboard lives at krexion.com, not stuck on one PC." },
+  { icon: Activity, title: "Always-On Tracking Links",
+    desc: "Every link you generate runs at krexion.com/r/xxx — clicks keep flowing even when your computer is off, sleeping, or unplugged." },
+  { icon: Layers, title: "Massive Proxy Pool",
+    desc: "Plug in residential, ISP or mobile proxies. Built-in checker validates them at scale across parallel batches." },
+  { icon: Cpu, title: "CPI Job Orchestrator",
+    desc: "Run Cost-Per-Install campaigns across distributed worker devices with smart routing and per-device fingerprinting." },
+  { icon: Shield, title: "Form Filler + Real User Traffic",
+    desc: "Auto-fill landing pages and emulate genuine human patterns through real Chrome — not headless bots." },
+  { icon: MailCheck, title: "Email Validation Suite",
+    desc: "Verify deliverability, separate cleaned lists, and feed only valid leads into your campaigns." },
 ];
 
 const FAQS = [
-  {
-    q: "Do I need to install anything?",
-    a: "No — Krexion runs fully online at krexion.com. Login, generate links, view clicks, manage campaigns from any browser. The optional desktop installer (krexion.com/download) is only for heavy local features like Real User Traffic and Form Filler.",
-  },
-  {
-    q: "Will my links die if I turn off my computer?",
-    a: "Never. All your links live on the krexion.com cloud — they keep tracking clicks 24/7 regardless of whether your PC is on, off, sleeping, or in a different country.",
-  },
-  {
-    q: "How does payment work?",
-    a: "We accept USDT (TRC-20) only. Pick a plan, send USDT to the wallet shown at checkout, paste your TxID, and your license + login credentials are delivered to your email within 30 minutes.",
-  },
-  {
-    q: "Do I need a credit card or bank?",
-    a: "No. Everything runs on crypto — no subscriptions, no recurring charges, no bank required. Pay only for the months you use.",
-  },
-  {
-    q: "How many PCs can I activate?",
-    a: "Cloud dashboard works on unlimited devices. For the optional desktop install: Starter 1 PC, Pro 3 PCs, Business 10 PCs, Trial 1 PC. Each install is tied to specific machine fingerprints.",
-  },
-  {
-    q: "Can I get a refund?",
-    a: "Yes — if your license is not delivered within 24 hours of TxID submission and on-chain confirmation, we refund in full. Otherwise sales are final.",
-  },
-  {
-    q: "What if my payment is underpaid?",
-    a: "We'll mark the order as rejected with the exact shortfall. Send the difference, resubmit your TxID, and we'll approve it.",
-  },
+  { q: "Do I need to install anything?",
+    a: "No — Krexion runs fully online at krexion.com. Login, generate links, view clicks, manage campaigns from any browser. The optional desktop installer is only for heavy features like Real User Traffic and Form Filler." },
+  { q: "Will my links die if I turn off my computer?",
+    a: "Never. All your links live on the krexion.com cloud — they keep tracking clicks 24/7 regardless of whether your PC is on, off, sleeping, or in a different country." },
+  { q: "How does payment work?",
+    a: "We accept USDT (TRC-20) only. Pick a plan, send USDT to the wallet shown at checkout, paste your TxID, and your license + login credentials are delivered to your email within 30 minutes." },
+  { q: "Do I need a credit card or bank?",
+    a: "No. Everything runs on crypto — no subscriptions, no recurring charges, no bank required. Pay only for the months you use." },
+  { q: "How many PCs can I activate?",
+    a: "Cloud dashboard works on unlimited devices. For the optional desktop install: Starter 1 PC, Pro 3 PCs, Business 10 PCs, Trial 1 PC." },
+  { q: "Can I get a refund?",
+    a: "Yes — if your license is not delivered within 24 hours of TxID submission and on-chain confirmation, we refund in full. Otherwise sales are final." },
 ];
+
+// Word-by-word reveal animation for the hero headline
+const WORD_VARIANTS = {
+  hidden: { opacity: 0, y: 40, filter: "blur(8px)" },
+  show: (i) => ({
+    opacity: 1, y: 0, filter: "blur(0px)",
+    transition: { delay: i * 0.08, duration: 0.6, ease: [0.22, 1, 0.36, 1] },
+  }),
+};
+
+function AnimatedWords({ text, className = "", accent = false }) {
+  return (
+    <span className={className}>
+      {text.split(" ").map((word, i) => (
+        <motion.span
+          key={`${word}-${i}`}
+          custom={i}
+          initial="hidden"
+          animate="show"
+          variants={WORD_VARIANTS}
+          className={`inline-block mr-3 ${accent ? "" : ""}`}
+        >
+          {word}
+        </motion.span>
+      ))}
+    </span>
+  );
+}
 
 export default function HomePage() {
   const [plans, setPlans] = useState([]);
@@ -83,150 +82,225 @@ export default function HomePage() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-[#0a0a0f] text-white overflow-x-hidden" data-testid="home-page">
-      {/* Ambient backdrop */}
-      <div className="pointer-events-none fixed inset-0 -z-10 opacity-60">
-        <div className="absolute -top-32 -left-32 w-[520px] h-[520px] rounded-full bg-[#8B5CF6]/20 blur-[140px]" />
-        <div className="absolute top-1/3 -right-40 w-[460px] h-[460px] rounded-full bg-[#3B82F6]/15 blur-[140px]" />
-        <div className="absolute bottom-0 left-1/3 w-[380px] h-[380px] rounded-full bg-[#22C55E]/10 blur-[120px]" />
+    <div className="min-h-screen bg-black text-white overflow-x-hidden relative" data-testid="home-page">
+      <WavyBackground />
+
+      {/* Soft blue ambient glows */}
+      <div className="pointer-events-none fixed inset-0 -z-10">
+        <div className="absolute -top-32 -left-32 w-[520px] h-[520px] rounded-full bg-blue-500/15 blur-[140px]" />
+        <div className="absolute top-1/3 -right-40 w-[460px] h-[460px] rounded-full bg-blue-600/15 blur-[140px]" />
+        <div className="absolute bottom-0 left-1/3 w-[380px] h-[380px] rounded-full bg-cyan-500/10 blur-[120px]" />
       </div>
 
       {/* Nav */}
-      <header className="border-b border-white/5 backdrop-blur-md sticky top-0 z-50 bg-[#0a0a0f]/70">
+      <header className="border-b border-white/5 backdrop-blur-md sticky top-0 z-50 bg-black/70">
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2" data-testid="home-logo">
-            <Sparkles className="text-[#A78BFA]" size={22} />
+            <Sparkles className="text-blue-400" size={22} />
             <span className="text-xl font-bold tracking-tight">KREXION</span>
           </Link>
           <nav className="hidden md:flex items-center gap-7 text-sm">
-            <a href="#features" className="text-[#A1A1AA] hover:text-white transition">Features</a>
-            <a href="#pricing" className="text-[#A1A1AA] hover:text-white transition">Pricing</a>
-            <Link to="/download" className="text-[#A1A1AA] hover:text-white transition" data-testid="nav-download">Download</Link>
-            <a href="#faq" className="text-[#A1A1AA] hover:text-white transition">FAQ</a>
-            <Link to="/login" className="text-[#A1A1AA] hover:text-white transition" data-testid="nav-login">Login</Link>
-            <Link to="/pricing" className="bg-white text-black px-4 py-1.5 rounded-md font-medium hover:bg-gray-200 transition" data-testid="nav-get-started">
+            <a href="#features" className="text-zinc-400 hover:text-white transition">Features</a>
+            <a href="#pricing" className="text-zinc-400 hover:text-white transition">Pricing</a>
+            <Link to="/download" className="text-zinc-400 hover:text-white transition" data-testid="nav-download">Download</Link>
+            <a href="#faq" className="text-zinc-400 hover:text-white transition">FAQ</a>
+            <Link to="/login" className="text-zinc-400 hover:text-white transition" data-testid="nav-login">Login</Link>
+            <Link
+              to="/pricing"
+              className="bg-blue-500 text-white px-4 py-1.5 rounded-md font-medium hover:bg-blue-400 transition shadow-lg shadow-blue-500/30"
+              data-testid="nav-get-started"
+            >
               Get started
             </Link>
           </nav>
-          <Link to="/pricing" className="md:hidden bg-white text-black px-3 py-1.5 rounded-md text-xs font-medium">
+          <Link to="/pricing" className="md:hidden bg-blue-500 text-white px-3 py-1.5 rounded-md text-xs font-medium">
             Start
           </Link>
         </div>
       </header>
 
       {/* Hero */}
-      <section className="max-w-7xl mx-auto px-6 pt-24 pb-20 text-center">
-        <div className="inline-flex items-center gap-2 bg-white/5 border border-white/10 rounded-full px-4 py-1.5 mb-7 text-xs">
-          <Zap size={12} className="text-[#A78BFA]" />
-          Cloud + Self-host • Pay with USDT • Links live 24/7
-        </div>
+      <section className="relative max-w-7xl mx-auto px-6 pt-24 pb-24 text-center">
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.05, duration: 0.6 }}
+          className="inline-flex items-center gap-2 bg-blue-500/10 border border-blue-500/30 rounded-full px-4 py-1.5 mb-7 text-xs backdrop-blur-sm"
+        >
+          <Zap size={12} className="text-blue-400" />
+          <span className="text-blue-100">Cloud + Self-host • Pay with USDT • Links live 24/7</span>
+        </motion.div>
+
+        {/* Animated heading */}
         <h1 className="text-5xl sm:text-6xl lg:text-7xl font-extrabold tracking-tight leading-[1.05] mb-6">
-          Real traffic.<br/>
-          <span className="bg-gradient-to-r from-[#A78BFA] via-[#C4B5FD] to-[#8B5CF6] bg-clip-text text-transparent">
+          <AnimatedWords text="Real traffic." className="block" />
+          <motion.span
+            initial={{ opacity: 0, y: 30, filter: "blur(8px)" }}
+            animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+            transition={{ delay: 0.35, duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
+            className="block bg-clip-text text-transparent"
+            style={{
+              backgroundImage: "linear-gradient(90deg, #60A5FA 0%, #3B82F6 25%, #93C5FD 50%, #3B82F6 75%, #60A5FA 100%)",
+              backgroundSize: "200% 100%",
+              animation: "krx-gradient 5s ease-in-out infinite",
+            }}
+          >
             Real conversions.
-          </span>
+          </motion.span>
         </h1>
-        <p className="text-lg text-[#A1A1AA] max-w-2xl mx-auto mb-9 leading-relaxed">
-          Manage your tracking, links and campaigns from anywhere in the world.
-          Your <span className="text-white font-semibold">krexion.com</span> links stay live 24/7 — even when your PC is off.
-        </p>
-        <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+
+        <motion.p
+          initial={{ opacity: 0, y: 14 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.6, duration: 0.6 }}
+          className="text-lg text-zinc-400 max-w-2xl mx-auto mb-9 leading-relaxed"
+        >
+          Manage your tracking, links and campaigns from anywhere in the world. Your{" "}
+          <span className="text-white font-semibold">krexion.com</span> links stay live 24/7 — even when your PC is off.
+        </motion.p>
+
+        <motion.div
+          initial={{ opacity: 0, y: 14 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.8, duration: 0.6 }}
+          className="flex flex-col sm:flex-row items-center justify-center gap-3"
+        >
           <Link
             to="/pricing"
-            className="bg-[#A78BFA] text-black font-semibold px-7 py-3.5 rounded-lg hover:bg-[#C4B5FD] transition inline-flex items-center gap-2"
+            className="group bg-blue-500 text-white font-semibold px-7 py-3.5 rounded-lg hover:bg-blue-400 transition inline-flex items-center gap-2 shadow-xl shadow-blue-500/30"
             data-testid="hero-cta-pricing"
           >
-            See plans <ArrowRight size={16} />
+            See plans <ArrowRight size={16} className="group-hover:translate-x-1 transition-transform" />
           </Link>
           <a
             href="#features"
-            className="border border-white/15 px-7 py-3.5 rounded-lg hover:bg-white/5 transition text-sm"
+            className="border border-white/15 px-7 py-3.5 rounded-lg hover:bg-white/5 transition text-sm backdrop-blur-sm"
           >
             How it works
           </a>
-        </div>
-        <div className="mt-12 grid grid-cols-2 md:grid-cols-4 gap-6 max-w-3xl mx-auto text-center">
+        </motion.div>
+
+        {/* Stat strip */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 1.0, duration: 0.7 }}
+          className="mt-14 grid grid-cols-2 md:grid-cols-4 gap-6 max-w-3xl mx-auto text-center"
+        >
           {[
             { v: "10M+", l: "Clicks delivered" },
             { v: "120+", l: "Countries supported" },
             { v: "99.9%", l: "Uptime" },
             { v: "<30 min", l: "License delivery" },
-          ].map(s => (
-            <div key={s.l}>
-              <div className="text-2xl font-bold text-white">{s.v}</div>
-              <div className="text-xs text-[#71717A] mt-1">{s.l}</div>
-            </div>
+          ].map((s, idx) => (
+            <motion.div
+              key={s.l}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 1.0 + idx * 0.08, duration: 0.5 }}
+            >
+              <div className="text-2xl font-bold bg-clip-text text-transparent" style={{ backgroundImage: "linear-gradient(90deg, #93C5FD, #3B82F6)" }}>
+                {s.v}
+              </div>
+              <div className="text-xs text-zinc-500 mt-1">{s.l}</div>
+            </motion.div>
           ))}
-        </div>
+        </motion.div>
       </section>
 
       {/* Features */}
-      <section id="features" className="max-w-7xl mx-auto px-6 py-20 scroll-mt-20">
-        <div className="text-center mb-14">
-          <div className="text-xs uppercase tracking-widest text-[#A78BFA] mb-3">Built for scale</div>
+      <section id="features" className="max-w-7xl mx-auto px-6 py-20 scroll-mt-20 relative">
+        <motion.div
+          initial={{ opacity: 0, y: 30 }}
+          whileInView={{ opacity: 1, y: 0 }}
+          viewport={{ once: true }}
+          transition={{ duration: 0.5 }}
+          className="text-center mb-14"
+        >
+          <div className="text-xs uppercase tracking-widest text-blue-400 mb-3">Built for scale</div>
           <h2 className="text-3xl sm:text-4xl font-bold mb-3">Everything you need to run traffic at scale</h2>
-          <p className="text-[#A1A1AA] max-w-2xl mx-auto text-sm">
+          <p className="text-zinc-400 max-w-2xl mx-auto text-sm">
             From single landing-page tests to multi-thousand-PC campaigns — one platform, fully self-hosted under your license.
           </p>
-        </div>
+        </motion.div>
+
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {FEATURES.map((f) => (
-            <div
+          {FEATURES.map((f, idx) => (
+            <motion.div
               key={f.title}
+              initial={{ opacity: 0, y: 22 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true, margin: "-80px" }}
+              transition={{ duration: 0.5, delay: idx * 0.06 }}
               data-testid={`feature-card-${f.title.toLowerCase().replace(/\s+/g, '-')}`}
-              className="group bg-white/[0.03] border border-white/10 rounded-xl p-6 hover:border-[#A78BFA]/30 hover:bg-white/[0.05] transition-all"
+              className="group relative bg-white/[0.025] border border-white/10 rounded-xl p-6 hover:border-blue-500/40 hover:bg-blue-500/5 transition-all duration-300 overflow-hidden"
             >
-              <div className="w-10 h-10 rounded-lg bg-[#A78BFA]/15 border border-[#A78BFA]/30 flex items-center justify-center mb-4 group-hover:bg-[#A78BFA]/25 transition">
-                <f.icon className="text-[#A78BFA]" size={18} />
+              <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none"
+                   style={{ background: "radial-gradient(circle at top left, rgba(59,130,246,0.12), transparent 60%)" }} />
+              <div className="relative">
+                <div className="w-10 h-10 rounded-lg bg-blue-500/15 border border-blue-500/30 flex items-center justify-center mb-4 group-hover:bg-blue-500/25 group-hover:scale-110 transition">
+                  <f.icon className="text-blue-400" size={18} />
+                </div>
+                <h3 className="font-semibold mb-1.5">{f.title}</h3>
+                <p className="text-sm text-zinc-400 leading-relaxed">{f.desc}</p>
               </div>
-              <h3 className="font-semibold mb-1.5">{f.title}</h3>
-              <p className="text-sm text-[#A1A1AA] leading-relaxed">{f.desc}</p>
-            </div>
+            </motion.div>
           ))}
         </div>
       </section>
 
-      {/* Pricing (compact) */}
-      <section id="pricing" className="max-w-7xl mx-auto px-6 py-20 scroll-mt-20">
-        <div className="text-center mb-12">
-          <div className="text-xs uppercase tracking-widest text-[#A78BFA] mb-3">Pricing</div>
+      {/* Pricing */}
+      <section id="pricing" className="max-w-7xl mx-auto px-6 py-20 scroll-mt-20 relative">
+        <motion.div
+          initial={{ opacity: 0, y: 26 }}
+          whileInView={{ opacity: 1, y: 0 }}
+          viewport={{ once: true }}
+          transition={{ duration: 0.5 }}
+          className="text-center mb-12"
+        >
+          <div className="text-xs uppercase tracking-widest text-blue-400 mb-3">Pricing</div>
           <h2 className="text-3xl sm:text-4xl font-bold mb-3">Simple plans, USDT only</h2>
-          <p className="text-[#A1A1AA] text-sm max-w-xl mx-auto">
+          <p className="text-zinc-400 text-sm max-w-xl mx-auto">
             One-time payments. Pay per month — no auto-renewal, no surprises.
           </p>
-        </div>
+        </motion.div>
+
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           {plans.length === 0 ? (
-            <div className="col-span-full text-center text-[#71717A] py-10 text-sm">Loading plans…</div>
-          ) : plans.map(plan => (
-            <div
+            <div className="col-span-full text-center text-zinc-500 py-10 text-sm">Loading plans…</div>
+          ) : plans.map((plan, idx) => (
+            <motion.div
               key={plan.id}
+              initial={{ opacity: 0, y: 30 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true, margin: "-50px" }}
+              transition={{ duration: 0.5, delay: idx * 0.08 }}
               data-testid={`home-plan-${plan.id}`}
-              className={`rounded-2xl p-6 flex flex-col relative ${
+              className={`rounded-2xl p-6 flex flex-col relative transition-all duration-300 hover:-translate-y-1 ${
                 plan.is_popular
-                  ? "bg-gradient-to-b from-[#1e1530] to-[#0f0a18] border-2 border-[#A78BFA]"
-                  : "bg-white/[0.03] border border-white/10"
+                  ? "bg-gradient-to-b from-blue-500/10 to-black border-2 border-blue-500 shadow-2xl shadow-blue-500/20"
+                  : "bg-white/[0.03] border border-white/10 hover:border-blue-500/40"
               }`}
             >
               {plan.is_popular && (
-                <div className="absolute -top-3 left-1/2 -translate-x-1/2 bg-[#A78BFA] text-black text-[10px] font-bold px-3 py-1 rounded-full">
+                <div className="absolute -top-3 left-1/2 -translate-x-1/2 bg-blue-500 text-white text-[10px] font-bold px-3 py-1 rounded-full shadow-lg shadow-blue-500/50">
                   MOST POPULAR
                 </div>
               )}
               <h3 className="font-bold text-lg mb-1">{plan.name}</h3>
-              <p className="text-xs text-[#71717A] min-h-[28px] mb-3">{plan.description}</p>
+              <p className="text-xs text-zinc-500 min-h-[28px] mb-3">{plan.description}</p>
               <div className="flex items-baseline gap-1 mb-4">
                 <span className="text-3xl font-bold">{plan.price_usdt}</span>
-                <span className="text-xs text-[#A1A1AA]">USDT</span>
-                <span className="text-xs text-[#71717A] ml-1">
+                <span className="text-xs text-zinc-400">USDT</span>
+                <span className="text-xs text-zinc-500 ml-1">
                   / {plan.duration_days === 1 ? "1 day" : `${plan.duration_days} days`}
                 </span>
               </div>
               <ul className="space-y-1.5 mb-5 flex-1">
                 {(plan.features || []).slice(0, 4).map((f, i) => (
                   <li key={i} className="flex items-start gap-2 text-xs">
-                    <Check size={12} className="text-[#A78BFA] shrink-0 mt-0.5" />
-                    <span className="text-[#D4D4D8]">{f}</span>
+                    <Check size={12} className="text-blue-400 shrink-0 mt-0.5" />
+                    <span className="text-zinc-300">{f}</span>
                   </li>
                 ))}
               </ul>
@@ -235,27 +309,33 @@ export default function HomePage() {
                 data-testid={`home-pick-${plan.id}`}
                 className={`w-full text-center py-2 rounded-lg text-sm font-medium transition ${
                   plan.is_popular
-                    ? "bg-[#A78BFA] text-black hover:bg-[#C4B5FD]"
-                    : "bg-white/5 border border-white/10 hover:bg-white/10"
+                    ? "bg-blue-500 text-white hover:bg-blue-400 shadow-lg shadow-blue-500/30"
+                    : "bg-white/5 border border-white/10 hover:bg-white/10 hover:border-blue-500/40"
                 }`}
               >
                 Pick {plan.name}
               </Link>
-            </div>
+            </motion.div>
           ))}
         </div>
         <div className="text-center mt-8">
-          <Link to="/pricing" className="text-sm text-[#A78BFA] hover:text-white inline-flex items-center gap-1" data-testid="see-all-plans">
+          <Link to="/pricing" className="text-sm text-blue-400 hover:text-white inline-flex items-center gap-1 transition" data-testid="see-all-plans">
             Compare full plans <ArrowRight size={13} />
           </Link>
         </div>
       </section>
 
       {/* How payment works */}
-      <section className="max-w-5xl mx-auto px-6 py-16">
-        <div className="bg-white/[0.02] border border-white/10 rounded-2xl p-8 md:p-10">
+      <section className="max-w-5xl mx-auto px-6 py-16 relative">
+        <motion.div
+          initial={{ opacity: 0, y: 24 }}
+          whileInView={{ opacity: 1, y: 0 }}
+          viewport={{ once: true }}
+          transition={{ duration: 0.5 }}
+          className="bg-white/[0.02] border border-white/10 rounded-2xl p-8 md:p-10 backdrop-blur-sm"
+        >
           <div className="text-center mb-8">
-            <div className="text-xs uppercase tracking-widest text-[#22C55E] mb-2">Crypto checkout in 3 steps</div>
+            <div className="text-xs uppercase tracking-widest text-blue-400 mb-2">Crypto checkout in 3 steps</div>
             <h2 className="text-2xl font-bold">From payment to license in under 30 minutes</h2>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
@@ -263,23 +343,38 @@ export default function HomePage() {
               { n: "1", t: "Pick your plan", d: "Choose Starter, Pro, or Business based on your scale." },
               { n: "2", t: "Send USDT-TRC20", d: "Pay from any wallet (Binance, Trust, OKX). We give you the address + QR." },
               { n: "3", t: "Submit your TxID", d: "Paste your transaction ID — we verify on-chain and email your license." },
-            ].map(s => (
-              <div key={s.n} className="bg-[#0a0a0f] border border-white/10 rounded-xl p-5">
-                <div className="w-9 h-9 rounded-full bg-[#A78BFA] text-black font-bold flex items-center justify-center mb-3">{s.n}</div>
+            ].map((s, idx) => (
+              <motion.div
+                key={s.n}
+                initial={{ opacity: 0, y: 20 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: true }}
+                transition={{ duration: 0.4, delay: idx * 0.1 }}
+                className="bg-black/40 border border-white/10 rounded-xl p-5 hover:border-blue-500/40 transition"
+              >
+                <div className="w-9 h-9 rounded-full bg-blue-500 text-white font-bold flex items-center justify-center mb-3 shadow-lg shadow-blue-500/40">
+                  {s.n}
+                </div>
                 <h4 className="font-semibold mb-1">{s.t}</h4>
-                <p className="text-xs text-[#A1A1AA] leading-relaxed">{s.d}</p>
-              </div>
+                <p className="text-xs text-zinc-400 leading-relaxed">{s.d}</p>
+              </motion.div>
             ))}
           </div>
-        </div>
+        </motion.div>
       </section>
 
       {/* FAQ */}
-      <section id="faq" className="max-w-3xl mx-auto px-6 py-20 scroll-mt-20">
-        <div className="text-center mb-10">
-          <div className="text-xs uppercase tracking-widest text-[#A78BFA] mb-3">FAQ</div>
+      <section id="faq" className="max-w-3xl mx-auto px-6 py-20 scroll-mt-20 relative">
+        <motion.div
+          initial={{ opacity: 0, y: 22 }}
+          whileInView={{ opacity: 1, y: 0 }}
+          viewport={{ once: true }}
+          transition={{ duration: 0.5 }}
+          className="text-center mb-10"
+        >
+          <div className="text-xs uppercase tracking-widest text-blue-400 mb-3">FAQ</div>
           <h2 className="text-3xl sm:text-4xl font-bold">Questions, answered</h2>
-        </div>
+        </motion.div>
         <div className="space-y-3">
           {FAQS.map((item, idx) => {
             const open = openFaq === idx;
@@ -287,7 +382,7 @@ export default function HomePage() {
               <div
                 key={idx}
                 data-testid={`faq-item-${idx}`}
-                className="bg-white/[0.03] border border-white/10 rounded-xl overflow-hidden"
+                className="bg-white/[0.03] border border-white/10 rounded-xl overflow-hidden hover:border-blue-500/30 transition-colors"
               >
                 <button
                   onClick={() => setOpenFaq(open ? -1 : idx)}
@@ -295,12 +390,16 @@ export default function HomePage() {
                   data-testid={`faq-toggle-${idx}`}
                 >
                   <span className="font-medium text-sm">{item.q}</span>
-                  <ChevronDown size={16} className={`text-[#A1A1AA] transition-transform ${open ? "rotate-180" : ""}`} />
+                  <ChevronDown size={16} className={`text-zinc-400 transition-transform ${open ? "rotate-180 text-blue-400" : ""}`} />
                 </button>
                 {open && (
-                  <div className="px-5 pb-4 text-sm text-[#A1A1AA] leading-relaxed border-t border-white/5">
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: "auto" }}
+                    className="px-5 pb-4 text-sm text-zinc-400 leading-relaxed border-t border-white/5"
+                  >
                     <div className="pt-3">{item.a}</div>
-                  </div>
+                  </motion.div>
                 )}
               </div>
             );
@@ -309,47 +408,67 @@ export default function HomePage() {
       </section>
 
       {/* CTA strip */}
-      <section className="max-w-5xl mx-auto px-6 pb-20">
-        <div className="bg-gradient-to-br from-[#1e1530] to-[#0a0a0f] border border-[#A78BFA]/30 rounded-2xl p-10 text-center">
-          <Lock className="mx-auto mb-4 text-[#A78BFA]" size={28} />
-          <h2 className="text-2xl sm:text-3xl font-bold mb-3">Start in under 5 minutes</h2>
-          <p className="text-[#A1A1AA] text-sm mb-6 max-w-lg mx-auto">
-            Try Krexion for 1 day at just 3 USDT. Pay → check email → login at <span className="text-white font-semibold">krexion.com/login</span>. That's it.
-          </p>
-          <div className="flex flex-col sm:flex-row gap-3 justify-center">
-            <Link
-              to="/pricing"
-              className="bg-[#A78BFA] text-black font-semibold px-8 py-3 rounded-lg hover:bg-[#C4B5FD] transition inline-flex items-center justify-center gap-2"
-              data-testid="footer-cta-pricing"
-            >
-              Start your trial <ArrowRight size={16} />
-            </Link>
-            <Link
-              to="/login"
-              className="border border-white/15 px-8 py-3 rounded-lg hover:bg-white/5 transition inline-flex items-center justify-center gap-2 text-sm"
-            >
-              I already have a license
-            </Link>
+      <section className="max-w-5xl mx-auto px-6 pb-20 relative">
+        <motion.div
+          initial={{ opacity: 0, y: 26 }}
+          whileInView={{ opacity: 1, y: 0 }}
+          viewport={{ once: true }}
+          transition={{ duration: 0.5 }}
+          className="relative overflow-hidden bg-gradient-to-br from-blue-600/20 via-blue-500/10 to-black border border-blue-500/30 rounded-2xl p-10 text-center"
+        >
+          {/* decorative shimmer */}
+          <div className="absolute inset-0 opacity-30 pointer-events-none"
+               style={{ background: "radial-gradient(circle at 80% 20%, rgba(59,130,246,0.4), transparent 60%)" }} />
+          <div className="relative">
+            <Lock className="mx-auto mb-4 text-blue-400" size={28} />
+            <h2 className="text-2xl sm:text-3xl font-bold mb-3">Start in under 5 minutes</h2>
+            <p className="text-zinc-400 text-sm mb-6 max-w-lg mx-auto">
+              Try Krexion for 1 day at just 3 USDT. Pay → check email → login at{" "}
+              <span className="text-white font-semibold">krexion.com/login</span>. That's it.
+            </p>
+            <div className="flex flex-col sm:flex-row gap-3 justify-center">
+              <Link
+                to="/pricing"
+                className="bg-blue-500 text-white font-semibold px-8 py-3 rounded-lg hover:bg-blue-400 transition inline-flex items-center justify-center gap-2 shadow-xl shadow-blue-500/40"
+                data-testid="footer-cta-pricing"
+              >
+                Start your trial <ArrowRight size={16} />
+              </Link>
+              <Link
+                to="/login"
+                className="border border-white/15 px-8 py-3 rounded-lg hover:bg-white/5 transition inline-flex items-center justify-center gap-2 text-sm"
+              >
+                I already have a license
+              </Link>
+            </div>
           </div>
-        </div>
+        </motion.div>
       </section>
 
       {/* Footer */}
-      <footer className="border-t border-white/5 mt-10">
-        <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-[#71717A]">
+      <footer className="border-t border-white/5 mt-10 relative">
+        <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-zinc-500">
           <div className="flex items-center gap-2">
-            <Sparkles className="text-[#A78BFA]" size={14} />
+            <Sparkles className="text-blue-400" size={14} />
             <span className="font-semibold text-white">KREXION</span>
             <span>© {new Date().getFullYear()}</span>
           </div>
           <div className="flex items-center gap-5">
-            <Link to="/pricing" className="hover:text-white">Pricing</Link>
-            <Link to="/download" className="hover:text-white">Download</Link>
-            <Link to="/login" className="hover:text-white">Login</Link>
-            <a href="mailto:support@krexion.com" className="hover:text-white">Support</a>
+            <Link to="/pricing" className="hover:text-white transition">Pricing</Link>
+            <Link to="/download" className="hover:text-white transition">Download</Link>
+            <Link to="/login" className="hover:text-white transition">Login</Link>
+            <a href="mailto:support@krexion.com" className="hover:text-white transition">Support</a>
           </div>
         </div>
       </footer>
+
+      {/* Inline keyframes for the gradient sweep on the headline */}
+      <style>{`
+        @keyframes krx-gradient {
+          0%, 100% { background-position: 0% 50%; }
+          50% { background-position: 100% 50%; }
+        }
+      `}</style>
     </div>
   );
 }
