@@ -37,19 +37,80 @@ jobs:
             git reset --hard origin/main
             git stash pop || true
 
-            # 2. Rebuild + restart containers
-            echo ">> Rebuilding frontend + backend containers..."
-            docker compose up -d --build frontend backend
+            # 2. REBUILD installer ZIP from source folder.
+            #    The ZIP itself is .gitignored, so we re-zip the
+            #    Krexion-User-Package/ directory (which IS in git) on every
+            #    deploy. This keeps install-master.ps1 + INSTALL.bat changes
+            #    automatically flowing to customers without any manual step.
+            echo ">> Rebuilding Krexion-User-Package.zip from source..."
+            if [ -d "Krexion-User-Package" ]; then
+              # Make sure zip command is installed
+              command -v zip >/dev/null 2>&1 || apt-get update && apt-get install -y zip
+              rm -f frontend/public/Krexion-User-Package.zip
+              ( cd Krexion-User-Package && zip -r ../frontend/public/Krexion-User-Package.zip . -x "*.DS_Store" >/dev/null )
+              SRC_SHA=$(sha256sum frontend/public/Krexion-User-Package.zip | awk '{print $1}')
+              SIZE=$(stat -c%s frontend/public/Krexion-User-Package.zip)
+              echo "   Built ZIP: ${SIZE} bytes, SHA256: $SRC_SHA"
+            else
+              echo "::warning::Krexion-User-Package/ folder not found, skipping ZIP rebuild"
+              SRC_SHA="(skipped)"
+            fi
 
-            # 3. Show short status
+            # 3. Stop frontend so old container doesn't hold stale image
+            echo ">> Stopping old frontend container..."
+            docker compose stop frontend || true
+            docker compose rm -f frontend || true
+
+            # 4. Force a CLEAN rebuild of frontend (no layer cache).
+            #    Without --no-cache, Docker reuses old COPY layers and the
+            #    new HomePage/Guide/installer ZIP never reaches production.
+            echo ">> Rebuilding frontend WITHOUT cache..."
+            docker compose build --no-cache --pull frontend
+
+            # 5. Backend can keep its cache (faster)
+            echo ">> Rebuilding backend..."
+            docker compose build backend
+
+            # 6. Bring everything up
+            echo ">> Starting all containers..."
+            docker compose up -d frontend backend
+
+            # 7. Wait for frontend to be healthy
+            echo ">> Waiting for frontend to come online..."
+            for i in 1 2 3 4 5 6 7 8 9 10; do
+              if docker compose ps frontend | grep -qE "Up|running"; then
+                echo "   Frontend is up (attempt $i)"
+                break
+              fi
+              sleep 3
+            done
+
+            # 8. Verify the served ZIP matches what we just built.
+            if [ "$SRC_SHA" != "(skipped)" ]; then
+              echo ">> Verifying production ZIP matches source..."
+              sleep 5
+              PROD_SHA=$(curl -sL https://krexion.com/Krexion-User-Package.zip | sha256sum | awk '{print $1}')
+              echo "   Source SHA:     $SRC_SHA"
+              echo "   Production SHA: $PROD_SHA"
+              if [ "$SRC_SHA" = "$PROD_SHA" ]; then
+                echo "   ✓ MATCH — new installer is live on krexion.com"
+              else
+                echo "   ✗ MISMATCH — restarting frontend and retrying..."
+                docker compose restart frontend
+                sleep 10
+                PROD_SHA=$(curl -sL https://krexion.com/Krexion-User-Package.zip | sha256sum | awk '{print $1}')
+                echo "   Production SHA (after restart): $PROD_SHA"
+                if [ "$SRC_SHA" != "$PROD_SHA" ]; then
+                  echo "::error::ZIP still doesn't match. Check Cloudflare cache or proxy in front of Caddy."
+                  exit 1
+                fi
+                echo "   ✓ MATCH (after restart)"
+              fi
+            fi
+
+            # 9. Final status
             echo ">> Container status:"
             docker compose ps
-
-            # 4. Verify the public installer ZIP is the new build
-            echo ">> Verifying installer ZIP on disk..."
-            ls -la frontend/public/Krexion-User-Package.zip || true
-            sha256sum frontend/public/Krexion-User-Package.zip || true
-
             echo "===================================================="
             echo "  DEPLOY COMPLETE at $(date)"
             echo "===================================================="
