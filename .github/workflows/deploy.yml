@@ -1,0 +1,55 @@
+name: Deploy to VPS
+
+# When does this run?
+#   1. Automatically — every push to main (Save to GitHub triggers this)
+#   2. Manually — GitHub → Actions tab → "Deploy to VPS" → Run workflow (the button)
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: SSH into VPS and rebuild containers
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          timeout: 30m
+          command_timeout: 30m
+          script: |
+            set -e
+            cd /opt/krexion
+            echo "===================================================="
+            echo "  KREXION AUTO-DEPLOY started at $(date)"
+            echo "===================================================="
+
+            # 1. Save any local-only changes (env etc.) and pull latest code
+            echo ">> Pulling latest code from GitHub..."
+            git stash --include-untracked || true
+            git fetch origin main
+            git reset --hard origin/main
+            git stash pop || true
+
+            # 2. Rebuild + restart containers
+            echo ">> Rebuilding frontend + backend containers..."
+            docker compose up -d --build frontend backend
+
+            # 3. Show short status
+            echo ">> Container status:"
+            docker compose ps
+
+            # 4. Verify the public installer ZIP is the new build
+            echo ">> Verifying installer ZIP on disk..."
+            ls -la frontend/public/Krexion-User-Package.zip || true
+            sha256sum frontend/public/Krexion-User-Package.zip || true
+
+            echo "===================================================="
+            echo "  DEPLOY COMPLETE at $(date)"
+            echo "===================================================="
