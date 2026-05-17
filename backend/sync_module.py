@@ -168,20 +168,35 @@ async def heartbeat(
     x_krexion_license: Optional[str] = Header(None),
 ):
     lic, user = await _validate_license(x_krexion_license)
+    update_doc = {
+        "license_key": lic["license_key"],
+        "email": user["email"],
+        "user_id": user["id"],
+        "hostname": (body.get("hostname") or "")[:120],
+        "version": (body.get("version") or "")[:32],
+        "platform": (body.get("platform") or "")[:60],
+        "ip": (request.client.host if request.client else "")[:60],
+        "last_seen": _now_iso(),
+    }
+    # Hardware info for cloud-orchestrated load tuning (bridge module)
+    if body.get("ram_gb") is not None:
+        try:
+            update_doc["ram_gb"] = float(body.get("ram_gb"))
+        except (TypeError, ValueError):
+            pass
+    if body.get("cpu_cores") is not None:
+        try:
+            update_doc["cpu_cores"] = int(body.get("cpu_cores"))
+        except (TypeError, ValueError):
+            pass
+    if body.get("recommended_concurrency") is not None:
+        try:
+            update_doc["recommended_concurrency"] = int(body.get("recommended_concurrency"))
+        except (TypeError, ValueError):
+            pass
     await _db.sync_heartbeats.update_one(
         {"license_key": lic["license_key"]},
-        {
-            "$set": {
-                "license_key": lic["license_key"],
-                "email": user["email"],
-                "user_id": user["id"],
-                "hostname": (body.get("hostname") or "")[:120],
-                "version": (body.get("version") or "")[:32],
-                "platform": (body.get("platform") or "")[:60],
-                "ip": (request.client.host if request.client else "")[:60],
-                "last_seen": _now_iso(),
-            }
-        },
+        {"$set": update_doc},
         upsert=True,
     )
     return {"ok": True, "server_time": _now_iso()}

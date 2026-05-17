@@ -10087,10 +10087,31 @@ async def _test_proxy_with_proxycheck(proxy_string: str, proxy_type: str, timeou
 @api_router.post("/proxies/bulk-test")
 async def bulk_test_proxies(
     data: dict,
+    request: Request,
     user: dict = Depends(get_current_user_with_fresh_data),
-    _cloud_gate: bool = Depends(require_local_mode),
 ):
-    """Ultra-fast bulk proxy testing with optimized duplicate check"""
+    """Ultra-fast bulk proxy testing with optimized duplicate check.
+
+    On the cloud edge (KREXION_MODE=cloud) this transparently enqueues a
+    bridge job so the user's local PC executes it (UI stays on krexion.com).
+    On a local install it runs inline. The X-Krexion-Bridge-Job header is
+    set by sync_client when it's executing a queued job, so we never
+    re-enqueue (would cause an infinite loop).
+    """
+    # If we're on the cloud edge AND this isn't already a bridge worker
+    # call, route to the user's local PC.
+    if IS_CLOUD and not request.headers.get("X-Krexion-Bridge-Job"):
+        try:
+            from bridge_module import enqueue_bridge_job as _enqueue
+        except Exception:
+            _enqueue = None
+        if _enqueue is None:
+            raise HTTPException(status_code=503, detail=CLOUD_HEAVY_FEATURE_MSG)
+        return await _enqueue(
+            user, "proxies/bulk-test", data,
+            wait_for_result=True, wait_timeout=25,
+        )
+
     check_user_feature(user, "proxies")
     
     proxy_ids = data.get("proxy_ids", [])
@@ -13116,12 +13137,54 @@ except Exception as _cp_err:  # noqa: BLE001
 
 # ─── Sync module (cloud↔local hybrid bridge) ──────────────────────────
 try:
-    from sync_module import sync_router, _bind as _sync_bind
+    from sync_module import sync_router, _bind as _sync_bind, _validate_license as _sync_validate_license
     _sync_bind(main_db=main_db, get_db_for_user=get_db_for_user)
     app.include_router(sync_router)
     logger.info("Sync module loaded — endpoints under /api/sync/*")
 except Exception as _sync_err:  # noqa: BLE001
     logger.error(f"Sync module failed to load: {_sync_err}")
+    _sync_validate_license = None
+
+
+# ─── Bridge module (cloud-orchestrated local execution) ───────────────
+try:
+    import bridge_module
+    from bridge_module import (
+        bridge_router as _bridge_router,
+        bridge_sync_router as _bridge_sync_router,
+        _bind as _bridge_bind,
+        enqueue_bridge_job,
+        is_user_local_online,
+        get_my_local_status_for,
+        get_my_job,
+        list_jobs_for,
+    )
+    _bridge_bind(
+        main_db=main_db,
+        get_current_user=get_current_user,
+        validate_license=_sync_validate_license,
+    )
+
+    # Register frontend-facing bridge endpoints with proper JWT auth
+    @_bridge_router.get("/me/local-status")
+    async def _bridge_my_local_status(user: dict = Depends(get_current_user)):
+        return await get_my_local_status_for(user["id"])
+
+    @_bridge_router.get("/jobs/{job_id}")
+    async def _bridge_get_job(job_id: str, user: dict = Depends(get_current_user)):
+        return await get_my_job(job_id, user["id"])
+
+    @_bridge_router.get("/jobs")
+    async def _bridge_list_jobs(limit: int = 50, user: dict = Depends(get_current_user)):
+        return {"jobs": await list_jobs_for(user["id"], limit)}
+
+    app.include_router(_bridge_router)
+    app.include_router(_bridge_sync_router)
+    logger.info("Bridge module loaded — /api/bridge/* + /api/sync/jobs/*")
+except Exception as _bridge_err:  # noqa: BLE001
+    logger.error(f"Bridge module failed to load: {_bridge_err}")
+    enqueue_bridge_job = None  # type: ignore
+    is_user_local_online = None  # type: ignore
 
 
 # ─── Releases / Auto-update module ────────────────────────────────────

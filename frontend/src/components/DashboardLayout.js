@@ -8,6 +8,7 @@ import { useBranding } from "../context/BrandingContext";
 import ThemeToggle from "./ThemeToggle";
 import WavyBackground from "./WavyBackground";
 import CloudModeBanner from "./CloudModeBanner";
+import LocalPCStatusBadge from "./LocalPCStatusBadge";
 import UpdateBanner from "./UpdateBanner";
 import axios from "axios";
 
@@ -302,6 +303,7 @@ export default function DashboardLayout({ children }) {
           </div>
 
           <div className="flex items-center gap-2">
+            <LocalPCStatusBadge />
             <ThemeToggle />
             <DropdownMenu>
             <DropdownMenuTrigger asChild>

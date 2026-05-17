@@ -241,7 +241,45 @@ User wants: admin publishes a new version → every customer's local install get
 
 ---
 
-## 2026-05-17 — Guide Page Wired + Installer ZIP Repackaged
+## 2026-05-17 — Cloud-Orchestrated Local Execution (Bridge)
+
+### Built
+- **`/app/backend/bridge_module.py`** — Bridge job queue. Mongo collection `bridge_jobs`. Helper `enqueue_bridge_job()` waits inline up to 25s for the local PC to execute (synchronous UX for short jobs).
+- Cloud endpoints (JWT auth):
+  - `GET /api/bridge/me/local-status` — frontend polls every 15s; returns `{online, hostname, ram_gb, cpu_cores}`
+  - `GET /api/bridge/jobs/{id}` — frontend polls for job result
+  - `GET /api/bridge/jobs` — list user's recent jobs
+- Worker endpoints (license-key auth):
+  - `GET /api/sync/jobs/pull?limit=5&hostname=...` — atomic find-and-claim from `bridge_jobs`
+  - `POST /api/sync/jobs/result` — worker posts back the result
+- **`sync_module.py` heartbeat extended** — accepts and stores `ram_gb`, `cpu_cores`, `recommended_concurrency` on each ping.
+- **`sync_client.py` v1.1.0** — sends hardware info in heartbeat using `psutil` (RAM/cores), runs a separate `_bridge_loop` at 5s cadence that pulls pending jobs and executes them locally against `http://localhost:8001` then POSTs result back. Sets `X-Krexion-Bridge-Job` header so the cloud-side endpoint detects bridge calls and avoids re-enqueue loops.
+- **`server.py` bulk-test endpoint** — replaced `require_local_mode` 423 gate with bridge enqueue when `IS_CLOUD and not header X-Krexion-Bridge-Job`. Other heavy endpoints can be wired the same way with 3 lines each.
+- **Frontend**:
+  - `LocalPCStatusBadge.js` — header badge showing "PC connected · 32 GB / 8 cores" (green) or "PC offline — turn on for heavy features" (amber). Polls /me/local-status every 15s.
+  - `DashboardLayout.js` — mounts the badge next to ThemeToggle.
+  - `cloudGateInterceptor.js` — now handles new 503 `{code: 'local_pc_offline'}` payload with friendly Roman-Urdu toast linking to /guide.
+
+### Verified on Production (krexion.com)
+- `/api/bridge/me/local-status` → 401 (auth required) ✓
+- `/api/sync/jobs/pull` → 401 invalid license ✓
+- Bridge module loaded message in backend logs ✓
+
+### Customer Activation
+For existing customer installs to start receiving bridge jobs, they need their local backend rebuilt with the new sync_client.py. Two paths:
+- **UPDATE-WATCHER.bat** running on their PC will pull a new release once admin publishes one to `/api/system/public-latest` (currently latest=1.0.3, bump to 1.1.0 with this change).
+- Fresh reinstall via Krexion-User-Package.zip uses the latest GitHub source.
+
+### How to wire more heavy endpoints
+Pattern (3 lines, replaces `_cloud_gate` dep):
+```python
+async def my_heavy_endpoint(data: dict, request: Request, user = Depends(get_current_user)):
+    if IS_CLOUD and not request.headers.get("X-Krexion-Bridge-Job"):
+        from bridge_module import enqueue_bridge_job
+        return await enqueue_bridge_job(user, "feature/route", data, wait_for_result=True, wait_timeout=25)
+    # ...rest of original local logic
+```
+Then add the route to `feature_routes` in `sync_client._execute_job_locally()`.
 
 ### Done
 - **`/guide` route wired** in `App.js` (import + Route). GuidePage was already fully built (TOC, 10 sections, Steps, Boxes, FAQs in Roman Urdu/Hindi).
