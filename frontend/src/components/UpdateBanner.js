@@ -84,17 +84,18 @@ export default function UpdateBanner() {
       setShowModal(false);
     } catch (e) {
       const detail = e.response?.data?.detail;
-      // Bridge: local PC offline
+      // Bridge: local PC offline OR v1.0.4 customer (no bridge worker yet)
       if (
         e.response?.status === 503 &&
         detail &&
         typeof detail === "object" &&
         detail.code === "local_pc_offline"
       ) {
-        toast.error(
-          "Aap ka PC offline hai. PC on karein, 1 min wait karein, phir Update dobara click karein.",
-          { duration: 10000 }
-        );
+        // Auto-show bootstrap option since both scenarios (PC actually
+        // offline AND v1.0.4 with no working bridge) need the same fix:
+        // use the manual updater .bat which works regardless of license/
+        // heartbeat state.
+        setShowBootstrapHelp(true);
       } else if (
         e.response?.status === 403 &&
         typeof detail === "string" &&
@@ -201,6 +202,18 @@ export default function UpdateBanner() {
               >
                 {latest.notes || "No release notes provided."}
               </pre>
+              <div className="mt-5 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs">
+                <div className="font-semibold mb-1">Pehla update v1.1.0 install karna? (one-time)</div>
+                Agar "Install update" pe error aaye ("PC offline" ya kuch aur), to{" "}
+                <button
+                  onClick={() => setShowBootstrapHelp(true)}
+                  data-testid="manual-updater-link"
+                  className="underline font-semibold text-amber-100 hover:text-white"
+                >
+                  manual updater
+                </button>{" "}
+                use karein - 5 min mein PC update ho jayega. Aage se "Install update" button direct kaam karega.
+              </div>
             </div>
             <div className="px-6 py-4 border-t border-white/10 flex items-center justify-between bg-white/[0.02]">
               <div className="flex items-start gap-2 text-xs text-[#71717A]">
