@@ -1,0 +1,38 @@
+{
+  "summary": "End-to-end testing of Profile Builder feature (AdsPower bulk profile creator + ProxyJet) complete. Backend pytest: 21/21 pass (gating returns 403 for 7 endpoints when profile_builder=false; after admin PUT /api/admin/users/{id} flips it to true the same endpoints return 200; validation 400s correct for empty api_key, count=0/101, invalid state, missing config_id; 404 on invalid job_id; static endpoints return 50 US states and 6 UA template keys; new registrations default profile_builder=false). Frontend Playwright e2e: (a) user WITHOUT flag — sidebar does NOT show 'Profile Builder', direct nav to /profile-builder gets redirected to /dashboard by FeatureRoute; (b) user WITH flag (adspowertester@gmail.com) — sidebar shows 'Profile Builder' under Proxies area, page renders with title 'Profile Builder', AdsPower configs panel, ProxyJet creds panel showing 'Saved: 260202...' masked badge, Generate form (count/state/prefix/UA mix). Add Config modal opens via [data-testid=add-adspower-config], blocks save when api_key empty (toast), saves and refreshes list when filled, Delete button removes config and refreshes. ProxyJet creds modal saves and badge updates. Generate triggers cloud-side enqueue → JobProgress panel becomes visible with status 'ALLOCATING IPS' 0/1 and button switches to 'Running...' spinner (expected; no local bridge worker in cloud env so it will transition to failed later — per review request this is acceptable). Admin dashboard /admin/dashboard Edit-User modal Feature Access section shows the 'Profile Builder (AdsPower bulk profiles + ProxyJet)' toggle (verified visible AND working — toggle button with aria-checked reflects current state). UserFeatures extra='allow' correctly persists profile_builder in features dict.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Profile Builder page (/profile-builder)", "issues": ["Content panels (configs/proxy creds/generate form) use max-w-6xl mx-auto so on a 1920px viewport they sit shifted right next to the sidebar with a large empty band between the sidebar and the panels. Consider left-aligning or widening the content container so the layout feels balanced. Not blocking — just an aesthetic observation."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration8_profile_builder.py",
+    "/app/test_reports/pytest/iteration8_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Gating is consistently applied on all 9 /api/adspower/* routes via check_user_feature(user, 'profile_builder') — no bypass found.",
+    "adspower_module.list_configs/save_config correctly mask api_key (returns api_key_masked, drops raw api_key) — no credential leak.",
+    "UserFeatures(BaseModel) has model_config = ConfigDict(extra='allow') so admin PUT with profile_builder=True is preserved end-to-end into features dict (verified via subsequent GET /configs returning 200).",
+    "Frontend FeatureRoute correctly redirects to /dashboard for users missing the flag — no Access Denied UI is shown, just a clean redirect. If product wants a clearer 'You don't have access to this feature, contact admin' page (matches backend 403 error string), consider a dedicated /no-access page; otherwise current behavior is acceptable for a hidden-by-sidebar feature.",
+    "Job creation enqueues with status='allocating_ips' as expected; in cloud-only env the job will eventually transition to 'failed' once ProxyJet IP allocation against fake creds times out — per the review request this is expected and tests do not block on it."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration8_profile_builder.py (new — 21 pytest cases)"
+  ],
+  "success_rate": {
+    "backend": "100% (21/21)",
+    "frontend": "100% on all critical paths (sidebar visibility both ways, route gating, add/delete config, proxy creds save+badge, generate→JobProgress, admin Profile Builder toggle in Feature Access modal)"
+  },
+  "test_credentials": "Admin: admin@krexion.local / admin123. Pre-flag user: adspowertester@gmail.com / Test12345 (profile_builder=true). Test users created by run (left in DB, TEST_ prefix): TEST_pb_* and TEST_def_* (registration-default users used to assert profile_builder=false default), TEST_noflag_6696f8@krexion.test / Test12345! (active user WITHOUT profile_builder, used for sidebar/route gating).",
+  "seed_data_creation": "Inserted TEST_ prefixed entries into db.adspower_configs (1 created+deleted during run), db.adspower_settings (1 proxy creds upsert for the TEST_pb_* fixture user and the playwright run for adspowertester), db.adspower_jobs (one generate kicked off, will transition to failed in cloud env). All test data is TEST_-prefixed; safe to leave.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Re-run: pytest /app/backend/tests/test_iteration8_profile_builder.py -v. Fixture `fresh_user_info` registers a new TEST_pb_<uuid>@krexion.test user, activates via admin keeping profile_builder=False to verify 403 gating, then TestAdminToggle flips it to True and re-logins. Note: backend `/auth/login` returns 'access_token' (snake_case); admin login returns 'access_token' too — both accepted via .get('access_token') or .get('token') fallback. Admin Edit-User modal feature toggles are <button role='switch' aria-checked='...'> not <input type=checkbox>, so toggle them via click or aria-checked. Frontend FeatureRoute for users without the flag silently redirects to /dashboard (no error UI). Static /api/adspower/states and /ua-templates are unauthenticated."
+}

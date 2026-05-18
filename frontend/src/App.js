@@ -23,6 +23,7 @@ import FormFillerPage from "./pages/FormFillerPage";
 import RealUserTrafficPage from "./pages/RealUserTrafficPage";
 import VisualRecorderPage from "./pages/VisualRecorderPage";
 import UploadedThingsPage from "./pages/UploadedThingsPage";
+import AdsPowerPage from "./pages/AdsPowerPage";
 import CPIOffersPage from "./pages/CPIOffersPage";
 import CPIJobsPage from "./pages/CPIJobsPage";
 import CPIJobDetailPage from "./pages/CPIJobDetailPage";
@@ -179,6 +180,11 @@ function App() {
                       <Route path="/proxies" element={
                         <FeatureRoute feature="proxies">
                           <ProxiesPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/profile-builder" element={
+                        <FeatureRoute feature="profile_builder">
+                          <AdsPowerPage />
                         </FeatureRoute>
                       } />
                       <Route path="/referrers" element={

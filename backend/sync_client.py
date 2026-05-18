@@ -185,11 +185,35 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
         # Self-update — cloud UpdateBanner click ends up here so customer
         # never has to open localhost.
         "system/self-update": ("POST", "/api/system/install-update"),
+        # AdsPower bulk profile creator (UI on cloud, executes locally)
+        "adspower/create": ("POST", "__adspower_create__"),
     }
     if feature not in feature_routes:
         return {"status": "failed", "error": f"unknown feature: {feature}"}
 
     method, route = feature_routes[feature]
+    # Special handler: AdsPower local API call (not a local backend route)
+    if route == "__adspower_create__":
+        host = (payload.get("host") or "http://local.adspower.net:50325").rstrip("/")
+        api_key = payload.get("api_key") or ""
+        body = {k: v for k, v in payload.items() if k not in ("host", "api_key")}
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.post(
+                    f"{host}/api/v1/user/create",
+                    json=body,
+                    headers={"Authorization": api_key, "Content-Type": "application/json"},
+                )
+            try:
+                data = r.json()
+            except Exception:
+                data = {"text": r.text[:5000]}
+            if r.status_code < 400 and (data.get("code") == 0 or data.get("status") == "success"):
+                return {"status": "done", "result": data}
+            return {"status": "failed", "error": f"AdsPower {r.status_code}: {data.get('msg') or data}"}
+        except Exception as e:  # noqa: BLE001
+            return {"status": "failed", "error": f"AdsPower local call failed: {e}"}
+
     url = f"{LOCAL_API_BASE}{route}"
     headers = {"Content-Type": "application/json"}
     # Forward the user's JWT if we have one cached, otherwise rely on local

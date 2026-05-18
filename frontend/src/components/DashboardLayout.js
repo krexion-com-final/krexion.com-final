@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { LayoutDashboard, Link2, MousePointerClick, DollarSign, Server, Menu, LogOut, User, Settings, TrendingUp, Upload, Mail, Filter, Smartphone, Search, ClipboardCheck, Fingerprint, Package, Apple, Cpu, Briefcase, ChevronDown, ChevronRight, Link as LinkIcon, Activity, Camera } from "lucide-react";
+import { LayoutDashboard, Link2, MousePointerClick, DollarSign, Server, Menu, LogOut, User, Settings, TrendingUp, Upload, Mail, Filter, Smartphone, Search, ClipboardCheck, Fingerprint, Package, Apple, Cpu, Briefcase, ChevronDown, ChevronRight, Link as LinkIcon, Activity, Camera, UserPlus } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "./ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "./ui/dropdown-menu";
@@ -82,6 +82,7 @@ export default function DashboardLayout({ children }) {
     { name: "Visual Recorder", path: "/visual-recorder", icon: Camera, feature: "real_user_traffic" },
     { name: "Uploaded Things", path: "/uploaded-things", icon: Package, feature: "real_user_traffic" },
     { name: "Proxies", path: "/proxies", icon: Server, feature: "proxies" },
+    { name: "Profile Builder", path: "/profile-builder", icon: UserPlus, feature: "profile_builder" },
   ];
 
   // Backward compat: new granular features fall back to "import_data" legacy flag

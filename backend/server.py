@@ -646,6 +646,7 @@ DEFAULT_FEATURES = {
     "separate_data": False,
     "form_filler": False,
     "real_user_traffic": False,
+    "profile_builder": False,
     "settings": True,  # Settings access - default ON for main users
     "max_links": 0,
     "max_clicks": 0,
@@ -13263,6 +13264,67 @@ except Exception as _bridge_err:  # noqa: BLE001
     logger.error(f"Bridge module failed to load: {_bridge_err}")
     enqueue_bridge_job = None  # type: ignore
     is_user_local_online = None  # type: ignore
+
+
+# ─── AdsPower module (bulk profile creator via bridge) ────────────────
+try:
+    import adspower_module
+    from fastapi import APIRouter as _AdspowerAPIRouter
+    adspower_module._bind(main_db=main_db)
+    _ads_router = _AdspowerAPIRouter(prefix="/api/adspower", tags=["adspower"])
+
+    @_ads_router.get("/states")
+    async def _ads_states():
+        return {"states": adspower_module.US_STATES}
+
+    @_ads_router.get("/ua-templates")
+    async def _ads_uas():
+        return {"templates": list(adspower_module.UA_TEMPLATES.keys())}
+
+    @_ads_router.get("/configs")
+    async def _ads_list_cfgs(user: dict = Depends(get_current_user)):
+        check_user_feature(user, "profile_builder")
+        return {"configs": await adspower_module.list_configs(user["id"])}
+
+    @_ads_router.post("/configs")
+    async def _ads_save_cfg(body: dict, user: dict = Depends(get_current_user)):
+        check_user_feature(user, "profile_builder")
+        return await adspower_module.save_config(user["id"], body)
+
+    @_ads_router.delete("/configs/{cid}")
+    async def _ads_del_cfg(cid: str, user: dict = Depends(get_current_user)):
+        check_user_feature(user, "profile_builder")
+        return await adspower_module.delete_config(user["id"], cid)
+
+    @_ads_router.get("/proxy-creds")
+    async def _ads_get_creds(user: dict = Depends(get_current_user)):
+        check_user_feature(user, "profile_builder")
+        return await adspower_module.get_proxy_creds_status(user["id"])
+
+    @_ads_router.post("/proxy-creds")
+    async def _ads_save_creds(body: dict, user: dict = Depends(get_current_user)):
+        check_user_feature(user, "profile_builder")
+        return await adspower_module.save_proxy_creds(user["id"], body)
+
+    @_ads_router.post("/generate")
+    async def _ads_generate(body: dict, user: dict = Depends(get_current_user)):
+        check_user_feature(user, "profile_builder")
+        return await adspower_module.start_generate(user, body)
+
+    @_ads_router.get("/jobs/{job_id}")
+    async def _ads_job(job_id: str, user: dict = Depends(get_current_user)):
+        check_user_feature(user, "profile_builder")
+        return await adspower_module.get_job(user["id"], job_id)
+
+    @_ads_router.get("/profiles")
+    async def _ads_profiles(limit: int = 200, user: dict = Depends(get_current_user)):
+        check_user_feature(user, "profile_builder")
+        return {"profiles": await adspower_module.list_profiles_for(user["id"], limit)}
+
+    app.include_router(_ads_router)
+    logger.info("AdsPower module loaded — /api/adspower/*")
+except Exception as _ads_err:  # noqa: BLE001
+    logger.error(f"AdsPower module failed to load: {_ads_err}")
 
 
 # ─── Releases / Auto-update module ────────────────────────────────────
