@@ -187,11 +187,33 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
         "system/self-update": ("POST", "/api/system/install-update"),
         # AdsPower bulk profile creator (UI on cloud, executes locally)
         "adspower/create": ("POST", "__adspower_create__"),
+        # AdsPower API connection test (UI on cloud, executes locally)
+        "adspower/test": ("POST", "__adspower_test__"),
     }
     if feature not in feature_routes:
         return {"status": "failed", "error": f"unknown feature: {feature}"}
 
     method, route = feature_routes[feature]
+    # Special handler: AdsPower API connection test
+    if route == "__adspower_test__":
+        host = (payload.get("host") or "http://local.adspower.net:50325").rstrip("/")
+        api_key = payload.get("api_key") or ""
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.get(
+                    f"{host}/status",
+                    headers={"Authorization": api_key},
+                )
+            try:
+                data = r.json()
+            except Exception:
+                data = {"text": r.text[:1000]}
+            if r.status_code < 400:
+                return {"status": "done", "result": {"reachable": True, "raw": data}}
+            return {"status": "failed", "error": f"AdsPower /status {r.status_code}: {data}"}
+        except Exception as e:  # noqa: BLE001
+            return {"status": "failed", "error": f"AdsPower not reachable: {e}"}
+
     # Special handler: AdsPower local API call (not a local backend route)
     if route == "__adspower_create__":
         host = (payload.get("host") or "http://local.adspower.net:50325").rstrip("/")

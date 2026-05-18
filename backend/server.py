@@ -13296,6 +13296,11 @@ try:
         check_user_feature(user, "profile_builder")
         return await adspower_module.delete_config(user["id"], cid)
 
+    @_ads_router.post("/configs/{cid}/test")
+    async def _ads_test_cfg(cid: str, user: dict = Depends(get_current_user)):
+        check_user_feature(user, "profile_builder")
+        return await adspower_module.test_adspower_config(user, cid)
+
     @_ads_router.get("/proxy-creds")
     async def _ads_get_creds(user: dict = Depends(get_current_user)):
         check_user_feature(user, "profile_builder")

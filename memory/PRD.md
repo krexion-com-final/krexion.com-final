@@ -307,27 +307,33 @@ Then add the route to `feature_routes` in `sync_client._execute_job_locally()`.
 ### Built
 - **New feature `profile_builder`** — admin-gated toggle in DEFAULT_FEATURES + `UserFeatures` Pydantic model. Visible in Admin Dashboard "Feature Access" section as "Profile Builder (AdsPower bulk profiles + ProxyJet)".
 - **Page** `/profile-builder` (component: `AdsPowerPage.js`, in-sidebar label **Profile Builder**, icon `UserPlus`, position right under Proxies).
-- **Backend** `/api/adspower/*` (in `adspower_module.py`, wired in `server.py` ~line 13270):
-  - `GET /states` · 50 US states (public lookup)
-  - `GET /ua-templates` · 6 UA template keys (public lookup)
-  - `GET /configs` · list user's AdsPower API configs (masked) — gated
-  - `POST /configs` · save a new config (name + host + api_key) — gated
-  - `DELETE /configs/{cid}` — gated
-  - `GET /proxy-creds` · status (has_creds + base_user_masked) — gated
-  - `POST /proxy-creds` · save ProxyJet base_user / base_pass — gated
-  - `POST /generate` · kicks off bulk job (count/state/ua_templates/name_prefix/config_id) — gated
-  - `GET /jobs/{job_id}` · polling for live progress — gated
-  - `GET /profiles` · created profile history — gated
-  - All gated endpoints use `check_user_feature(user, "profile_builder")` → 403 when flag off.
-- **Hybrid execution flow**: Cloud server allocates unique sticky US IPs via ProxyJet (lightweight HTTP). Final AdsPower profile-create POST to `http://local.adspower.net:50325/api/v1/user/create` is enqueued into `bridge_jobs` and pulled by customer PC's `sync_client.py` worker (already implemented). 30-min sticky session keeps IP locked while user works.
-- **Frontend UX**: AdsPower API configs panel (radio-select + Add/Delete), ProxyJet creds modal (masked display), Generate form (count 1-100, state dropdown, name prefix, multi-select UA template chips), live `JobProgress` panel with progress bar + errors panel + profile-results table with copyable IPs.
+- **Backend** `/api/adspower/*` (in `adspower_module.py`, wired in `server.py` ~line 13270).
+
+### Speed rewrite (same day, after user feedback "bridge timeout"+"chahye seconds mein complete")
+- **Removed slow ProxyJet IP verification round-trip** (was ~12s/IP via api.ipify.org through proxy). Sticky session IDs are unique by design — verification unnecessary.
+- **Reuses `/api/user-agents/generate`** internally — full app picker (Instagram, Facebook, TikTok, YouTube, WhatsApp, Google Search, Chrome mobile, Pinterest, Snapchat, Browser) × platform picker (Any/Android/iOS/Desktop). Produces real in-app UA strings, not 6 generic templates.
+- **`wipe_existing` flag** — atomically deletes old profiles + used_ips + old jobs before building new batch.
+- **`push_to_adspower` flag (default OFF)** — when ON, additionally enqueues bridge_jobs for the local PC worker; runs in BACKGROUND watcher (`_watch_bridge_jobs`) so main job completes immediately. If no local PC online, profiles still saved on cloud (no more "Timeout" error blocking UX).
+- **Max count bumped 100 → 200**.
+- **New endpoints**: `DELETE /api/adspower/profiles` (purge all), `GET /api/adspower/profiles/export` (XLSX bulk export with proxy + UA + fingerprint columns ready for AdsPower bulk import).
+- **Verified speed**: 10 profiles in **0.27s** (was 120s+).
+
+### Frontend
+- Embedded rich App grid (10 apps with brand-gradient highlights) + Platform pill picker
+- "Delete existing profiles before building" toggle (default ON)
+- "Also push directly into AdsPower (requires local PC online)" toggle (default OFF)
+- Dynamic gradient on Build button matches selected app
+- Top-right "Export N (.xlsx)" + "Clear all" buttons
+- ProfilesTable below with sticky header, copy-session button, push status column
+- Count input clamps 1-200 on type (UX guardrail + backend already validates)
 
 ### Fixed during work
 - Removed nested `<DashboardLayout>` wrapper inside AdsPowerPage (was causing double-sidebar on /profile-builder because parent route also wraps in DashboardLayout).
 
 ### Tested
-- **Backend pytest 21/21** — `/app/backend/tests/test_iteration8_profile_builder.py` (gating, CRUD, validation, default flag off, admin toggle).
-- **Frontend Playwright e2e** — sidebar visibility both ways (with/without flag), route gating via FeatureRoute, Add/Delete config flow, ProxyJet creds save + masked badge, Generate → JobProgress panel, admin Feature Access toggle.
+- **Backend pytest 21/21 (iter 8) + 14/14 (iter 9) = 35 tests pass**.
+- **Frontend Playwright e2e** — both flows green (legacy + fast rewrite).
+- Speed verified: 0.27s for 10 profiles, ~3s budget for 15 in full UI.
 
 ### Backlog (unchanged)
 - **P1**: Legal pages (Terms / Privacy / Refund).

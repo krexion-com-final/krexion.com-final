@@ -16,6 +16,9 @@ import {
   Download,
   Eraser,
   Zap,
+  Wifi,
+  WifiOff,
+  ShieldCheck,
 } from "lucide-react";
 
 const API = (process.env.REACT_APP_BACKEND_URL || "") + "/api";
@@ -64,6 +67,9 @@ export default function AdsPowerPage() {
   const [platform, setPlatform] = useState("any");
   const [wipeExisting, setWipeExisting] = useState(true);
   const [pushToAdspower, setPushToAdspower] = useState(false);
+  const [verifyUniqueIps, setVerifyUniqueIps] = useState(false);
+  const [testingCfg, setTestingCfg] = useState(null);
+  const [cfgTestResult, setCfgTestResult] = useState({}); // {cid: {ok,message}}
 
   const [job, setJob] = useState(null);
   const [polling, setPolling] = useState(false);
@@ -123,6 +129,23 @@ export default function AdsPowerPage() {
     toast.success("Deleted");
     if (selectedCfg === id) setSelectedCfg(null);
     refreshAll();
+  }
+
+  async function testConfig(id) {
+    setTestingCfg(id);
+    setCfgTestResult((prev) => ({ ...prev, [id]: null }));
+    try {
+      const r = await axios.post(`${API}/adspower/configs/${id}/test`, {}, { headers: authHeaders() });
+      setCfgTestResult((prev) => ({ ...prev, [id]: r.data }));
+      if (r.data.ok) toast.success(r.data.message || "AdsPower API connected");
+      else toast.error(r.data.message || "AdsPower test failed");
+    } catch (e) {
+      const msg = e.response?.data?.detail || "Test failed";
+      setCfgTestResult((prev) => ({ ...prev, [id]: { ok: false, message: msg } }));
+      toast.error(msg);
+    } finally {
+      setTestingCfg(null);
+    }
   }
 
   async function saveProxyCreds() {
@@ -279,34 +302,65 @@ export default function AdsPowerPage() {
               <div className="text-xs text-[#71717A] py-4 text-center">No configs yet - add your AdsPower API key</div>
             ) : (
               <div className="space-y-2">
-                {configs.map((c) => (
-                  <label
-                    key={c.id}
-                    className={`flex items-center gap-3 p-2 rounded border cursor-pointer transition ${
-                      selectedCfg === c.id
-                        ? "bg-[#3B82F6]/10 border-[#3B82F6]/50"
-                        : "border-white/10 hover:border-white/20"
-                    }`}
-                  >
-                    <input
-                      type="radio"
-                      checked={selectedCfg === c.id}
-                      onChange={() => setSelectedCfg(c.id)}
-                      data-testid={`select-config-${c.id}`}
-                    />
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm text-white font-medium truncate">{c.name}</div>
-                      <div className="text-[10px] text-[#71717A] truncate font-mono">{c.host} · {c.api_key_masked}</div>
-                    </div>
-                    <button
-                      onClick={(e) => { e.preventDefault(); deleteConfig(c.id); }}
-                      data-testid={`delete-config-${c.id}`}
-                      className="text-[#71717A] hover:text-red-400 p-1"
+                {configs.map((c) => {
+                  const tr = cfgTestResult[c.id];
+                  return (
+                    <div
+                      key={c.id}
+                      className={`rounded border transition ${
+                        selectedCfg === c.id
+                          ? "bg-[#3B82F6]/10 border-[#3B82F6]/50"
+                          : "border-white/10 hover:border-white/20"
+                      }`}
                     >
-                      <Trash2 size={14} />
-                    </button>
-                  </label>
-                ))}
+                      <label className="flex items-center gap-3 p-2 cursor-pointer">
+                        <input
+                          type="radio"
+                          checked={selectedCfg === c.id}
+                          onChange={() => setSelectedCfg(c.id)}
+                          data-testid={`select-config-${c.id}`}
+                        />
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm text-white font-medium truncate inline-flex items-center gap-2">
+                            {c.name}
+                            {tr && tr.ok && (
+                              <span className="text-[10px] inline-flex items-center gap-1 text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 px-1.5 py-0.5 rounded-full">
+                                <Wifi size={9} /> Connected
+                              </span>
+                            )}
+                            {tr && !tr.ok && (
+                              <span className="text-[10px] inline-flex items-center gap-1 text-red-300 bg-red-500/10 border border-red-500/30 px-1.5 py-0.5 rounded-full">
+                                <WifiOff size={9} /> Failed
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[10px] text-[#71717A] truncate font-mono">{c.host} · {c.api_key_masked}</div>
+                        </div>
+                        <button
+                          onClick={(e) => { e.preventDefault(); testConfig(c.id); }}
+                          disabled={testingCfg === c.id}
+                          data-testid={`test-config-${c.id}`}
+                          className="text-xs inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/25 disabled:opacity-50"
+                        >
+                          {testingCfg === c.id ? <Loader2 size={11} className="animate-spin" /> : <ShieldCheck size={11} />}
+                          Test
+                        </button>
+                        <button
+                          onClick={(e) => { e.preventDefault(); deleteConfig(c.id); }}
+                          data-testid={`delete-config-${c.id}`}
+                          className="text-[#71717A] hover:text-red-400 p-1"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </label>
+                      {tr && !tr.ok && tr.message && (
+                        <div className="text-[10px] text-red-300/80 px-3 pb-2 pt-0 break-words">
+                          {tr.message}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -383,6 +437,16 @@ export default function AdsPowerPage() {
           <h3 className="text-sm font-bold text-white inline-flex items-center gap-2 mb-4">
             <PlayCircle size={15} /> Generate profiles
           </h3>
+          {selectedCfg ? (
+            <div className="mb-4 inline-flex items-center gap-2 text-xs px-3 py-1.5 rounded-full bg-[#3B82F6]/15 border border-[#3B82F6]/30 text-[#93C5FD]" data-testid="active-config-banner">
+              <Key size={11} />
+              Profiles will be created on AdsPower account: <b className="text-white">{(configs.find((c) => c.id === selectedCfg) || {}).name || "—"}</b>
+            </div>
+          ) : (
+            <div className="mb-4 inline-flex items-center gap-2 text-xs px-3 py-1.5 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300">
+              <AlertCircle size={11} /> Select an AdsPower API config above first
+            </div>
+          )}
           <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div>
               <label className="text-xs text-[#71717A] block mb-1">Count (1-200)</label>
@@ -391,7 +455,11 @@ export default function AdsPowerPage() {
                 min={1}
                 max={200}
                 value={count}
-                onChange={(e) => setCount(parseInt(e.target.value) || 1)}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value);
+                  if (Number.isNaN(v)) return setCount(1);
+                  setCount(Math.max(1, Math.min(200, v)));
+                }}
                 data-testid="generate-count"
                 className="w-full bg-black/40 border border-white/10 rounded px-3 py-2 text-white text-sm"
               />
@@ -445,6 +513,17 @@ export default function AdsPowerPage() {
               />
               <Eraser size={12} className="text-red-300" />
               Delete existing profiles before building
+            </label>
+            <label className="text-xs inline-flex items-center gap-2 px-3 py-2 rounded-lg border bg-white/[0.02] border-white/10 text-[#A1A1AA] hover:border-white/20 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={verifyUniqueIps}
+                onChange={(e) => setVerifyUniqueIps(e.target.checked)}
+                data-testid="verify-unique-ips-toggle"
+                className="accent-amber-500"
+              />
+              <ShieldCheck size={12} className="text-amber-300" />
+              Verify each proxy gives a unique IP (slower — checks ipify before saving)
             </label>
             <label className="text-xs inline-flex items-center gap-2 px-3 py-2 rounded-lg border bg-white/[0.02] border-white/10 text-[#A1A1AA] hover:border-white/20 cursor-pointer">
               <input
@@ -590,10 +669,11 @@ function ProfilesTable({ profiles }) {
             <tr>
               <th className="text-left px-3 py-2">#</th>
               <th className="text-left px-3 py-2">Name</th>
+              <th className="text-left px-3 py-2">IP</th>
               <th className="text-left px-3 py-2">Device</th>
               <th className="text-left px-3 py-2">Platform</th>
               <th className="text-left px-3 py-2">UA</th>
-              <th className="text-left px-3 py-2">Session</th>
+              <th className="text-left px-3 py-2">Account</th>
               <th className="text-left px-3 py-2">Push</th>
             </tr>
           </thead>
@@ -602,17 +682,24 @@ function ProfilesTable({ profiles }) {
               <tr key={p.id || i} className="border-t border-white/5" data-testid={`profile-row-${i}`}>
                 <td className="px-3 py-2 text-[#71717A]">{i + 1}</td>
                 <td className="px-3 py-2 text-white font-mono whitespace-nowrap">{p.name}</td>
+                <td className="px-3 py-2 text-emerald-300 font-mono whitespace-nowrap">
+                  {p.ip ? (
+                    <span className="inline-flex items-center gap-1">
+                      {p.ip}
+                      <button onClick={() => copy(p.ip, `ip-${i}`)} className="text-[#71717A] hover:text-white">
+                        {copiedKey === `ip-${i}` ? <Check size={11} /> : <Copy size={11} />}
+                      </button>
+                    </span>
+                  ) : (
+                    <span className="text-[#71717A]">— sticky</span>
+                  )}
+                </td>
                 <td className="px-3 py-2 text-[#A1A1AA]">{p.device_label || "-"}</td>
                 <td className="px-3 py-2 text-[#A1A1AA]">{p.ua_platform || "-"}</td>
                 <td className="px-3 py-2 text-emerald-300 font-mono max-w-md">
                   <div className="truncate" title={p.user_agent}>{p.user_agent}</div>
                 </td>
-                <td className="px-3 py-2 text-cyan-300 font-mono whitespace-nowrap inline-flex items-center gap-1">
-                  {p.proxy_session}
-                  <button onClick={() => copy(p.proxy_session, `s-${i}`)} className="text-[#71717A] hover:text-white">
-                    {copiedKey === `s-${i}` ? <Check size={11} /> : <Copy size={11} />}
-                  </button>
-                </td>
+                <td className="px-3 py-2 text-[#A1A1AA] whitespace-nowrap">{p.config_name || "—"}</td>
                 <td className="px-3 py-2 text-[#A1A1AA] text-[10px]">{p.push_status || "skipped"}</td>
               </tr>
             ))}

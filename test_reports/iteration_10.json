@@ -1,0 +1,34 @@
+{
+  "summary": "Iteration 10 — Profile Builder: per-config 'Test' button, verify_unique_ips toggle, active-config banner, IP/Account columns. 6/6 backend pytest pass (24s incl. 18s bridge-online simulation). Full frontend Playwright validation passes: 2 Test buttons render with config names, 'Failed' badge + red 'Cannot reach AdsPower from cloud' message appear after clicking Test (PC offline), verify-unique-ips-toggle present with default OFF, active-config-banner shows 'Profiles will be created on AdsPower account: <name>' and updates live when switching radio selection, Account-B add flow works (modal opens, save persists, appears in list, banner reflects 'Account-B'). Profiles table has IP column (between Name and Device) and Account column. Generated profile with config 'Test' selected correctly shows 'Test' in Account column and '— sticky' in IP column when verify_unique_ips:false. Backend: test_adspower_config returns 200+{ok:false,reachable:false,local_online:false} when offline (<1s), 404 for unknown cid, 403 for user without feature. With a fresh sync_heartbeats doc injected to simulate PC online, a bridge_job with feature='adspower/test' IS enqueued in db.bridge_jobs (confirmed via direct Mongo read), and the call waits ~18s then returns ok:false,local_online:true with timeout message. /generate now includes 'verify_unique_ips' and 'config_name' on the job doc; profile docs include 'config_name' and 'ip' fields. verify_unique_ips:true with fake ProxyJet creds fast-fails (~15s) with clean error 'Only 0/N unique IPs found...' (no crash). verify_unique_ips:false (default) generates 10 profiles in ~1.5s — regression preserved.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration10_adspower_test_and_unique_ips.py",
+    "/app/test_reports/pytest/iter10_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "adspower_module.test_adspower_config: offline path correctly returns 200 with structured error (not 5xx). Online path correctly inserts bridge_job with feature='adspower/test' and payload {host, api_key} — handler '__adspower_test__' on sync_client side should read these.",
+    "allocate_unique_ips: concurrency-15 semaphore + max_attempts cap behaves correctly under fake creds — fails fast in ~15s without resource leak. _probe_ip uses httpx with 10s timeout.",
+    "Profile docs persist 'ip' (None in fast mode) and 'config_name' from cfg.name — consistent contract.",
+    "Job docs expose verify_unique_ips and config_name — UI Account column reads from profile.config_name (not job), so historical profiles will still render their original account name correctly.",
+    "IP column reads p.ip with copy button when set, falls back to '— sticky' muted gray when null. UA platform/device columns unchanged."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration10_adspower_test_and_unique_ips.py (new — 6 pytest tests)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "admin@krexion.local / admin123 (admin); adspowertester@gmail.com / Test12345 (pre-flagged profile_builder user — currently has configs ['Test', 'Account-A'], ProxyJet creds saved).",
+  "seed_data_creation": "Tests create transient profiles via wipe_existing=true; cleanup automated. During Playwright I added & removed 'Account-B' and accidentally deleted then re-created the 'Test' config — the seeded user's config list is restored to ['Test', 'Account-A'] (verified at end via /api/adspower/configs). The Playwright test_config online-simulation also inserts then deletes a fresh sync_heartbeats doc — fully reverted.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All 6 iteration-10 backend tests pass in ~24s (the online-sim test is the longest at ~18s because it actually waits for the bridge_job timeout). Frontend Profile Builder route is /profile-builder. Key new test IDs: test-config-{cid}, verify-unique-ips-toggle, active-config-banner. verify_unique_ips toggle default OFF in UI. When generating in fast mode (verify_unique_ips=false), IP column shows '— sticky' (muted gray) and Account column shows config_name. Profile field contract additions: 'ip' (str|None), 'config_name' (str). Job doc additions: 'verify_unique_ips' (bool), 'config_name' (str). To simulate 'local PC online' for the /test endpoint, upsert sync_heartbeats {user_id, last_seen=now} — but no real worker is running so the test will timeout at 18s and return local_online:true,ok:false. The pre-flagged user currently has 2 configs ('Test', 'Account-A'); avoid disrupting them or restore at end.",
+  "rca of the issue": "n/a — no bugs found. All review-request scenarios verified end-to-end."
+}

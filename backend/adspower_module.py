@@ -118,6 +118,178 @@ def build_proxy(base_user: str, base_pass: str, state: str, sid: str | None = No
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Parallel unique-IP allocator — fetches the real exit IP for each
+# sticky session via api.ipify.org, skips duplicates against the user's
+# adspower_used_ips history. Concurrency-capped so we don't melt the
+# proxy pool. Roughly 50 profiles ≈ 8-15s instead of 600s sequential.
+# ─────────────────────────────────────────────────────────────────────
+import httpx  # local import keeps the module light when unused
+
+_IP_PROBE_URLS = [
+    "https://api.ipify.org?format=json",
+    "https://ifconfig.me/ip",
+]
+
+
+async def _probe_ip(proxy_url: str, timeout: int = 10) -> str | None:
+    """Try each probe URL once, fastest wins."""
+    import re
+    for url in _IP_PROBE_URLS:
+        try:
+            async with httpx.AsyncClient(
+                proxy=proxy_url, timeout=timeout, follow_redirects=True,
+            ) as c:
+                r = await c.get(url)
+                if r.status_code != 200:
+                    continue
+                txt = r.text.strip()
+                if txt.startswith("{"):
+                    try:
+                        txt = (r.json() or {}).get("ip") or ""
+                    except Exception:
+                        continue
+                if re.match(r"^\d+\.\d+\.\d+\.\d+$", txt):
+                    return txt
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+async def allocate_unique_ips(
+    user_id: str,
+    base_user: str,
+    base_pass: str,
+    state: str,
+    count: int,
+    *,
+    concurrency: int = 15,
+    max_attempts_factor: int = 4,
+    on_progress=None,
+) -> tuple[list[dict], list[str]]:
+    """Returns (allocated, errors). Each allocated entry has {ip, proxy}.
+
+    Skips IPs that already exist in `adspower_used_ips` for this user, and
+    skips duplicates within the same batch. Caps probe attempts so we don't
+    loop forever for users with depleted ProxyJet pools.
+    """
+    sem = asyncio.Semaphore(concurrency)
+    found: list[dict] = []
+    errors: list[str] = []
+    seen_ips: set[str] = set()
+
+    # Preload user's historical IPs (best-effort)
+    try:
+        cursor = _db.adspower_used_ips.find(
+            {"user_id": user_id, "ip": {"$exists": True}},
+            {"_id": 0, "ip": 1},
+        )
+        async for doc in cursor:
+            if doc.get("ip"):
+                seen_ips.add(doc["ip"])
+    except Exception:  # noqa: BLE001
+        pass
+
+    max_attempts = max(count * max_attempts_factor, count + 5)
+    attempts_left = max_attempts
+
+    async def one_probe() -> dict | None:
+        async with sem:
+            p = build_proxy(base_user, base_pass, state)
+            ip = await _probe_ip(p["url_http"])
+            if not ip:
+                return None
+            if ip in seen_ips:
+                return {"duplicate": True, "ip": ip}
+            seen_ips.add(ip)
+            return {"ip": ip, "proxy": p}
+
+    # Fire probes in waves until we have enough or run out of attempts
+    while len(found) < count and attempts_left > 0:
+        batch_size = min(attempts_left, max(concurrency, count - len(found) + 3))
+        attempts_left -= batch_size
+        results = await asyncio.gather(*[one_probe() for _ in range(batch_size)])
+        for r in results:
+            if not r:
+                continue
+            if r.get("duplicate"):
+                continue
+            found.append({"ip": r["ip"], "proxy": r["proxy"]})
+            if on_progress:
+                try:
+                    await on_progress(len(found), count)
+                except Exception:
+                    pass
+            if len(found) >= count:
+                break
+
+    if len(found) < count:
+        errors.append(
+            f"Only {len(found)}/{count} unique IPs found after {max_attempts - attempts_left} probes. "
+            "Try a different state or smaller count."
+        )
+    return found[:count], errors
+
+
+# ─────────────────────────────────────────────────────────────────────
+# AdsPower API connection test — bridges to local PC via bridge_jobs
+# ─────────────────────────────────────────────────────────────────────
+async def test_adspower_config(user: dict, cid: str, *, wait_timeout: int = 18) -> dict:
+    cfg = await _db.adspower_configs.find_one({"id": cid, "user_id": user["id"]}, {"_id": 0})
+    if not cfg:
+        raise HTTPException(404, "AdsPower config not found")
+
+    # Check if user has a local heartbeat (PC online)
+    hb = await _db.sync_heartbeats.find_one({"user_id": user["id"]}, {"_id": 0})
+    online = False
+    if hb and hb.get("last_seen"):
+        try:
+            last = datetime.fromisoformat(str(hb["last_seen"]).replace("Z", "+00:00"))
+            online = (datetime.now(timezone.utc) - last).total_seconds() <= 120
+        except Exception:
+            online = False
+
+    if not online:
+        return {
+            "ok": False,
+            "reachable": False,
+            "message": (
+                "Cannot reach AdsPower from cloud. Your local Krexion PC must be online "
+                "(install Krexion desktop app and keep AdsPower running)."
+            ),
+            "local_online": False,
+        }
+
+    # Enqueue a bridge_job for adspower/test
+    bj_id = uuid.uuid4().hex
+    await _db.bridge_jobs.insert_one({
+        "id": bj_id, "user_id": user["id"], "email": user.get("email"),
+        "feature": "adspower/test",
+        "payload": {"host": cfg["host"], "api_key": cfg["api_key"]},
+        "status": "pending", "result": None, "error": None,
+        "created_at": _now(), "started_at": None, "completed_at": None, "claimed_by": None,
+    })
+    deadline = asyncio.get_event_loop().time() + wait_timeout
+    while asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(0.5)
+        bj = await _db.bridge_jobs.find_one({"id": bj_id}, {"_id": 0})
+        if bj and bj.get("status") in ("done", "failed"):
+            if bj["status"] == "done":
+                return {
+                    "ok": True, "reachable": True, "local_online": True,
+                    "message": "AdsPower API connected successfully on your PC.",
+                    "raw": bj.get("result"),
+                }
+            return {
+                "ok": False, "reachable": False, "local_online": True,
+                "message": bj.get("error") or "AdsPower test failed",
+            }
+    return {
+        "ok": False, "reachable": False, "local_online": True,
+        "message": "Timeout — your PC did not respond within 18s. Make sure AdsPower is running and Krexion sync_client is active.",
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────
 # CRUD - configs / proxy creds
 # ─────────────────────────────────────────────────────────────────────
 async def list_configs(user_id: str) -> list:
@@ -360,6 +532,7 @@ async def start_generate(user: dict, body: dict) -> dict:
     name_prefix = (body.get("name_prefix") or "krexion").strip()[:32] or "krexion"
     wipe_existing = bool(body.get("wipe_existing") or False)
     push_to_adspower = bool(body.get("push_to_adspower") or False)
+    verify_unique_ips = bool(body.get("verify_unique_ips") or False)
     ua_cfg = body.get("ua_config") or {}
     # legacy fallback if user only sent ua_templates
     if not ua_cfg and body.get("ua_templates"):
@@ -384,27 +557,58 @@ async def start_generate(user: dict, body: dict) -> dict:
     await _db.adspower_jobs.insert_one({
         "id": job_id, "user_id": user["id"], "email": user.get("email"),
         "type": "profile_builder", "count": count, "state": state,
-        "config_id": config_id, "name_prefix": name_prefix,
+        "config_id": config_id, "config_name": cfg.get("name"),
+        "name_prefix": name_prefix,
         "ua_config": ua_cfg,
         "wipe_existing": wipe_existing, "push_to_adspower": push_to_adspower,
+        "verify_unique_ips": verify_unique_ips,
         "status": "running", "progress": 0, "total": count,
         "profiles": [], "errors": [], "created_at": _now(),
     })
     asyncio.create_task(_run_job_fast(
         job_id, user, cfg, base_user, base_pass, state, count, ua_cfg,
-        name_prefix, push_to_adspower,
+        name_prefix, push_to_adspower, verify_unique_ips,
     ))
     return {"job_id": job_id, "status": "started", "count": count, "wiped": wiped}
 
 
-async def _run_job_fast(job_id, user, cfg, base_user, base_pass, state, count, ua_cfg, name_prefix, push_to_adspower):
-    """Fast path: generate everything on cloud in seconds. No ProxyJet
-    verification (each sticky session gives a unique IP by design).
-    Optional push to local AdsPower runs in BACKGROUND afterwards."""
+async def _run_job_fast(job_id, user, cfg, base_user, base_pass, state, count, ua_cfg, name_prefix, push_to_adspower, verify_unique_ips=False):
+    """Fast path: generate everything on cloud in seconds. Optionally verifies
+    unique IPs via parallel ipify probes. Optional push to local AdsPower
+    runs in BACKGROUND afterwards."""
     async def upd(fields):
         await _db.adspower_jobs.update_one({"id": job_id}, {"$set": fields})
 
     try:
+        # Step 1 — allocate proxies. Either verify-unique (slow but real
+        # IPs) or generate sticky sessions instantly (no IP captured).
+        allocated_proxies: list[dict] = []
+        if verify_unique_ips:
+            await upd({"status": "allocating_ips", "progress": 0})
+
+            async def _ip_progress(done: int, total: int):
+                await upd({"progress": done})
+
+            allocated, ip_errors = await allocate_unique_ips(
+                user["id"], base_user, base_pass, state, count,
+                on_progress=_ip_progress,
+            )
+            if len(allocated) < count:
+                await upd({
+                    "status": "failed",
+                    "errors": ip_errors or [f"Only {len(allocated)}/{count} unique IPs available"],
+                    "completed_at": _now(),
+                })
+                return
+            allocated_proxies = allocated  # each: {ip, proxy}
+        else:
+            # Instant: unique session IDs = unique IPs by design (no verify)
+            allocated_proxies = [
+                {"ip": None, "proxy": build_proxy(base_user, base_pass, state)}
+                for _ in range(count)
+            ]
+
+        # Step 2 — generate UAs
         uas = await _gen_uas(user, ua_cfg, count)
         await upd({"status": "creating_profiles", "progress": 0})
 
@@ -413,9 +617,11 @@ async def _run_job_fast(job_id, user, cfg, base_user, base_pass, state, count, u
 
         for idx in range(1, count + 1):
             ua_info = uas[idx - 1] if idx - 1 < len(uas) else uas[-1]
+            pinfo = allocated_proxies[idx - 1]
+            proxy = pinfo["proxy"]
+            ip = pinfo.get("ip")
             seq = f"{idx:03d}"
             pname = f"{name_prefix}-{state.replace('_', '')}-{seq}"
-            proxy = build_proxy(base_user, base_pass, state)
             resolution = (ua_info.get("resolution") or "").replace("x", "_") or random.choice([
                 "1920_1080", "1536_864", "1440_900", "1366_768"
             ])
@@ -426,10 +632,11 @@ async def _run_job_fast(job_id, user, cfg, base_user, base_pass, state, count, u
                 "id": uuid.uuid4().hex,
                 "user_id": user["id"],
                 "config_id": cfg["id"],
+                "config_name": cfg.get("name"),
                 "adspower_profile_id": None,
                 "name": pname,
                 "state": state,
-                "ip": None,  # filled in async if pushed to AdsPower
+                "ip": ip,
                 "user_agent": ua_info.get("user_agent"),
                 "device_label": ua_info.get("device_label"),
                 "ua_platform": ua_info.get("platform"),
@@ -447,6 +654,7 @@ async def _run_job_fast(job_id, user, cfg, base_user, base_pass, state, count, u
             await _db.adspower_used_ips.insert_one({
                 "user_id": user["id"],
                 "session_id": proxy["session_id"],
+                "ip": ip,
                 "profile_name": pname,
                 "state": state,
                 "created_at": _now(),
@@ -455,6 +663,7 @@ async def _run_job_fast(job_id, user, cfg, base_user, base_pass, state, count, u
             profile_summary = {
                 "name": pname,
                 "session": proxy["session_id"],
+                "ip": ip,
                 "user_agent": ua_info.get("user_agent", "")[:120],
                 "device": ua_info.get("device_label", ""),
             }
@@ -496,9 +705,7 @@ async def _run_job_fast(job_id, user, cfg, base_user, base_pass, state, count, u
         final_status = "done"
         await upd({"status": final_status, "completed_at": _now()})
 
-        # Background: if push_to_adspower, watch bridge jobs and update
-        # the corresponding profile docs as workers report back. Non-fatal
-        # if it never resolves (cloud-only environment).
+        # Background: if push_to_adspower, watch bridge jobs
         if push_to_adspower and bridge_job_ids:
             asyncio.create_task(_watch_bridge_jobs(job_id, bridge_job_ids))
     except Exception as e:  # noqa: BLE001
