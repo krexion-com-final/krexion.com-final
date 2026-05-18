@@ -13178,6 +13178,32 @@ try:
     async def _bridge_list_jobs(limit: int = 50, user: dict = Depends(get_current_user)):
         return {"jobs": await list_jobs_for(user["id"], limit)}
 
+    @_bridge_router.post("/pair")
+    async def _bridge_pair_pc(user: dict = Depends(get_current_user)):
+        """One-click 'Pair my PC' — returns the user's license key plus
+        a ready-to-paste PowerShell one-liner so the customer can wire
+        their local install to this cloud account in 5 seconds."""
+        from bridge_module import get_or_create_license_for_user
+        info = await get_or_create_license_for_user(user)
+        key = info["license_key"]
+        ps_command = (
+            'cd C:\\Krexion ; '
+            '(Get-Content .env | Where-Object {$_ -notmatch "^LICENSE_KEY="}) '
+            f'+ "LICENSE_KEY={key}" | Set-Content .env -Encoding ASCII ; '
+            'docker compose restart backend'
+        )
+        return {
+            "license_key": key,
+            "created": info["created"],
+            "powershell_command": ps_command,
+            "instructions": [
+                "1. Apne PC pe PowerShell open karein - right click karke 'Run as Administrator'",
+                "2. Neeche ki line copy karein aur PowerShell mein paste karein, phir Enter dabayein",
+                "3. 30 sec wait karein - backend restart ho jayega",
+                "4. Wapas krexion.com pe F5 refresh karein - green 'PC connected' badge dikhna chahye",
+            ],
+        }
+
     app.include_router(_bridge_router)
     app.include_router(_bridge_sync_router)
     logger.info("Bridge module loaded — /api/bridge/* + /api/sync/jobs/*")

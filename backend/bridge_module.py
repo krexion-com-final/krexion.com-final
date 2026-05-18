@@ -190,6 +190,39 @@ async def list_jobs_for(user_id: str, limit: int = 50) -> list:
     return await cursor.to_list(200)
 
 
+async def get_or_create_license_for_user(user: dict) -> dict:
+    """Find an existing active license for the user, or generate a new
+    one. Used by the 'Pair my PC' flow to give the customer a key they
+    can drop into their local install's .env file so heartbeats start
+    landing in the cloud DB."""
+    existing = await _db.licenses.find_one(
+        {"email": user["email"], "status": {"$in": ["active", "issued"]}},
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    if existing and existing.get("license_key"):
+        return {"license_key": existing["license_key"], "created": False, "license": existing}
+
+    # Generate a new license key
+    new_key = "KRX-" + uuid.uuid4().hex.upper()[:24]
+    doc = {
+        "id": uuid.uuid4().hex,
+        "license_key": new_key,
+        "email": user["email"],
+        "user_id": user["id"],
+        "plan": "self-paired",
+        "status": "active",
+        "created_at": _now_iso(),
+        "expires_at": None,
+        "machine_fingerprint": None,
+        "source": "self-pair",
+    }
+    await _db.licenses.insert_one(doc)
+    logger.info(f"[bridge.pair] new license created for {user['email']}: {new_key[:18]}...")
+    doc_clean = {k: v for k, v in doc.items() if k != "_id"}
+    return {"license_key": new_key, "created": True, "license": doc_clean}
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Local-worker endpoints (auth = X-Krexion-License)
 # ─────────────────────────────────────────────────────────────────────
