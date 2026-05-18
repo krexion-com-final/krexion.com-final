@@ -299,3 +299,42 @@ Then add the route to `feature_routes` in `sync_client._execute_job_locally()`.
 - **P3**: Affiliate / Referral system (USDT commissions).
 - **P3**: Cloudflare Worker for `/r/<short>` redirects (scale).
 
+
+---
+
+## 2026-05-18 — Profile Builder (AdsPower bulk profiles via bridge)
+
+### Built
+- **New feature `profile_builder`** — admin-gated toggle in DEFAULT_FEATURES + `UserFeatures` Pydantic model. Visible in Admin Dashboard "Feature Access" section as "Profile Builder (AdsPower bulk profiles + ProxyJet)".
+- **Page** `/profile-builder` (component: `AdsPowerPage.js`, in-sidebar label **Profile Builder**, icon `UserPlus`, position right under Proxies).
+- **Backend** `/api/adspower/*` (in `adspower_module.py`, wired in `server.py` ~line 13270):
+  - `GET /states` · 50 US states (public lookup)
+  - `GET /ua-templates` · 6 UA template keys (public lookup)
+  - `GET /configs` · list user's AdsPower API configs (masked) — gated
+  - `POST /configs` · save a new config (name + host + api_key) — gated
+  - `DELETE /configs/{cid}` — gated
+  - `GET /proxy-creds` · status (has_creds + base_user_masked) — gated
+  - `POST /proxy-creds` · save ProxyJet base_user / base_pass — gated
+  - `POST /generate` · kicks off bulk job (count/state/ua_templates/name_prefix/config_id) — gated
+  - `GET /jobs/{job_id}` · polling for live progress — gated
+  - `GET /profiles` · created profile history — gated
+  - All gated endpoints use `check_user_feature(user, "profile_builder")` → 403 when flag off.
+- **Hybrid execution flow**: Cloud server allocates unique sticky US IPs via ProxyJet (lightweight HTTP). Final AdsPower profile-create POST to `http://local.adspower.net:50325/api/v1/user/create` is enqueued into `bridge_jobs` and pulled by customer PC's `sync_client.py` worker (already implemented). 30-min sticky session keeps IP locked while user works.
+- **Frontend UX**: AdsPower API configs panel (radio-select + Add/Delete), ProxyJet creds modal (masked display), Generate form (count 1-100, state dropdown, name prefix, multi-select UA template chips), live `JobProgress` panel with progress bar + errors panel + profile-results table with copyable IPs.
+
+### Fixed during work
+- Removed nested `<DashboardLayout>` wrapper inside AdsPowerPage (was causing double-sidebar on /profile-builder because parent route also wraps in DashboardLayout).
+
+### Tested
+- **Backend pytest 21/21** — `/app/backend/tests/test_iteration8_profile_builder.py` (gating, CRUD, validation, default flag off, admin toggle).
+- **Frontend Playwright e2e** — sidebar visibility both ways (with/without flag), route gating via FeatureRoute, Add/Delete config flow, ProxyJet creds save + masked badge, Generate → JobProgress panel, admin Feature Access toggle.
+
+### Backlog (unchanged)
+- **P1**: Legal pages (Terms / Privacy / Refund).
+- **P1**: "Change password on first login" for auto-created accounts.
+- **P1**: Customer portal `/account` (orders, licenses, machine bindings).
+- **P2**: Resend License Email admin button + expiry reminder cron (7d/1d).
+- **P2**: Bump release to v1.1.0 + publish so installed customer PCs pull updated `sync_client.py` (already contains the `adspower/create` worker handler).
+- **P3**: Affiliate / Referral system.
+- **P3**: Cloudflare Worker for `/r/<short>` redirects.
+
