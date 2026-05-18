@@ -766,3 +766,187 @@ async def get_job(user_id: str, job_id: str) -> dict:
     if not j:
         raise HTTPException(404, "Job not found")
     return j
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Retry pushing stuck/failed profiles to AdsPower
+# ─────────────────────────────────────────────────────────────────────
+async def retry_push_to_adspower(user: dict, body: dict) -> dict:
+    """Re-enqueue bridge jobs for profiles whose push didn't land.
+
+    Body:
+      cid (optional)         — AdsPower config id; defaults to first one
+      profile_ids (optional) — explicit profile ids to retry
+                               (if omitted, retries every profile that is
+                                not yet successfully pushed)
+
+    Returns the count of jobs re-enqueued plus the job ids so the UI can
+    poll for completion (handled by the persistent sweeper below).
+    """
+    # Resolve AdsPower config to use
+    cid = (body or {}).get("cid")
+    if cid:
+        cfg = await _db.adspower_configs.find_one({"id": cid, "user_id": user["id"]}, {"_id": 0})
+    else:
+        cfg = await _db.adspower_configs.find_one({"user_id": user["id"]}, {"_id": 0})
+    if not cfg:
+        raise HTTPException(400, "No AdsPower config found — add an API key first.")
+
+    # Pick profiles to retry
+    explicit_ids = (body or {}).get("profile_ids")
+    query: dict = {"user_id": user["id"]}
+    if explicit_ids and isinstance(explicit_ids, list):
+        query["id"] = {"$in": explicit_ids}
+    else:
+        # Anything not successfully pushed = candidate
+        query["$or"] = [
+            {"pushed_to_adspower": {"$ne": True}},
+            {"pushed_to_adspower": {"$exists": False}},
+        ]
+    profiles = await _db.adspower_profiles.find(query, {"_id": 0}).to_list(2000)
+    if not profiles:
+        return {"retried": 0, "job_ids": [], "message": "Nothing to retry — all profiles are already pushed."}
+
+    enqueued: list[str] = []
+    for prof in profiles:
+        # Skip if a still-pending bridge_job already exists for this
+        # profile — avoid duplicates piling up in the queue.
+        existing = await _db.bridge_jobs.find_one(
+            {"profile_id": prof["id"], "status": {"$in": ["pending", "running"]}},
+            {"_id": 0, "id": 1},
+        )
+        if existing:
+            enqueued.append(existing["id"])
+            continue
+
+        bj_id = uuid.uuid4().hex
+        ua_info = {
+            "user_agent": prof.get("user_agent"),
+        }
+        payload = {
+            "host": cfg["host"],
+            "api_key": cfg["api_key"],
+            "name": prof.get("name"),
+            "user_agent": ua_info["user_agent"],
+            "proxy": prof.get("proxy") and {
+                "proxy_soft": "other",
+                "proxy_type": "http",
+                "proxy_host": prof["proxy"].get("host"),
+                "proxy_port": prof["proxy"].get("port"),
+                "proxy_user": prof["proxy"].get("username"),
+                "proxy_password": prof["proxy"].get("password"),
+            },
+            "fingerprint_config": {
+                "automatic_timezone": "1",
+                "language": (prof.get("language") or "en-US").split(","),
+                "screen_resolution": (prof.get("resolution") or "1080x1920").replace("x", "_"),
+            },
+        }
+        await _db.bridge_jobs.insert_one({
+            "id": bj_id, "user_id": user["id"], "email": user.get("email"),
+            "feature": "adspower/create", "payload": payload,
+            "status": "pending", "result": None, "error": None,
+            "created_at": _now(), "started_at": None,
+            "completed_at": None, "claimed_by": None,
+            "profile_id": prof["id"],
+        })
+        await _db.adspower_profiles.update_one(
+            {"id": prof["id"]},
+            {"$set": {"push_status": "queued"}},
+        )
+        enqueued.append(bj_id)
+
+    return {
+        "retried": len(enqueued),
+        "job_ids": enqueued,
+        "message": f"Re-queued {len(enqueued)} profile(s). Bridge worker will pick them up within seconds.",
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Persistent sweeper — reconciles 'queued' profiles with their
+# bridge_jobs status. Runs every 30 s in the background. Survives
+# server restarts (unlike the per-job _watch_bridge_jobs task).
+# ─────────────────────────────────────────────────────────────────────
+_sweeper_started: bool = False
+
+
+async def _sweep_queued_profiles_loop() -> None:
+    """Background reconciliation loop. Picks up profiles stuck in
+    'queued' status and updates them based on their bridge_jobs status."""
+    logger.info("[profile-builder] sweeper started — reconciling queued profiles every 30s")
+    while True:
+        try:
+            stuck = await _db.adspower_profiles.find(
+                {"pushed_to_adspower": {"$ne": True},
+                 "push_status": {"$nin": ["skipped", "success"]}},
+                {"_id": 0, "id": 1, "user_id": 1, "created_at": 1, "push_status": 1},
+            ).limit(500).to_list(500)
+            for prof in stuck:
+                bj = await _db.bridge_jobs.find_one(
+                    {"profile_id": prof["id"]},
+                    {"_id": 0},
+                    sort=[("created_at", -1)],
+                )
+                if not bj:
+                    continue
+                status = bj.get("status")
+                if status == "done":
+                    ads = bj.get("result") or {}
+                    pid = None
+                    if isinstance(ads.get("data"), dict):
+                        pid = ads["data"].get("id") or ads["data"].get("user_id")
+                    pid = pid or ads.get("user_id")
+                    await _db.adspower_profiles.update_one(
+                        {"id": prof["id"]},
+                        {"$set": {
+                            "adspower_profile_id": pid,
+                            "pushed_to_adspower": True,
+                            "push_status": "success",
+                        }},
+                    )
+                elif status == "failed":
+                    await _db.adspower_profiles.update_one(
+                        {"id": prof["id"]},
+                        {"$set": {
+                            "pushed_to_adspower": False,
+                            "push_status": f"failed: {bj.get('error') or 'bridge error'}",
+                        }},
+                    )
+                else:
+                    # Still pending/running — mark as timeout if the
+                    # bridge job is older than 10 minutes (gives the
+                    # local PC plenty of time to pick it up, even if
+                    # AdsPower was briefly closed).
+                    try:
+                        created = datetime.fromisoformat(
+                            str(bj.get("created_at", "")).replace("Z", "+00:00")
+                        )
+                        age = (datetime.now(timezone.utc) - created).total_seconds()
+                        if age > 600 and prof.get("push_status") != "timeout: local PC bridge worker did not pick up":
+                            await _db.adspower_profiles.update_one(
+                                {"id": prof["id"]},
+                                {"$set": {
+                                    "push_status": "timeout: local PC bridge worker did not pick up — re-pair PC and click Retry push",
+                                }},
+                            )
+                    except Exception:  # noqa: BLE001
+                        pass
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[profile-builder] sweeper iteration error: {e}")
+        await asyncio.sleep(30)
+
+
+def start_sweeper_once() -> None:
+    """Idempotent — called from server.py on startup. Safe to call
+    multiple times (only spawns the task on the first call)."""
+    global _sweeper_started
+    if _sweeper_started:
+        return
+    try:
+        asyncio.create_task(_sweep_queued_profiles_loop())
+        _sweeper_started = True
+    except RuntimeError:
+        # No running loop yet — caller should call again from a
+        # startup event handler. Don't mark started.
+        pass

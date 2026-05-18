@@ -76,11 +76,24 @@ export default function AdsPowerPage() {
   const [profiles, setProfiles] = useState([]);
   const [exporting, setExporting] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const [retryingPush, setRetryingPush] = useState(false);
 
   useEffect(() => {
     refreshAll();
     loadProfiles();
   }, []);
+
+  // Auto-poll profiles list every 6 s while there are profiles whose
+  // push hasn't landed yet — so the badges update without manual refresh.
+  useEffect(() => {
+    const hasPending = profiles.some((p) => {
+      const s = p.push_status || "skipped";
+      return !p.pushed_to_adspower && s !== "success" && s !== "skipped" && !s.startsWith("timeout") && !s.startsWith("failed");
+    });
+    if (!hasPending) return;
+    const t = setInterval(() => { loadProfiles(); }, 6000);
+    return () => clearInterval(t);
+  }, [profiles]);
 
   async function refreshAll() {
     try {
@@ -190,6 +203,26 @@ export default function AdsPowerPage() {
       toast.error("Export failed");
     } finally {
       setExporting(false);
+    }
+  }
+
+  async function retryPushToAdsPower() {
+    setRetryingPush(true);
+    try {
+      const cid = selectedCfg || (configs[0] && configs[0].id) || null;
+      const r = await axios.post(
+        `${API}/adspower/profiles/retry-push`,
+        cid ? { cid } : {},
+        { headers: authHeaders() }
+      );
+      toast.success(r.data.message || `Re-queued ${r.data.retried} profile(s)`);
+      // Auto-polling effect will keep refreshing as the bridge worker
+      // catches up; do one immediate refresh too.
+      loadProfiles();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Retry failed");
+    } finally {
+      setRetryingPush(false);
     }
   }
 
@@ -543,7 +576,7 @@ export default function AdsPowerPage() {
         {job && <JobProgress job={job} />}
 
         {/* --- Profiles table --- */}
-        {profiles.length > 0 && <ProfilesTable profiles={profiles} />}
+        {profiles.length > 0 && <ProfilesTable profiles={profiles} onRetryPush={retryPushToAdsPower} retrying={retryingPush} />}
       </div>
 
       {/* Add config modal */}
@@ -646,19 +679,58 @@ function JobProgress({ job }) {
   );
 }
 
-function ProfilesTable({ profiles }) {
+function ProfilesTable({ profiles, onRetryPush, retrying }) {
   const [copiedKey, setCopiedKey] = useState(null);
   function copy(val, key) {
     navigator.clipboard.writeText(val);
     setCopiedKey(key);
     setTimeout(() => setCopiedKey(null), 1200);
   }
+  const unpushed = profiles.filter((p) => {
+    const s = p.push_status || "skipped";
+    return !p.pushed_to_adspower && s !== "success" && s !== "skipped";
+  }).length;
+  function statusBadge(p) {
+    const s = p.push_status || "skipped";
+    if (p.pushed_to_adspower || s === "success") {
+      return <span className="inline-block px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[10px]" title="Pushed to AdsPower">✓ pushed</span>;
+    }
+    if (s === "skipped") {
+      return <span className="inline-block px-2 py-0.5 rounded-full bg-white/5 text-[#71717A] border border-white/10 text-[10px]" title="Push to AdsPower was not enabled">skipped</span>;
+    }
+    if (s === "queued") {
+      return <span className="inline-block px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px]" title="Waiting for your local Krexion bridge worker to pick this up">⏳ queued</span>;
+    }
+    if (s.startsWith("timeout")) {
+      return <span className="inline-block px-2 py-0.5 rounded-full bg-red-500/15 text-red-300 border border-red-500/30 text-[10px]" title={s}>⏰ timeout</span>;
+    }
+    return <span className="inline-block px-2 py-0.5 rounded-full bg-red-500/15 text-red-300 border border-red-500/30 text-[10px]" title={s}>⚠ {s.length > 20 ? s.slice(0, 20) + "…" : s}</span>;
+  }
   return (
     <div className="bg-white/[0.03] border border-white/10 rounded-xl p-4 space-y-3" data-testid="profiles-table">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
         <h3 className="text-sm font-bold text-white">Generated profiles ({profiles.length})</h3>
-        <div className="text-[10px] text-[#71717A]">Latest at top · 30-min sticky IP lock</div>
+        <div className="flex items-center gap-3">
+          {unpushed > 0 && (
+            <button
+              onClick={onRetryPush}
+              disabled={retrying}
+              data-testid="retry-push-button"
+              className="text-xs inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-amber-500/15 text-amber-200 border border-amber-500/40 hover:bg-amber-500/25 disabled:opacity-50"
+              title="Re-enqueue every profile that did not reach AdsPower"
+            >
+              {retrying ? <Loader2 size={12} className="animate-spin" /> : <Zap size={12} />}
+              Retry push to AdsPower ({unpushed})
+            </button>
+          )}
+          <div className="text-[10px] text-[#71717A]">Latest at top · 30-min sticky IP lock</div>
+        </div>
       </div>
+      {unpushed > 0 && (
+        <div className="text-[11px] text-amber-300/80 bg-amber-500/5 border border-amber-500/20 rounded px-3 py-2">
+          {unpushed} profile{unpushed === 1 ? "" : "s"} did not reach AdsPower. Open AdsPower + make sure Krexion is running on the same PC, then click <span className="font-semibold">Retry push</span>.
+        </div>
+      )}
       <div className="overflow-auto max-h-[500px] border border-white/10 rounded">
         <table className="w-full text-xs">
           <thead className="bg-white/[0.04] text-[#71717A] sticky top-0">
@@ -696,7 +768,7 @@ function ProfilesTable({ profiles }) {
                   <div className="truncate" title={p.user_agent}>{p.user_agent}</div>
                 </td>
                 <td className="px-3 py-2 text-[#A1A1AA] whitespace-nowrap">{p.config_name || "—"}</td>
-                <td className="px-3 py-2 text-[#A1A1AA] text-[10px]">{p.push_status || "skipped"}</td>
+                <td className="px-3 py-2 whitespace-nowrap">{statusBadge(p)}</td>
               </tr>
             ))}
           </tbody>

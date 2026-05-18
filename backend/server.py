@@ -13400,8 +13400,22 @@ try:
         check_user_feature(user, "profile_builder")
         return await adspower_module.export_profiles_xlsx(user["id"])
 
+    @_ads_router.post("/profiles/retry-push")
+    async def _ads_profiles_retry_push(body: dict = None, user: dict = Depends(get_current_user)):
+        check_user_feature(user, "profile_builder")
+        return await adspower_module.retry_push_to_adspower(user, body or {})
+
     app.include_router(_ads_router)
     logger.info("AdsPower module loaded — /api/adspower/*")
+
+    # Start the persistent sweeper that reconciles 'queued' profiles
+    # with their bridge_jobs status (survives server restarts).
+    @app.on_event("startup")
+    async def _start_adspower_sweeper():
+        try:
+            adspower_module.start_sweeper_once()
+        except Exception as _swe:  # noqa: BLE001
+            logger.warning(f"AdsPower sweeper failed to start: {_swe}")
 except Exception as _ads_err:  # noqa: BLE001
     logger.error(f"AdsPower module failed to load: {_ads_err}")
 
