@@ -1,0 +1,41 @@
+{
+  "summary": "End-to-end testing of Profile Builder fast-mode rewrite (iteration 9). 14/14 backend pytest tests pass after one minor test-side fix (job field naming: actual is 'count', not 'done'). Frontend smoke test on /profile-builder confirms full UI flow: app grid, platform picker, wipe/push toggles, dynamic Build button text, 5 profiles generated and rendered, Export & Clear-all buttons functional, Clear-all confirmation accepts and empties the table. Fast generation verified at ~0.27s for 10 profiles (well under 15s budget). xlsx export returns valid file (PK zip header, >1KB). wipe_existing fully replaces old profiles. UA variants validated: TikTok+Android (musical_ly/trill_ tokens, Android), Instagram+iOS (Instagram + iPhone/iPad). push_to_adspower=true does not block job completion. Feature gating still enforced for /generate, /profiles/export, DELETE /profiles.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/adspower/jobs/{id}", "issue": "Job response uses 'count' field for finished total; no explicit 'done' field. Cosmetic — frontend reads progress fine; documentation/contract clarity only."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Profile Builder count input", "issue": "Numeric input accepts typing 250 (above the documented 1-200 range). HTML max attribute either missing or not enforced on type. Backend correctly rejects 201+ with 400, so functionally safe, but UX should clamp input. Note: typing 0 is correctly normalized to 1.", "selector": "[data-testid='generate-count']", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration9_profile_builder_fast.py",
+    "/app/test_reports/pytest/iter9_results.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: clamp the Count input to max=200 in the UI (add max attribute and onChange clamp). Backend validation already covers it, so this is purely cosmetic.",
+    "NOTE for next agent: Profile Builder route is /profile-builder (not /adspower). Frontend app keys differ from prose-style description: actual keys are instagram, facebook, tiktok, youtube, whatsapp, gsearch, gchrome, pinterest, snapchat, chrome (last is the generic 'Browser' card). All 10 apps render correctly."
+  ],
+  "critical_code_review_comments": [
+    "/app/backend/adspower_module.py — fast generation correctly skips ProxyJet IP verify (confirmed by 0.27s for 10 profiles).",
+    "Profile rich-field contract is stable: name/state/user_agent/device_label/ua_platform/ua_app/resolution/language/timezone/proxy/proxy_session/created_at/pushed_to_adspower/push_status all present.",
+    "Proxy dict includes host/port/username/password/session_id and url_http — good for downstream consumption.",
+    "DELETE /api/adspower/profiles returns {deleted_profiles, deleted_used_ips, deleted_jobs} as specified.",
+    "wipe_existing=true reliably removes prior profile IDs before insert (no overlap on two consecutive wipe-generates)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration9_profile_builder_fast.py (new — 14 tests, pytest)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "95%"},
+  "test_credentials": "admin@krexion.local / admin123 (admin); adspowertester@gmail.com / Test12345 (pre-flagged profile_builder user). ProxyJet creds and AdsPower config already saved for the test user.",
+  "seed_data_creation": "Tests create transient profiles prefixed TEST_iter9_*; each test that creates uses wipe_existing=true and the suite ends with DELETE /api/adspower/profiles, so no residual data.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All 14 iteration-9 backend tests pass in ~7s. Frontend Profile Builder route is /profile-builder. App grid uses keys: instagram, facebook, tiktok, youtube, whatsapp, gsearch, gchrome, pinterest, snapchat, chrome. Platform keys: any/android/ios/desktop. Build button text format is 'Build N now'. wipe-existing-toggle default ON, push-adspower-toggle default OFF. Export and Clear-all buttons live in the page header (data-testid='export-xlsx' and 'clear-all-profiles'). Clear-all uses window.confirm — accept the dialog in Playwright.",
+  "rca of the issue": "n/a — no critical bugs found. Single minor UX issue: Count input does not clamp to 200 in HTML; backend protects with 400 on 201+."
+}

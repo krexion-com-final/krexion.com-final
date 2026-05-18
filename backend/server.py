@@ -13270,7 +13270,7 @@ except Exception as _bridge_err:  # noqa: BLE001
 try:
     import adspower_module
     from fastapi import APIRouter as _AdspowerAPIRouter
-    adspower_module._bind(main_db=main_db)
+    adspower_module._bind(main_db=main_db, ua_generate_func=generate_user_agents)
     _ads_router = _AdspowerAPIRouter(prefix="/api/adspower", tags=["adspower"])
 
     @_ads_router.get("/states")
@@ -13320,6 +13320,16 @@ try:
     async def _ads_profiles(limit: int = 200, user: dict = Depends(get_current_user)):
         check_user_feature(user, "profile_builder")
         return {"profiles": await adspower_module.list_profiles_for(user["id"], limit)}
+
+    @_ads_router.delete("/profiles")
+    async def _ads_profiles_clear(user: dict = Depends(get_current_user)):
+        check_user_feature(user, "profile_builder")
+        return await adspower_module.clear_all_profiles(user["id"])
+
+    @_ads_router.get("/profiles/export")
+    async def _ads_profiles_export(user: dict = Depends(get_current_user)):
+        check_user_feature(user, "profile_builder")
+        return await adspower_module.export_profiles_xlsx(user["id"])
 
     app.include_router(_ads_router)
     logger.info("AdsPower module loaded — /api/adspower/*")

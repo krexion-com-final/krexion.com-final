@@ -1,10 +1,20 @@
 """
-Krexion AdsPower Module - Bulk Profile Creator
-================================================
+Krexion Profile Builder — Bulk AdsPower-Compatible Profile Generator
+=====================================================================
 
-UI on krexion.com cloud. Heavy lifting (AdsPower local API call) is
-silently bridged to the customer's PC via existing bridge_jobs queue +
-KrexionHeartbeat-style PowerShell scheduled task.
+The cloud generates everything needed for AdsPower in seconds:
+  • A unique ProxyJet sticky session per profile (no IP verification needed
+    because each session = unique IP by design; verification was killing
+    perf — 12s round-trips through ProxyJet were the bottleneck).
+  • A realistic User-Agent via the same rich generator that powers the
+    "User Agent Generator" page (full app/platform/device/version control).
+  • Fingerprint config (screen resolution, language, timezone).
+
+Results are saved in `adspower_profiles` and can be:
+  1. Exported as XLSX/CSV/JSON for manual AdsPower bulk import.
+  2. Optionally pushed live into AdsPower via `bridge_jobs` IF the customer
+     has the local sync_client worker online. This now runs in the
+     BACKGROUND — the job itself completes in seconds, push happens after.
 
 Multi-config support: customer can save many AdsPower API keys, switch
 between them, delete unwanted ones.
@@ -13,34 +23,37 @@ between them, delete unwanted ones.
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import random
-import re
 import secrets
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-import httpx
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 
 logger = logging.getLogger(__name__)
 
 _db: Any = None
+_ua_generate_func: Any = None  # bound to server.py's generate_user_agents
 
 
-def _bind(*, main_db) -> None:
-    global _db
+def _bind(*, main_db, ua_generate_func=None) -> None:
+    global _db, _ua_generate_func
     _db = main_db
+    if ua_generate_func is not None:
+        _ua_generate_func = ua_generate_func
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# ──────────────────────────────────────────────────────────────────────
-# UA templates + US states
-# ──────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────
+# US states + legacy UA template fallback (used only if UA generator
+# fails or is not bound)
+# ─────────────────────────────────────────────────────────────────────
 UA_TEMPLATES = {
     "windows_chrome": [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{v}.0.0.0 Safari/537.36",
@@ -65,19 +78,13 @@ UA_TEMPLATES = {
 CHROME_VERSIONS = [126, 127, 128, 129, 130, 131]
 
 
-def gen_ua(key: str) -> str:
+def _fallback_ua(key: str) -> str:
     pool = UA_TEMPLATES.get(key) or UA_TEMPLATES["windows_chrome"]
     return random.choice(pool).format(
         v=random.choice(CHROME_VERSIONS),
         m=random.randint(0, 6),
         n=random.randint(100, 999),
     )
-
-
-def gen_mixed_uas(count: int, keys: list[str]) -> list[str]:
-    if not keys:
-        keys = ["windows_chrome"]
-    return [gen_ua(random.choice(keys)) for _ in range(count)]
 
 
 US_STATES = [
@@ -94,9 +101,9 @@ US_STATES = [
 ]
 
 
-# ──────────────────────────────────────────────────────────────────────
-# ProxyJet sticky-session builder + IP rotation
-# ──────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────
+# ProxyJet sticky-session builder
+# ─────────────────────────────────────────────────────────────────────
 def build_proxy(base_user: str, base_pass: str, state: str, sid: str | None = None) -> dict:
     sid = sid or "krx" + secrets.token_hex(4)
     username = f"{base_user}-resi_region-US_{state}-session-{sid}-sessTime-30"
@@ -110,40 +117,9 @@ def build_proxy(base_user: str, base_pass: str, state: str, sid: str | None = No
     }
 
 
-async def _ip_via_proxy(proxy_url: str, timeout: int = 12) -> str | None:
-    try:
-        async with httpx.AsyncClient(proxy=proxy_url, timeout=timeout, follow_redirects=True) as c:
-            r = await c.get("https://api.ipify.org?format=json")
-            if r.status_code == 200:
-                ip = (r.json() or {}).get("ip")
-                if ip and re.match(r"^\d+\.\d+\.\d+\.\d+$", ip):
-                    return ip
-    except Exception as e:  # noqa: BLE001
-        logger.debug(f"[adspower] ip fetch fail: {e}")
-    return None
-
-
-async def allocate_unique_ips(user: dict, base_user: str, base_pass: str, state: str, count: int) -> list[dict]:
-    found: list[dict] = []
-    attempts = 0
-    max_attempts = count * 4 + 5
-    while len(found) < count and attempts < max_attempts:
-        attempts += 1
-        p = build_proxy(base_user, base_pass, state)
-        ip = await _ip_via_proxy(p["url_http"])
-        if not ip:
-            continue
-        if any(f["ip"] == ip for f in found):
-            continue
-        if await _db.adspower_used_ips.find_one({"user_id": user["id"], "ip": ip}):
-            continue
-        found.append({"ip": ip, "proxy": p})
-    return found
-
-
-# ──────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────
 # CRUD - configs / proxy creds
-# ──────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────
 async def list_configs(user_id: str) -> list:
     docs = await _db.adspower_configs.find({"user_id": user_id}, {"_id": 0}).to_list(50)
     for c in docs:
@@ -198,21 +174,196 @@ async def get_proxy_creds_status(user_id: str) -> dict:
     return {"has_creds": True, "base_user_masked": s["proxy_base_user"][:6] + "..."}
 
 
-# ──────────────────────────────────────────────────────────────────────
-# Main: generate
-# ──────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────
+# Profile management: clear all, list, export
+# ─────────────────────────────────────────────────────────────────────
+async def clear_all_profiles(user_id: str) -> dict:
+    p = await _db.adspower_profiles.delete_many({"user_id": user_id})
+    u = await _db.adspower_used_ips.delete_many({"user_id": user_id})
+    j = await _db.adspower_jobs.delete_many({"user_id": user_id})
+    return {
+        "deleted_profiles": p.deleted_count,
+        "deleted_used_ips": u.deleted_count,
+        "deleted_jobs": j.deleted_count,
+    }
+
+
+async def list_profiles_for(user_id: str, limit: int = 200) -> list:
+    return await _db.adspower_profiles.find(
+        {"user_id": user_id}, {"_id": 0}
+    ).sort("created_at", -1).limit(min(limit, 1000)).to_list(1000)
+
+
+async def export_profiles_xlsx(user_id: str) -> Response:
+    profiles = await _db.adspower_profiles.find(
+        {"user_id": user_id}, {"_id": 0}
+    ).sort("created_at", -1).to_list(50000)
+
+    rows = []
+    for p in profiles:
+        proxy = p.get("proxy") or {}
+        rows.append({
+            "name": p.get("name"),
+            "state": p.get("state"),
+            "user_agent": p.get("user_agent"),
+            "device": p.get("device_label"),
+            "platform": p.get("ua_platform"),
+            "app": p.get("ua_app"),
+            "resolution": p.get("resolution"),
+            "language": p.get("language"),
+            "timezone": p.get("timezone"),
+            "proxy_host": proxy.get("host"),
+            "proxy_port": proxy.get("port"),
+            "proxy_username": proxy.get("username"),
+            "proxy_password": proxy.get("password"),
+            "proxy_url": proxy.get("url_http"),
+            "session_id": proxy.get("session_id"),
+            "adspower_id": p.get("adspower_profile_id") or "",
+            "created_at": p.get("created_at"),
+        })
+
+    import pandas as pd
+    cols = [
+        "name", "state", "user_agent", "device", "platform", "app",
+        "resolution", "language", "timezone",
+        "proxy_host", "proxy_port", "proxy_username", "proxy_password",
+        "proxy_url", "session_id", "adspower_id", "created_at",
+    ]
+    df = pd.DataFrame(rows, columns=cols)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="Profiles", index=False)
+    output.seek(0)
+    filename = f"krexion_profiles_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return Response(
+        content=output.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Profile-Count": str(len(rows)),
+            "Access-Control-Expose-Headers": "X-Profile-Count, Content-Disposition",
+        },
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# UA generation — reuse the rich UA Generator if available, otherwise
+# fall back to legacy 6-template randomiser.
+# ─────────────────────────────────────────────────────────────────────
+async def _gen_uas(user: dict, ua_cfg: dict, count: int) -> list[dict]:
+    """Return a list of {user_agent, device_label, platform, app, resolution}.
+
+    `ua_cfg` mirrors a subset of UAGenerateRequest fields:
+        app, platform, brand, device_id, device_ids, app_version,
+        app_versions, os_version, os_versions, region, regions,
+        resolution, resolutions, ua_templates (legacy fallback).
+    """
+    legacy_keys = ua_cfg.get("ua_templates")
+    if _ua_generate_func is None or not (ua_cfg.get("app") or ua_cfg.get("platform")):
+        # legacy random-template fallback
+        keys = legacy_keys or ["windows_chrome"]
+        return [
+            {
+                "user_agent": _fallback_ua(random.choice(keys)),
+                "device_label": "",
+                "platform": random.choice(keys),
+                "app": None,
+                "resolution": None,
+            }
+            for _ in range(count)
+        ]
+
+    try:
+        # Build a UAGenerateRequest-shaped payload object dynamically
+        class _P:
+            pass
+
+        p = _P()
+        p.app = ua_cfg.get("app") or "instagram"
+        p.platform = ua_cfg.get("platform") or "any"
+        p.brand = ua_cfg.get("brand")
+        p.device_id = ua_cfg.get("device_id")
+        p.device_ids = ua_cfg.get("device_ids")
+        p.app_version = ua_cfg.get("app_version")
+        p.app_versions = ua_cfg.get("app_versions")
+        p.os_version = ua_cfg.get("os_version")
+        p.os_versions = ua_cfg.get("os_versions")
+        p.region = ua_cfg.get("region")
+        p.regions = ua_cfg.get("regions")
+        p.resolution = ua_cfg.get("resolution")
+        p.resolutions = ua_cfg.get("resolutions")
+        p.count = count
+        p.format = "json"
+
+        result = await _ua_generate_func(p, user)
+        items = (result or {}).get("user_agents") or []
+        out = []
+        for it in items:
+            out.append({
+                "user_agent": it.get("user_agent", ""),
+                "device_label": it.get("device", ""),
+                "platform": it.get("platform", ""),
+                "app": it.get("app"),
+                "resolution": it.get("resolution"),
+            })
+        # If UA generator returned fewer than asked, pad with fallback
+        while len(out) < count:
+            keys = legacy_keys or ["windows_chrome"]
+            out.append({
+                "user_agent": _fallback_ua(random.choice(keys)),
+                "device_label": "",
+                "platform": "fallback",
+                "app": None,
+                "resolution": None,
+            })
+        return out[:count]
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[profile-builder] UA generator failed, fallback: {e}")
+        keys = legacy_keys or ["windows_chrome"]
+        return [
+            {
+                "user_agent": _fallback_ua(random.choice(keys)),
+                "device_label": "",
+                "platform": random.choice(keys),
+                "app": None,
+                "resolution": None,
+            }
+            for _ in range(count)
+        ]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Main: generate (fast path)
+# ─────────────────────────────────────────────────────────────────────
+_LANG_BY_STATE_DEFAULT = ["en-US", "en"]
+_TZ_BY_STATE = {
+    "California": "America/Los_Angeles", "Oregon": "America/Los_Angeles",
+    "Washington": "America/Los_Angeles", "Nevada": "America/Los_Angeles",
+    "Arizona": "America/Phoenix", "Colorado": "America/Denver",
+    "Utah": "America/Denver", "New_Mexico": "America/Denver",
+    "Texas": "America/Chicago", "Illinois": "America/Chicago",
+    "Florida": "America/New_York", "New_York": "America/New_York",
+    "Georgia": "America/New_York", "Pennsylvania": "America/New_York",
+}
+
+
 async def start_generate(user: dict, body: dict) -> dict:
     count = int(body.get("count") or 0)
-    if count < 1 or count > 100:
-        raise HTTPException(400, "count must be 1-100")
+    if count < 1 or count > 200:
+        raise HTTPException(400, "count must be 1-200")
     state = (body.get("state") or "California").strip()
     if state not in US_STATES:
         raise HTTPException(400, "invalid state")
     config_id = body.get("config_id")
     if not config_id:
         raise HTTPException(400, "config_id required")
-    ua_keys = body.get("ua_templates") or ["windows_chrome"]
     name_prefix = (body.get("name_prefix") or "krexion").strip()[:32] or "krexion"
+    wipe_existing = bool(body.get("wipe_existing") or False)
+    push_to_adspower = bool(body.get("push_to_adspower") or False)
+    ua_cfg = body.get("ua_config") or {}
+    # legacy fallback if user only sent ua_templates
+    if not ua_cfg and body.get("ua_templates"):
+        ua_cfg = {"ua_templates": body["ua_templates"]}
 
     cfg = await _db.adspower_configs.find_one({"id": config_id, "user_id": user["id"]}, {"_id": 0})
     if not cfg:
@@ -224,100 +375,183 @@ async def start_generate(user: dict, body: dict) -> dict:
     base_user = settings["proxy_base_user"]
     base_pass = settings["proxy_base_pass"]
 
+    # Wipe existing if requested
+    wiped = None
+    if wipe_existing:
+        wiped = await clear_all_profiles(user["id"])
+
     job_id = uuid.uuid4().hex
     await _db.adspower_jobs.insert_one({
         "id": job_id, "user_id": user["id"], "email": user.get("email"),
-        "type": "adspower_bulk_create", "count": count, "state": state,
-        "config_id": config_id, "name_prefix": name_prefix, "ua_templates": ua_keys,
-        "status": "allocating_ips", "progress": 0, "total": count,
+        "type": "profile_builder", "count": count, "state": state,
+        "config_id": config_id, "name_prefix": name_prefix,
+        "ua_config": ua_cfg,
+        "wipe_existing": wipe_existing, "push_to_adspower": push_to_adspower,
+        "status": "running", "progress": 0, "total": count,
         "profiles": [], "errors": [], "created_at": _now(),
     })
-    asyncio.create_task(
-        _run_job(job_id, user, cfg, base_user, base_pass, state, count, ua_keys, name_prefix)
-    )
-    return {"job_id": job_id, "status": "started", "count": count}
+    asyncio.create_task(_run_job_fast(
+        job_id, user, cfg, base_user, base_pass, state, count, ua_cfg,
+        name_prefix, push_to_adspower,
+    ))
+    return {"job_id": job_id, "status": "started", "count": count, "wiped": wiped}
 
 
-async def _run_job(job_id, user, cfg, base_user, base_pass, state, count, ua_keys, name_prefix):
+async def _run_job_fast(job_id, user, cfg, base_user, base_pass, state, count, ua_cfg, name_prefix, push_to_adspower):
+    """Fast path: generate everything on cloud in seconds. No ProxyJet
+    verification (each sticky session gives a unique IP by design).
+    Optional push to local AdsPower runs in BACKGROUND afterwards."""
     async def upd(fields):
         await _db.adspower_jobs.update_one({"id": job_id}, {"$set": fields})
+
     try:
-        await upd({"status": "allocating_ips", "progress": 0})
-        ips = await allocate_unique_ips(user, base_user, base_pass, state, count)
-        if len(ips) < count:
-            await upd({"status": "failed", "errors": [f"Only {len(ips)}/{count} unique IPs allocated. Try smaller count or different state."]})
-            return
-        uas = gen_mixed_uas(count, ua_keys)
+        uas = await _gen_uas(user, ua_cfg, count)
         await upd({"status": "creating_profiles", "progress": 0})
 
         created: list[dict] = []
-        errors: list[str] = []
-        for idx, (ipinfo, ua) in enumerate(zip(ips, uas), start=1):
+        bridge_job_ids: list[tuple[str, dict]] = []
+
+        for idx in range(1, count + 1):
+            ua_info = uas[idx - 1] if idx - 1 < len(uas) else uas[-1]
             seq = f"{idx:03d}"
             pname = f"{name_prefix}-{state.replace('_', '')}-{seq}"
-            payload = {
-                "host": cfg["host"],
-                "api_key": cfg["api_key"],
-                "name": pname,
-                "user_agent": ua,
-                "proxy": {
-                    "proxy_soft": "other",
-                    "proxy_type": "http",
-                    "proxy_host": ipinfo["proxy"]["host"],
-                    "proxy_port": ipinfo["proxy"]["port"],
-                    "proxy_user": ipinfo["proxy"]["username"],
-                    "proxy_password": ipinfo["proxy"]["password"],
-                },
-                "fingerprint_config": {
-                    "automatic_timezone": "1",
-                    "language": ["en-US", "en"],
-                    "screen_resolution": random.choice(["1920_1080", "1536_864", "1440_900", "1366_768"]),
-                },
-            }
+            proxy = build_proxy(base_user, base_pass, state)
+            resolution = (ua_info.get("resolution") or "").replace("x", "_") or random.choice([
+                "1920_1080", "1536_864", "1440_900", "1366_768"
+            ])
+            timezone_str = _TZ_BY_STATE.get(state, "America/New_York")
+            language = _LANG_BY_STATE_DEFAULT
 
-            bj_id = uuid.uuid4().hex
-            await _db.bridge_jobs.insert_one({
-                "id": bj_id, "user_id": user["id"], "email": user.get("email"),
-                "feature": "adspower/create", "payload": payload,
-                "status": "pending", "result": None, "error": None,
-                "created_at": _now(), "started_at": None, "completed_at": None, "claimed_by": None,
+            profile_doc = {
+                "id": uuid.uuid4().hex,
+                "user_id": user["id"],
+                "config_id": cfg["id"],
+                "adspower_profile_id": None,
+                "name": pname,
+                "state": state,
+                "ip": None,  # filled in async if pushed to AdsPower
+                "user_agent": ua_info.get("user_agent"),
+                "device_label": ua_info.get("device_label"),
+                "ua_platform": ua_info.get("platform"),
+                "ua_app": ua_info.get("app"),
+                "resolution": resolution.replace("_", "x"),
+                "language": ",".join(language),
+                "timezone": timezone_str,
+                "proxy": proxy,
+                "proxy_session": proxy["session_id"],
+                "created_at": _now(),
+                "pushed_to_adspower": False,
+                "push_status": "skipped" if not push_to_adspower else "queued",
+            }
+            await _db.adspower_profiles.insert_one(profile_doc)
+            await _db.adspower_used_ips.insert_one({
+                "user_id": user["id"],
+                "session_id": proxy["session_id"],
+                "profile_name": pname,
+                "state": state,
+                "created_at": _now(),
             })
 
-            deadline = asyncio.get_event_loop().time() + 60
-            res = None
-            while asyncio.get_event_loop().time() < deadline:
-                await asyncio.sleep(2)
-                bj = await _db.bridge_jobs.find_one({"id": bj_id}, {"_id": 0})
-                if bj and bj.get("status") in ("done", "failed"):
-                    res = bj
-                    break
+            profile_summary = {
+                "name": pname,
+                "session": proxy["session_id"],
+                "user_agent": ua_info.get("user_agent", "")[:120],
+                "device": ua_info.get("device_label", ""),
+            }
+            created.append(profile_summary)
 
-            if res and res.get("status") == "done":
-                ads = res.get("result") or {}
-                pid = None
-                if isinstance(ads.get("data"), dict):
-                    pid = ads["data"].get("id") or ads["data"].get("user_id")
-                pid = pid or ads.get("user_id")
-                await _db.adspower_profiles.insert_one({
-                    "id": uuid.uuid4().hex, "user_id": user["id"],
-                    "config_id": cfg["id"], "adspower_profile_id": pid,
-                    "name": pname, "ip": ipinfo["ip"], "state": state,
-                    "user_agent": ua, "proxy_session": ipinfo["proxy"]["session_id"],
-                    "created_at": _now(),
+            if push_to_adspower:
+                bj_id = uuid.uuid4().hex
+                payload = {
+                    "host": cfg["host"],
+                    "api_key": cfg["api_key"],
+                    "name": pname,
+                    "user_agent": ua_info.get("user_agent"),
+                    "proxy": {
+                        "proxy_soft": "other",
+                        "proxy_type": "http",
+                        "proxy_host": proxy["host"],
+                        "proxy_port": proxy["port"],
+                        "proxy_user": proxy["username"],
+                        "proxy_password": proxy["password"],
+                    },
+                    "fingerprint_config": {
+                        "automatic_timezone": "1",
+                        "language": language,
+                        "screen_resolution": resolution,
+                    },
+                }
+                await _db.bridge_jobs.insert_one({
+                    "id": bj_id, "user_id": user["id"], "email": user.get("email"),
+                    "feature": "adspower/create", "payload": payload,
+                    "status": "pending", "result": None, "error": None,
+                    "created_at": _now(), "started_at": None,
+                    "completed_at": None, "claimed_by": None,
+                    "profile_id": profile_doc["id"],
                 })
-                await _db.adspower_used_ips.insert_one({
-                    "user_id": user["id"], "ip": ipinfo["ip"],
-                    "profile_name": pname, "created_at": _now(),
-                })
-                created.append({"name": pname, "ip": ipinfo["ip"], "adspower_id": pid})
-            else:
-                errors.append(f"{pname}: {(res or {}).get('error') or 'Timeout - bridge worker missing'}")
-            await upd({"progress": idx, "profiles": created, "errors": errors})
+                bridge_job_ids.append((bj_id, profile_doc))
 
-        await upd({"status": "done" if created else "failed", "completed_at": _now()})
+            await upd({"progress": idx, "profiles": created})
+
+        final_status = "done"
+        await upd({"status": final_status, "completed_at": _now()})
+
+        # Background: if push_to_adspower, watch bridge jobs and update
+        # the corresponding profile docs as workers report back. Non-fatal
+        # if it never resolves (cloud-only environment).
+        if push_to_adspower and bridge_job_ids:
+            asyncio.create_task(_watch_bridge_jobs(job_id, bridge_job_ids))
     except Exception as e:  # noqa: BLE001
-        logger.error(f"[adspower] job {job_id} crashed: {e}")
+        logger.error(f"[profile-builder] job {job_id} crashed: {e}")
         await upd({"status": "failed", "errors": [f"Internal: {e}"], "completed_at": _now()})
+
+
+async def _watch_bridge_jobs(job_id: str, bridge_job_ids: list[tuple[str, dict]]) -> None:
+    """Background watcher — updates profile docs as bridge workers finish.
+    Times out per job after 120s to avoid hanging. Never raises."""
+    try:
+        deadline = asyncio.get_event_loop().time() + 180
+        pending = {bj_id: prof for bj_id, prof in bridge_job_ids}
+        while pending and asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(3)
+            for bj_id in list(pending):
+                bj = await _db.bridge_jobs.find_one({"id": bj_id}, {"_id": 0})
+                if not bj:
+                    continue
+                if bj.get("status") in ("done", "failed"):
+                    prof = pending.pop(bj_id)
+                    if bj.get("status") == "done":
+                        ads = bj.get("result") or {}
+                        pid = None
+                        if isinstance(ads.get("data"), dict):
+                            pid = ads["data"].get("id") or ads["data"].get("user_id")
+                        pid = pid or ads.get("user_id")
+                        await _db.adspower_profiles.update_one(
+                            {"id": prof["id"]},
+                            {"$set": {
+                                "adspower_profile_id": pid,
+                                "pushed_to_adspower": True,
+                                "push_status": "success",
+                            }},
+                        )
+                    else:
+                        await _db.adspower_profiles.update_one(
+                            {"id": prof["id"]},
+                            {"$set": {
+                                "pushed_to_adspower": False,
+                                "push_status": f"failed: {bj.get('error') or 'bridge error'}",
+                            }},
+                        )
+        # Mark any remaining as timed out
+        for prof in pending.values():
+            await _db.adspower_profiles.update_one(
+                {"id": prof["id"]},
+                {"$set": {
+                    "push_status": "timeout: local PC bridge worker did not pick up",
+                }},
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[profile-builder] watcher {job_id} non-fatal error: {e}")
 
 
 async def get_job(user_id: str, job_id: str) -> dict:
@@ -325,9 +559,3 @@ async def get_job(user_id: str, job_id: str) -> dict:
     if not j:
         raise HTTPException(404, "Job not found")
     return j
-
-
-async def list_profiles_for(user_id: str, limit: int = 200) -> list:
-    return await _db.adspower_profiles.find(
-        {"user_id": user_id}, {"_id": 0}
-    ).sort("created_at", -1).limit(min(limit, 500)).to_list(500)

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useMemo } from "react";
 import axios from "axios";
 import { toast } from "sonner";
 import {
@@ -13,18 +13,32 @@ import {
   AlertCircle,
   Copy,
   Check,
+  Download,
+  Eraser,
+  Zap,
 } from "lucide-react";
 
-const API = (process.env.REACT_APP_BACKEND_URL || "") + "/api/adspower";
+const API = (process.env.REACT_APP_BACKEND_URL || "") + "/api";
 
-const UA_LABELS = {
-  windows_chrome: "Windows · Chrome",
-  windows_edge: "Windows · Edge",
-  mac_chrome: "macOS · Chrome",
-  mac_safari: "macOS · Safari",
-  iphone_safari: "iPhone · Safari",
-  android_chrome: "Android · Chrome",
-};
+const APPS = [
+  { key: "instagram", label: "Instagram", color: "from-pink-500 to-purple-500" },
+  { key: "facebook", label: "Facebook", color: "from-blue-600 to-blue-500" },
+  { key: "tiktok", label: "TikTok", color: "from-pink-500 to-cyan-500" },
+  { key: "youtube", label: "YouTube", color: "from-red-600 to-red-500" },
+  { key: "whatsapp", label: "WhatsApp", color: "from-green-600 to-green-500" },
+  { key: "gsearch", label: "Google Search", color: "from-blue-500 to-yellow-500" },
+  { key: "gchrome", label: "Chrome (mobile)", color: "from-blue-500 to-green-500" },
+  { key: "pinterest", label: "Pinterest", color: "from-red-500 to-rose-500" },
+  { key: "snapchat", label: "Snapchat", color: "from-yellow-400 to-yellow-300" },
+  { key: "chrome", label: "Browser", color: "from-slate-500 to-slate-400" },
+];
+
+const PLATFORMS = [
+  { key: "any", label: "Any" },
+  { key: "android", label: "Android" },
+  { key: "ios", label: "iOS" },
+  { key: "desktop", label: "Desktop" },
+];
 
 function authHeaders() {
   const token = localStorage.getItem("token");
@@ -46,21 +60,28 @@ export default function AdsPowerPage() {
   const [count, setCount] = useState(10);
   const [state, setState] = useState("California");
   const [namePrefix, setNamePrefix] = useState("krexion");
-  const [uaTemplates, setUaTemplates] = useState(["windows_chrome", "mac_chrome"]);
+  const [app, setApp] = useState("instagram");
+  const [platform, setPlatform] = useState("any");
+  const [wipeExisting, setWipeExisting] = useState(true);
+  const [pushToAdspower, setPushToAdspower] = useState(false);
 
   const [job, setJob] = useState(null);
   const [polling, setPolling] = useState(false);
+  const [profiles, setProfiles] = useState([]);
+  const [exporting, setExporting] = useState(false);
+  const [clearing, setClearing] = useState(false);
 
   useEffect(() => {
     refreshAll();
+    loadProfiles();
   }, []);
 
   async function refreshAll() {
     try {
       const [c, s, p] = await Promise.all([
-        axios.get(`${API}/configs`, { headers: authHeaders() }),
-        axios.get(`${API}/states`, { headers: authHeaders() }),
-        axios.get(`${API}/proxy-creds`, { headers: authHeaders() }),
+        axios.get(`${API}/adspower/configs`, { headers: authHeaders() }),
+        axios.get(`${API}/adspower/states`, { headers: authHeaders() }),
+        axios.get(`${API}/adspower/proxy-creds`, { headers: authHeaders() }),
       ]);
       setConfigs(c.data.configs || []);
       setStates(s.data.states || []);
@@ -70,14 +91,23 @@ export default function AdsPowerPage() {
         setSelectedCfg(c.data.configs[0].id);
       }
     } catch (e) {
-      toast.error(e.response?.data?.detail || "Failed to load AdsPower data");
+      toast.error(e.response?.data?.detail || "Failed to load Profile Builder data");
+    }
+  }
+
+  async function loadProfiles() {
+    try {
+      const r = await axios.get(`${API}/adspower/profiles?limit=500`, { headers: authHeaders() });
+      setProfiles(r.data.profiles || []);
+    } catch {
+      /* silent */
     }
   }
 
   async function addConfig() {
     if (!newCfg.api_key) return toast.error("API key required");
     try {
-      await axios.post(`${API}/configs`, newCfg, { headers: authHeaders() });
+      await axios.post(`${API}/adspower/configs`, newCfg, { headers: authHeaders() });
       toast.success("AdsPower config saved");
       setShowAddCfg(false);
       setNewCfg({ name: "", host: "http://local.adspower.net:50325", api_key: "" });
@@ -89,7 +119,7 @@ export default function AdsPowerPage() {
 
   async function deleteConfig(id) {
     if (!window.confirm("Delete this AdsPower config?")) return;
-    await axios.delete(`${API}/configs/${id}`, { headers: authHeaders() });
+    await axios.delete(`${API}/adspower/configs/${id}`, { headers: authHeaders() });
     toast.success("Deleted");
     if (selectedCfg === id) setSelectedCfg(null);
     refreshAll();
@@ -97,38 +127,69 @@ export default function AdsPowerPage() {
 
   async function saveProxyCreds() {
     if (!proxyForm.base_user || !proxyForm.base_pass) return toast.error("Both fields required");
-    await axios.post(`${API}/proxy-creds`, proxyForm, { headers: authHeaders() });
+    await axios.post(`${API}/adspower/proxy-creds`, proxyForm, { headers: authHeaders() });
     toast.success("ProxyJet credentials saved");
     setShowProxy(false);
     setProxyForm({ base_user: "", base_pass: "" });
     refreshAll();
   }
 
-  function toggleUa(key) {
-    setUaTemplates((prev) =>
-      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
-    );
+  async function clearAll() {
+    if (!window.confirm("This will delete ALL your saved profiles. Continue?")) return;
+    setClearing(true);
+    try {
+      const r = await axios.delete(`${API}/adspower/profiles`, { headers: authHeaders() });
+      toast.success(`Deleted ${r.data.deleted_profiles} profiles`);
+      setProfiles([]);
+      setJob(null);
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Clear failed");
+    } finally {
+      setClearing(false);
+    }
+  }
+
+  async function exportXlsx() {
+    setExporting(true);
+    try {
+      const r = await axios.get(`${API}/adspower/profiles/export`, {
+        headers: authHeaders(),
+        responseType: "blob",
+      });
+      const url = URL.createObjectURL(new Blob([r.data]));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `krexion_profiles_${Date.now()}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success(`Exported ${profiles.length} profiles to Excel`);
+    } catch (e) {
+      toast.error("Export failed");
+    } finally {
+      setExporting(false);
+    }
   }
 
   async function generate() {
     if (!selectedCfg) return toast.error("Select an AdsPower config first");
     if (!hasProxyCreds) return toast.error("Save ProxyJet credentials first");
-    if (uaTemplates.length === 0) return toast.error("Pick at least one UA template");
-    if (count < 1 || count > 100) return toast.error("Count must be 1-100");
+    if (count < 1 || count > 200) return toast.error("Count must be 1-200");
 
     try {
       const r = await axios.post(
-        `${API}/generate`,
+        `${API}/adspower/generate`,
         {
           config_id: selectedCfg,
           count,
           state,
-          ua_templates: uaTemplates,
           name_prefix: namePrefix,
+          wipe_existing: wipeExisting,
+          push_to_adspower: pushToAdspower,
+          ua_config: { app, platform },
         },
         { headers: authHeaders() }
       );
-      toast.success(`Job started (${r.data.job_id.slice(0, 8)}...)`);
+      toast.success(`Job started — count ${r.data.count}${r.data.wiped?.deleted_profiles ? ` · wiped ${r.data.wiped.deleted_profiles} old` : ""}`);
       pollJob(r.data.job_id);
     } catch (e) {
       toast.error(e.response?.data?.detail || "Generate failed");
@@ -140,31 +201,61 @@ export default function AdsPowerPage() {
     let stop = false;
     while (!stop) {
       try {
-        const r = await axios.get(`${API}/jobs/${jobId}`, { headers: authHeaders() });
+        const r = await axios.get(`${API}/adspower/jobs/${jobId}`, { headers: authHeaders() });
         setJob(r.data);
         if (["done", "failed"].includes(r.data.status)) {
           stop = true;
           setPolling(false);
-          if (r.data.status === "done") toast.success(`${r.data.profiles.length} profiles created!`);
-          else toast.error("Job failed - check errors panel");
+          if (r.data.status === "done") {
+            toast.success(`${r.data.profiles.length} profiles created in seconds!`);
+            loadProfiles();
+          } else toast.error("Job failed - check errors panel");
         }
       } catch {
         stop = true;
         setPolling(false);
       }
-      if (!stop) await new Promise((r) => setTimeout(r, 2500));
+      if (!stop) await new Promise((r) => setTimeout(r, 700));
     }
   }
+
+  const appMeta = useMemo(() => APPS.find((a) => a.key === app) || APPS[0], [app]);
 
   return (
     <>
       <div className="max-w-6xl mx-auto p-4 sm:p-6 space-y-6" data-testid="adspower-page">
         <div className="flex items-start justify-between gap-3 flex-wrap">
           <div>
-            <h1 className="text-2xl font-bold text-white">Profile Builder</h1>
-            <p className="text-sm text-[#71717A] mt-1">
-              Bulk AdsPower antidetect profiles with unique sticky US IPs (ProxyJet residential) + diverse user agents. 30-min IP lock so sessions don't rotate while you work.
+            <h1 className="text-2xl font-bold text-white inline-flex items-center gap-2">
+              <Zap size={22} className="text-amber-400" /> Profile Builder
+            </h1>
+            <p className="text-sm text-[#71717A] mt-1 max-w-2xl">
+              Bulk AdsPower-compatible profiles in seconds. Each profile gets a unique sticky US residential IP (ProxyJet, 30-min lock) + a realistic in-app User Agent for the app you target. Export to Excel and bulk-import into AdsPower.
             </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {profiles.length > 0 && (
+              <>
+                <button
+                  onClick={exportXlsx}
+                  disabled={exporting}
+                  data-testid="export-xlsx"
+                  className="inline-flex items-center gap-2 text-xs px-3 py-2 rounded-lg bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/25 transition disabled:opacity-50"
+                >
+                  {exporting ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+                  Export {profiles.length} ({"  .xlsx"})
+                </button>
+                <button
+                  onClick={clearAll}
+                  disabled={clearing}
+                  data-testid="clear-all-profiles"
+                  className="inline-flex items-center gap-2 text-xs px-3 py-2 rounded-lg bg-red-500/15 text-red-300 border border-red-500/30 hover:bg-red-500/25 transition disabled:opacity-50"
+                >
+                  {clearing ? <Loader2 size={13} className="animate-spin" /> : <Eraser size={13} />}
+                  Clear all
+                </button>
+              </>
+            )}
           </div>
         </div>
 
@@ -240,24 +331,65 @@ export default function AdsPowerPage() {
               </div>
             ) : (
               <div className="text-xs text-amber-300 inline-flex items-center gap-2">
-                <AlertCircle size={14} /> Add your ProxyJet username + password (visible in your ProxyJet dashboard "Proxy Generator").
+                <AlertCircle size={14} /> Add your ProxyJet username + password (from ProxyJet dashboard "Proxy Generator").
               </div>
             )}
+          </div>
+        </div>
+
+        {/* --- App picker --- */}
+        <div className="bg-white/[0.03] border border-white/10 rounded-xl p-5">
+          <h3 className="text-sm font-bold text-white inline-flex items-center gap-2 mb-4">
+            <Cpu size={15} /> Target app &amp; platform
+          </h3>
+          <div className="text-xs text-[#71717A] mb-2">App / platform — UAs are tuned for this app</div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+            {APPS.map((a) => (
+              <button
+                key={a.key}
+                onClick={() => setApp(a.key)}
+                data-testid={`app-${a.key}`}
+                className={`text-xs font-semibold px-3 py-2.5 rounded-lg border transition text-left ${
+                  app === a.key
+                    ? `bg-gradient-to-br ${a.color} text-white border-white/30 shadow-lg`
+                    : "bg-white/[0.02] border-white/10 text-[#A1A1AA] hover:border-white/30 hover:text-white"
+                }`}
+              >
+                {a.label}
+              </button>
+            ))}
+          </div>
+          <div className="text-xs text-[#71717A] mt-4 mb-2">Operating system</div>
+          <div className="flex flex-wrap gap-2">
+            {PLATFORMS.map((p) => (
+              <button
+                key={p.key}
+                onClick={() => setPlatform(p.key)}
+                data-testid={`platform-${p.key}`}
+                className={`text-xs font-semibold px-4 py-2 rounded-lg border transition ${
+                  platform === p.key
+                    ? "bg-[#3B82F6] text-black border-[#3B82F6]"
+                    : "bg-white/[0.02] border-white/10 text-[#A1A1AA] hover:border-white/30 hover:text-white"
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
           </div>
         </div>
 
         {/* --- Generate form --- */}
         <div className="bg-white/[0.03] border border-white/10 rounded-xl p-5">
           <h3 className="text-sm font-bold text-white inline-flex items-center gap-2 mb-4">
-            <Cpu size={15} /> Generate profiles
+            <PlayCircle size={15} /> Generate profiles
           </h3>
           <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div>
-              <label className="text-xs text-[#71717A] block mb-1">Count (1-100)</label>
+              <label className="text-xs text-[#71717A] block mb-1">Count (1-200)</label>
               <input
                 type="number"
                 min={1}
-                max={100}
+                max={200}
                 value={count}
                 onChange={(e) => setCount(parseInt(e.target.value) || 1)}
                 data-testid="generate-count"
@@ -265,7 +397,7 @@ export default function AdsPowerPage() {
               />
             </div>
             <div>
-              <label className="text-xs text-[#71717A] block mb-1">US State</label>
+              <label className="text-xs text-[#71717A] block mb-1">US State (sticky IP region)</label>
               <select
                 value={state}
                 onChange={(e) => setState(e.target.value)}
@@ -294,41 +426,45 @@ export default function AdsPowerPage() {
                 onClick={generate}
                 disabled={polling}
                 data-testid="generate-button"
-                className="w-full inline-flex items-center justify-center gap-2 font-bold px-4 py-2.5 rounded-lg bg-[#3B82F6] text-black hover:bg-[#60A5FA] transition disabled:opacity-60"
+                className={`w-full inline-flex items-center justify-center gap-2 font-bold px-4 py-2.5 rounded-lg bg-gradient-to-r ${appMeta.color} text-white hover:opacity-90 transition disabled:opacity-60`}
               >
-                {polling ? <Loader2 size={15} className="animate-spin" /> : <PlayCircle size={16} />}
-                {polling ? "Running…" : "Generate profiles"}
+                {polling ? <Loader2 size={15} className="animate-spin" /> : <Zap size={16} />}
+                {polling ? "Building…" : `Build ${count} now`}
               </button>
             </div>
           </div>
-          <div className="mt-5">
-            <div className="text-xs text-[#71717A] mb-2">User-agent mix (pick one or many)</div>
-            <div className="flex flex-wrap gap-2">
-              {Object.entries(UA_LABELS).map(([k, label]) => (
-                <label
-                  key={k}
-                  className={`text-xs inline-flex items-center gap-2 px-3 py-1.5 rounded-full border cursor-pointer transition ${
-                    uaTemplates.includes(k)
-                      ? "bg-[#3B82F6]/15 border-[#3B82F6]/50 text-[#93C5FD]"
-                      : "bg-white/[0.02] border-white/10 text-[#A1A1AA] hover:border-white/20"
-                  }`}
-                >
-                  <input
-                    type="checkbox"
-                    checked={uaTemplates.includes(k)}
-                    onChange={() => toggleUa(k)}
-                    data-testid={`ua-toggle-${k}`}
-                    className="accent-[#3B82F6]"
-                  />
-                  {label}
-                </label>
-              ))}
-            </div>
+
+          <div className="mt-5 flex flex-wrap gap-4">
+            <label className="text-xs inline-flex items-center gap-2 px-3 py-2 rounded-lg border bg-white/[0.02] border-white/10 text-[#A1A1AA] hover:border-white/20 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={wipeExisting}
+                onChange={(e) => setWipeExisting(e.target.checked)}
+                data-testid="wipe-existing-toggle"
+                className="accent-red-500"
+              />
+              <Eraser size={12} className="text-red-300" />
+              Delete existing profiles before building
+            </label>
+            <label className="text-xs inline-flex items-center gap-2 px-3 py-2 rounded-lg border bg-white/[0.02] border-white/10 text-[#A1A1AA] hover:border-white/20 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={pushToAdspower}
+                onChange={(e) => setPushToAdspower(e.target.checked)}
+                data-testid="push-adspower-toggle"
+                className="accent-emerald-500"
+              />
+              <CheckCircle2 size={12} className="text-emerald-300" />
+              Also push directly into AdsPower (requires local PC online)
+            </label>
           </div>
         </div>
 
         {/* --- Job progress --- */}
         {job && <JobProgress job={job} />}
+
+        {/* --- Profiles table --- */}
+        {profiles.length > 0 && <ProfilesTable profiles={profiles} />}
       </div>
 
       {/* Add config modal */}
@@ -399,15 +535,9 @@ export default function AdsPowerPage() {
 }
 
 function JobProgress({ job }) {
-  const [copyIp, setCopyIp] = useState(null);
-  function copy(text) {
-    navigator.clipboard.writeText(text);
-    setCopyIp(text);
-    setTimeout(() => setCopyIp(null), 1500);
-  }
   const pct = job.total > 0 ? Math.round((job.progress / job.total) * 100) : 0;
   const colors = {
-    allocating_ips: "bg-blue-500/15 border-blue-500/30 text-blue-300",
+    running: "bg-blue-500/15 border-blue-500/30 text-blue-300",
     creating_profiles: "bg-amber-500/15 border-amber-500/30 text-amber-300",
     done: "bg-emerald-500/15 border-emerald-500/30 text-emerald-300",
     failed: "bg-red-500/15 border-red-500/30 text-red-300",
@@ -437,35 +567,58 @@ function JobProgress({ job }) {
           {job.errors.map((e, i) => <div key={i}>· {e}</div>)}
         </div>
       )}
-      {job.profiles && job.profiles.length > 0 && (
-        <div className="overflow-auto max-h-96 border border-white/10 rounded">
-          <table className="w-full text-xs">
-            <thead className="bg-white/[0.04] text-[#71717A]">
-              <tr>
-                <th className="text-left px-3 py-2">#</th>
-                <th className="text-left px-3 py-2">Name</th>
-                <th className="text-left px-3 py-2">IP</th>
-                <th className="text-left px-3 py-2">AdsPower ID</th>
+    </div>
+  );
+}
+
+function ProfilesTable({ profiles }) {
+  const [copiedKey, setCopiedKey] = useState(null);
+  function copy(val, key) {
+    navigator.clipboard.writeText(val);
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey(null), 1200);
+  }
+  return (
+    <div className="bg-white/[0.03] border border-white/10 rounded-xl p-4 space-y-3" data-testid="profiles-table">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-bold text-white">Generated profiles ({profiles.length})</h3>
+        <div className="text-[10px] text-[#71717A]">Latest at top · 30-min sticky IP lock</div>
+      </div>
+      <div className="overflow-auto max-h-[500px] border border-white/10 rounded">
+        <table className="w-full text-xs">
+          <thead className="bg-white/[0.04] text-[#71717A] sticky top-0">
+            <tr>
+              <th className="text-left px-3 py-2">#</th>
+              <th className="text-left px-3 py-2">Name</th>
+              <th className="text-left px-3 py-2">Device</th>
+              <th className="text-left px-3 py-2">Platform</th>
+              <th className="text-left px-3 py-2">UA</th>
+              <th className="text-left px-3 py-2">Session</th>
+              <th className="text-left px-3 py-2">Push</th>
+            </tr>
+          </thead>
+          <tbody>
+            {profiles.map((p, i) => (
+              <tr key={p.id || i} className="border-t border-white/5" data-testid={`profile-row-${i}`}>
+                <td className="px-3 py-2 text-[#71717A]">{i + 1}</td>
+                <td className="px-3 py-2 text-white font-mono whitespace-nowrap">{p.name}</td>
+                <td className="px-3 py-2 text-[#A1A1AA]">{p.device_label || "-"}</td>
+                <td className="px-3 py-2 text-[#A1A1AA]">{p.ua_platform || "-"}</td>
+                <td className="px-3 py-2 text-emerald-300 font-mono max-w-md">
+                  <div className="truncate" title={p.user_agent}>{p.user_agent}</div>
+                </td>
+                <td className="px-3 py-2 text-cyan-300 font-mono whitespace-nowrap inline-flex items-center gap-1">
+                  {p.proxy_session}
+                  <button onClick={() => copy(p.proxy_session, `s-${i}`)} className="text-[#71717A] hover:text-white">
+                    {copiedKey === `s-${i}` ? <Check size={11} /> : <Copy size={11} />}
+                  </button>
+                </td>
+                <td className="px-3 py-2 text-[#A1A1AA] text-[10px]">{p.push_status || "skipped"}</td>
               </tr>
-            </thead>
-            <tbody>
-              {job.profiles.map((p, i) => (
-                <tr key={i} className="border-t border-white/5" data-testid={`profile-row-${i}`}>
-                  <td className="px-3 py-2 text-[#71717A]">{i + 1}</td>
-                  <td className="px-3 py-2 text-white font-mono">{p.name}</td>
-                  <td className="px-3 py-2 text-emerald-300 font-mono inline-flex items-center gap-1">
-                    {p.ip}
-                    <button onClick={() => copy(p.ip)} className="text-[#71717A] hover:text-white">
-                      {copyIp === p.ip ? <Check size={11} /> : <Copy size={11} />}
-                    </button>
-                  </td>
-                  <td className="px-3 py-2 text-[#A1A1AA] font-mono">{p.adspower_id || "-"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
