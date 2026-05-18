@@ -253,8 +253,8 @@ async def test_adspower_config(user: dict, cid: str, *, wait_timeout: int = 18) 
             "ok": False,
             "reachable": False,
             "message": (
-                "Cannot reach AdsPower from cloud. Your local Krexion PC must be online "
-                "(install Krexion desktop app and keep AdsPower running)."
+                "AdsPower is not connected yet. Open AdsPower on the same "
+                "computer where Krexion is installed, then click Test again."
             ),
             "local_online": False,
         }

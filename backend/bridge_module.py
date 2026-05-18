@@ -114,10 +114,9 @@ async def enqueue_bridge_job(
             detail={
                 "code": "local_pc_offline",
                 "message": (
-                    "Aap ka Krexion PC offline hai. Heavy features (proxy "
-                    "check, RUT, form filler) tab kaam karte hain jab aap "
-                    "ka PC on ho aur Krexion chal raha ho. PC on karein, "
-                    "Krexion automatically connect ho jayega."
+                    "Connection lost. Please open Krexion on your computer "
+                    "and keep AdsPower running — Krexion will reconnect "
+                    "automatically within a few seconds."
                 ),
                 "local_status": status,
             },

@@ -55,7 +55,7 @@ export default function AdsPowerPage() {
   const [proxyCredsMasked, setProxyCredsMasked] = useState("");
 
   const [showAddCfg, setShowAddCfg] = useState(false);
-  const [newCfg, setNewCfg] = useState({ name: "", host: "http://local.adspower.net:50325", api_key: "" });
+  const [newCfg, setNewCfg] = useState({ name: "", api_key: "" });
   const [showProxy, setShowProxy] = useState(false);
   const [proxyForm, setProxyForm] = useState({ base_user: "", base_pass: "" });
 
@@ -116,7 +116,7 @@ export default function AdsPowerPage() {
       await axios.post(`${API}/adspower/configs`, newCfg, { headers: authHeaders() });
       toast.success("AdsPower config saved");
       setShowAddCfg(false);
-      setNewCfg({ name: "", host: "http://local.adspower.net:50325", api_key: "" });
+      setNewCfg({ name: "", api_key: "" });
       refreshAll();
     } catch (e) {
       toast.error(e.response?.data?.detail || "Save failed");
@@ -334,7 +334,7 @@ export default function AdsPowerPage() {
                               </span>
                             )}
                           </div>
-                          <div className="text-[10px] text-[#71717A] truncate font-mono">{c.host} · {c.api_key_masked}</div>
+                          <div className="text-[10px] text-[#71717A] truncate font-mono">AdsPower API · {c.api_key_masked}</div>
                         </div>
                         <button
                           onClick={(e) => { e.preventDefault(); testConfig(c.id); }}
@@ -551,19 +551,15 @@ export default function AdsPowerPage() {
         <div className="fixed inset-0 z-[100] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-[#0f0a18] border border-[#3B82F6]/40 rounded-2xl w-full max-w-md p-6 space-y-4">
             <h3 className="text-lg font-bold text-white">Add AdsPower API</h3>
+            <p className="text-[11px] text-[#71717A] -mt-2">
+              Open <span className="font-semibold text-white">AdsPower → API → Local API</span> and paste your <span className="font-semibold text-white">API key</span> below. That's it — Krexion handles the connection automatically.
+            </p>
             <input
               placeholder="Name (e.g. Main account)"
               value={newCfg.name}
               onChange={(e) => setNewCfg({ ...newCfg, name: e.target.value })}
               className="w-full bg-black/40 border border-white/10 rounded px-3 py-2 text-white text-sm"
               data-testid="new-cfg-name"
-            />
-            <input
-              placeholder="Host (default ok)"
-              value={newCfg.host}
-              onChange={(e) => setNewCfg({ ...newCfg, host: e.target.value })}
-              className="w-full bg-black/40 border border-white/10 rounded px-3 py-2 text-white text-sm font-mono"
-              data-testid="new-cfg-host"
             />
             <input
               placeholder="API Key (from AdsPower → API Settings)"
