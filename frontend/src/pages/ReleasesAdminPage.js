@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import axios from "axios";
-import { Plus, Sparkles, Trash2, Edit3, RefreshCw, X } from "lucide-react";
+import { Plus, Sparkles, Trash2, Edit3, RefreshCw, X, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
@@ -23,6 +23,8 @@ export default function ReleasesAdminPage() {
   const [releases, setReleases] = useState([]);
   const [currentVersion, setCurrentVersion] = useState("");
   const [loading, setLoading] = useState(true);
+  const [detecting, setDetecting] = useState(false);
+  const [detection, setDetection] = useState(null); // last auto-detect result for the modal preview
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState({
@@ -54,7 +56,44 @@ export default function ReleasesAdminPage() {
   const reset = () => {
     setForm({ version: "", title: "", notes: "", severity: "recommended", download_url: "", published: true });
     setEditingId(null);
+    setDetection(null);
     setShowForm(false);
+  };
+
+  const autoDetect = async () => {
+    setDetecting(true);
+    try {
+      const r = await axios.get(`${API}/admin/releases/auto-detect`, { headers: authHeaders() });
+      const d = r.data || {};
+      if (!d.needs_release) {
+        toast.info(
+          d.last_release_version
+            ? `No new changes since v${d.last_release_version}. Nothing to release.`
+            : "No new changes detected. Nothing to release."
+        );
+        setDetection(d);
+        return;
+      }
+      // Pre-fill the form with detected suggestions and open the modal
+      setForm({
+        version: d.suggested_version || "",
+        title: d.suggested_title || "",
+        notes: d.suggested_notes || "",
+        severity: d.suggested_severity || "recommended",
+        download_url: "",
+        published: true,
+      });
+      setEditingId(null);
+      setDetection(d);
+      setShowForm(true);
+      const n = d.meaningful_commit_count || d.files_changed_count || d.commit_count || 0;
+      const unit = d.notes_source === "files" ? "file" : "change";
+      toast.success(`Detected ${n} ${unit}${n === 1 ? "" : "s"} since last release — review and publish.`);
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Auto-detect failed");
+    } finally {
+      setDetecting(false);
+    }
   };
 
   const save = async () => {
@@ -120,6 +159,16 @@ export default function ReleasesAdminPage() {
             <RefreshCw size={13} className={loading ? "animate-spin" : ""} /> Refresh
           </button>
           <button
+            onClick={autoDetect}
+            disabled={detecting}
+            data-testid="auto-detect-release-button"
+            className="flex items-center gap-1.5 bg-[#3B82F6]/15 border border-[#3B82F6]/40 text-[#93C5FD] px-3 py-2 rounded-md hover:bg-[#3B82F6]/25 transition text-xs disabled:opacity-60 disabled:cursor-not-allowed"
+            title="Detect changes since last release and pre-fill a new release"
+          >
+            <Wand2 size={13} className={detecting ? "animate-spin" : ""} />
+            {detecting ? "Detecting…" : "Auto-detect update"}
+          </button>
+          <button
             onClick={() => { reset(); setShowForm(true); }}
             data-testid="new-release-button"
             className="flex items-center gap-1.5 bg-[#A78BFA] text-black px-4 py-2 rounded-md font-medium hover:bg-[#C4B5FD] transition text-sm"
@@ -141,6 +190,33 @@ export default function ReleasesAdminPage() {
               <h3 className="text-lg font-bold">{editingId ? "Edit release" : "Publish a new release"}</h3>
               <button onClick={reset} className="text-[#71717A] hover:text-white" data-testid="close-form"><X size={18} /></button>
             </div>
+            {detection && !editingId && detection.needs_release && (
+              <div
+                data-testid="auto-detect-banner"
+                className="mb-4 flex items-start gap-2 bg-[#3B82F6]/10 border border-[#3B82F6]/30 text-[#BFDBFE] rounded-md px-3 py-2 text-xs"
+              >
+                <Wand2 size={14} className="mt-0.5 shrink-0" />
+                <div>
+                  Auto-filled from{" "}
+                  {detection.notes_source === "files" ? (
+                    <>
+                      <span className="font-mono">{detection.files_changed_count}</span>{" "}
+                      file{detection.files_changed_count === 1 ? "" : "s"} changed
+                    </>
+                  ) : (
+                    <>
+                      <span className="font-mono">{detection.meaningful_commit_count || detection.commit_count}</span>{" "}
+                      commit{(detection.meaningful_commit_count || detection.commit_count) === 1 ? "" : "s"}
+                    </>
+                  )}
+                  {" "}since{" "}
+                  {detection.last_release_version
+                    ? <>last release <span className="font-mono">v{detection.last_release_version}</span></>
+                    : "the start of the repo"}.
+                  {" "}You can edit anything below before publishing.
+                </div>
+              </div>
+            )}
             <div className="space-y-3">
               <div>
                 <label className="block text-xs uppercase tracking-wider text-[#71717A] mb-1">Version (semver)</label>
