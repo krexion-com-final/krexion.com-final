@@ -13190,7 +13190,8 @@ try:
             'cd C:\\Krexion ; '
             '(Get-Content .env | Where-Object {$_ -notmatch "^LICENSE_KEY="}) '
             f'+ "LICENSE_KEY={key}" | Set-Content .env -Encoding ASCII ; '
-            'docker compose restart backend'
+            'docker rm -f realflow-backend realflow-frontend realflow-mongo realflow-caddy 2>$null ; '
+            'docker compose up -d --force-recreate backend frontend'
         )
         return {
             "license_key": key,
