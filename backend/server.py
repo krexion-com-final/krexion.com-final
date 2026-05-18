@@ -13208,22 +13208,80 @@ try:
     @_bridge_router.post("/pair")
     async def _bridge_pair_pc(user: dict = Depends(get_current_user)):
         """One-click 'Pair my PC' — returns the user's license key plus
-        a self-contained PowerShell command that creates a Windows Task
-        Scheduler heartbeat job. This works EVEN IF the customer's local
-        Docker install has stale code without our bridge worker — the
-        heartbeats come straight from PowerShell, not from inside the
-        container. As long as PC is on + internet works, badge stays
-        green."""
+        a self-contained PowerShell command that creates TWO Windows
+        Scheduled Tasks:
+
+          • KrexionHeartbeat  — POSTs /api/sync/heartbeat once a minute
+                                so cloud knows the PC is online.
+          • KrexionBridge     — pulls pending bridge jobs from cloud and
+                                executes the AdsPower-related ones
+                                locally (AdsPower API runs on this same
+                                PC at http://local.adspower.net:50325).
+                                Loops every ~5 s for fast response.
+
+        Both work EVEN IF the customer's local Docker install has stale
+        code or is not running — heartbeats + AdsPower bridging happen
+        straight from PowerShell, no container required.
+        """
         from bridge_module import get_or_create_license_for_user
         info = await get_or_create_license_for_user(user)
         key = info["license_key"]
         cloud = "https://krexion.com"
 
+        # ── Bridge-job-puller PowerShell script (plain text, replaced
+        # post-hoc so we don't have to fight Python f-string escaping
+        # for every { and } in the PS body).
+        bridge_ps_body = r"""
+$cloud = "__CLOUD__"
+$key = "__KEY__"
+$endTime = (Get-Date).AddSeconds(55)
+while ((Get-Date) -lt $endTime) {
+  try {
+    $resp = Invoke-RestMethod -Uri "$cloud/api/sync/jobs/pull?limit=3&hostname=$env:COMPUTERNAME" -Headers @{"X-Krexion-License"=$key} -TimeoutSec 10
+    foreach ($job in $resp.jobs) {
+      $result = @{ job_id = $job.id; status = "failed"; error = "unhandled feature" }
+      try {
+        $feature = $job.feature
+        $payload = $job.payload
+        $apHost = "http://local.adspower.net:50325"
+        if ($payload.host) { $apHost = $payload.host.TrimEnd('/') }
+        if ($feature -eq "adspower/test") {
+          $r = Invoke-RestMethod -Uri "$apHost/status" -Headers @{"Authorization"=$payload.api_key} -TimeoutSec 12
+          $result.status = "done"
+          $result.result = @{ reachable = $true; raw = $r }
+          $result.Remove("error") | Out-Null
+        } elseif ($feature -eq "adspower/create") {
+          $bodyObj = @{}
+          foreach ($p in $payload.PSObject.Properties) {
+            if ($p.Name -ne "host" -and $p.Name -ne "api_key") { $bodyObj[$p.Name] = $p.Value }
+          }
+          $bodyJson = $bodyObj | ConvertTo-Json -Compress -Depth 10
+          $r = Invoke-RestMethod -Uri "$apHost/api/v1/user/create" -Method POST -Headers @{"Authorization"=$payload.api_key; "Content-Type"="application/json"} -Body $bodyJson -TimeoutSec 30
+          $result.status = "done"
+          $result.result = $r
+          $result.Remove("error") | Out-Null
+        } else {
+          $result.error = "feature '$feature' needs the full Krexion install (Docker)."
+        }
+      } catch {
+        $result.error = "$_"
+      }
+      try {
+        $rb = $result | ConvertTo-Json -Depth 10
+        Invoke-RestMethod -Uri "$cloud/api/sync/jobs/result" -Method POST -Headers @{"X-Krexion-License"=$key; "Content-Type"="application/json"} -Body $rb -TimeoutSec 15 | Out-Null
+      } catch { }
+    }
+  } catch { }
+  Start-Sleep -Seconds 5
+}
+""".replace("__CLOUD__", cloud).replace("__KEY__", key)
+
         # Self-contained PowerShell:
         #   1. Save license to C:\Krexion\.env (so future container restarts pick it up)
-        #   2. Write a heartbeat script to C:\Krexion\krexion-heartbeat.ps1
-        #   3. Register a Windows Scheduled Task that runs it every 30 seconds
-        #   4. Run the script once immediately so the badge goes green right away
+        #   2. Write krexion-heartbeat.ps1  (heartbeat once per task tick)
+        #   3. Write krexion-bridge.ps1     (job-puller loop, ~5s polling)
+        #   4. Register two Scheduled Tasks (Heartbeat + Bridge, both every 1 min)
+        #   5. Run both once immediately so AdsPower test responds instantly
         ps_command = (
             'cd C:\\Krexion ; '
             '(Get-Content .env -ErrorAction SilentlyContinue | '
@@ -13240,10 +13298,15 @@ try:
             f'}} catch {{ }}\n'
             f'\'@ ; '
             'Set-Content -Path "C:\\Krexion\\krexion-heartbeat.ps1" -Value $hb -Encoding UTF8 ; '
+            '$br=@\'' + bridge_ps_body + '\'@ ; '
+            'Set-Content -Path "C:\\Krexion\\krexion-bridge.ps1" -Value $br -Encoding UTF8 ; '
             'schtasks /Delete /TN "KrexionHeartbeat" /F 2>$null ; '
             'schtasks /Create /TN "KrexionHeartbeat" /TR "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\\Krexion\\krexion-heartbeat.ps1" /SC MINUTE /MO 1 /RL HIGHEST /F ; '
+            'schtasks /Delete /TN "KrexionBridge" /F 2>$null ; '
+            'schtasks /Create /TN "KrexionBridge" /TR "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\\Krexion\\krexion-bridge.ps1" /SC MINUTE /MO 1 /RL HIGHEST /F ; '
             'powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\\Krexion\\krexion-heartbeat.ps1 ; '
-            'Write-Host "Pairing complete - badge should go green in 30 seconds" -ForegroundColor Green'
+            'Start-Process powershell -ArgumentList "-NoProfile","-WindowStyle","Hidden","-ExecutionPolicy","Bypass","-File","C:\\Krexion\\krexion-bridge.ps1" -WindowStyle Hidden ; '
+            'Write-Host "Pairing complete - badge should go green in 30 seconds, AdsPower Test should pass immediately" -ForegroundColor Green'
         )
         return {
             "license_key": key,
@@ -13254,6 +13317,7 @@ try:
                 "2. Neeche ki line copy karein, PowerShell mein paste karein, Enter dabayein",
                 "3. End mein green 'Pairing complete' message dikhega",
                 "4. krexion.com pe F5 refresh karein - 30 sec mein green 'PC connected' badge dikhna chahye",
+                "5. AdsPower must be running on this same PC — Test button will succeed within 5 sec.",
             ],
         }
 
