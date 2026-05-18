@@ -286,10 +286,16 @@ CLOUD_HEAVY_FEATURE_MSG = (
 )
 
 def require_local_mode():
-    """FastAPI dependency: block heavy operations when running on the cloud
-    edge. Customers run them on their local Krexion install instead."""
-    if IS_CLOUD:
-        raise HTTPException(status_code=423, detail=CLOUD_HEAVY_FEATURE_MSG)
+    """FastAPI dependency.
+
+    Historically this blocked heavy operations on the cloud edge to force
+    customers to run them locally. With the bridge + heartbeat pairing
+    flow now live, paid customers can run them on krexion.com directly
+    (cloud transparently bridges to their local PC when available, or
+    falls back to cloud execution). Returning True unconditionally keeps
+    the original DI signature so existing endpoints don't need rewiring,
+    while removing the 423 lockout that was a poor customer experience.
+    """
     return True
 
 
@@ -10099,18 +10105,38 @@ async def bulk_test_proxies(
     re-enqueue (would cause an infinite loop).
     """
     # If we're on the cloud edge AND this isn't already a bridge worker
-    # call, route to the user's local PC.
+    # call, try to route to the user's local PC. If their local bridge
+    # worker doesn't pick the job within the timeout window (e.g. they
+    # haven't upgraded to v1.1.0 yet), fall through and execute on cloud
+    # so the feature still works for the customer.
     if IS_CLOUD and not request.headers.get("X-Krexion-Bridge-Job"):
         try:
             from bridge_module import enqueue_bridge_job as _enqueue
+            from bridge_module import is_user_local_online as _is_online
         except Exception:
             _enqueue = None
-        if _enqueue is None:
-            raise HTTPException(status_code=503, detail=CLOUD_HEAVY_FEATURE_MSG)
-        return await _enqueue(
-            user, "proxies/bulk-test", data,
-            wait_for_result=True, wait_timeout=25,
-        )
+            _is_online = None
+        if _enqueue is not None and _is_online is not None:
+            try:
+                status_local = await _is_online(user["id"])
+                # Only try bridge if the local PC AND its bridge worker is
+                # actively pulling (we know workers v1.1.0+ send hardware
+                # info; PowerShell-only heartbeat won't, so ram_gb may be
+                # absent but it's worth a try)
+                if status_local.get("online"):
+                    bridge_resp = await _enqueue(
+                        user, "proxies/bulk-test", data,
+                        wait_for_result=True, wait_timeout=10,
+                    )
+                    # If the worker actually returned a real result, use it
+                    if bridge_resp.get("status") == "done" and bridge_resp.get("result"):
+                        return bridge_resp["result"]
+                    # Otherwise fall through to cloud execution below
+                    logger.info(f"[bridge] proxies bulk-test fell back to cloud for user {user.get('email')}")
+            except Exception as br_err:  # noqa: BLE001
+                logger.warning(f"[bridge] proxies bulk-test bridge failed: {br_err}")
+        # Fallback: execute on cloud (works for all customers regardless
+        # of local bridge worker state)
 
     check_user_feature(user, "proxies")
     
