@@ -1809,14 +1809,87 @@ async def run_real_user_traffic_job(
 
                 page = await context.new_page()
                 push_live_step(job_id, i + 1, "browser", "info", f"Opening {target_url}")
+
+                # Tunnel-error retry: ProxyJet sticky sessions sometimes
+                # have a dead egress for a specific target host. Detect
+                # ERR_TUNNEL_CONNECTION_FAILED / proxy-CONNECT errors and
+                # transparently rotate to a fresh proxy up to 2 times so
+                # the visit doesn't false-fail on a one-off bad tunnel.
+                _TUNNEL_ERR_TOKENS = (
+                    "ERR_TUNNEL_CONNECTION_FAILED",
+                    "ERR_PROXY_CONNECTION_FAILED",
+                    "ERR_HTTP_RESPONSE_CODE_FAILURE",
+                    "ERR_CONNECTION_RESET",
+                    "ERR_CONNECTION_CLOSED",
+                    "ERR_CONNECTION_REFUSED",
+                    "ERR_EMPTY_RESPONSE",
+                    "ERR_SOCKET_NOT_CONNECTED",
+                )
+                MAX_TUNNEL_RETRIES = 2
+                tunnel_attempt = 0
+                resp = None
+                goto_exc = None
+                while True:
+                    try:
+                        resp = await page.goto(target_url, timeout=90000, wait_until="domcontentloaded")
+                        goto_exc = None
+                        break
+                    except Exception as _ge:
+                        goto_exc = _ge
+                        err_str = str(_ge)
+                        is_tunnel = any(tok in err_str for tok in _TUNNEL_ERR_TOKENS)
+                        if not is_tunnel or tunnel_attempt >= MAX_TUNNEL_RETRIES:
+                            break
+                        # Pick a fresh proxy and rebuild context+page
+                        new_proxy = pick_next_proxy()
+                        if not new_proxy:
+                            break
+                        tunnel_attempt += 1
+                        push_live_step(
+                            job_id, i + 1, "browser", "info",
+                            f"Tunnel failed · rotating proxy ({tunnel_attempt}/{MAX_TUNNEL_RETRIES}): {new_proxy.get('server','')}",
+                        )
+                        try:
+                            raw_line = new_proxy.get("raw") or ""
+                            if raw_line:
+                                used_proxy_set.add(raw_line)
+                                _spawn_live(_live_remove_proxy(raw_line))
+                        except Exception:
+                            pass
+                        # close old context
+                        try:
+                            await context.close()
+                        except Exception:
+                            pass
+                        try:
+                            proxy = new_proxy
+                            entry["proxy"] = proxy.get("server", "")
+                            context = await browser.new_context(
+                                proxy={
+                                    "server": proxy["server"],
+                                    **({"username": proxy["username"]} if proxy.get("username") else {}),
+                                    **({"password": proxy["password"]} if proxy.get("password") else {}),
+                                },
+                                user_agent=ua,
+                                viewport=fp["viewport"],
+                                device_scale_factor=fp["device_scale_factor"],
+                                is_mobile=fp["is_mobile"],
+                                has_touch=fp["has_touch"],
+                                locale=geo["locale"],
+                                timezone_id=geo["timezone"],
+                                geolocation={"latitude": geo["lat"], "longitude": geo["lon"]},
+                                permissions=["geolocation"],
+                                extra_http_headers=_ctx_headers,
+                            )
+                            await context.add_init_script(_build_stealth_script(fp, geo))
+                            page = await context.new_page()
+                        except Exception as _rebuild_e:
+                            goto_exc = _rebuild_e
+                            break
+
                 try:
-                    # 2026-01: timeout bumped 45s → 90s. Slow proxies
-                    # + ad-laden offer pages frequently need 60-80s to
-                    # finish DOMContentLoaded; the previous 45s was
-                    # killing visits mid-load before they could
-                    # produce a click ("link kholta hai jitni deir
-                    # mein link kholta hai succeed b ni hota").
-                    resp = await page.goto(target_url, timeout=90000, wait_until="domcontentloaded")
+                    if goto_exc is not None:
+                        raise goto_exc
                     entry["http_status"] = str(resp.status) if resp else ""
                     # Detect chrome-error pages — happens when the residential
                     # proxy's egress tunnel breaks mid-navigation or DNS
@@ -1856,8 +1929,19 @@ async def run_real_user_traffic_job(
                                        f"Page loaded (HTTP {entry['http_status'] or '?'})")
                 except Exception as e:
                     entry["status"] = "failed"
-                    entry["error"] = f"goto failed: {str(e)[:180]}"
-                    push_live_step(job_id, i + 1, "browser", "failed", f"goto failed: {str(e)[:100]}")
+                    err_text = str(e)
+                    # Friendlier message for tunnel/proxy failures so the
+                    # customer immediately understands it's a proxy-pool
+                    # issue, not their setup.
+                    friendly = err_text[:180]
+                    if any(tok in err_text for tok in _TUNNEL_ERR_TOKENS):
+                        friendly = (
+                            f"Proxy tunnel failed after {tunnel_attempt + 1} attempts — "
+                            "your proxy provider couldn't reach the target. Try a different "
+                            "US state, smaller batch, or reload proxies."
+                        )
+                    entry["error"] = f"goto failed: {friendly}"
+                    push_live_step(job_id, i + 1, "browser", "failed", f"goto failed: {friendly[:100]}")
                     await context.close()
                     return await _record(job_id, entry, report, report_lock, db)
 

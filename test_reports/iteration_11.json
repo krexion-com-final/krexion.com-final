@@ -1,0 +1,37 @@
+{
+  "summary": "Iteration 11 - RUT tunnel-retry logic (real_user_traffic.py L1808-1947) verified via 17 pytest cases. All pass in 0.97s. Code review confirms: (1) all 8 required tokens present in _TUNNEL_ERR_TOKENS tuple (ERR_TUNNEL_CONNECTION_FAILED, ERR_PROXY_CONNECTION_FAILED, ERR_HTTP_RESPONSE_CODE_FAILURE, ERR_CONNECTION_RESET, ERR_CONNECTION_CLOSED, ERR_CONNECTION_REFUSED, ERR_EMPTY_RESPONSE, ERR_SOCKET_NOT_CONNECTED); (2) MAX_TUNNEL_RETRIES=2; (3) retry loop calls pick_next_proxy() and closes old context BEFORE rebuilding new context (no leak); (4) rebuild reuses same UA/fingerprint/geo (viewport, locale, timezone_id, user_agent=ua); (5) non-tunnel errors short-circuit without rotation (`if not is_tunnel or ...: break`); (6) friendly message 'Proxy tunnel failed after N attempts - your proxy provider couldn't reach the target. Try a different US state, smaller batch, or reload proxies.' fires ONLY when err_text contains a tunnel token. Behavior simulation (mirror of source loop with monkey-patched goto) verified: (a) 2 tunnel failures + 3rd success -> pick_next_proxy called exactly 2x, contexts closed properly; (b) all-tunnel-failures -> entry.error contains 'Proxy tunnel failed after 3 attempts' (1 initial + 2 retries); (c) TimeoutError -> pick_next_proxy NOT called, raw timeout msg preserved (no friendly message); (d) pick_next_proxy returns None -> graceful break, no infinite loop; (e) each of 8 tokens independently triggers rotation. Regression: API surface intact - /api/auth/me (reachability), /api/user-agents/options (200), /api/adspower/configs (200/403), /api/real-user-traffic/jobs POST with empty payload returns 422 (validation) NOT 500, /api/real-user-traffic/jobs GET (200/403). Patch did NOT introduce 5xx regressions.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration11_rut_tunnel_retry.py",
+    "/app/test_reports/pytest/iter11_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Retry loop correctness: when goto raises after a successful proxy rotation (e.g. 1st goto tunnel-fails, 2nd goto succeeds connection but then crashes for non-tunnel reason), the outer except uses tunnel_attempt+1 in the friendly message - but the err_text is NON-tunnel so the friendly branch is NOT taken and raw err_text is used. Verified correct.",
+    "tunnel_attempt counter semantics: friendly msg says 'after {tunnel_attempt + 1} attempts'. After 0 retries (initial fail only) -> 'after 1 attempts'. After 2 retries exhausted -> 'after 3 attempts'. Matches spec.",
+    "Edge case found and verified safe: if pick_next_proxy() returns None mid-rotation, the loop breaks BEFORE incrementing tunnel_attempt -> friendly msg correctly reports 'after N attempts' where N = attempts actually made.",
+    "Edge case found and verified safe: if browser.new_context() inside the rebuild itself raises (e.g. browser crashed), the inner try catches it, sets goto_exc=_rebuild_e and breaks - prevents infinite loop and reports the rebuild error to the user.",
+    "Context leak audit: old context.close() is called BEFORE every new_context call inside the retry loop (line ~1861), and the outer except at line 1945 calls context.close() for the final context. No leak path identified.",
+    "Minor style: `if True:` wrapper at L1808 is dead code from refactor - could be removed (cosmetic only, no functional impact).",
+    "The retry block reuses _ctx_headers from the OUTER scope (line ~1755) instead of recomputing - correct because UA-derived Referer must stay identical across rotations (same fingerprint contract).",
+    "No regression in /api/real-user-traffic/jobs POST 4xx handling - empty payload returns 422 cleanly, no 500."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration11_rut_tunnel_retry.py (NEW - 17 pytest cases)"
+  ],
+  "success_rate": {"backend": "100% (17/17)", "frontend": "n/a (backend-only request)"},
+  "test_credentials": "admin@krexion.local / admin123 in this env returns 401 (Invalid credentials) - used adspowertester@gmail.com / Test12345 (pre-flagged user) for the regression API tests instead. /app/memory/test_credentials.md may need updating for this preview env, OR admin user wasn't seeded.",
+  "seed_data_creation": "No persistent data created. Tests are pure logic (static source-file inspection + mocked async loop) plus read-only GET endpoints. POST /api/real-user-traffic/jobs is hit with empty payload only - no actual job is created (returns 422 validation error before reaching the job creation path).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "test_iteration11_rut_tunnel_retry.py organizes tests into 3 sections: (A) TestSourceCodeContainsRetryBlock - 7 static regex checks against real_user_traffic.py source code; (B) TestRetryLoopBehavior - 5 async behavior tests using a `run_retry_loop` helper that MIRRORS the exact source loop pattern (since the real loop is buried inside _process_visit with heavy deps); (C) TestRegressionEndpoints - 5 live API hits using adspowertester@gmail.com. If you modify the retry block in real_user_traffic.py, also update `run_retry_loop` in the test file to stay in sync. Note: pytest-asyncio is NOT installed in this env; tests use asyncio.run() sync wrappers. Admin login admin@krexion.local/admin123 returned 401 - either the admin user is not seeded in this preview env or the password rotates; pre-flagged adspowertester user works fine and has real_user_traffic=true implied (RUT GET returned 200).",
+  "rca of the issue": "n/a - this iteration is a validation of E1's bug fix. The original customer issue (24/30 ERR_TUNNEL_CONNECTION_FAILED) is correctly addressed by E1's patch: tunnel errors now trigger up to 2 transparent proxy rotations before failing, and the user-facing error message is now actionable ('try different state / smaller batch / reload proxies') instead of leaking Playwright internals. End-to-end customer-traffic validation would require real ProxyJet credentials and Chromium - out of scope for this preview env."
+}
