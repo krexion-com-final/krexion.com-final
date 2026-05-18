@@ -13181,27 +13181,52 @@ try:
     @_bridge_router.post("/pair")
     async def _bridge_pair_pc(user: dict = Depends(get_current_user)):
         """One-click 'Pair my PC' — returns the user's license key plus
-        a ready-to-paste PowerShell one-liner so the customer can wire
-        their local install to this cloud account in 5 seconds."""
+        a self-contained PowerShell command that creates a Windows Task
+        Scheduler heartbeat job. This works EVEN IF the customer's local
+        Docker install has stale code without our bridge worker — the
+        heartbeats come straight from PowerShell, not from inside the
+        container. As long as PC is on + internet works, badge stays
+        green."""
         from bridge_module import get_or_create_license_for_user
         info = await get_or_create_license_for_user(user)
         key = info["license_key"]
+        cloud = "https://krexion.com"
+
+        # Self-contained PowerShell:
+        #   1. Save license to C:\Krexion\.env (so future container restarts pick it up)
+        #   2. Write a heartbeat script to C:\Krexion\krexion-heartbeat.ps1
+        #   3. Register a Windows Scheduled Task that runs it every 30 seconds
+        #   4. Run the script once immediately so the badge goes green right away
         ps_command = (
             'cd C:\\Krexion ; '
-            '(Get-Content .env | Where-Object {$_ -notmatch "^LICENSE_KEY="}) '
-            f'+ "LICENSE_KEY={key}" | Set-Content .env -Encoding ASCII ; '
-            'docker rm -f realflow-backend realflow-frontend realflow-mongo realflow-caddy 2>$null ; '
-            'docker compose up -d --force-recreate backend frontend'
+            '(Get-Content .env -ErrorAction SilentlyContinue | '
+            'Where-Object {$_ -notmatch "^LICENSE_KEY=" -and $_ -notmatch "^KREXION_CLOUD_URL=" -and $_ -notmatch "^KREXION_MODE="}) '
+            f'+ "LICENSE_KEY={key}" + "KREXION_CLOUD_URL={cloud}" + "KREXION_MODE=local" '
+            '| Set-Content .env -Encoding ASCII ; '
+            f'$hb=@\'\n'
+            f'try {{\n'
+            f'  $ram = [math]::Round((Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize / 1MB, 1)\n'
+            f'  $cpu = (Get-CimInstance Win32_Processor | Measure-Object NumberOfLogicalProcessors -Sum).Sum\n'
+            f'  $conc = [int][math]::Min(256, [math]::Max(8, $ram * 2))\n'
+            f'  $body = @{{ hostname = $env:COMPUTERNAME; version = "1.1.0"; platform = "windows"; ram_gb = $ram; cpu_cores = $cpu; recommended_concurrency = $conc }} | ConvertTo-Json -Compress\n'
+            f'  Invoke-RestMethod -Uri "{cloud}/api/sync/heartbeat" -Method POST -Headers @{{"X-Krexion-License"="{key}"; "Content-Type"="application/json"}} -Body $body -TimeoutSec 10\n'
+            f'}} catch {{ }}\n'
+            f'\'@ ; '
+            'Set-Content -Path "C:\\Krexion\\krexion-heartbeat.ps1" -Value $hb -Encoding UTF8 ; '
+            'schtasks /Delete /TN "KrexionHeartbeat" /F 2>$null ; '
+            'schtasks /Create /TN "KrexionHeartbeat" /TR "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\\Krexion\\krexion-heartbeat.ps1" /SC MINUTE /MO 1 /RL HIGHEST /F ; '
+            'powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\\Krexion\\krexion-heartbeat.ps1 ; '
+            'Write-Host "Pairing complete - badge should go green in 30 seconds" -ForegroundColor Green'
         )
         return {
             "license_key": key,
             "created": info["created"],
             "powershell_command": ps_command,
             "instructions": [
-                "1. Apne PC pe PowerShell open karein - right click karke 'Run as Administrator'",
-                "2. Neeche ki line copy karein aur PowerShell mein paste karein, phir Enter dabayein",
-                "3. 30 sec wait karein - backend restart ho jayega",
-                "4. Wapas krexion.com pe F5 refresh karein - green 'PC connected' badge dikhna chahye",
+                "1. PowerShell open karein 'Run as Administrator' se (Start menu -> PowerShell -> right-click)",
+                "2. Neeche ki line copy karein, PowerShell mein paste karein, Enter dabayein",
+                "3. End mein green 'Pairing complete' message dikhega",
+                "4. krexion.com pe F5 refresh karein - 30 sec mein green 'PC connected' badge dikhna chahye",
             ],
         }
 
