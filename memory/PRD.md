@@ -335,6 +335,25 @@ Then add the route to `feature_routes` in `sync_client._execute_job_locally()`.
 - **Frontend Playwright e2e** — both flows green (legacy + fast rewrite).
 - Speed verified: 0.27s for 10 profiles, ~3s budget for 15 in full UI.
 
+---
+
+## 2026-05-18 (later) — Profile Builder: Unique IP verify + Test API + Multi-config UX
+
+### Built
+- **`verify_unique_ips` flag** on POST /api/adspower/generate — when true, parallel ipify probes through each sticky ProxyJet session, dedupes against the user's `adspower_used_ips` history, retries up to 4x count with 15-concurrency semaphore. Default off (instant mode preserved).
+- **`POST /api/adspower/configs/{cid}/test`** — bridges an `adspower/test` job to the customer's local PC (sync_client now handles GET /status on AdsPower local API). Returns friendly offline message if PC not online (no scary 500s).
+- **`sync_client.py` v1.2.0** — new `__adspower_test__` feature handler.
+- **`config_name`** stored on job + each profile doc so "which AdsPower account is this profile on?" is always answerable.
+- **Frontend**:
+  - Test button per config with spinner, "Connected"/"Failed" badge, inline error message.
+  - "Verify each proxy gives a unique IP" toggle (default OFF).
+  - "Profiles will be created on AdsPower account: <name>" pill banner inside Generate panel, live-updates when user switches radio.
+  - Profile table gains IP column + Account column.
+
+### Tested
+- **Backend pytest 6/6 (iter 10)** — all paths: offline test, 404, 403, fresh-heartbeat bridge enqueue, 18s timeout path, verify-unique-ips fail-fast, fast-mode regression.
+- **Frontend Playwright e2e 100%** — Test button flow, Failed/Connected badges, banner live-update on radio change, IP/Account columns, Account-B add flow.
+
 ### Backlog (unchanged)
 - **P1**: Legal pages (Terms / Privacy / Refund).
 - **P1**: "Change password on first login" for auto-created accounts.
