@@ -273,7 +273,7 @@ export default function UpdateBanner() {
                 <li>
                   Neeche se{" "}
                   <a
-                    href="/krexion-update-bootstrap.bat"
+                    href={`/krexion-update-bootstrap.bat?v=${Date.now()}`}
                     download
                     data-testid="bootstrap-download"
                     className="text-[#3B82F6] hover:underline font-semibold"
@@ -301,15 +301,19 @@ export default function UpdateBanner() {
               <div className="mt-5 p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs">
                 <strong>Aage se</strong> - is page ka "Install update" button direct kaam karega. Yeh bootstrap step phir kabhi nahi karna padega.
               </div>
+              <div className="mt-3 p-3 rounded-lg bg-[#3B82F6]/10 border border-[#3B82F6]/30 text-[#93C5FD] text-xs">
+                <strong>Sahi file ki pehchaan:</strong> Downloaded file ~4 KB ki hai, andar pehli line mein <code className="bg-black/40 px-1 py-0.5 rounded">@echo off</code> aur 3rd line mein <code className="bg-black/40 px-1 py-0.5 rounded">v3 - flat, no tricks</code> likha hoga.
+                <br />Agar 2-3 KB se kam file mile → browser cache hai. Ctrl+Shift+R hard refresh karein, phir dobara download karein.
+              </div>
             </div>
             <div className="px-6 py-4 border-t border-white/10 flex items-center justify-end gap-3 bg-white/[0.02]">
               <a
-                href="/krexion-update-bootstrap.bat"
-                download
+                href={`/krexion-update-bootstrap.bat?v=${Date.now()}`}
+                download="krexion-update-bootstrap.bat"
                 data-testid="bootstrap-download-btn"
                 className="inline-flex items-center gap-2 font-bold px-5 py-2.5 rounded-lg bg-[#3B82F6] text-black hover:bg-[#60A5FA] transition"
               >
-                <Download size={15} /> Download bootstrap.bat
+                <Download size={15} /> Download bootstrap.bat (v3)
               </a>
             </div>
           </div>
