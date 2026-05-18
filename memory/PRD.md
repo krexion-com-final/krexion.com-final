@@ -354,6 +354,24 @@ Then add the route to `feature_routes` in `sync_client._execute_job_locally()`.
 - **Backend pytest 6/6 (iter 10)** — all paths: offline test, 404, 403, fresh-heartbeat bridge enqueue, 18s timeout path, verify-unique-ips fail-fast, fast-mode regression.
 - **Frontend Playwright e2e 100%** — Test button flow, Failed/Connected badges, banner live-update on radio change, IP/Account columns, Account-B add flow.
 
+---
+
+## 2026-05-18 (even later) — RUT: Auto-retry on proxy tunnel failure
+
+### Why
+Customer ran a RUT job and got `Page.goto: net::ERR_TUNNEL_CONNECTION_FAILED` on 24/30 visits. Root cause: ProxyJet sticky proxies occasionally have a dead egress for a specific target host. The old code marked the visit failed immediately without retrying with a fresh proxy.
+
+### Built
+- New tunnel-error detection in `real_user_traffic.py` around the `page.goto` call (lines ~1808-1900). Detects 8 tunnel/connection-class tokens: ERR_TUNNEL_CONNECTION_FAILED, ERR_PROXY_CONNECTION_FAILED, ERR_HTTP_RESPONSE_CODE_FAILURE, ERR_CONNECTION_RESET, ERR_CONNECTION_CLOSED, ERR_CONNECTION_REFUSED, ERR_EMPTY_RESPONSE, ERR_SOCKET_NOT_CONNECTED.
+- On detection: closes old `BrowserContext`, calls `pick_next_proxy()` for a fresh proxy, rebuilds the context with the **same** UA/fingerprint/geo, retries `page.goto`. Max 2 retries per visit.
+- Friendly user-facing error when all retries exhaust: "Proxy tunnel failed after N attempts — your proxy provider couldn't reach the target. Try a different US state, smaller batch, or reload proxies." (was previously a raw Playwright internal string).
+- Non-tunnel errors (timeout, DNS, etc.) short-circuit without rotation — preserve original behaviour.
+
+### Tested
+- 17/17 backend pytest pass in 0.97s (`/app/backend/tests/test_iteration11_rut_tunnel_retry.py`).
+- Covered: each of 8 tokens triggers rotation, non-tunnel doesn't, no context leak, no infinite loop, friendly message only when appropriate.
+- Regression: /api/health, /api/adspower/*, /api/user-agents/*, /api/real-user-traffic/jobs all healthy.
+
 ### Backlog (unchanged)
 - **P1**: Legal pages (Terms / Privacy / Refund).
 - **P1**: "Change password on first login" for auto-created accounts.
