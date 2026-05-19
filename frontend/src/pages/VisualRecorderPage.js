@@ -20,6 +20,8 @@ import {
   Globe,
   ListPlus,
   RefreshCw,
+  Image as ImageIcon,
+  ChevronDown,
 } from "lucide-react";
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
@@ -35,7 +37,9 @@ const authH = () => ({
 const TOOLS = [
   { id: "default", icon: Hand, label: "Click", help: "Normal click — captures button/link text" },
   { id: "form_fill", icon: Type, label: "Form Fill", help: "Click an input, then bind to Excel column" },
+  { id: "dropdown", icon: ChevronDown, label: "Dropdown", help: "Click a <select> dropdown to bind an option or Excel column" },
   { id: "random", icon: Shuffle, label: "Random Pick", help: "Click 2+ buttons → random one each run" },
+  { id: "capture", icon: ImageIcon, label: "Capture", help: "Insert a screenshot marker — shown in Live Activity during the job" },
   { id: "final", icon: Flag, label: "Mark Final", help: "Capture this page as conversion target" },
 ];
 
@@ -59,6 +63,7 @@ export default function VisualRecorderPage() {
   const [pageMeta, setPageMeta] = useState({ url: "", title: "" });
   const [tool, setTool] = useState("default");
   const [pendingFormFill, setPendingFormFill] = useState(null); // {selector, header_name?}
+  const [pendingDropdown, setPendingDropdown] = useState(null); // {selector, options:[{value,label,...}], element}
   const [pendingRandom, setPendingRandom] = useState([]); // texts collected so far
   const [navUrl, setNavUrl] = useState("");
   const [waitMs, setWaitMs] = useState(2000);
@@ -206,6 +211,34 @@ export default function VisualRecorderPage() {
       return;
     }
 
+    // "capture" tool: insert a screenshot marker — no need to click
+    // anywhere on the page, but if the user does, we still treat it
+    // as a request to insert at current position.
+    if (tool === "capture") {
+      setBusy(true);
+      try {
+        const name = window.prompt(
+          "Name this capture (shown in Live Activity):",
+          `Step ${steps.length + 1}`,
+        );
+        if (name === null) { setBusy(false); return; }   // user cancelled
+        const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/screenshot-marker`, {
+          method: "POST",
+          headers: authH(),
+          body: JSON.stringify({ name: name || `Step ${steps.length + 1}` }),
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+        toast.success(`📷 Capture point inserted: "${d.step?.name || "Step"}"`);
+        refreshState();
+      } catch (err) {
+        toast.error(`Insert capture failed: ${err.message || err}`);
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
     setBusy(true);
     try {
       const body = { x, y, mode: tool };
@@ -219,6 +252,21 @@ export default function VisualRecorderPage() {
 
       if (tool === "form_fill" && d.element) {
         setPendingFormFill({ selector: d.selector || "input", element: d.element });
+      } else if (tool === "dropdown") {
+        // The backend returned the <select> element's options. Open
+        // the binding panel so the user picks one option literal OR
+        // an Excel column to substitute at run-time.
+        if (d.warning) {
+          toast.error(d.warning);
+        } else if (!Array.isArray(d.options) || d.options.length === 0) {
+          toast.error("No <select> options found at that point — click the dropdown control itself.");
+        } else {
+          setPendingDropdown({
+            selector: d.selector || "select",
+            options: d.options,
+            element: d.element,
+          });
+        }
       } else if (tool === "random" && d.element) {
         const txt = (d.element.text || "").trim();
         if (txt) {
@@ -233,6 +281,38 @@ export default function VisualRecorderPage() {
       refreshScreenshot();
     } catch (err) {
       toast.error(`Click failed: ${err.message || err}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // ── Dropdown bind: complete the select after picking the dropdown ─
+  const submitDropdownBind = async (opts) => {
+    // opts: { value?: string, header_name?: string, match_by?: 'label'|'value' }
+    if (!pendingDropdown || !sessionId) return;
+    setBusy(true);
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/dropdown-bind`, {
+        method: "POST",
+        headers: authH(),
+        body: JSON.stringify({
+          selector: pendingDropdown.selector,
+          value: opts.value || null,
+          header_name: opts.header_name || null,
+          match_by: opts.match_by || "label",
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      toast.success(
+        opts.header_name
+          ? `Dropdown bound to {{${opts.header_name}}}`
+          : `Dropdown will select "${opts.value}"`,
+      );
+      setPendingDropdown(null);
+      refreshState();
+    } catch (err) {
+      toast.error(err.message || String(err));
     } finally {
       setBusy(false);
     }
@@ -725,6 +805,74 @@ export default function VisualRecorderPage() {
                     <button
                       onClick={() => setPendingFormFill(null)}
                       className="px-2 py-1 rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-xs"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {pendingDropdown && (
+                <div
+                  className="mt-3 p-3 rounded-lg bg-amber-950/30 border border-amber-700/40"
+                  data-testid="vr-dropdown-bind-panel"
+                >
+                  <div className="text-xs text-amber-200 mb-1 font-medium flex items-center gap-1">
+                    <ChevronDown className="w-3.5 h-3.5" />
+                    Bind dropdown <code className="text-zinc-300">{pendingDropdown.selector}</code>
+                  </div>
+                  <div className="text-[11px] text-zinc-400 mb-2">
+                    {pendingDropdown.options.length} option{pendingDropdown.options.length === 1 ? "" : "s"} found —
+                    pick a fixed one OR bind to an Excel column.
+                  </div>
+
+                  {/* Excel column bindings (preferred for per-row values) */}
+                  {headers.length > 0 && (
+                    <>
+                      <div className="text-[11px] text-zinc-500 mb-1 uppercase tracking-wide">
+                        Bind to Excel column (match by visible label)
+                      </div>
+                      <div className="flex flex-wrap gap-1.5 mb-3">
+                        {headers.map((h) => (
+                          <button
+                            key={`dd-h-${h}`}
+                            onClick={() => submitDropdownBind({ header_name: h, match_by: "label" })}
+                            className="px-2 py-1 rounded bg-amber-600/30 hover:bg-amber-600/60 border border-amber-500/40 text-amber-50 text-xs"
+                            data-testid={`vr-dd-bind-${h}`}
+                          >
+                            {`{{${h}}}`}
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  )}
+
+                  <div className="text-[11px] text-zinc-500 mb-1 uppercase tracking-wide">
+                    Or pick a fixed option (always selected)
+                  </div>
+                  <div className="max-h-44 overflow-y-auto rounded border border-zinc-800 bg-zinc-950/50 divide-y divide-zinc-800/60">
+                    {pendingDropdown.options.map((o, idx) => {
+                      const lbl = (o.label || o.value || "").trim() || `(option #${idx + 1})`;
+                      const sub = o.value && o.value !== lbl ? ` · value="${o.value}"` : "";
+                      return (
+                        <button
+                          key={`dd-opt-${idx}`}
+                          onClick={() => submitDropdownBind({ value: o.label || o.value || "", match_by: "label" })}
+                          className="w-full text-left px-2 py-1.5 text-xs text-zinc-200 hover:bg-amber-600/20 hover:text-amber-100 transition flex items-center justify-between"
+                          data-testid={`vr-dd-opt-${idx}`}
+                        >
+                          <span className="truncate">{lbl}</span>
+                          <span className="text-[10px] text-zinc-500 ml-2 truncate">{sub}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="flex justify-end mt-2">
+                    <button
+                      onClick={() => setPendingDropdown(null)}
+                      className="px-2 py-1 rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-300 text-xs"
+                      data-testid="vr-dd-cancel"
                     >
                       Cancel
                     </button>

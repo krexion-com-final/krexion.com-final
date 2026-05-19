@@ -12998,6 +12998,54 @@ async def vr_mark_final(session_id: str, user: dict = Depends(get_current_user))
     return await vr.mark_final(sess)
 
 
+class VRScreenshotMarkerReq(BaseModel):
+    name: Optional[str] = None
+
+
+@api_router.post("/visual-recorder/{session_id}/screenshot-marker")
+async def vr_screenshot_marker(session_id: str, req: VRScreenshotMarkerReq, user: dict = Depends(get_current_user)):
+    """Insert a 'capture screenshot here' marker in the recording. At
+    job-run time, the runner will take a real screenshot at this point
+    and push it to the Live Activity panel so the operator can verify
+    visit progress."""
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.add_screenshot_marker(sess, name=req.name)
+
+
+class VRDropdownBindReq(BaseModel):
+    selector: str
+    value: Optional[str] = None
+    header_name: Optional[str] = None
+    match_by: str = "label"  # 'label' (visible text) or 'value' (attr)
+
+
+@api_router.post("/visual-recorder/{session_id}/dropdown-bind")
+async def vr_dropdown_bind(session_id: str, req: VRDropdownBindReq, user: dict = Depends(get_current_user)):
+    """Finalise a dropdown binding started by a click in dropdown-mode.
+    Caller must provide EITHER `value` (a literal option) OR
+    `header_name` (an Excel column to substitute at runtime)."""
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.bind_dropdown(
+        sess,
+        selector=req.selector,
+        value=req.value,
+        header_name=req.header_name,
+        match_by=req.match_by,
+    )
+
+
 @api_router.delete("/visual-recorder/{session_id}/step/{index}")
 async def vr_delete_step(session_id: str, index: int, user: dict = Depends(get_current_user)):
     if vr is None:

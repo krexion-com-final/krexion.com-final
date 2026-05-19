@@ -2382,9 +2382,35 @@ async def run_real_user_traffic_job(
                     # If user provided a custom Automation JSON, run that.
                     # Otherwise fall through to the smart auto-fill heuristic.
                     if automation_steps:
+                        # Hand the runner a screenshot-callback so any
+                        # {"action":"screenshot",...} step the user added
+                        # via the Visual Recorder's Capture tool surfaces
+                        # in the Live Activity panel (and is also saved
+                        # alongside the visit's other shots for later
+                        # inspection).
+                        async def _on_user_capture(step_idx: int, name: str, png_bytes: bytes):
+                            try:
+                                safe_name = (name or f"step_{step_idx}").replace("/", "_")[:40]
+                                shot_path = shots_dir / f"visit_{i+1:05d}_capture{step_idx:02d}_{safe_name}.png"
+                                await asyncio.to_thread(shot_path.write_bytes, png_bytes)
+                                entry.setdefault("capture_screenshots", []).append({
+                                    "name": name,
+                                    "step_index": step_idx,
+                                    "path": str(shot_path),
+                                })
+                                push_live_step(
+                                    job_id, i + 1, "capture", "ok",
+                                    f"📷 {name} (step {step_idx})",
+                                )
+                            except Exception:
+                                # Surface the failure but never crash
+                                # the visit because of a capture.
+                                pass
+
                         step_res = await _execute_automation_steps(
                             page, row or {}, automation_steps, skip_captcha=skip_captcha,
                             self_heal=self_heal,
+                            on_screenshot=_on_user_capture,
                         )
                     else:
                         # Click through any CTA ("UNLOCK NOW", "Get Started", etc.)
@@ -3405,6 +3431,7 @@ async def _execute_automation_steps(
     steps: List[Dict[str, Any]],
     skip_captcha: bool = True,
     self_heal: bool = True,
+    on_screenshot: Optional[Callable[[int, str, bytes], Awaitable[None]]] = None,
 ) -> Dict[str, Any]:
     """Execute a user-provided automation script step-by-step. Returns
     {status, error?, executed_steps}.  Each step format:
@@ -3418,6 +3445,11 @@ async def _execute_automation_steps(
     of the current page and ask Gemini 2.5 Pro for a single recovery action
     (dismiss popup, click Continue, etc.). We try the main step one more time
     after applying the recovery.
+
+    When an `on_screenshot` callback is provided, every `screenshot` action
+    captures a real PNG of the current page and hands it to the callback
+    (along with the step index and the user-supplied name) so the live
+    activity / per-visit storage layer can surface it for the operator.
     """
     executed = 0
     heal_used = 0
@@ -3528,9 +3560,23 @@ async def _execute_automation_steps(
                     js = _substitute(step.get("script") or step.get("js") or "", row)
                     await page.evaluate(js)
                 elif action == "screenshot":
-                    # User-named intermediate screenshot — skipped here; main
-                    # final screenshot is captured by the job loop.
-                    pass
+                    # User-defined intermediate capture — take a real
+                    # PNG and forward it to the on_screenshot callback
+                    # so the live-activity panel can surface it as
+                    # visible visit progress. Always optional under the
+                    # hood: a transient screenshot failure must NOT
+                    # fail the visit.
+                    if on_screenshot is not None:
+                        try:
+                            png_bytes = await page.screenshot(
+                                type="png", timeout=10000, full_page=False
+                            )
+                            shot_name = str(
+                                step.get("name") or f"Step {idx + 1}"
+                            ).strip() or f"Step {idx + 1}"
+                            await on_screenshot(idx + 1, shot_name, png_bytes)
+                        except Exception:
+                            pass
                 else:
                     if not optional:
                         return {"status": "failed", "error": f"Unknown action '{action}' at step {idx+1}", "executed_steps": executed}
@@ -3591,7 +3637,38 @@ async def _dispatch_single_action(page: Page, action: str, selector: str,
     elif action == "type":
         await page.type(selector, str(value), delay=int(step.get("delay") or 50), timeout=timeout)
     elif action == "select":
-        await page.select_option(selector, value=str(value), timeout=timeout)
+        # The Visual Recorder's dropdown tool defaults to match_by='label'
+        # (visible option text) because customer Excel sheets typically
+        # contain human-readable values like "Male"/"California" rather
+        # than the underlying option `value` attributes. We try the
+        # match_by the step asks for first, then transparently fall back
+        # so an unknown mismatch doesn't fail an otherwise-good visit.
+        val = "" if value is None else str(value)
+        match_by = str(step.get("match_by") or "label").lower()
+        attempts: List[Tuple[str, Any]] = []
+        if match_by == "value":
+            attempts = [("value", val), ("label", val), ("label", val.strip())]
+        else:
+            attempts = [("label", val), ("label", val.strip()), ("value", val)]
+        # Also try numeric index as a last resort (e.g. "0", "1", "2").
+        if val.isdigit():
+            attempts.append(("index", int(val)))
+        last_err: Optional[Exception] = None
+        for strategy, payload in attempts:
+            try:
+                if strategy == "label":
+                    await page.select_option(selector, label=payload, timeout=timeout)
+                elif strategy == "value":
+                    await page.select_option(selector, value=str(payload), timeout=timeout)
+                elif strategy == "index":
+                    await page.select_option(selector, index=int(payload), timeout=timeout)
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                continue
+        if last_err is not None:
+            raise last_err
     elif action == "check":
         await page.check(selector, timeout=timeout)
     elif action == "uncheck":

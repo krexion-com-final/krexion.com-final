@@ -402,10 +402,14 @@ async def get_page_meta(sess: RecorderSession) -> Dict[str, Any]:
 async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default", header_name: Optional[str] = None, group_id: Optional[str] = None) -> Dict[str, Any]:
     """Forward a click at (x, y) onto the page. Captures the element and
     appends a step. Modes:
-      - default:   normal text-based click
-      - form_fill: click + remember field for next /type call (Excel header binding)
-      - random:    add this element to a "random pick" group (group_id required)
-      - final:     mark current page as conversion target
+      - default:    normal text-based click
+      - form_fill:  click + remember field for next /type call (Excel header binding)
+      - random:     add this element to a "random pick" group (group_id required)
+      - dropdown:   click a <select> element, return its <option> list so the
+                    caller can bind an option (literal value/label) OR an
+                    Excel column. No step is recorded until /dropdown-bind
+                    is called (mirrors the form_fill → /type two-step flow).
+      - final:      mark current page as conversion target
     """
     sess.touch()
     async with sess.lock:
@@ -438,6 +442,55 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
         except Exception:
             pass
 
+        # For dropdown mode we also need to pull the option list out of
+        # the element (or its nearest <select> ancestor) BEFORE leaving
+        # the page lock so the DOM is in the state the user just saw.
+        dropdown_options: List[Dict[str, str]] = []
+        dropdown_selector: str = ""
+        if mode == "dropdown":
+            try:
+                opts = await sess.page.evaluate(
+                    """([x,y])=>{
+                        var el = document.elementFromPoint(x, y);
+                        if(!el) return null;
+                        // Walk up to find the nearest <select> — works
+                        // whether the user clicked the select directly or
+                        // a styled wrapper around it.
+                        var sel = el;
+                        while(sel && sel.tagName !== 'SELECT'){
+                            sel = sel.parentElement;
+                        }
+                        if(!sel || sel.tagName !== 'SELECT') return null;
+                        var options = [];
+                        for(var i=0; i<sel.options.length; i++){
+                            var o = sel.options[i];
+                            options.push({
+                                value: String(o.value == null ? '' : o.value),
+                                label: String(o.text || o.label || '').trim(),
+                                index: i,
+                                selected: !!o.selected,
+                            });
+                        }
+                        return {
+                            name: sel.getAttribute('name') || '',
+                            id: sel.id || '',
+                            options: options,
+                        };
+                    }""",
+                    [int(x), int(y)],
+                )
+                if opts and opts.get("options"):
+                    dropdown_options = opts["options"]
+                    # Build the same selector style as form_fill so the
+                    # downstream `select` action can find the element.
+                    dropdown_selector = _make_selector_for_input({
+                        "tag": "SELECT",
+                        "name": opts.get("name") or "",
+                        "id": opts.get("id") or "",
+                    })
+            except Exception:
+                pass
+
     # Build & append step (outside lock to keep it short)
     step: Optional[Dict[str, Any]] = None
     extra: Dict[str, Any] = {"element": info}
@@ -461,6 +514,18 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
         # Don't add a step — caller will batch via /group-random
         extra["pending_random_text"] = text
         extra["group_id"] = group_id
+    elif mode == "dropdown":
+        # We don't record the `select` step yet — the caller has to bind
+        # it (literal option or Excel header) via /dropdown-bind first.
+        # Surface the option list so the UI can render a picker.
+        step = None
+        extra["selector"] = dropdown_selector or _make_selector_for_input(info)
+        extra["options"] = dropdown_options
+        if not dropdown_options:
+            extra["warning"] = (
+                "No <select> element found at that point — pick the dropdown "
+                "control itself (the one that opens the option list)."
+            )
     elif mode == "final":
         # Captured separately by /mark-final endpoint
         step = None
@@ -475,6 +540,62 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
         sess.steps.append(_build_wait(2000))
 
     return {"recorded": step is not None, "step": step, "element": info, "mode": mode, **{k: v for k, v in extra.items() if k != "element"}}
+
+
+async def add_screenshot_marker(sess: RecorderSession, name: Optional[str] = None) -> Dict[str, Any]:
+    """Insert a 'screenshot' action step at the current position. During
+    the actual RUT job, the runner will take a real screenshot at this
+    point and push it to the Live Activity panel so the customer can
+    visually verify how far the visit progressed.
+
+    Does NOT take a screenshot now — the live preview the customer is
+    already polling from /screenshot covers the recording-time view.
+    """
+    sess.touch()
+    safe_name = (name or f"Step {len(sess.steps) + 1}")[:60].strip() or f"Step {len(sess.steps) + 1}"
+    step = {
+        "action": "screenshot",
+        "name": safe_name,
+        # optional=True so a transient screenshot failure during job
+        # execution (e.g. a closed page) doesn't fail the whole visit.
+        "optional": True,
+    }
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+async def bind_dropdown(
+    sess: RecorderSession,
+    selector: str,
+    value: Optional[str] = None,
+    header_name: Optional[str] = None,
+    match_by: str = "label",
+) -> Dict[str, Any]:
+    """Finalise a dropdown binding started by a `mode='dropdown'` click.
+
+    The caller passes EITHER:
+      - `value`        — a literal option (e.g. "Male") to always select, OR
+      - `header_name`  — an Excel column name; the row's value is used.
+
+    `match_by` is either 'label' (visible text — default, most forgiving)
+    or 'value' (the option's value attribute).
+    """
+    sess.touch()
+    if not selector:
+        return {"recorded": False, "error": "selector required"}
+    if not value and not header_name:
+        return {"recorded": False, "error": "either value or header_name required"}
+    chosen = f"{{{{{header_name}}}}}" if header_name else str(value)
+    step = {
+        "action": "select",
+        "selector": selector,
+        "value": chosen,
+        "match_by": match_by if match_by in ("label", "value") else "label",
+    }
+    sess.steps.append(step)
+    # Brief settle wait so subsequent steps see the post-change DOM.
+    sess.steps.append(_build_wait(500))
+    return {"recorded": True, "step": step}
 
 
 def _make_selector_for_input(info: Dict[str, Any]) -> str:
