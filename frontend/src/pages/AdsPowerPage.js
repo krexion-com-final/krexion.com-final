@@ -185,6 +185,34 @@ export default function AdsPowerPage() {
     }
   }
 
+  const [wipingAds, setWipingAds] = useState(false);
+  async function wipeOnAdsPower() {
+    const cid = selectedCfg || (configs[0] && configs[0].id) || null;
+    if (!cid) {
+      toast.error("Add an AdsPower API config first.");
+      return;
+    }
+    const pushed = profiles.filter((p) => p.pushed_to_adspower).length;
+    if (!window.confirm(
+      `This will delete ${pushed} profile(s) from AdsPower itself, then remove them from Krexion. ` +
+      `Make sure your PC is online and Krexion bridge is running. Continue?`
+    )) return;
+    setWipingAds(true);
+    try {
+      const r = await axios.post(
+        `${API}/adspower/profiles/wipe-on-adspower`,
+        { cid, also_clear_local: true },
+        { headers: authHeaders() }
+      );
+      toast.success(r.data.message || `Wiped ${r.data.wiped_on_adspower} profiles`);
+      loadProfiles();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Wipe failed");
+    } finally {
+      setWipingAds(false);
+    }
+  }
+
   async function exportXlsx() {
     setExporting(true);
     try {
@@ -302,13 +330,24 @@ export default function AdsPowerPage() {
                   Export {profiles.length} ({"  .xlsx"})
                 </button>
                 <button
+                  onClick={wipeOnAdsPower}
+                  disabled={wipingAds || profiles.filter((p) => p.pushed_to_adspower).length === 0}
+                  data-testid="wipe-on-adspower"
+                  className="inline-flex items-center gap-2 text-xs px-3 py-2 rounded-lg bg-amber-500/15 text-amber-200 border border-amber-500/40 hover:bg-amber-500/25 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                  title="Delete profiles from AdsPower app AND Krexion in one click. Bridge must be running on your PC."
+                >
+                  {wipingAds ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                  Wipe from AdsPower
+                </button>
+                <button
                   onClick={clearAll}
                   disabled={clearing}
                   data-testid="clear-all-profiles"
                   className="inline-flex items-center gap-2 text-xs px-3 py-2 rounded-lg bg-red-500/15 text-red-300 border border-red-500/30 hover:bg-red-500/25 transition disabled:opacity-50"
+                  title="Delete from Krexion only — leaves AdsPower profiles intact"
                 >
                   {clearing ? <Loader2 size={13} className="animate-spin" /> : <Eraser size={13} />}
-                  Clear all
+                  Clear Krexion only
                 </button>
               </>
             )}

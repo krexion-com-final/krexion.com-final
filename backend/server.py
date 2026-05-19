@@ -13311,6 +13311,17 @@ while ((Get-Date) -lt $endTime) {
           $result.status = "done"
           $result.result = $r
           $result.Remove("error") | Out-Null
+        } elseif ($feature -eq "adspower/delete") {
+          $ids = @($payload.user_ids)
+          if ($ids.Count -eq 0) { throw "no user_ids provided" }
+          $bodyJson = @{ user_ids = $ids } | ConvertTo-Json -Compress -Depth 5
+          $r = Invoke-AdsPower -Path "/api/v1/user/delete" -Method "POST" -ApiKey $apiKey -Body $bodyJson
+          if ($r.code -ne 0 -and $r.code -ne $null) {
+            throw "AdsPower rejected the delete: $($r.msg)"
+          }
+          $result.status = "done"
+          $result.result = $r
+          $result.Remove("error") | Out-Null
         } else {
           $result.error = "feature '$feature' needs the full Krexion install (Docker)."
         }
@@ -13455,6 +13466,16 @@ try:
     async def _ads_profiles_retry_push(body: dict = None, user: dict = Depends(get_current_user)):
         check_user_feature(user, "profile_builder")
         return await adspower_module.retry_push_to_adspower(user, body or {})
+
+    @_ads_router.post("/profiles/wipe-on-adspower")
+    async def _ads_profiles_wipe_on_adspower(body: dict = None, user: dict = Depends(get_current_user)):
+        check_user_feature(user, "profile_builder")
+        b = body or {}
+        return await adspower_module.wipe_on_adspower(
+            user,
+            cid=b.get("cid"),
+            also_clear_local=bool(b.get("also_clear_local", True)),
+        )
 
     app.include_router(_ads_router)
     logger.info("AdsPower module loaded — /api/adspower/*")

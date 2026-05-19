@@ -189,6 +189,8 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
         "adspower/create": ("POST", "__adspower_create__"),
         # AdsPower API connection test (UI on cloud, executes locally)
         "adspower/test": ("POST", "__adspower_test__"),
+        # AdsPower bulk profile delete (UI on cloud, executes locally)
+        "adspower/delete": ("POST", "__adspower_delete__"),
     }
     if feature not in feature_routes:
         return {"status": "failed", "error": f"unknown feature: {feature}"}
@@ -254,6 +256,21 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
         api_key = payload.get("api_key") or ""
         body = {k: v for k, v in payload.items() if k not in ("host", "api_key")}
         res = await _call_adspower("/api/v1/user/create", "POST", body, host, api_key)
+        if res["ok"]:
+            return {"status": "done", "result": res["data"]}
+        return {"status": "failed", "error": res["error"]}
+
+    # Special handler: AdsPower bulk delete
+    if route == "__adspower_delete__":
+        host = payload.get("host") or "http://local.adspower.net:50325"
+        api_key = payload.get("api_key") or ""
+        user_ids = payload.get("user_ids") or []
+        if not user_ids:
+            return {"status": "failed", "error": "no user_ids provided"}
+        res = await _call_adspower(
+            "/api/v1/user/delete", "POST",
+            {"user_ids": user_ids}, host, api_key,
+        )
         if res["ok"]:
             return {"status": "done", "result": res["data"]}
         return {"status": "failed", "error": res["error"]}

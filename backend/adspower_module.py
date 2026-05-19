@@ -464,6 +464,117 @@ async def clear_all_profiles(user_id: str) -> dict:
     }
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Wipe profiles from AdsPower itself (not just Krexion's DB).
+# Sends adspower/delete bridge_jobs in batches of 100 (AdsPower limit),
+# waits up to 60 s for them to complete, then removes the deleted
+# profiles from Krexion's DB.
+# ─────────────────────────────────────────────────────────────────────
+async def wipe_on_adspower(user: dict, cid: str | None = None,
+                           *, also_clear_local: bool = True,
+                           wait_timeout: int = 60) -> dict:
+    """Delete every profile we previously pushed to AdsPower from the
+    AdsPower app, then optionally remove them from Krexion's DB too.
+
+    `cid`           — which AdsPower config to use (defaults to the first
+                      one). Needed for host + api_key.
+    `also_clear_local` — when True (default), Krexion DB is cleared after
+                      AdsPower confirms the deletion.
+    """
+    if cid:
+        cfg = await _db.adspower_configs.find_one({"id": cid, "user_id": user["id"]}, {"_id": 0})
+    else:
+        cfg = await _db.adspower_configs.find_one({"user_id": user["id"]}, {"_id": 0})
+    if not cfg:
+        raise HTTPException(400, "No AdsPower config found — add an API key first.")
+
+    profiles = await _db.adspower_profiles.find(
+        {"user_id": user["id"], "adspower_profile_id": {"$exists": True, "$ne": None}},
+        {"_id": 0, "id": 1, "adspower_profile_id": 1},
+    ).to_list(5000)
+
+    if not profiles:
+        # Nothing was ever pushed — just clear the local rows if asked.
+        cleared = await clear_all_profiles(user["id"]) if also_clear_local else None
+        return {
+            "wiped_on_adspower": 0,
+            "wiped_locally": (cleared or {}).get("deleted_profiles", 0),
+            "message": "No AdsPower profiles to delete. Local rows cleared.",
+        }
+
+    # Group into batches of 100 (AdsPower API hard limit).
+    ids = [p["adspower_profile_id"] for p in profiles if p.get("adspower_profile_id")]
+    batches = [ids[i:i + 100] for i in range(0, len(ids), 100)]
+    job_ids: list[str] = []
+    for batch in batches:
+        bj_id = uuid.uuid4().hex
+        await _db.bridge_jobs.insert_one({
+            "id": bj_id, "user_id": user["id"], "email": user.get("email"),
+            "feature": "adspower/delete",
+            "payload": {
+                "host": cfg["host"], "api_key": cfg["api_key"],
+                "user_ids": batch,
+            },
+            "status": "pending", "result": None, "error": None,
+            "created_at": _now(), "started_at": None,
+            "completed_at": None, "claimed_by": None,
+        })
+        job_ids.append(bj_id)
+
+    # Wait for all the delete jobs to complete (or timeout). 60 s is
+    # generous — bridge polls every 5 s, AdsPower delete is fast.
+    deadline = asyncio.get_event_loop().time() + wait_timeout
+    completed: set = set()
+    failed_ids: list[str] = []
+    while asyncio.get_event_loop().time() < deadline and len(completed) < len(job_ids):
+        await asyncio.sleep(1.0)
+        cursor = _db.bridge_jobs.find(
+            {"id": {"$in": [j for j in job_ids if j not in completed]}},
+            {"_id": 0, "id": 1, "status": 1, "error": 1, "payload.user_ids": 1},
+        )
+        async for bj in cursor:
+            if bj.get("status") in ("done", "failed"):
+                completed.add(bj["id"])
+                if bj["status"] == "failed":
+                    failed_ids.append(bj["id"])
+
+    # Count successfully deleted profiles and gather the AdsPower user_ids
+    # that were actually wiped (so we can clear those local rows).
+    wiped_on_ads = 0
+    ok_ids: list[str] = []
+    for bj_id in completed - set(failed_ids):
+        bj = await _db.bridge_jobs.find_one(
+            {"id": bj_id}, {"_id": 0, "payload.user_ids": 1, "status": 1},
+        )
+        if bj and bj.get("status") == "done":
+            ids_in_batch = (bj.get("payload") or {}).get("user_ids") or []
+            wiped_on_ads += len(ids_in_batch)
+            ok_ids.extend(ids_in_batch)
+
+    # Remove successful deletions from Krexion DB
+    if also_clear_local and ok_ids:
+        await _db.adspower_profiles.delete_many({
+            "user_id": user["id"],
+            "adspower_profile_id": {"$in": ok_ids},
+        })
+        # And clear used-IP history so the next batch can re-use IPs if
+        # it wants to.
+        await _db.adspower_used_ips.delete_many({"user_id": user["id"]})
+
+    msg = f"Deleted {wiped_on_ads} profile(s) from AdsPower."
+    if failed_ids:
+        msg += f" {len(failed_ids)} batch(es) failed — check AdsPower / re-pair PC."
+    if len(completed) < len(job_ids):
+        msg += f" {len(job_ids) - len(completed)} batch(es) still pending (will finish in background)."
+    return {
+        "wiped_on_adspower": wiped_on_ads,
+        "wiped_locally": wiped_on_ads if also_clear_local else 0,
+        "batches": len(job_ids),
+        "batches_failed": len(failed_ids),
+        "message": msg,
+    }
+
+
 async def list_profiles_for(user_id: str, limit: int = 200) -> list:
     return await _db.adspower_profiles.find(
         {"user_id": user_id}, {"_id": 0}
