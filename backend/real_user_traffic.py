@@ -1934,13 +1934,42 @@ async def run_real_user_traffic_job(
                     # customer immediately understands it's a proxy-pool
                     # issue, not their setup.
                     friendly = err_text[:180]
-                    if any(tok in err_text for tok in _TUNNEL_ERR_TOKENS):
+                    is_tunnel_fail = any(tok in err_text for tok in _TUNNEL_ERR_TOKENS)
+                    # Specific detection: 502 Bad Gateway from the proxy
+                    # gateway means the provider is REFUSING the target
+                    # domain (common with residential proxy ToS filters).
+                    # Surface that distinctly so users don't keep blaming
+                    # their own setup.
+                    is_proxy_block_502 = (
+                        "502" in err_text
+                        or "bad gateway" in err_text.lower()
+                        or "ERR_HTTP_RESPONSE_CODE_FAILURE" in err_text
+                    )
+                    if is_proxy_block_502:
+                        friendly = (
+                            f"Proxy provider returned 502 Bad Gateway after {tunnel_attempt + 1} attempt(s) — "
+                            "your proxy provider is REFUSING this target domain. "
+                            "Ask your proxy support to whitelist the domain, or use a different proxy provider."
+                        )
+                    elif is_tunnel_fail:
                         friendly = (
                             f"Proxy tunnel failed after {tunnel_attempt + 1} attempts — "
                             "your proxy provider couldn't reach the target. Try a different "
                             "US state, smaller batch, or reload proxies."
                         )
                     entry["error"] = f"goto failed: {friendly}"
+                    # Tag tunnel/proxy-block failures so the dispatcher can
+                    # optionally exclude them from the max_attempts budget
+                    # (so transient proxy-provider hiccups don't
+                    # prematurely end the run before real visits happen).
+                    if is_tunnel_fail or is_proxy_block_502:
+                        entry["tunnel_failed"] = True
+                        try:
+                            RUT_JOBS[job_id]["tunnel_fail_count"] = int(
+                                RUT_JOBS[job_id].get("tunnel_fail_count", 0) or 0
+                            ) + 1
+                        except Exception:
+                            pass
                     push_live_step(job_id, i + 1, "browser", "failed", f"goto failed: {friendly[:100]}")
                     await context.close()
                     return await _record(job_id, entry, report, report_lock, db)
@@ -2571,6 +2600,34 @@ async def run_real_user_traffic_job(
             max_att = max(target_conv * 20, target_conv + 50)  # safety default
         RUT_JOBS[job_id]["max_attempts"] = max_att
         RUT_JOBS[job_id]["total"] = max_att  # UI progress bar denominator
+        # Ensure tunnel_fail_count is initialised so reads never KeyError.
+        RUT_JOBS[job_id].setdefault("tunnel_fail_count", 0)
+
+        # ── 2026-01: Tunnel-fail-aware budget ────────────────────────────
+        # Tunnel/proxy-block failures (ERR_TUNNEL_*, 502 Bad Gateway from
+        # proxy gateway, etc.) are typically caused by the proxy provider
+        # — not by the visit logic — and they don't represent a real
+        # visit attempt against the target site. Counting them in the
+        # max_attempts budget means a flaky proxy pool can prematurely
+        # end the run with 0 real visits.
+        #
+        # New default behaviour: tunnel failures are FREE — they don't
+        # decrement the budget, so the dispatcher keeps trying until
+        # either a real visit hits the budget cap, the proxy pool truly
+        # exhausts ("No more proxies available"), the conversion target
+        # is hit, or the absolute safety cap (HARD_CAP) below is reached.
+        #
+        # Set RUT_TUNNEL_FAIL_COUNTS_IN_BUDGET=true to revert to the
+        # legacy "every attempt counts" behaviour.
+        _tunnel_counts_in_budget = os.environ.get(
+            "RUT_TUNNEL_FAIL_COUNTS_IN_BUDGET", "false"
+        ).lower() == "true"
+        # Absolute safety cap to prevent runaway jobs if every single
+        # spawn hits a tunnel failure (e.g. proxy provider hard-blocks
+        # the entire domain). Configurable via RUT_HARD_CAP_MULTIPLIER
+        # (default 10× max_att, floor 1000).
+        _hard_cap_mult = max(int(os.environ.get("RUT_HARD_CAP_MULTIPLIER", "10")), 1)
+        HARD_CAP = max(max_att * _hard_cap_mult, 1000)
 
         attempt_counter = 0
         in_flight: set = set()
@@ -2595,17 +2652,35 @@ async def run_real_user_traffic_job(
                             f"🎯 Target {target_conv} conversions reached — no new visits will start. Draining {len(in_flight)} in-flight visit(s) so their leads aren't wasted…",
                         )
                     break
-                if attempt_counter >= max_att:
+                # Compute effective attempts — tunnel failures are excluded
+                # from the budget by default (see _tunnel_counts_in_budget).
+                _tunnel_fails_so_far = int(RUT_JOBS[job_id].get("tunnel_fail_count", 0) or 0)
+                _effective_attempts = (
+                    attempt_counter
+                    if _tunnel_counts_in_budget
+                    else max(attempt_counter - _tunnel_fails_so_far, 0)
+                )
+                if _effective_attempts >= max_att:
                     push_live_step(
                         job_id, 0, "done", "info",
                         f"Max {max_att} attempts exhausted — stopping (conversions: {cur_conv}/{target_conv})",
+                    )
+                    break
+                # Absolute runaway-protection cap.
+                if attempt_counter >= HARD_CAP:
+                    push_live_step(
+                        job_id, 0, "done", "info",
+                        f"Hard cap {HARD_CAP} attempts reached — stopping "
+                        f"(conversions: {cur_conv}/{target_conv}, tunnel_fails: {_tunnel_fails_so_far}). "
+                        "Most attempts failed at the proxy tunnel — check your proxy provider.",
                     )
                     break
 
                 # Fill the pool up to `concurrency` in-flight visits
                 while (
                     len(in_flight) < conc
-                    and attempt_counter < max_att
+                    and _effective_attempts < max_att
+                    and attempt_counter < HARD_CAP
                     and not cancel_event.is_set()
                     and not target_drain_event.is_set()
                 ):
@@ -2613,6 +2688,15 @@ async def run_real_user_traffic_job(
                     in_flight.add(t)
                     t.add_done_callback(in_flight.discard)
                     attempt_counter += 1
+                    # Re-compute effective attempts inside the spawn loop
+                    # too — otherwise we'd over-spawn when a burst of
+                    # tunnel-fail entries lands between iterations.
+                    _tunnel_fails_so_far = int(RUT_JOBS[job_id].get("tunnel_fail_count", 0) or 0)
+                    _effective_attempts = (
+                        attempt_counter
+                        if _tunnel_counts_in_budget
+                        else max(attempt_counter - _tunnel_fails_so_far, 0)
+                    )
 
                 if not in_flight:
                     await asyncio.sleep(0.2)
