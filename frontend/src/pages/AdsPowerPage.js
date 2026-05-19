@@ -67,7 +67,7 @@ export default function AdsPowerPage() {
   const [platform, setPlatform] = useState("any");
   const [wipeExisting, setWipeExisting] = useState(true);
   const [pushToAdspower, setPushToAdspower] = useState(false);
-  const [verifyUniqueIps, setVerifyUniqueIps] = useState(false);
+  const [verifyUniqueIps, setVerifyUniqueIps] = useState(true);
   const [testingCfg, setTestingCfg] = useState(null);
   const [cfgTestResult, setCfgTestResult] = useState({}); // {cid: {ok,message}}
 
@@ -592,7 +592,7 @@ export default function AdsPowerPage() {
               <Eraser size={12} className="text-red-300" />
               Delete existing profiles before building
             </label>
-            <label className="text-xs inline-flex items-center gap-2 px-3 py-2 rounded-lg border bg-white/[0.02] border-white/10 text-[#A1A1AA] hover:border-white/20 cursor-pointer">
+            <label className="text-xs inline-flex items-center gap-2 px-3 py-2 rounded-lg border bg-amber-500/5 border-amber-500/30 text-amber-100 hover:border-amber-500/50 cursor-pointer">
               <input
                 type="checkbox"
                 checked={verifyUniqueIps}
@@ -601,7 +601,7 @@ export default function AdsPowerPage() {
                 className="accent-amber-500"
               />
               <ShieldCheck size={12} className="text-amber-300" />
-              Verify each proxy gives a unique IP (slower — checks ipify before saving)
+              <span><b>Recommended:</b> Verify each proxy gives a unique IP (anti-detect — skip only if you don't care about IP uniqueness)</span>
             </label>
             <label className="text-xs inline-flex items-center gap-2 px-3 py-2 rounded-lg border bg-white/[0.02] border-white/10 text-[#A1A1AA] hover:border-white/20 cursor-pointer">
               <input

@@ -23,6 +23,7 @@ between them, delete unwanted ones.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import logging
 import random
@@ -635,7 +636,10 @@ async def start_generate(user: dict, body: dict) -> dict:
     name_prefix = (body.get("name_prefix") or "krexion").strip()[:32] or "krexion"
     wipe_existing = bool(body.get("wipe_existing") or False)
     push_to_adspower = bool(body.get("push_to_adspower") or False)
-    verify_unique_ips = bool(body.get("verify_unique_ips") or False)
+    # Default to True for proper anti-detect: every profile gets a
+    # verified-unique exit IP. Customers can still pass False explicitly
+    # if they want raw sticky-session behaviour.
+    verify_unique_ips = bool(body.get("verify_unique_ips", True))
     ua_cfg = body.get("ua_config") or {}
     # legacy fallback if user only sent ua_templates
     if not ua_cfg and body.get("ua_templates"):
@@ -898,6 +902,25 @@ def _normalize_resolution(res: str) -> str:
     return str(res).replace("x", "_")
 
 
+# Random pools used to make every profile look like a different physical
+# device. AdsPower will pick from these the moment we hand them off so
+# the customer never has to think about anti-detect themselves.
+_RANDOM_KERNEL_VERSIONS = ["122", "123", "124", "125", "126"]
+_RANDOM_HW_CONCURRENCY = ["4", "8", "12", "16"]
+_RANDOM_DEVICE_MEMORY = ["4", "6", "8"]
+
+
+def _stable_random_choice(seed: str, options: list[str]) -> str:
+    """Deterministically pick one option from `options` based on `seed`.
+    Same seed → same choice (so the profile fingerprint stays stable
+    across retries) but two different profiles → almost always different
+    choices."""
+    if not options:
+        return ""
+    idx = int(hashlib.md5(seed.encode("utf-8")).hexdigest(), 16) % len(options)
+    return options[idx]
+
+
 def _build_adspower_create_body(cfg: dict, profile: dict, app: str | None = None) -> dict:
     """Build the body sent to AdsPower's POST /api/v1/user/create.
 
@@ -906,6 +929,12 @@ def _build_adspower_create_body(cfg: dict, profile: dict, app: str | None = None
       • name      (required)
       • user_proxy_config (NOT 'proxy')
       • fingerprint_config.ua (NOT a top-level 'user_agent')
+
+    Anti-detect: every fingerprint field that AdsPower lets us randomise
+    is randomised per-profile (canvas, webgl, audio, font, mac address,
+    hardware_concurrency, device_memory, browser kernel version) so that
+    20 profiles look like 20 physically different devices to every
+    fingerprinting library.
     """
     proxy = profile.get("proxy") or {}
     user_proxy_config = {
@@ -915,13 +944,54 @@ def _build_adspower_create_body(cfg: dict, profile: dict, app: str | None = None
         "proxy_port": str(proxy.get("port", "")),
         "proxy_user": str(proxy.get("username", "")),
         "proxy_password": str(proxy.get("password", "")),
+        "global_config": "1",
     } if proxy else {"proxy_soft": "no_proxy"}
 
+    # Per-profile deterministic randomness seeded on the profile name so
+    # the fingerprint is reproducible if we ever need to recreate the
+    # same profile — but still unique vs every other profile we make.
+    seed = (profile.get("name") or "") + (proxy.get("session_id") or "")
+    kernel_version = _stable_random_choice(seed + "k", _RANDOM_KERNEL_VERSIONS)
+    hw_concurrency = _stable_random_choice(seed + "hw", _RANDOM_HW_CONCURRENCY)
+    dev_memory = _stable_random_choice(seed + "mem", _RANDOM_DEVICE_MEMORY)
+    # Random MAC address (locally-administered, unicast). Format AdsPower
+    # expects: colon-separated lowercase hex, e.g. "02:1a:2b:3c:4d:5e".
+    mac_seed = hashlib.md5((seed + "mac").encode()).hexdigest()
+    mac = "02:" + ":".join(mac_seed[i:i+2] for i in (0, 2, 4, 6, 8))
+
     fingerprint_config = {
+        # Time & locale
         "automatic_timezone": "1",
         "language": (profile.get("language") or "en-US").split(","),
+        # Display
         "screen_resolution": _normalize_resolution(profile.get("resolution") or ""),
+        # User agent
         "ua": profile.get("user_agent") or "",
+        # Browser kernel — random Chrome version per profile
+        "browser_kernel_config": {"version": kernel_version, "type": "chrome"},
+        # Anti-fingerprint: enable noise on every signal a tracker might
+        # use to identify the device. "1" = randomised noise on per
+        # AdsPower's convention.
+        "canvas": "1",
+        "webgl": "1",
+        "webgl_image": "1",
+        "audio": "1",
+        # Hide local IP via WebRTC — without this the real IP leaks even
+        # behind a proxy, which is what gets accounts banned fastest.
+        "webrtc": "disabled",
+        # Random hardware footprint per profile
+        "hardware_concurrency": hw_concurrency,
+        "device_memory": dev_memory,
+        # Random MAC for OS-fingerprint resilience
+        "mac_address_config": {"model": "1", "address": mac},
+        # Fonts: let AdsPower auto-pick a real font list (most realistic)
+        "fonts": ["all"],
+        # Misc anti-detect
+        "do_not_track": "default",
+        "flash": "block",
+        # Geolocation: ask each time so profile doesn't leak our PC's GPS
+        "location": "ask",
+        "location_switch": "1",
     }
     domain = _APP_TO_DOMAIN.get((app or profile.get("ua_app") or "").lower(), "google.com")
     return {
