@@ -917,6 +917,174 @@ async def _detect_validation_errors(page: Page) -> Tuple[bool, str]:
     return False, ""
 
 
+# ── 2026-01: Server-side tracker bypass ────────────────────────────
+# When the residential-proxy provider refuses to connect to OUR OWN
+# backend domain (e.g. ProxyJet returning 502 Bad Gateway on
+# `api.krexion.com` because of an internal block-list), there's no
+# need to go through the proxy at all for that one HTTP hop — the
+# backend can hit its own tracker endpoint via 127.0.0.1 and have it
+# record the click as if it came from the proxy's exit IP by
+# injecting the IP into the `X-Forwarded-For` header. After that the
+# browser-via-proxy can navigate directly to the offer URL (which
+# the proxy IS allowed to reach), and the rest of the visit
+# (form-fill, conversion, screenshots) proceeds normally.
+#
+# Behaviour is OPT-IN by hostname: only triggers if the target URL's
+# host is listed in the env var RUT_LOCALHOST_BYPASS_HOSTS (default
+# "krexion.com,api.krexion.com,localhost,127.0.0.1") AND the proxy's
+# tunnel failed with a 502 / tunnel error after all MAX_TUNNEL_RETRIES.
+# Set RUT_LOCALHOST_BYPASS_HOSTS="" to fully disable the bypass.
+
+def _bypass_hosts() -> set:
+    raw = os.environ.get(
+        "RUT_LOCALHOST_BYPASS_HOSTS",
+        "krexion.com,api.krexion.com,localhost,127.0.0.1",
+    )
+    return {h.strip().lower() for h in raw.split(",") if h.strip()}
+
+
+def _url_host_matches_bypass(url: str) -> bool:
+    """True if the URL's hostname (or any parent domain) is in the
+    bypass list — i.e. we know proxies can't reach it but localhost
+    can."""
+    if not url:
+        return False
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    if not host:
+        return False
+    bypass = _bypass_hosts()
+    if not bypass:
+        return False
+    if host in bypass:
+        return True
+    # Also match parent domains (api.krexion.com matches krexion.com)
+    for b in bypass:
+        if host.endswith("." + b):
+            return True
+    return False
+
+
+async def _get_exit_ip_via_proxy(
+    proxy: Dict[str, Any], timeout: float = 10.0
+) -> Optional[str]:
+    """Fetch the residential proxy's exit IP by querying a neutral
+    IP-echo endpoint THROUGH the proxy. Used only when the regular
+    page-based detection can't run because the browser failed to
+    reach the target. Returns None on any failure (caller must
+    treat that as 'bypass not possible'). Never raises."""
+    server = (proxy.get("server") or "").strip()
+    username = (proxy.get("username") or "").strip()
+    password = (proxy.get("password") or "").strip()
+    if not server:
+        return None
+    # Build proxy URL for httpx
+    if "://" in server:
+        proto, hostport = server.split("://", 1)
+    else:
+        proto, hostport = "http", server
+    if username:
+        from urllib.parse import quote
+        proxy_url = (
+            f"{proto}://{quote(username, safe='')}:"
+            f"{quote(password, safe='')}@{hostport}"
+        )
+    else:
+        proxy_url = f"{proto}://{hostport}"
+    # Try a couple of neutral IP-echo endpoints. These are known to
+    # work through proxy-jet & most residential providers because
+    # they are NOT on any tracker blocklist.
+    candidates = (
+        "https://api.ipify.org?format=json",
+        "https://ipinfo.io/ip",
+        "https://ifconfig.me/ip",
+    )
+    for url in candidates:
+        try:
+            async with httpx.AsyncClient(
+                proxy=proxy_url, timeout=timeout, follow_redirects=True
+            ) as c:
+                r = await c.get(url)
+                if r.status_code != 200:
+                    continue
+                txt = (r.text or "").strip()
+                if not txt:
+                    continue
+                if txt.startswith("{"):
+                    try:
+                        import json as _json
+                        data = _json.loads(txt)
+                        ip = data.get("ip") or data.get("origin")
+                        if ip:
+                            return ip.split(",")[0].strip()
+                    except Exception:
+                        continue
+                # Plain text IP response
+                first = txt.splitlines()[0].strip()
+                # Sanity: looks like an IPv4
+                if first.count(".") == 3 and all(p.isdigit() for p in first.split(".")):
+                    return first
+        except Exception:
+            continue
+    return None
+
+
+async def _resolve_tracker_via_localhost(
+    target_url: str,
+    exit_ip: str,
+    user_agent: str,
+    timeout: float = 15.0,
+) -> Optional[str]:
+    """Hit the tracker endpoint via 127.0.0.1 (no proxy) with the
+    proxy's exit IP injected as X-Forwarded-For. The tracker will
+    record the click against that IP and respond with a 3xx whose
+    Location header is the offer URL. We return that Location so the
+    browser can navigate to it through the proxy. Returns None on
+    any failure (caller falls back to the original tunnel-failed
+    behaviour). Never raises."""
+    if not (target_url and exit_ip):
+        return None
+    try:
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(target_url)
+        # Re-target the same path/query to localhost backend.
+        local_port = os.environ.get("LOCAL_BACKEND_PORT") or os.environ.get("PORT") or "8001"
+        local_url = urlunparse((
+            "http",
+            f"127.0.0.1:{local_port}",
+            parsed.path or "/",
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        ))
+        headers = {
+            "X-Forwarded-For": exit_ip,
+            "CF-Connecting-IP": exit_ip,
+            "User-Agent": user_agent or "Mozilla/5.0",
+            # Pretend the request came in over HTTPS so any tracker logic
+            # that inspects the scheme still behaves correctly.
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": parsed.hostname or "",
+        }
+        async with httpx.AsyncClient(
+            follow_redirects=False, timeout=timeout, trust_env=False
+        ) as c:
+            r = await c.get(local_url, headers=headers)
+        # We accept 3xx (normal redirect) AND 200 (some trackers return
+        # an HTML meta-refresh). For 200 we can't extract a destination,
+        # so only 3xx is useful here.
+        if r.status_code in (301, 302, 303, 307, 308):
+            loc = r.headers.get("Location") or r.headers.get("location")
+            if loc:
+                return loc.strip()
+    except Exception:
+        return None
+    return None
+
+
 # ─── Job runner ──────────────────────────────────────────────────
 async def run_real_user_traffic_job(
     job_id: str,
@@ -1889,7 +2057,77 @@ async def run_real_user_traffic_job(
 
                 try:
                     if goto_exc is not None:
-                        raise goto_exc
+                        # ── 2026-01: Localhost-bypass fallback ─────────────
+                        # If we just exhausted MAX_TUNNEL_RETRIES on a URL
+                        # whose host is in RUT_LOCALHOST_BYPASS_HOSTS
+                        # (e.g. our own krexion.com tracker), give it one
+                        # last chance: pre-resolve the tracker server-side
+                        # over 127.0.0.1 with the proxy's exit IP forged
+                        # as X-Forwarded-For, then point the browser at
+                        # the resulting offer URL through the proxy.
+                        # The click is still recorded as the residential
+                        # exit IP, the browser still navigates through
+                        # the proxy for the offer page (which the proxy
+                        # IS allowed to reach), and the rest of the visit
+                        # — form-fill, conversion, screenshots — runs
+                        # unmodified.
+                        _err_text_bp = str(goto_exc)
+                        _is_tunnel_bp = any(t in _err_text_bp for t in _TUNNEL_ERR_TOKENS)
+                        _is_502_bp = (
+                            "502" in _err_text_bp
+                            or "bad gateway" in _err_text_bp.lower()
+                            or "ERR_HTTP_RESPONSE_CODE_FAILURE" in _err_text_bp
+                        )
+                        if (
+                            (_is_tunnel_bp or _is_502_bp)
+                            and _url_host_matches_bypass(target_url)
+                        ):
+                            push_live_step(
+                                job_id, i + 1, "bypass", "info",
+                                "Proxy refused own-domain tracker — trying localhost bypass…",
+                            )
+                            _exit_ip_for_bypass = await _get_exit_ip_via_proxy(proxy)
+                            if _exit_ip_for_bypass:
+                                _bypass_offer_url = await _resolve_tracker_via_localhost(
+                                    target_url, _exit_ip_for_bypass, ua
+                                )
+                                if _bypass_offer_url:
+                                    push_live_step(
+                                        job_id, i + 1, "bypass", "ok",
+                                        f"Click registered via localhost ({_exit_ip_for_bypass}). "
+                                        f"Browser → {_bypass_offer_url[:100]}",
+                                    )
+                                    try:
+                                        # Update target_url so subsequent
+                                        # logic (form fill detection,
+                                        # landing-url capture, etc.) sees
+                                        # the resolved offer URL.
+                                        target_url = _bypass_offer_url
+                                        entry["bypass_used"] = True
+                                        entry["bypass_exit_ip"] = _exit_ip_for_bypass
+                                        resp = await page.goto(
+                                            _bypass_offer_url,
+                                            timeout=90000,
+                                            wait_until="domcontentloaded",
+                                        )
+                                        goto_exc = None  # clear → success path
+                                    except Exception as _bp_e:
+                                        # Bypass-page itself failed too;
+                                        # fall through to the original
+                                        # failure-recording code.
+                                        goto_exc = _bp_e
+                                else:
+                                    push_live_step(
+                                        job_id, i + 1, "bypass", "failed",
+                                        "Localhost tracker returned no redirect — falling back.",
+                                    )
+                            else:
+                                push_live_step(
+                                    job_id, i + 1, "bypass", "failed",
+                                    "Could not detect proxy exit IP — bypass skipped.",
+                                )
+                        if goto_exc is not None:
+                            raise goto_exc
                     entry["http_status"] = str(resp.status) if resp else ""
                     # Detect chrome-error pages — happens when the residential
                     # proxy's egress tunnel breaks mid-navigation or DNS
