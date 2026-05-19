@@ -671,25 +671,25 @@ async def _run_job_fast(job_id, user, cfg, base_user, base_pass, state, count, u
 
             if push_to_adspower:
                 bj_id = uuid.uuid4().hex
-                payload = {
-                    "host": cfg["host"],
-                    "api_key": cfg["api_key"],
-                    "name": pname,
-                    "user_agent": ua_info.get("user_agent"),
-                    "proxy": {
-                        "proxy_soft": "other",
-                        "proxy_type": "http",
-                        "proxy_host": proxy["host"],
-                        "proxy_port": proxy["port"],
-                        "proxy_user": proxy["username"],
-                        "proxy_password": proxy["password"],
+                # Build proper AdsPower v1 body via shared helper so the
+                # generate-flow and retry-flow always produce identical
+                # (and correct) shapes.
+                payload = _build_bridge_payload(
+                    cfg,
+                    {
+                        "name": pname,
+                        "user_agent": ua_info.get("user_agent"),
+                        "language": ",".join(language) if isinstance(language, list) else language,
+                        "resolution": resolution,
+                        "proxy": {
+                            "host": proxy["host"],
+                            "port": proxy["port"],
+                            "username": proxy["username"],
+                            "password": proxy["password"],
+                        },
+                        "ua_app": ua_cfg.get("app") if isinstance(ua_cfg, dict) else None,
                     },
-                    "fingerprint_config": {
-                        "automatic_timezone": "1",
-                        "language": language,
-                        "screen_resolution": resolution,
-                    },
-                }
+                )
                 await _db.bridge_jobs.insert_one({
                     "id": bj_id, "user_id": user["id"], "email": user.get("email"),
                     "feature": "adspower/create", "payload": payload,
@@ -769,6 +769,78 @@ async def get_job(user_id: str, job_id: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────
+# AdsPower request body builder
+# ─────────────────────────────────────────────────────────────────────
+# Maps the user's "target app" choice to a sensible default domain so
+# AdsPower opens the right site when the profile is launched.
+_APP_TO_DOMAIN = {
+    "instagram": "instagram.com",
+    "facebook": "facebook.com",
+    "tiktok": "tiktok.com",
+    "youtube": "youtube.com",
+    "whatsapp": "web.whatsapp.com",
+    "gsearch": "google.com",
+    "gchrome": "google.com",
+    "pinterest": "pinterest.com",
+    "snapchat": "snapchat.com",
+    "chrome": "google.com",
+}
+
+
+def _normalize_resolution(res: str) -> str:
+    """AdsPower expects screen_resolution as 'WIDTH_HEIGHT' (underscore).
+    We may receive it as '1080x1920' or '1080_1920' — normalise it."""
+    if not res:
+        return "1080_1920"
+    return str(res).replace("x", "_")
+
+
+def _build_adspower_create_body(cfg: dict, profile: dict, app: str | None = None) -> dict:
+    """Build the body sent to AdsPower's POST /api/v1/user/create.
+
+    Must match AdsPower v1 API spec exactly:
+      • group_id  (required)
+      • name      (required)
+      • user_proxy_config (NOT 'proxy')
+      • fingerprint_config.ua (NOT a top-level 'user_agent')
+    """
+    proxy = profile.get("proxy") or {}
+    user_proxy_config = {
+        "proxy_soft": "other",
+        "proxy_type": "http",
+        "proxy_host": str(proxy.get("host", "")),
+        "proxy_port": str(proxy.get("port", "")),
+        "proxy_user": str(proxy.get("username", "")),
+        "proxy_password": str(proxy.get("password", "")),
+    } if proxy else {"proxy_soft": "no_proxy"}
+
+    fingerprint_config = {
+        "automatic_timezone": "1",
+        "language": (profile.get("language") or "en-US").split(","),
+        "screen_resolution": _normalize_resolution(profile.get("resolution") or ""),
+        "ua": profile.get("user_agent") or "",
+    }
+    domain = _APP_TO_DOMAIN.get((app or profile.get("ua_app") or "").lower(), "google.com")
+    return {
+        "name": profile.get("name") or "krexion-profile",
+        "group_id": "0",          # 0 = default "Ungrouped" — always exists
+        "domain_name": domain,
+        "user_proxy_config": user_proxy_config,
+        "fingerprint_config": fingerprint_config,
+    }
+
+
+def _build_bridge_payload(cfg: dict, profile: dict, app: str | None = None) -> dict:
+    """Wrap an AdsPower create body with the host/api_key the bridge
+    worker needs to actually reach AdsPower on the customer's PC."""
+    return {
+        "host": cfg["host"],
+        "api_key": cfg["api_key"],
+        **_build_adspower_create_body(cfg, profile, app),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Retry pushing stuck/failed profiles to AdsPower
 # ─────────────────────────────────────────────────────────────────────
 async def retry_push_to_adspower(user: dict, body: dict) -> dict:
@@ -820,28 +892,9 @@ async def retry_push_to_adspower(user: dict, body: dict) -> dict:
             continue
 
         bj_id = uuid.uuid4().hex
-        ua_info = {
-            "user_agent": prof.get("user_agent"),
-        }
-        payload = {
-            "host": cfg["host"],
-            "api_key": cfg["api_key"],
-            "name": prof.get("name"),
-            "user_agent": ua_info["user_agent"],
-            "proxy": prof.get("proxy") and {
-                "proxy_soft": "other",
-                "proxy_type": "http",
-                "proxy_host": prof["proxy"].get("host"),
-                "proxy_port": prof["proxy"].get("port"),
-                "proxy_user": prof["proxy"].get("username"),
-                "proxy_password": prof["proxy"].get("password"),
-            },
-            "fingerprint_config": {
-                "automatic_timezone": "1",
-                "language": (prof.get("language") or "en-US").split(","),
-                "screen_resolution": (prof.get("resolution") or "1080x1920").replace("x", "_"),
-            },
-        }
+        # Build the *correct* AdsPower v1 body (group_id, user_proxy_config,
+        # fingerprint_config.ua — not the legacy bug-shaped one).
+        payload = _build_bridge_payload(cfg, prof)
         await _db.bridge_jobs.insert_one({
             "id": bj_id, "user_id": user["id"], "email": user.get("email"),
             "feature": "adspower/create", "payload": payload,
