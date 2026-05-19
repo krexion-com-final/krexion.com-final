@@ -1145,7 +1145,22 @@ async def _resolve_tracker_via_localhost(
             if r.status_code in (301, 302, 303, 307, 308):
                 loc = r.headers.get("Location") or r.headers.get("location")
                 if loc:
-                    return loc.strip()
+                    loc_stripped = loc.strip()
+                    # SAFETY: never propagate a customer-visible
+                    # 127.0.0.1 / localhost URL back to the browser
+                    # — the browser address bar must show only the
+                    # real offer URL for a professional appearance.
+                    # Reject any Location that resolves to a private
+                    # / loopback host; the next candidate (or the
+                    # original failure path) will be tried instead.
+                    _loc_low = loc_stripped.lower()
+                    if (
+                        "127.0.0.1" in _loc_low
+                        or "://localhost" in _loc_low
+                        or _loc_low.startswith("localhost")
+                    ):
+                        continue
+                    return loc_stripped
         except Exception:
             # Move on to the next candidate.
             continue
@@ -2186,7 +2201,7 @@ async def run_real_user_traffic_job(
                                 else:
                                     push_live_step(
                                         job_id, i + 1, "bypass", "failed",
-                                        "Direct & localhost tracker calls both returned no redirect — falling back.",
+                                        "Direct bypass returned no redirect — falling back.",
                                     )
                             else:
                                 push_live_step(
