@@ -1038,20 +1038,73 @@ async def _resolve_tracker_via_localhost(
     user_agent: str,
     timeout: float = 15.0,
 ) -> Optional[str]:
-    """Hit the tracker endpoint via 127.0.0.1 (no proxy) with the
-    proxy's exit IP injected as X-Forwarded-For. The tracker will
-    record the click against that IP and respond with a 3xx whose
-    Location header is the offer URL. We return that Location so the
-    browser can navigate to it through the proxy. Returns None on
-    any failure (caller falls back to the original tunnel-failed
-    behaviour). Never raises."""
+    """Resolve the tracker server-side WITHOUT going through the
+    residential proxy, while still recording the click as the
+    proxy's exit IP via the X-Forwarded-For header.
+
+    Architecture-aware: this fits two deployment styles —
+      1. **Distributed**: the RUT browser runs on a customer PC but
+         the tracker (`api.krexion.com/api/t/...`) lives on a remote
+         VPS. The PC's backend (where RUT is running) can reach the
+         VPS over its regular internet connection — no proxy needed.
+      2. **All-local**: the RUT browser AND the tracker run on the
+         same machine (e.g. a self-contained krexion install) and
+         127.0.0.1 reaches the tracker too.
+
+    Strategy: try the ORIGINAL target URL first (direct internet
+    call from the RUT host, no proxy, with X-Forwarded-For injected).
+    If that fails for any reason (DNS, host firewall, 404 because the
+    link only exists on the local backend, etc.) we fall back to
+    127.0.0.1:${LOCAL_BACKEND_PORT|PORT|8001}. Whichever returns a
+    3xx redirect wins.
+
+    Returns the Location URL from the 3xx response, or None on
+    failure. Never raises.
+    """
     if not (target_url and exit_ip):
         return None
+
+    headers = {
+        # Standard reverse-proxy headers — most FastAPI / Caddy /
+        # Nginx setups read one of these to determine the real
+        # client IP. We set all the common ones so whichever the
+        # backend trusts will pick up the residential exit IP.
+        "X-Forwarded-For": exit_ip,
+        "X-Real-IP": exit_ip,
+        "True-Client-IP": exit_ip,
+        "X-Client-IP": exit_ip,
+        # NOTE: We intentionally do NOT set CF-Connecting-IP here.
+        # If the request actually transits Cloudflare, CF replaces
+        # that header with the request's real source IP (so our
+        # value would be ignored anyway). For non-CF setups, the
+        # other four headers above cover the common cases.
+        "User-Agent": user_agent or "Mozilla/5.0",
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,*/*;q=0.8"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    candidates: List[str] = []
     try:
         from urllib.parse import urlparse, urlunparse
         parsed = urlparse(target_url)
-        # Re-target the same path/query to localhost backend.
-        local_port = os.environ.get("LOCAL_BACKEND_PORT") or os.environ.get("PORT") or "8001"
+
+        # Candidate #1 — call the ORIGINAL target URL directly (no
+        # proxy). This is the right path for the typical owner setup
+        # where the tracker is on a remote VPS but RUT runs on a PC.
+        if parsed.scheme and parsed.netloc:
+            candidates.append(target_url)
+
+        # Candidate #2 — fall back to 127.0.0.1 on the configured
+        # backend port. Right path for self-contained installs where
+        # the tracker lives in the same box.
+        local_port = (
+            os.environ.get("LOCAL_BACKEND_PORT")
+            or os.environ.get("PORT")
+            or "8001"
+        )
         local_url = urlunparse((
             "http",
             f"127.0.0.1:{local_port}",
@@ -1060,28 +1113,42 @@ async def _resolve_tracker_via_localhost(
             parsed.query,
             parsed.fragment,
         ))
-        headers = {
-            "X-Forwarded-For": exit_ip,
-            "CF-Connecting-IP": exit_ip,
-            "User-Agent": user_agent or "Mozilla/5.0",
-            # Pretend the request came in over HTTPS so any tracker logic
-            # that inspects the scheme still behaves correctly.
-            "X-Forwarded-Proto": "https",
-            "X-Forwarded-Host": parsed.hostname or "",
-        }
-        async with httpx.AsyncClient(
-            follow_redirects=False, timeout=timeout, trust_env=False
-        ) as c:
-            r = await c.get(local_url, headers=headers)
-        # We accept 3xx (normal redirect) AND 200 (some trackers return
-        # an HTML meta-refresh). For 200 we can't extract a destination,
-        # so only 3xx is useful here.
-        if r.status_code in (301, 302, 303, 307, 308):
-            loc = r.headers.get("Location") or r.headers.get("location")
-            if loc:
-                return loc.strip()
+        candidates.append(local_url)
     except Exception:
         return None
+
+    # Try each candidate; the first one to return a 3xx wins.
+    for url in candidates:
+        try:
+            # The Host header for the 127.0.0.1 call should still be
+            # the public hostname so the tracker's link lookup picks
+            # up the right tenant (matters for multi-tenant setups).
+            req_headers = dict(headers)
+            if url.startswith("http://127.0.0.1"):
+                try:
+                    public_host = urlparse(target_url).hostname or ""
+                    if public_host:
+                        req_headers["Host"] = public_host
+                        req_headers["X-Forwarded-Host"] = public_host
+                        req_headers["X-Forwarded-Proto"] = "https"
+                except Exception:
+                    pass
+
+            async with httpx.AsyncClient(
+                follow_redirects=False,
+                timeout=timeout,
+                trust_env=False,
+                # Verify SSL for public URLs; for 127.0.0.1 we use
+                # http:// so verify doesn't matter.
+            ) as c:
+                r = await c.get(url, headers=req_headers)
+            if r.status_code in (301, 302, 303, 307, 308):
+                loc = r.headers.get("Location") or r.headers.get("location")
+                if loc:
+                    return loc.strip()
+        except Exception:
+            # Move on to the next candidate.
+            continue
     return None
 
 
@@ -2084,7 +2151,7 @@ async def run_real_user_traffic_job(
                         ):
                             push_live_step(
                                 job_id, i + 1, "bypass", "info",
-                                "Proxy refused own-domain tracker — trying localhost bypass…",
+                                "Proxy refused tracker domain — trying direct bypass (no proxy)…",
                             )
                             _exit_ip_for_bypass = await _get_exit_ip_via_proxy(proxy)
                             if _exit_ip_for_bypass:
@@ -2094,7 +2161,7 @@ async def run_real_user_traffic_job(
                                 if _bypass_offer_url:
                                     push_live_step(
                                         job_id, i + 1, "bypass", "ok",
-                                        f"Click registered via localhost ({_exit_ip_for_bypass}). "
+                                        f"Click registered via direct bypass as {_exit_ip_for_bypass}. "
                                         f"Browser → {_bypass_offer_url[:100]}",
                                     )
                                     try:
@@ -2119,7 +2186,7 @@ async def run_real_user_traffic_job(
                                 else:
                                     push_live_step(
                                         job_id, i + 1, "bypass", "failed",
-                                        "Localhost tracker returned no redirect — falling back.",
+                                        "Direct & localhost tracker calls both returned no redirect — falling back.",
                                     )
                             else:
                                 push_live_step(
