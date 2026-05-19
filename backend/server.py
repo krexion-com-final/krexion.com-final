@@ -13235,6 +13235,40 @@ try:
 $cloud = "__CLOUD__"
 $key = "__KEY__"
 $endTime = (Get-Date).AddSeconds(55)
+
+function Invoke-AdsPower {
+  param([string]$Path, [string]$Method = "GET", [string]$ApiKey = "", $Body = $null)
+  # Try the official DNS name first, fall back to plain loopback in case
+  # the user's machine can't resolve local.adspower.net.
+  $candidates = @("http://local.adspower.net:50325", "http://127.0.0.1:50325")
+  $lastErr = $null
+  foreach ($base in $candidates) {
+    try {
+      $headers = @{ "Authorization" = $ApiKey; "Content-Type" = "application/json" }
+      if ($Method -eq "GET") {
+        return Invoke-RestMethod -Uri "$base$Path" -Headers $headers -TimeoutSec 12
+      } else {
+        return Invoke-RestMethod -Uri "$base$Path" -Method $Method -Headers $headers -Body $Body -TimeoutSec 30
+      }
+    } catch {
+      $lastErr = $_
+      continue
+    }
+  }
+  # Surface a customer-friendly error instead of the raw .NET exception.
+  $msg = "$lastErr"
+  if ($msg -match "Unable to connect|actively refused|No connection could be made|connection was forcibly closed") {
+    throw "AdsPower's Local API is not listening on port 50325. Open AdsPower -> Settings -> 'Local API' and make sure it is enabled. (AdsPower must be running too.)"
+  }
+  if ($msg -match "remote name could not be resolved|No such host|Could not resolve") {
+    throw "Cannot resolve local.adspower.net on this machine. This usually means AdsPower is not installed correctly. Reinstall AdsPower or check your DNS settings."
+  }
+  if ($msg -match "operation has timed out|timed out") {
+    throw "AdsPower took too long to respond. Restart AdsPower and try again."
+  }
+  throw $msg
+}
+
 while ((Get-Date) -lt $endTime) {
   try {
     $resp = Invoke-RestMethod -Uri "$cloud/api/sync/jobs/pull?limit=3&hostname=$env:COMPUTERNAME" -Headers @{"X-Krexion-License"=$key} -TimeoutSec 10
@@ -13243,10 +13277,9 @@ while ((Get-Date) -lt $endTime) {
       try {
         $feature = $job.feature
         $payload = $job.payload
-        $apHost = "http://local.adspower.net:50325"
-        if ($payload.host) { $apHost = $payload.host.TrimEnd('/') }
+        $apiKey = if ($payload.api_key) { $payload.api_key } else { "" }
         if ($feature -eq "adspower/test") {
-          $r = Invoke-RestMethod -Uri "$apHost/status" -Headers @{"Authorization"=$payload.api_key} -TimeoutSec 12
+          $r = Invoke-AdsPower -Path "/status" -Method "GET" -ApiKey $apiKey
           $result.status = "done"
           $result.result = @{ reachable = $true; raw = $r }
           $result.Remove("error") | Out-Null
@@ -13256,7 +13289,10 @@ while ((Get-Date) -lt $endTime) {
             if ($p.Name -ne "host" -and $p.Name -ne "api_key") { $bodyObj[$p.Name] = $p.Value }
           }
           $bodyJson = $bodyObj | ConvertTo-Json -Compress -Depth 10
-          $r = Invoke-RestMethod -Uri "$apHost/api/v1/user/create" -Method POST -Headers @{"Authorization"=$payload.api_key; "Content-Type"="application/json"} -Body $bodyJson -TimeoutSec 30
+          $r = Invoke-AdsPower -Path "/api/v1/user/create" -Method "POST" -ApiKey $apiKey -Body $bodyJson
+          if ($r.code -ne 0 -and $r.code -ne $null) {
+            throw "AdsPower rejected the request: $($r.msg)"
+          }
           $result.status = "done"
           $result.result = $r
           $result.Remove("error") | Out-Null

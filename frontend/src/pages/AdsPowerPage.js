@@ -389,15 +389,23 @@ export default function AdsPowerPage() {
                       {tr && !tr.ok && tr.message && (
                         <div className="text-[10px] text-red-300/80 px-3 pb-2 pt-0 break-words space-y-1.5">
                           <div>{tr.message}</div>
+                          {tr.needs_adspower_api_enabled && (
+                            <div className="bg-amber-500/5 border border-amber-500/20 rounded px-2 py-1.5 text-amber-200/90 text-[10px] leading-relaxed">
+                              <div className="font-semibold mb-0.5">How to enable AdsPower's Local API:</div>
+                              <ol className="list-decimal pl-4 space-y-0.5">
+                                <li>Open AdsPower on your PC</li>
+                                <li>Click your avatar → <b>Settings</b></li>
+                                <li>Go to <b>"Local API"</b> tab</li>
+                                <li>Toggle <b>Enable Local API</b> ON (port 50325)</li>
+                                <li>Copy the API key shown there into Krexion if it differs</li>
+                              </ol>
+                            </div>
+                          )}
                           {tr.needs_repair && (
                             <button
                               type="button"
                               onClick={(e) => {
                                 e.preventDefault();
-                                // Open the local-PC status badge (works in
-                                // both green "connected" and amber "offline"
-                                // states — both now respond to click and
-                                // open the Pair my PC modal).
                                 const badge =
                                   document.querySelector('[data-testid="local-pc-badge-online"]') ||
                                   document.querySelector('[data-testid="local-pc-badge-offline"]');

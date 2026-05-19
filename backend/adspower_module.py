@@ -233,6 +233,49 @@ async def allocate_unique_ips(
 # ─────────────────────────────────────────────────────────────────────
 # AdsPower API connection test — bridges to local PC via bridge_jobs
 # ─────────────────────────────────────────────────────────────────────
+# Raw .NET / httpx exception strings → customer-friendly hint mapping.
+# Used both for the synchronous Test endpoint and for the push-status
+# badge inside the profiles table (so users with the old bridge worker
+# still see actionable text without having to re-pair first).
+def _humanize_adspower_error(raw: str) -> str:
+    s = (raw or "").lower()
+    if "unable to connect to the remote server" in s or "actively refused" in s \
+            or "no connection could be made" in s or "connection refused" in s \
+            or "forcibly closed" in s:
+        return (
+            "AdsPower's Local API is not listening on port 50325. "
+            "Open AdsPower → Settings → 'Local API' and make sure it is enabled. "
+            "AdsPower must also be running."
+        )
+    if "remote name could not be resolved" in s or "no such host" in s or "could not resolve" in s:
+        return (
+            "Your PC cannot resolve local.adspower.net. This usually means AdsPower "
+            "isn't installed correctly. Reinstall AdsPower or check your DNS settings."
+        )
+    if "timed out" in s or "operation has timed out" in s:
+        return "AdsPower took too long to respond. Restart AdsPower and try Test again."
+    if "401" in s or "unauthorized" in s or "invalid api" in s or "api key" in s:
+        return (
+            "AdsPower rejected the API key. Open AdsPower → Settings → API → "
+            "Local API and copy the key shown there into Krexion exactly."
+        )
+    if "rejected the request" in s:
+        return raw  # already friendly (from our PowerShell wrapper)
+    return raw  # leave anything else verbatim — better than swallowing it
+
+
+def _classify_adspower_error(raw: str) -> dict:
+    """Return extra flags the UI can use to surface a tailored CTA
+    next to the error message (e.g. 'Open AdsPower settings')."""
+    s = (raw or "").lower()
+    if "unable to connect" in s or "actively refused" in s or "connection refused" in s \
+            or "no connection could be made" in s or "forcibly closed" in s:
+        return {"needs_adspower_api_enabled": True}
+    if "401" in s or "unauthorized" in s or "invalid api" in s or "api key" in s:
+        return {"needs_api_key_check": True}
+    return {}
+
+
 async def test_adspower_config(user: dict, cid: str, *, wait_timeout: int = 18) -> dict:
     cfg = await _db.adspower_configs.find_one({"id": cid, "user_id": user["id"]}, {"_id": 0})
     if not cfg:
@@ -281,9 +324,12 @@ async def test_adspower_config(user: dict, cid: str, *, wait_timeout: int = 18) 
                     "message": "AdsPower API connected successfully on your PC.",
                     "raw": bj.get("result"),
                 }
+            raw_err = (bj.get("error") or "AdsPower test failed").strip()
             return {
                 "ok": False, "reachable": False, "local_online": True,
-                "message": bj.get("error") or "AdsPower test failed",
+                "message": _humanize_adspower_error(raw_err),
+                "raw_error": raw_err,
+                **(_classify_adspower_error(raw_err)),
             }
 
     # Timeout — diagnose WHY the job wasn't picked up.
@@ -1008,11 +1054,12 @@ async def _sweep_queued_profiles_loop() -> None:
                         }},
                     )
                 elif status == "failed":
+                    raw_err = bj.get("error") or "bridge error"
                     await _db.adspower_profiles.update_one(
                         {"id": prof["id"]},
                         {"$set": {
                             "pushed_to_adspower": False,
-                            "push_status": f"failed: {bj.get('error') or 'bridge error'}",
+                            "push_status": f"failed: {_humanize_adspower_error(raw_err)}",
                         }},
                     )
                 else:
