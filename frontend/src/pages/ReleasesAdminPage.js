@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import axios from "axios";
-import { Plus, Sparkles, Trash2, Edit3, RefreshCw, X, Wand2 } from "lucide-react";
+import { Plus, Sparkles, Trash2, Edit3, RefreshCw, X, Wand2, Zap } from "lucide-react";
 import { toast } from "sonner";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
@@ -96,6 +96,42 @@ export default function ReleasesAdminPage() {
     }
   };
 
+  // One-click: auto-detect + auto-fill + publish immediately.
+  // No form to fill — for admins who just want to push the latest
+  // GitHub `main` to all customers without reviewing the notes.
+  const [quickPublishing, setQuickPublishing] = useState(false);
+  const quickPublish = async () => {
+    const last = releases.find((r) => r.published);
+    const ok = window.confirm(
+      `Quick-publish a new release?\n\n` +
+      `• Version will auto-bump from v${last?.version || currentVersion || "0.0.0"}\n` +
+      `• Title + notes auto-filled\n` +
+      `• Published immediately to ALL customers\n` +
+      `• Banner appears within 10 minutes\n\n` +
+      `Continue?`
+    );
+    if (!ok) return;
+    setQuickPublishing(true);
+    try {
+      const r = await axios.post(
+        `${API}/admin/releases/quick-publish`,
+        {},
+        { headers: authHeaders() }
+      );
+      const rel = r.data?.release;
+      const fallback = rel?.auto_detected?.used_fallback;
+      toast.success(
+        `🚀 v${rel?.version} published${fallback ? " (generic notes)" : ""} — customers notified within 10 min.`,
+        { duration: 6000 }
+      );
+      load();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Quick-publish failed");
+    } finally {
+      setQuickPublishing(false);
+    }
+  };
+
   const save = async () => {
     try {
       if (editingId) {
@@ -167,6 +203,16 @@ export default function ReleasesAdminPage() {
           >
             <Wand2 size={13} className={detecting ? "animate-spin" : ""} />
             {detecting ? "Detecting…" : "Auto-detect update"}
+          </button>
+          <button
+            onClick={quickPublish}
+            disabled={quickPublishing}
+            data-testid="quick-publish-release-button"
+            className="flex items-center gap-1.5 bg-gradient-to-r from-[#10B981] to-[#34D399] text-black px-3 py-2 rounded-md font-medium hover:from-[#34D399] hover:to-[#6EE7B7] transition text-xs disabled:opacity-60 disabled:cursor-not-allowed shadow-[0_0_18px_-4px_rgba(16,185,129,0.55)]"
+            title="One-click: auto-bump version, auto-fill notes, publish immediately — no form to fill"
+          >
+            <Zap size={13} className={quickPublishing ? "animate-pulse" : ""} />
+            {quickPublishing ? "Publishing…" : "Quick Publish"}
           </button>
           <button
             onClick={() => { reset(); setShowForm(true); }}

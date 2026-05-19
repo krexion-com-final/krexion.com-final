@@ -352,6 +352,104 @@ def _build_admin_endpoints(get_admin_dep):
             "current_version": current_version(),
         }
 
+    @router.post("/api/admin/releases/quick-publish")
+    async def quick_publish(admin: dict = Depends(get_admin_dep)):
+        """One-click publish — bundles auto-detect + create release.
+
+        Behaviour:
+          1. Run the same change-detection logic as `auto-detect`.
+          2. Use the suggested version / title / notes when available.
+          3. If no git history is available on this host (the typical
+             VPS rsync deployment excludes the `.git` directory for
+             security), gracefully fall back to bumping the patch
+             component of the last published version and use a
+             timestamped generic title + notes — so the admin still
+             gets a single-click publish and customers get notified.
+          4. Create the release with `published=true` immediately.
+
+        Returns the inserted release document on success.
+        """
+        # Step 1 — change detection (same as auto-detect)
+        last_rel = await _db.app_releases.find_one(
+            {"published": True}, sort=[("created_at", -1)], projection={"_id": 0}
+        )
+        since_iso = last_rel["created_at"] if last_rel else None
+        commits = _collect_commits_since(since_iso, limit=100)
+        files_changed = _collect_changed_files_since(since_iso)
+
+        base_ver = (last_rel["version"] if last_rel else current_version()) or "0.0.0"
+        suggested_version = _bump_patch(base_ver)
+
+        # Avoid collisions with any existing (draft or published) release
+        existing = await _db.app_releases.find({}, {"_id": 0, "version": 1}).to_list(500)
+        existing_versions = {r.get("version") for r in existing}
+        while suggested_version in existing_versions:
+            suggested_version = _bump_patch(suggested_version)
+
+        meaningful_commits = [c for c in commits if not c.get("is_auto")]
+
+        # Build title + notes — prefer real commit history, else fall
+        # back to a file-summary, else fall back to a generic "hotfix"
+        # message so quick-publish ALWAYS produces a usable release
+        # (works on VPS hosts where .git is intentionally excluded
+        # from the rsync deployment).
+        if meaningful_commits:
+            notes = "\n".join(f"- {c['subject']}" for c in meaningful_commits)
+            change_count = len(meaningful_commits)
+            unit = "change"
+            title = f"v{suggested_version} — {change_count} {unit}{'s' if change_count != 1 else ''} updated"
+        elif files_changed:
+            bullets, _grp = _summarize_file_changes(files_changed)
+            notes = "\n".join(bullets) if bullets else f"- Updated {len(files_changed)} file(s)"
+            change_count = len(files_changed)
+            title = f"v{suggested_version} — {change_count} file{'s' if change_count != 1 else ''} updated"
+        else:
+            # Generic fallback when no git history is available locally.
+            # The release is still useful: it bumps the version, fires
+            # the customer-side update banner, and triggers each
+            # customer PC to pull the latest code from GitHub.
+            notes = (
+                "Latest updates, performance improvements, and bug fixes from "
+                "the main branch. Install this update to pull the newest code "
+                "and rebuild your local services."
+            )
+            title = f"v{suggested_version} — Update available"
+
+        # Step 2 — create + publish immediately
+        doc = {
+            "id": str(uuid.uuid4()),
+            "version": suggested_version,
+            "title": title,
+            "notes": notes,
+            "severity": "recommended",
+            "download_url": "",
+            "min_required_version": "",
+            "published": True,
+            "created_at": _now_iso(),
+            "created_by": admin.get("email") or admin.get("id"),
+            "source": "quick-publish",
+            "auto_detected": {
+                "commit_count": len(commits),
+                "meaningful_commit_count": len(meaningful_commits),
+                "files_changed_count": len(files_changed),
+                "used_fallback": not (meaningful_commits or files_changed),
+            },
+        }
+        await _db.app_releases.insert_one(doc)
+        doc.pop("_id", None)
+        logger.info(
+            f"[releases] quick-publish v{suggested_version} by "
+            f"{doc['created_by']} (fallback={doc['auto_detected']['used_fallback']})"
+        )
+        return {
+            "ok": True,
+            "release": doc,
+            "message": (
+                f"Release v{suggested_version} published — all customers will "
+                "be notified within 10 minutes."
+            ),
+        }
+
     @router.patch("/api/admin/releases/{rid}")
     async def patch_release(rid: str, body: dict, admin: dict = Depends(get_admin_dep)):
         allowed = {"title", "notes", "severity", "download_url", "published", "min_required_version"}
