@@ -2180,13 +2180,29 @@ async def run_real_user_traffic_job(
                                         f"Browser → {_bypass_offer_url[:100]}",
                                     )
                                     try:
-                                        # Update target_url so subsequent
-                                        # logic (form fill detection,
-                                        # landing-url capture, etc.) sees
-                                        # the resolved offer URL.
-                                        target_url = _bypass_offer_url
+                                        # NOTE: We do NOT rebind the closure
+                                        # variable `target_url` here. Doing
+                                        # so would make Python treat
+                                        # `target_url` as a LOCAL throughout
+                                        # process_one (because any binding
+                                        # in a function body switches the
+                                        # whole-scope storage class), which
+                                        # would raise UnboundLocalError on
+                                        # every earlier read of target_url
+                                        # (the "Opening …" log, the initial
+                                        # page.goto, the bypass-host check)
+                                        # before this branch ever runs.
+                                        # Instead we tag the entry so
+                                        # downstream auditing knows the
+                                        # bypass kicked in, and we navigate
+                                        # the browser to _bypass_offer_url
+                                        # directly — the rest of the visit
+                                        # operates on page.url() / page DOM
+                                        # state, which already reflects the
+                                        # offer URL after this navigation.
                                         entry["bypass_used"] = True
                                         entry["bypass_exit_ip"] = _exit_ip_for_bypass
+                                        entry["bypass_offer_url"] = _bypass_offer_url
                                         resp = await page.goto(
                                             _bypass_offer_url,
                                             timeout=90000,
