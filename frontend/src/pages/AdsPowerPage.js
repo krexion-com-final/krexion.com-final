@@ -401,6 +401,18 @@ export default function AdsPowerPage() {
                               </ol>
                             </div>
                           )}
+                          {tr.needs_api_key_check && (
+                            <div className="bg-amber-500/5 border border-amber-500/20 rounded px-2 py-1.5 text-amber-200/90 text-[10px] leading-relaxed">
+                              <div className="font-semibold mb-0.5">Refresh your AdsPower API key:</div>
+                              <ol className="list-decimal pl-4 space-y-0.5">
+                                <li>Open AdsPower → <b>Settings → API → Local API</b></li>
+                                <li>Copy the API key currently shown there (it may have changed)</li>
+                                <li>In Krexion, delete this config and add a new one with the fresh key</li>
+                                <li>Click Test again</li>
+                              </ol>
+                              <div className="mt-1 text-amber-200/60">Note: AdsPower 8.4+ requires the key — and resetting it invalidates the old one immediately.</div>
+                            </div>
+                          )}
                           {tr.needs_repair && (
                             <button
                               type="button"

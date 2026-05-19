@@ -13241,18 +13241,30 @@ function Invoke-AdsPower {
   # Try the official DNS name first, fall back to plain loopback in case
   # the user's machine can't resolve local.adspower.net.
   $candidates = @("http://local.adspower.net:50325", "http://127.0.0.1:50325")
+  # AdsPower 8.4+ requires "Bearer <key>" auth — older versions accepted
+  # the raw key. Try Bearer first, then bare key as fallback.
+  $authVariants = @("Bearer $ApiKey", "$ApiKey")
   $lastErr = $null
   foreach ($base in $candidates) {
-    try {
-      $headers = @{ "Authorization" = $ApiKey; "Content-Type" = "application/json" }
-      if ($Method -eq "GET") {
-        return Invoke-RestMethod -Uri "$base$Path" -Headers $headers -TimeoutSec 12
-      } else {
-        return Invoke-RestMethod -Uri "$base$Path" -Method $Method -Headers $headers -Body $Body -TimeoutSec 30
+    foreach ($auth in $authVariants) {
+      try {
+        $headers = @{ "Authorization" = $auth; "Content-Type" = "application/json" }
+        if ($Method -eq "GET") {
+          $r = Invoke-RestMethod -Uri "$base$Path" -Headers $headers -TimeoutSec 12
+        } else {
+          $r = Invoke-RestMethod -Uri "$base$Path" -Method $Method -Headers $headers -Body $Body -TimeoutSec 30
+        }
+        # AdsPower returns 200 even on auth failure, with code != 0 and
+        # msg like "Require api-key". Detect & retry with next variant.
+        if ($r.code -ne $null -and $r.code -ne 0 -and ($r.msg -match "api-key|api_key|unauthorized|auth")) {
+          $lastErr = "AdsPower rejected auth: $($r.msg)"
+          continue
+        }
+        return $r
+      } catch {
+        $lastErr = $_
+        continue
       }
-    } catch {
-      $lastErr = $_
-      continue
     }
   }
   # Surface a customer-friendly error instead of the raw .NET exception.
@@ -13265,6 +13277,9 @@ function Invoke-AdsPower {
   }
   if ($msg -match "operation has timed out|timed out") {
     throw "AdsPower took too long to respond. Restart AdsPower and try again."
+  }
+  if ($msg -match "api-key|api_key") {
+    throw "AdsPower rejected the API key. Open AdsPower -> Settings -> API -> Local API and copy the current API key into Krexion exactly."
   }
   throw $msg
 }

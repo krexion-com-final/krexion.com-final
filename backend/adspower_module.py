@@ -254,10 +254,15 @@ def _humanize_adspower_error(raw: str) -> str:
         )
     if "timed out" in s or "operation has timed out" in s:
         return "AdsPower took too long to respond. Restart AdsPower and try Test again."
-    if "401" in s or "unauthorized" in s or "invalid api" in s or "api key" in s:
+    if "require api-key" in s or "require api_key" in s or "401" in s \
+            or "unauthorized" in s or "invalid api" in s \
+            or ("api-key" in s and "reject" in s) \
+            or ("api_key" in s and "reject" in s):
         return (
-            "AdsPower rejected the API key. Open AdsPower → Settings → API → "
-            "Local API and copy the key shown there into Krexion exactly."
+            "AdsPower rejected the API key. Please verify it: open AdsPower → "
+            "Settings → API → 'Local API', copy the current API key from there, "
+            "and paste it into Krexion exactly. If you reset the key recently, "
+            "the old one became invalid."
         )
     if "rejected the request" in s:
         return raw  # already friendly (from our PowerShell wrapper)
@@ -271,7 +276,10 @@ def _classify_adspower_error(raw: str) -> dict:
     if "unable to connect" in s or "actively refused" in s or "connection refused" in s \
             or "no connection could be made" in s or "forcibly closed" in s:
         return {"needs_adspower_api_enabled": True}
-    if "401" in s or "unauthorized" in s or "invalid api" in s or "api key" in s:
+    if "require api-key" in s or "require api_key" in s or "401" in s \
+            or "unauthorized" in s or "invalid api" in s \
+            or ("api-key" in s and "reject" in s) \
+            or ("api_key" in s and "reject" in s):
         return {"needs_api_key_check": True}
     return {}
 

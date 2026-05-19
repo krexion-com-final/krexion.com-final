@@ -194,47 +194,69 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
         return {"status": "failed", "error": f"unknown feature: {feature}"}
 
     method, route = feature_routes[feature]
+
+    # Helper: try Bearer + fallback URLs for AdsPower's local API.
+    # AdsPower 8.4+ requires "Bearer <key>", older versions accept the raw
+    # key. local.adspower.net may fail DNS on some machines → 127.0.0.1.
+    async def _call_adspower(path: str, http_method: str, json_body: dict | None,
+                             requested_host: str, api_key: str) -> dict:
+        bases = [
+            (requested_host or "http://local.adspower.net:50325").rstrip("/"),
+            "http://127.0.0.1:50325",
+        ]
+        # dedupe while keeping order
+        seen: set = set()
+        bases = [b for b in bases if not (b in seen or seen.add(b))]
+        auths = [f"Bearer {api_key}", api_key] if api_key else [""]
+        last_err = None
+        last_data: dict = {}
+        async with httpx.AsyncClient(timeout=30) as client:
+            for base in bases:
+                for auth in auths:
+                    try:
+                        headers = {"Content-Type": "application/json"}
+                        if auth:
+                            headers["Authorization"] = auth
+                        if http_method == "GET":
+                            r = await client.get(f"{base}{path}", headers=headers, timeout=15)
+                        else:
+                            r = await client.post(f"{base}{path}", json=json_body, headers=headers, timeout=30)
+                        try:
+                            data = r.json()
+                        except Exception:
+                            data = {"text": r.text[:2000]}
+                        last_data = data
+                        if r.status_code >= 400:
+                            last_err = f"AdsPower {r.status_code}: {data.get('msg') or data}"
+                            continue
+                        msg_l = str(data.get("msg", "")).lower()
+                        if data.get("code") not in (0, None) and ("api-key" in msg_l or "api_key" in msg_l or "auth" in msg_l):
+                            last_err = f"AdsPower rejected auth: {data.get('msg')}"
+                            continue
+                        return {"ok": True, "data": data}
+                    except Exception as e:  # noqa: BLE001
+                        last_err = str(e)
+                        continue
+        return {"ok": False, "error": last_err or "unreachable", "data": last_data}
+
     # Special handler: AdsPower API connection test
     if route == "__adspower_test__":
-        host = (payload.get("host") or "http://local.adspower.net:50325").rstrip("/")
+        host = payload.get("host") or "http://local.adspower.net:50325"
         api_key = payload.get("api_key") or ""
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                r = await client.get(
-                    f"{host}/status",
-                    headers={"Authorization": api_key},
-                )
-            try:
-                data = r.json()
-            except Exception:
-                data = {"text": r.text[:1000]}
-            if r.status_code < 400:
-                return {"status": "done", "result": {"reachable": True, "raw": data}}
-            return {"status": "failed", "error": f"AdsPower /status {r.status_code}: {data}"}
-        except Exception as e:  # noqa: BLE001
-            return {"status": "failed", "error": f"AdsPower not reachable: {e}"}
+        res = await _call_adspower("/status", "GET", None, host, api_key)
+        if res["ok"]:
+            return {"status": "done", "result": {"reachable": True, "raw": res["data"]}}
+        return {"status": "failed", "error": res["error"]}
 
     # Special handler: AdsPower local API call (not a local backend route)
     if route == "__adspower_create__":
-        host = (payload.get("host") or "http://local.adspower.net:50325").rstrip("/")
+        host = payload.get("host") or "http://local.adspower.net:50325"
         api_key = payload.get("api_key") or ""
         body = {k: v for k, v in payload.items() if k not in ("host", "api_key")}
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                r = await client.post(
-                    f"{host}/api/v1/user/create",
-                    json=body,
-                    headers={"Authorization": api_key, "Content-Type": "application/json"},
-                )
-            try:
-                data = r.json()
-            except Exception:
-                data = {"text": r.text[:5000]}
-            if r.status_code < 400 and (data.get("code") == 0 or data.get("status") == "success"):
-                return {"status": "done", "result": data}
-            return {"status": "failed", "error": f"AdsPower {r.status_code}: {data.get('msg') or data}"}
-        except Exception as e:  # noqa: BLE001
-            return {"status": "failed", "error": f"AdsPower local call failed: {e}"}
+        res = await _call_adspower("/api/v1/user/create", "POST", body, host, api_key)
+        if res["ok"]:
+            return {"status": "done", "result": res["data"]}
+        return {"status": "failed", "error": res["error"]}
 
     url = f"{LOCAL_API_BASE}{route}"
     headers = {"Content-Type": "application/json"}
