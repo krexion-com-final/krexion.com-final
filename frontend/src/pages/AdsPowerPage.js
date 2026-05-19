@@ -387,8 +387,33 @@ export default function AdsPowerPage() {
                         </button>
                       </label>
                       {tr && !tr.ok && tr.message && (
-                        <div className="text-[10px] text-red-300/80 px-3 pb-2 pt-0 break-words">
-                          {tr.message}
+                        <div className="text-[10px] text-red-300/80 px-3 pb-2 pt-0 break-words space-y-1.5">
+                          <div>{tr.message}</div>
+                          {tr.needs_repair && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                // Open the local-PC status badge (works in
+                                // both green "connected" and amber "offline"
+                                // states — both now respond to click and
+                                // open the Pair my PC modal).
+                                const badge =
+                                  document.querySelector('[data-testid="local-pc-badge-online"]') ||
+                                  document.querySelector('[data-testid="local-pc-badge-offline"]');
+                                if (badge) {
+                                  badge.scrollIntoView({ behavior: "smooth", block: "center" });
+                                  setTimeout(() => badge.click(), 350);
+                                } else {
+                                  toast.info("Open the green/amber 'PC' badge at the top of the page → click 'Pair my PC' and re-run the latest PowerShell command as Administrator.");
+                                }
+                              }}
+                              data-testid={`repair-pc-${c.id}`}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-500/15 text-amber-200 border border-amber-500/30 hover:bg-amber-500/25 text-[10px]"
+                            >
+                              <Zap size={9} /> Re-pair my PC
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>

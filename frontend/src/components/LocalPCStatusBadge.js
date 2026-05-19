@@ -104,10 +104,12 @@ export default function LocalPCStatusBadge() {
   return (
     <>
       {online ? (
-        <div
+        <button
           data-testid="local-pc-badge-online"
-          className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-medium"
-          title={`Bridge active - heavy features will run on your PC: ${host || "your computer"}`}
+          onClick={openPair}
+          className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-medium hover:bg-emerald-500/20 hover:border-emerald-500/50 transition cursor-pointer"
+          title={`Bridge active — click to re-pair or view setup. PC: ${host || "your computer"}`}
+          type="button"
         >
           <MonitorCheck size={14} />
           <span className="hidden sm:inline">PC connected</span>
@@ -119,7 +121,7 @@ export default function LocalPCStatusBadge() {
             </span>
           )}
           <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-        </div>
+        </button>
       ) : (
         <button
           data-testid="local-pc-badge-offline"

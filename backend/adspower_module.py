@@ -253,10 +253,12 @@ async def test_adspower_config(user: dict, cid: str, *, wait_timeout: int = 18) 
             "ok": False,
             "reachable": False,
             "message": (
-                "AdsPower is not connected yet. Open AdsPower on the same "
-                "computer where Krexion is installed, then click Test again."
+                "Your PC is not connected to Krexion. Open Krexion on your "
+                "computer and make sure AdsPower is running too — then click "
+                "Test again."
             ),
             "local_online": False,
+            "needs_repair": True,
         }
 
     # Enqueue a bridge_job for adspower/test
@@ -283,9 +285,56 @@ async def test_adspower_config(user: dict, cid: str, *, wait_timeout: int = 18) 
                 "ok": False, "reachable": False, "local_online": True,
                 "message": bj.get("error") or "AdsPower test failed",
             }
+
+    # Timeout — diagnose WHY the job wasn't picked up.
+    # Look at the job's current state + the user's recent bridge-job history
+    # to decide between:
+    #   (a) bridge worker never pulled (still 'pending', no claimed_by)
+    #       → their PC has the OLD heartbeat-only pair task
+    #   (b) bridge worker pulled but didn't finish (claimed_by set,
+    #       status still 'running')
+    #       → AdsPower not responding / API key wrong / network on PC
+    final = await _db.bridge_jobs.find_one({"id": bj_id}, {"_id": 0}) or {}
+    claimed = bool(final.get("claimed_by") or final.get("started_at"))
+
+    # Has ANY bridge job for this user ever completed? If yes → bridge
+    # worker is at least sometimes active; the issue is probably AdsPower
+    # not responding. If no → bridge worker is definitely not installed.
+    ever_done = await _db.bridge_jobs.find_one(
+        {"user_id": user["id"], "status": "done"},
+        {"_id": 0, "id": 1},
+    )
+
+    if not claimed and not ever_done:
+        return {
+            "ok": False, "reachable": False, "local_online": True,
+            "needs_repair": True,
+            "message": (
+                "Your PC is online but the Krexion bridge worker isn't "
+                "running. Click the green ‘PC connected’ badge at the top "
+                "of the page → re-run the Pair my PC command in PowerShell "
+                "as Administrator. The new command installs the "
+                "KrexionBridge background task that handles AdsPower."
+            ),
+        }
+    if not claimed and ever_done:
+        return {
+            "ok": False, "reachable": False, "local_online": True,
+            "needs_repair": True,
+            "message": (
+                "Your bridge worker was active earlier but didn't pick up "
+                "this test within 18 s. Open PowerShell as Administrator "
+                "and run:  schtasks /Run /TN KrexionBridge   to wake it. "
+                "If that fails, re-run the Pair my PC command."
+            ),
+        }
     return {
         "ok": False, "reachable": False, "local_online": True,
-        "message": "Timeout — your PC did not respond within 18s. Make sure AdsPower is running and Krexion sync_client is active.",
+        "message": (
+            "AdsPower didn't respond to the bridge worker within 18 s. "
+            "Check that AdsPower is actually running on your PC and that "
+            "the API key is correct (AdsPower → Settings → API → Local API)."
+        ),
     }
 
 
