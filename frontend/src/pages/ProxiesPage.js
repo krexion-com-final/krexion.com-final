@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import { Plus, Play, Trash2, RefreshCw, Copy, Square, Clock, ChevronDown, Check, RotateCcw, Globe, AlertTriangle, CheckCircle } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import { Checkbox } from "../components/ui/checkbox";
+import ProxyJetAutoCard from "../components/ProxyJetAutoCard";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -703,6 +704,9 @@ export default function ProxiesPage() {
 
   return (
     <div className="space-y-6" data-testid="proxies-page">
+      {/* ProxyJet Auto Mode — one-time creds for auto-unique-IP RUT runs */}
+      <ProxyJetAutoCard />
+
       {/* Bulk Test Summary Dialog */}
       <Dialog open={showBulkTestSummary} onOpenChange={setShowBulkTestSummary}>
         <DialogContent className="bg-[var(--brand-card)] border-[var(--brand-border)] max-w-2xl max-h-[80vh] overflow-y-auto">

@@ -251,6 +251,14 @@ export default function RealUserTrafficPage() {
   const [proxies, setProxies] = useState("");
   const [userAgents, setUserAgents] = useState("");
   const [useStoredProxies, setUseStoredProxies] = useState(false);
+  // ── ProxyJet Auto Mode ────────────────────────────────────────
+  // When ON, the user does NOT have to paste / upload any proxies —
+  // the backend auto-generates a fresh batch of unique residential
+  // proxies per job (using ProxyJet credentials saved on the Proxies
+  // page). Every exit-IP is guaranteed unused for this user.
+  const [useProxyJetAuto, setUseProxyJetAuto] = useState(false);
+  const [proxyJetCountry, setProxyJetCountry] = useState("US");
+  const [pjConfigured, setPjConfigured] = useState(null); // null=unknown, true/false
 
   // Uploaded Things — saved batch IDs (alternative to paste)
   const [uploadedLibrary, setUploadedLibrary] = useState([]);
@@ -388,6 +396,23 @@ export default function RealUserTrafficPage() {
     } catch (e) { /* ignore */ }
   };
 
+  // Detect whether ProxyJet credentials are already saved — used to
+  // gate the Auto-Mode toggle on/off and show a friendly hint when off.
+  const fetchProxyJetStatus = async () => {
+    try {
+      const r = await fetch(`${API_URL}/api/proxyjet/credentials`, { headers: authH() });
+      if (r.ok) {
+        const data = await r.json();
+        setPjConfigured(!!data.configured);
+        if (data.configured && data.default_country) {
+          setProxyJetCountry((prev) => prev || data.default_country);
+        }
+      } else {
+        setPjConfigured(false);
+      }
+    } catch (e) { setPjConfigured(false); }
+  };
+
   const fetchJobDetail = async (jobId) => {
     try {
       const r = await fetch(`${API_URL}/api/real-user-traffic/jobs/${jobId}`, { headers: authH() });
@@ -459,6 +484,7 @@ export default function RealUserTrafficPage() {
     fetchPendingCandidates();
     fetchUploadedLibrary();
     fetchEngineStatus();
+    fetchProxyJetStatus();
     // Poll engine status every 5s — cheap (single fs check on the backend)
     // and gives the user immediate feedback when chromium finishes
     // installing on a fresh pod boot.
@@ -597,9 +623,12 @@ export default function RealUserTrafficPage() {
 
   const onStart = async () => {
     if (!linkId) return toast.error("Select a tracker link");
-    // Validation: either paste OR uploaded batch must be present
-    if (!useStoredProxies && !selectedUploadProxyId && !proxies.trim()) {
-      return toast.error("Paste proxies, select an uploaded proxy batch, or enable 'Use my stored proxies'");
+    // Validation: either paste OR uploaded batch OR ProxyJet Auto must be present
+    if (!useProxyJetAuto && !useStoredProxies && !selectedUploadProxyId && !proxies.trim()) {
+      return toast.error("Paste proxies, select an uploaded proxy batch, enable 'Use my stored proxies', or turn on ProxyJet Auto Mode");
+    }
+    if (useProxyJetAuto && !pjConfigured) {
+      return toast.error("ProxyJet credentials not saved yet. Go to Proxies → ProxyJet Auto and save them first.");
     }
     if (!selectedUploadUaId && selectedUploadUaIds.length === 0 && !userAgents.trim()) {
       return toast.error("Paste at least one User Agent or select one-or-more uploaded UA batch(es)");
@@ -661,7 +690,7 @@ export default function RealUserTrafficPage() {
       // so total wait collapses to max-of-N (~1-2 s on a typical link).
       // ────────────────────────────────────────────────────────────────
       const wantExcel = formFillEnabled && dataSource === "excel" && file && !selectedUploadDataId;
-      const wantProxies = !useStoredProxies && !selectedUploadProxyId && proxies && proxies.trim();
+      const wantProxies = !useProxyJetAuto && !useStoredProxies && !selectedUploadProxyId && proxies && proxies.trim();
       const wantUas = !selectedUploadUaId && selectedUploadUaIds.length === 0 && userAgents && userAgents.trim();
       const wantAj = formFillEnabled && useCustomJson && !selectedUploadAjId && automationJson.trim();
       const wantTarget = !!targetScreenshotFile;
@@ -764,6 +793,11 @@ export default function RealUserTrafficPage() {
       fd.append("follow_redirect", String(followRedirect));
       fd.append("no_repeated_proxy", String(noRepeatedProxy));
       fd.append("force_tracker_url", String(forceTrackerUrl));
+      // ProxyJet Auto Mode — when ON the backend ignores proxies/use_stored_proxies/upload_proxy_id
+      // and instead asks proxyjet_module to generate a fresh batch of
+      // unique residential proxies (one-per-visit, no exit-IP ever reused).
+      fd.append("use_proxyjet_auto", String(useProxyJetAuto));
+      fd.append("proxyjet_country", (proxyJetCountry || "US").toUpperCase());
 
       fd.append("form_fill_enabled", String(formFillEnabled));
       if (formFillEnabled) {
@@ -1087,11 +1121,74 @@ export default function RealUserTrafficPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
+          {/* ── ProxyJet Auto Mode toggle (one-time creds → unique IP per visit) ── */}
+          <div
+            className={`rounded-md border p-3 transition-colors ${
+              useProxyJetAuto
+                ? "bg-gradient-to-r from-indigo-950/40 via-indigo-950/20 to-transparent border-indigo-500/40"
+                : "bg-zinc-900/40 border-zinc-700/60"
+            }`}
+            data-testid="rut-proxyjet-auto-block"
+          >
+            <label className="flex items-start gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={useProxyJetAuto}
+                onChange={(e) => setUseProxyJetAuto(e.target.checked)}
+                className="mt-1 w-4 h-4 accent-indigo-500"
+                data-testid="rut-use-proxyjet-auto"
+              />
+              <div className="flex-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-indigo-200 font-medium text-sm">
+                    🚀 ProxyJet Auto Mode
+                  </span>
+                  {pjConfigured === false && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                      credentials not saved — go to Proxies page
+                    </span>
+                  )}
+                  {pjConfigured === true && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                      ✓ ready
+                    </span>
+                  )}
+                </div>
+                <p className="text-[11px] text-zinc-400 mt-1 leading-snug">
+                  Skip pasting proxies entirely. Backend auto-generates one fresh residential
+                  proxy per visit. Every exit-IP is guaranteed <b className="text-emerald-300">unused</b> for your
+                  account — no duplicate clicks on your offer URL, ever.
+                </p>
+                {useProxyJetAuto && (
+                  <div className="mt-3 flex items-center gap-2 flex-wrap">
+                    <Label className="text-xs text-zinc-300">Country:</Label>
+                    <select
+                      value={proxyJetCountry}
+                      onChange={(e) => setProxyJetCountry(e.target.value)}
+                      className="h-8 px-2 rounded bg-zinc-800 border border-zinc-700 text-zinc-100 text-xs"
+                      data-testid="rut-proxyjet-country"
+                    >
+                      {["US","CA","GB","DE","FR","AU","BR","IN","JP","IT","ES","NL","MX"].map((c) => (
+                        <option key={c} value={c}>{c}</option>
+                      ))}
+                    </select>
+                    <span className="text-[10px] text-indigo-300">
+                      Anti-detect safeties (no-repeated-proxy + skip-duplicate-IP) auto-enabled.
+                    </span>
+                  </div>
+                )}
+              </div>
+            </label>
+          </div>
+
           {/* Proxies + UAs side-by-side */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <div>
+            <div className={useProxyJetAuto ? "opacity-50 pointer-events-none" : ""}>
               <div className="flex items-center justify-between mb-1">
-                <Label className="text-zinc-300">Proxies (one per line)</Label>
+                <Label className="text-zinc-300">
+                  Proxies (one per line)
+                  {useProxyJetAuto && <span className="ml-2 text-[10px] text-indigo-300">— disabled (Auto Mode ON)</span>}
+                </Label>
                 <label className="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer">
                   <input
                     type="checkbox"
@@ -1099,6 +1196,7 @@ export default function RealUserTrafficPage() {
                     onChange={(e) => setUseStoredProxies(e.target.checked)}
                     className="w-3.5 h-3.5 accent-fuchsia-500"
                     data-testid="rut-use-stored-proxies"
+                    disabled={useProxyJetAuto}
                   />
                   Use my stored proxies
                 </label>

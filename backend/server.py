@@ -3708,6 +3708,7 @@ from real_user_traffic import (
     RUT_JOBS as _RUT_JOBS,
     get_engine_status as _rut_get_engine_status,
 )
+import proxyjet_module as _pj
 
 
 def _is_local_or_private_host(url: str) -> bool:
@@ -4112,7 +4113,37 @@ async def _rut_prepare_and_run(
         upload_proxy_id = params.get("upload_proxy_id")
         use_stored_proxies = params.get("use_stored_proxies")
         paste_proxy_lines = params.get("paste_proxy_lines") or []
-        if upload_proxy_id:
+        use_proxyjet_auto = bool(params.get("use_proxyjet_auto"))
+        if use_proxyjet_auto:
+            # Auto Mode — generate unique-per-user residential proxies on
+            # the fly. We ask for 3× the visit count so the engine has
+            # plenty of spare sessions if some get rate-limited / fail
+            # captcha / are skipped by the duplicate-IP filter, while
+            # still respecting the per-user "no exit-IP ever reused"
+            # promise. Session IDs are recorded in the dedup ledger.
+            total_clicks_val = int(params.get("total_clicks") or 10)
+            target_mode_val = (params.get("target_mode") or "clicks").lower()
+            if target_mode_val == "conversions":
+                base_need = max(int(params.get("max_attempts") or 0),
+                                int(params.get("target_conversions") or 0) * 5)
+            else:
+                base_need = total_clicks_val
+            gen_count = max(base_need * 3, 50)
+            gen_count = min(gen_count, 100000)
+            try:
+                proxy_lines = await _pj.generate_unique_proxies(
+                    db,
+                    user["id"],
+                    count=gen_count,
+                    country=params.get("proxyjet_country", "US"),
+                    job_id=job_id,
+                )
+            except RuntimeError as e:
+                return await _mark_failed(str(e))
+            if not proxy_lines:
+                return await _mark_failed("ProxyJet returned zero proxies — check credentials.")
+            await _set_step(f"✓ Generated {len(proxy_lines)} unique ProxyJet proxies (auto-mode)")
+        elif upload_proxy_id:
             uploaded_proxy_lines = await _load_upload_items(user["id"], upload_proxy_id, "proxies")
             if not uploaded_proxy_lines:
                 return await _mark_failed("Selected proxy upload is empty or not found")
@@ -4488,6 +4519,14 @@ async def rut_create_job(
     # offer URL). Use when you want server-side click logging + duplicate
     # IP check to happen at the tracker endpoint itself.
     force_tracker_url: bool = Form(False),
+    # ── ProxyJet Auto Mode (one-time creds → unique IP per visit) ──
+    # When True, the BG task ignores `proxies`/`upload_proxy_id`/
+    # `use_stored_proxies` and instead asks `proxyjet_module` for a
+    # fresh batch of unique residential proxies. Session IDs are
+    # persisted so the SAME exit-IP is never reused for this user.
+    # When False (default), all legacy paths run identically.
+    use_proxyjet_auto: bool = Form(False),
+    proxyjet_country: str = Form("US"),
     user: dict = Depends(get_current_user_with_fresh_data),
     _cloud_gate: bool = Depends(require_local_mode),
 ):
@@ -4558,8 +4597,17 @@ async def rut_create_job(
     # instead of a misleading "Job started" toast followed by a silent
     # failure in the BG task. Upload existence still runs in BG (one DB
     # query, fast, but not blocking the response).
-    if not upload_proxy_id and not use_stored_proxies and not paste_proxy_lines:
-        raise HTTPException(status_code=400, detail="At least one proxy required (paste, pick a saved batch, or enable Use Stored Proxies)")
+    if not upload_proxy_id and not use_stored_proxies and not paste_proxy_lines and not use_proxyjet_auto:
+        raise HTTPException(status_code=400, detail="At least one proxy required (paste, pick a saved batch, enable Use Stored Proxies, or turn on ProxyJet Auto Mode)")
+    if use_proxyjet_auto:
+        _pj_creds = await _pj.get_credentials(db, user["id"])
+        if not _pj_creds:
+            raise HTTPException(status_code=400, detail="ProxyJet Auto Mode is on but credentials are not configured. Save them in Proxies → ProxyJet Auto.")
+        # Auto Mode mandates strongest anti-duplicate posture: each
+        # generated proxy is used at most once and the engine's own
+        # dup-IP filter remains on as a belt-and-suspenders guard.
+        no_repeated_proxy = True
+        skip_duplicate_ip = True
     if not upload_ua_id and not upload_ua_ids and not paste_ua_lines:
         raise HTTPException(status_code=400, detail="At least one User Agent required (paste or pick a saved batch)")
     if form_fill_enabled and data_source == "excel" and not file and not upload_data_file_id and not import_pending_from_job_id:
@@ -4646,6 +4694,8 @@ async def rut_create_job(
         "target_conversions": target_conversions,
         "max_attempts": max_attempts,
         "force_tracker_url": force_tracker_url,
+        "use_proxyjet_auto": bool(use_proxyjet_auto),
+        "proxyjet_country": (proxyjet_country or "US").strip().upper() or "US",
         "paste_proxy_lines": paste_proxy_lines,
         "paste_ua_lines": paste_ua_lines,
     }
@@ -4710,6 +4760,8 @@ async def rut_create_job(
             "skip_captcha": skip_captcha,
             "invalid_detection_enabled": invalid_detection_enabled,
             "force_tracker_url": force_tracker_url,
+            "use_proxyjet_auto": bool(use_proxyjet_auto),
+            "proxyjet_country": (proxyjet_country or "US").strip().upper() or "US",
             "data_source": data_source,
             # Counts will be updated by the BG task after it loads from
             # gsheet / upload batches. Set to paste-mode counts now so
@@ -10720,6 +10772,165 @@ async def refresh_proxy_status(user: dict = Depends(get_current_user_with_fresh_
         "total_used_ips": len(all_used_ips)
     }
 
+
+# ════════════════════════════════════════════════════════════════════
+# ProxyJet Auto Mode — save creds ONCE, system auto-generates unique
+# residential proxies per visit (no duplicate exit-IP per user, ever).
+# All endpoints are ADDITIVE; the legacy proxy paste / stored / upload
+# paths in /api/real-user-traffic/submit continue to work unchanged.
+# ════════════════════════════════════════════════════════════════════
+
+class ProxyJetCredentialsIn(BaseModel):
+    username: str
+    password: str
+    server: Optional[str] = "proxy-jet.io"
+    port: Optional[int] = 1010
+    default_country: Optional[str] = "US"
+    gateway: Optional[str] = "ca"
+    product: Optional[str] = "resi"
+
+
+class ProxyJetGenerateIn(BaseModel):
+    count: int = 10
+    country: Optional[str] = None
+
+
+@api_router.get("/proxyjet/credentials")
+async def proxyjet_get_credentials(user: dict = Depends(get_current_user)):
+    """Return whether the user has ProxyJet creds saved + masked details."""
+    creds = await _pj.get_credentials(db, user["id"])
+    if not creds:
+        return {"configured": False}
+    return {
+        "configured": True,
+        "username": creds.get("username", ""),
+        "password_masked": _pj.mask_password(creds.get("password", "")),
+        "server": creds.get("server", _pj.DEFAULT_SERVER),
+        "port": creds.get("port", _pj.DEFAULT_PORT),
+        "default_country": creds.get("default_country", _pj.DEFAULT_COUNTRY),
+        "gateway": creds.get("gateway", _pj.DEFAULT_GATEWAY),
+        "product": creds.get("product", _pj.DEFAULT_PRODUCT),
+        "updated_at": creds.get("updated_at"),
+    }
+
+
+@api_router.post("/proxyjet/credentials")
+async def proxyjet_save_credentials(payload: ProxyJetCredentialsIn,
+                                    user: dict = Depends(get_current_user)):
+    """Upsert the user's ProxyJet credentials (one-time setup)."""
+    if not (payload.username or "").strip() or not (payload.password or "").strip():
+        raise HTTPException(status_code=400, detail="username and password are required")
+    saved = await _pj.save_credentials(
+        db, user["id"],
+        username=payload.username,
+        password=payload.password,
+        server=payload.server or _pj.DEFAULT_SERVER,
+        port=int(payload.port or _pj.DEFAULT_PORT),
+        default_country=(payload.default_country or _pj.DEFAULT_COUNTRY).upper(),
+        gateway=(payload.gateway or _pj.DEFAULT_GATEWAY).strip(),
+        product=(payload.product or _pj.DEFAULT_PRODUCT).strip(),
+    )
+    return {
+        "configured": True,
+        "username": saved["username"],
+        "password_masked": _pj.mask_password(saved["password"]),
+        "server": saved["server"],
+        "port": saved["port"],
+        "default_country": saved["default_country"],
+        "gateway": saved["gateway"],
+        "product": saved["product"],
+        "updated_at": saved["updated_at"],
+    }
+
+
+@api_router.delete("/proxyjet/credentials")
+async def proxyjet_delete_credentials(user: dict = Depends(get_current_user)):
+    """Remove stored ProxyJet credentials. Does NOT touch used-session
+    history (so future re-add still skips previously-burned session IDs)."""
+    deleted = await _pj.delete_credentials(db, user["id"])
+    return {"deleted": deleted}
+
+
+@api_router.post("/proxyjet/test")
+async def proxyjet_test_credentials(user: dict = Depends(get_current_user)):
+    """Generate ONE proxy line and try fetching the exit-IP through it
+    via api.ipify.org. Returns the detected IP + round-trip ms so the
+    UI can show ✅/❌ next to the saved credentials."""
+    creds = await _pj.get_credentials(db, user["id"])
+    if not creds:
+        raise HTTPException(status_code=400, detail="ProxyJet credentials not configured")
+    proxy_str, sid = _pj.build_proxy_string(
+        username=creds["username"],
+        password=creds["password"],
+        country=creds.get("default_country", _pj.DEFAULT_COUNTRY),
+        gateway=creds.get("gateway", _pj.DEFAULT_GATEWAY),
+        server=creds.get("server", _pj.DEFAULT_SERVER),
+        port=int(creds.get("port", _pj.DEFAULT_PORT)),
+        product=creds.get("product", _pj.DEFAULT_PRODUCT),
+    )
+    # httpx supports user:pass@host:port via the proxies= dict
+    proxy_url = f"http://{proxy_str}"
+    started = time.time()
+    try:
+        async with httpx.AsyncClient(
+            proxies={"http://": proxy_url, "https://": proxy_url},
+            timeout=httpx.Timeout(20.0),
+            verify=False,
+        ) as client:
+            r = await client.get("https://api.ipify.org?format=json")
+            r.raise_for_status()
+            data = r.json()
+            exit_ip = data.get("ip")
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300], "session_id": sid}
+    rt_ms = int((time.time() - started) * 1000)
+    return {
+        "ok": True,
+        "exit_ip": exit_ip,
+        "session_id": sid,
+        "round_trip_ms": rt_ms,
+        "country": creds.get("default_country", _pj.DEFAULT_COUNTRY),
+        "gateway": f"{creds.get('gateway', _pj.DEFAULT_GATEWAY)}.{creds.get('server', _pj.DEFAULT_SERVER)}:{creds.get('port', _pj.DEFAULT_PORT)}",
+    }
+
+
+@api_router.post("/proxyjet/generate-batch")
+async def proxyjet_generate_batch(payload: ProxyJetGenerateIn,
+                                  user: dict = Depends(get_current_user)):
+    """Generate N unique proxy lines on-demand. Each session_id is
+    recorded in `proxyjet_used_sessions` so it is NEVER returned again
+    for this user — guaranteeing zero duplicate exit-IPs across all
+    future RUT jobs of this user."""
+    if payload.count < 1 or payload.count > 100000:
+        raise HTTPException(status_code=400, detail="count must be 1..100000")
+    try:
+        proxies = await _pj.generate_unique_proxies(
+            db, user["id"],
+            count=payload.count,
+            country=(payload.country or "").strip().upper() or None,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"count": len(proxies), "proxies": proxies}
+
+
+@api_router.get("/proxyjet/usage")
+async def proxyjet_usage(user: dict = Depends(get_current_user)):
+    """Return small usage stats for the credentials panel."""
+    stats = await _pj.get_usage_stats(db, user["id"])
+    return stats
+
+
+@api_router.post("/proxyjet/reset-history")
+async def proxyjet_reset_history(user: dict = Depends(get_current_user)):
+    """DANGEROUS: wipe the per-user used-session history so previously-
+    burned session IDs become available again. Useful when a user
+    rotates their ProxyJet account (new pool) and wants a clean slate.
+    Does NOT delete the credentials, just the dedup ledger."""
+    res = await db.proxyjet_used_sessions.delete_many({"user_id": user["id"]})
+    return {"deleted": res.deleted_count}
+
+
 @api_router.post("/offers", response_model=dict)
 async def create_offer(offer: OfferCreate, user: dict = Depends(get_current_user)):
     link = await db.links.find_one({"id": offer.link_id, "user_id": user["id"]}, {"_id": 0})
@@ -14044,6 +14255,12 @@ async def startup_db_indexes():
         await db.real_user_traffic_jobs.create_index([("status", 1), ("user_id", 1)])
         # Compound for the recovery-poll branch (after-network-abort)
         await db.real_user_traffic_jobs.create_index([("user_id", 1), ("link_id", 1), ("created_at", -1)])
+
+        # ── ProxyJet auto-mode collections (one-time setup, idempotent) ──
+        try:
+            await _pj.ensure_indexes(db)
+        except Exception as _pj_err:
+            logger.warning(f"ProxyJet index init skipped: {_pj_err}")
 
         logger.info("Database indexes created successfully")
     except Exception as e:
