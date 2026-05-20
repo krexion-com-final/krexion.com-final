@@ -105,31 +105,85 @@ def _build_text_click_evaluate(text: str) -> Dict[str, Any]:
     """JS that finds an element by visible text and clicks it.
 
     Robust against re-renders because it re-queries every replay.
-    Matches buttons, anchors, divs, spans whose innerText (trimmed,
-    case-insensitive) equals the given text.
+
+    ── 2026-05 (revised) ──
+    PRIORITISE ANCHORS. Many offer-page CTAs are anchors wrapped in
+    DIV/SPAN containers (e.g. `<div class="text-center"><a href="...">
+    Unlock Now</a></div>`). The naive "all elements" query matched the
+    outer DIV first because its visible innerText was the SAME as the
+    anchor's. Clicking the DIV did nothing useful (no href, no submit
+    handler). We now search anchors first; if an `<a>` with matching
+    text is found we navigate via `window.location.assign(el.href)`
+    which is deterministic in headless Chromium + residential proxy
+    (where the synthetic .click() event on anchors was being lost).
+
+    For non-anchor matches we ALSO peek inside for a descendant `<a>`
+    — common pattern in card-style CTAs. Falls back to a plain
+    `.click()` for true buttons / input[type=submit] / React onClick
+    spans.
+
+    ── 2026-05 #2 (submit-button fix) ──
+    For `input[type=submit]` and `button[type=submit]`, calling
+    `el.click()` in JS does NOT always navigate (the browser's submit
+    dispatcher may be skipped under headless + residential proxy).
+    We now also call `form.submit()` 150ms after .click() as a safety
+    net. Double-submits are de-duplicated server-side by the offer
+    page's antispam token; the small delay lets any onclick analytics
+    fire before the forced submit.
     """
     safe = text.replace("\\", "\\\\").replace("'", "\\'")
     script = (
         "(function(){var t='" + safe + "'.toLowerCase();"
-        "var els=Array.from(document.querySelectorAll('button,a,div,span,label,input[type=submit]'))"
-        ".filter(function(e){var s=window.getComputedStyle(e);if(s.display==='none'||s.visibility==='hidden')return false;"
-        "var x=((e.innerText||e.textContent||e.value||'')+'').trim().toLowerCase();return x===t;});"
-        "if(els.length){els[0].scrollIntoView({block:'center'});els[0].click();}})();"
+        "var match=function(e){var s=window.getComputedStyle(e);"
+        "if(s.display==='none'||s.visibility==='hidden')return false;"
+        "var x=((e.innerText||e.textContent||e.value||'')+'').trim().toLowerCase();return x===t;};"
+        # 1. Prefer real anchors
+        "var anchors=Array.from(document.querySelectorAll('a')).filter(match);"
+        "if(anchors.length){var a=anchors[0];a.scrollIntoView({block:'center'});"
+        "if(a.href&&!a.target){window.location.assign(a.href);}else{a.click();}return;}"
+        # 2. Fall back to other clickable elements
+        "var els=Array.from(document.querySelectorAll('button,div,span,label,input[type=submit]')).filter(match);"
+        "if(els.length){var el=els[0];el.scrollIntoView({block:'center'});"
+        # Peek inside for a wrapped anchor (CTA-card pattern)
+        "var inner=el.querySelector&&el.querySelector('a[href]');"
+        "if(inner&&inner.href&&!inner.target){window.location.assign(inner.href);return;}"
+        # Otherwise plain click
+        "el.click();"
+        # If this was a submit button, force the form submission as a safety net
+        "var isSubmit=(el.tagName==='INPUT'||el.tagName==='BUTTON')&&(el.type==='submit'||el.getAttribute&&el.getAttribute('type')==='submit');"
+        "if(isSubmit){var f=el.form||(el.closest&&el.closest('form'));"
+        "if(f){setTimeout(function(){try{if(!f._krx_submitted){f._krx_submitted=true;f.submit();}}catch(e){}},150);}}"
+        "}})();"
     )
     return {"action": "evaluate", "script": script}
 
 
 def _build_random_pick_evaluate(texts: List[str]) -> Dict[str, Any]:
-    """Pick one of N elements (by visible text) at random and click."""
+    """Pick one of N elements (by visible text) at random and click.
+
+    Same anchor-first priority + submit-button force-submit safety net
+    as _build_text_click_evaluate.
+    """
     safe = [t.replace("\\", "\\\\").replace("'", "\\'") for t in texts]
     arr = "['" + "','".join(safe) + "']"
     script = (
         "(function(){var labels=" + arr + ";"
         "var pick=labels[Math.floor(Math.random()*labels.length)].toLowerCase();"
-        "var els=Array.from(document.querySelectorAll('button,a,div,span,label'))"
-        ".filter(function(e){var s=window.getComputedStyle(e);if(s.display==='none'||s.visibility==='hidden')return false;"
-        "var x=((e.innerText||e.textContent||'')+'').trim().toLowerCase();return x===pick;});"
-        "if(els.length){els[0].scrollIntoView({block:'center'});els[0].click();}})();"
+        "var match=function(e){var s=window.getComputedStyle(e);"
+        "if(s.display==='none'||s.visibility==='hidden')return false;"
+        "var x=((e.innerText||e.textContent||'')+'').trim().toLowerCase();return x===pick;};"
+        "var anchors=Array.from(document.querySelectorAll('a')).filter(match);"
+        "if(anchors.length){var a=anchors[0];a.scrollIntoView({block:'center'});"
+        "if(a.href&&!a.target){window.location.assign(a.href);}else{a.click();}return;}"
+        "var els=Array.from(document.querySelectorAll('button,div,span,label,input[type=submit]')).filter(match);"
+        "if(els.length){var el=els[0];el.scrollIntoView({block:'center'});"
+        "var inner=el.querySelector&&el.querySelector('a[href]');"
+        "if(inner&&inner.href&&!inner.target){window.location.assign(inner.href);return;}"
+        "el.click();"
+        "var isSubmit=(el.tagName==='INPUT'||el.tagName==='BUTTON')&&(el.type==='submit'||el.getAttribute&&el.getAttribute('type')==='submit');"
+        "if(isSubmit){var f=el.form||(el.closest&&el.closest('form'));"
+        "if(f){setTimeout(function(){try{if(!f._krx_submitted){f._krx_submitted=true;f.submit();}}catch(e){}},150);}}"
+        "}})();"
     )
     return {"action": "evaluate", "script": script}
 
@@ -563,8 +617,26 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
         if text:
             step = _build_text_click_evaluate(text)
         else:
-            # No text — can't build a robust click. Fall back to coord.
-            step = {"action": "evaluate", "script": f"(function(){{var el=document.elementFromPoint({int(x)},{int(y)}); if(el){{el.scrollIntoView({{block:'center'}}); el.click();}}}})();"}
+            # No text — can't build a robust click. Fall back to coord-based
+            # click. Anchor-first priority (and inner-anchor peek) to handle
+            # the common pattern of a DIV/SPAN wrapping the real <a href>.
+            # Also force-submit if the clicked element is type=submit.
+            step = {"action": "evaluate", "script": (
+                f"(function(){{"
+                f"var el=document.elementFromPoint({int(x)},{int(y)});"
+                f"if(!el)return;"
+                f"el.scrollIntoView({{block:'center'}});"
+                f"if(el.tagName==='A'&&el.href&&!el.target){{window.location.assign(el.href);return;}}"
+                f"var inner=el.querySelector&&el.querySelector('a[href]');"
+                f"if(inner&&inner.href&&!inner.target){{window.location.assign(inner.href);return;}}"
+                f"var up=el.closest&&el.closest('a[href]');"
+                f"if(up&&up.href&&!up.target){{window.location.assign(up.href);return;}}"
+                f"el.click();"
+                f"var isSubmit=(el.tagName==='INPUT'||el.tagName==='BUTTON')&&(el.type==='submit'||el.getAttribute&&el.getAttribute('type')==='submit');"
+                f"if(isSubmit){{var f=el.form||(el.closest&&el.closest('form'));"
+                f"if(f){{setTimeout(function(){{try{{if(!f._krx_submitted){{f._krx_submitted=true;f.submit();}}}}catch(e){{}}}},150);}}}}"
+                f"}})();"
+            )}
     elif mode == "form_fill":
         # Build a selector for the input
         sel = _make_selector_for_input(info)

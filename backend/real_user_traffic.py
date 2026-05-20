@@ -3668,7 +3668,58 @@ async def _execute_automation_steps(
                         pass
                 elif action == "evaluate":
                     js = _substitute(step.get("script") or step.get("js") or "", row)
+                    # ── 2026-05 fix ───────────────────────────────────────
+                    # Visual Recorder emits `evaluate` steps that may
+                    # trigger navigation (e.g. `el.click()` on a button
+                    # whose onclick sets `location.href`, or
+                    # `window.location.assign(el.href)` from the new
+                    # anchor-navigation fix). Plain `page.evaluate()`
+                    # does not await the resulting navigation — the
+                    # next `fill` step then tries to target a selector
+                    # on the OLD page and times out.
+                    #
+                    # We snapshot the URL before, run the JS, and if
+                    # the URL has changed (or a load is in-flight)
+                    # within a short window, wait for the new page
+                    # to reach a stable state. This is safe for
+                    # non-navigating scripts because the polling
+                    # window is bounded and best-effort.
+                    _url_before = ""
+                    try:
+                        _url_before = page.url
+                    except Exception:
+                        pass
                     await page.evaluate(js)
+                    # Short polling window to detect navigation kicked
+                    # off by the JS (location.assign / location.href /
+                    # form.submit / el.click() on anchor or submit btn).
+                    # Form submits (POST → server → redirect) can take
+                    # 1-2s on slow proxies, so we poll up to ~2.5s.
+                    try:
+                        for _ in range(25):  # up to ~2.5s
+                            await page.wait_for_timeout(100)
+                            try:
+                                if page.url != _url_before:
+                                    # URL change detected — wait for new
+                                    # page to finish loading before the
+                                    # next automation step runs.
+                                    try:
+                                        await page.wait_for_load_state(
+                                            "domcontentloaded", timeout=20000
+                                        )
+                                    except Exception:
+                                        pass
+                                    try:
+                                        await page.wait_for_load_state(
+                                            "networkidle", timeout=15000
+                                        )
+                                    except Exception:
+                                        pass
+                                    break
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                 elif action == "screenshot":
                     # User-defined intermediate capture — take a real
                     # PNG and forward it to the on_screenshot callback
@@ -3801,7 +3852,33 @@ async def _dispatch_single_action(page: Page, action: str, selector: str,
             await page.evaluate(f"window.scrollBy(0,{int(step.get('y') or 500)})")
     elif action == "evaluate":
         js = _substitute(step.get("script") or step.get("js") or "", row)
+        # Mirror the navigation-aware behaviour from
+        # _execute_automation_steps so single-step self-heal and other
+        # callers also benefit from waiting on JS-triggered navigation.
+        _url_before = ""
+        try:
+            _url_before = page.url
+        except Exception:
+            pass
         await page.evaluate(js)
+        try:
+            for _ in range(25):  # up to ~2.5s
+                await page.wait_for_timeout(100)
+                try:
+                    if page.url != _url_before:
+                        try:
+                            await page.wait_for_load_state("domcontentloaded", timeout=20000)
+                        except Exception:
+                            pass
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=15000)
+                        except Exception:
+                            pass
+                        break
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 
 async def _try_self_heal(page: Page, failed_step: Dict[str, Any],

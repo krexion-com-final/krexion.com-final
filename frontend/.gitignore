@@ -24,3 +24,6 @@ yarn-error.log*
 
 # Preserve original repo convention — lockfile not committed
 yarn.lock
+
+# Internal test artifacts (do not commit)
+public/test-screenshots/
