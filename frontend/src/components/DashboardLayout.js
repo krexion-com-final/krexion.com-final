@@ -10,6 +10,7 @@ import WavyBackground from "./WavyBackground";
 import CloudModeBanner from "./CloudModeBanner";
 import LocalPCStatusBadge from "./LocalPCStatusBadge";
 import UpdateBanner from "./UpdateBanner";
+import InstalledVersionBadge from "./InstalledVersionBadge";
 import axios from "axios";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -140,11 +141,14 @@ export default function DashboardLayout({ children }) {
       >
         <div className="p-6 flex items-center justify-between" style={{ borderBottom: '1px solid rgba(79, 127, 255, 0.2)' }}>
           {sidebarOpen && (
-            branding.logo_url ? (
-              <img src={branding.logo_url} alt={branding.app_name} className="h-8 object-contain" data-testid="app-logo" />
-            ) : (
-              <h1 className="text-xl font-bold bg-gradient-to-r from-white to-[#4F7FFF] bg-clip-text text-transparent" data-testid="app-logo">{branding.app_name || "Krexion"}</h1>
-            )
+            <div className="flex items-center gap-2">
+              {branding.logo_url ? (
+                <img src={branding.logo_url} alt={branding.app_name} className="h-8 object-contain" data-testid="app-logo" />
+              ) : (
+                <h1 className="text-xl font-bold bg-gradient-to-r from-white to-[#4F7FFF] bg-clip-text text-transparent" data-testid="app-logo">{branding.app_name || "Krexion"}</h1>
+              )}
+              <InstalledVersionBadge />
+            </div>
           )}
           <Button
             variant="ghost"

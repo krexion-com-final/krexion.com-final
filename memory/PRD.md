@@ -381,3 +381,55 @@ Customer ran a RUT job and got `Page.goto: net::ERR_TUNNEL_CONNECTION_FAILED` on
 - **P3**: Affiliate / Referral system.
 - **P3**: Cloudflare Worker for `/r/<short>` redirects.
 
+
+---
+
+## 2026-05-20 — Strict Proxy Mode + Visual Recorder Auth + Failure Screenshots + Live Version Badge
+
+### User-reported issues
+1. 🔴 **CRITICAL**: Customer's real IP was being used when proxy refused the tracker domain (direct-bypass mechanism leaked TCP source IP even though X-Forwarded-For carried the proxy IP).
+2. 🎥 Visual Recorder showed blank preview when launched with an authenticated proxy (`user:pass@host:port`).
+3. 📷 RUT final-page screenshot was missing when form submit failed mid-way, AND user-defined `screenshot` capture steps placed after a failing step were silently skipped.
+4. 📌 Customer side mein installed version display unreliable — `VERSION` file never updated when admin clicked Quick Publish.
+
+### Built / Changed
+- **`backend/real_user_traffic.py`**:
+  - New env flag `RUT_ALLOW_DIRECT_BYPASS` (default **false** = STRICT mode). When strict, the localhost-bypass branch (lines ~2140-2230) is skipped and the visit fails cleanly with a clear "Strict proxy mode ON — proxy can't reach tracker domain" live step.
+  - Failure-debug full-page screenshot (`visit_NNNNN_final.png`) captured when `thank_you_reached` is False so the customer can see the actual page state (validation errors, captcha, redirect to error, etc.).
+  - `_execute_automation_steps()` now returns `remaining_steps` on failure. The main RUT loop iterates those remaining steps and best-effort runs any `{"action":"screenshot"}` steps (those become `entry.capture_screenshots[]` + Live Activity entries) so Visual Recorder Captures placed after submit are never lost.
+- **`backend/visual_recorder.py`**:
+  - New `_parse_proxy_for_playwright()` — supports `host:port`, `host:port:user:pass`, `user:pass@host:port`, `http://`, `https://`, `socks5://`, `socks4://` and emits Playwright's `{server, username, password}` dict. Authenticated residential proxies now negotiate the tunnel correctly (was previously stripped silently).
+- **`backend/releases_module.py`**:
+  - `POST /api/admin/releases` now writes the new semver to `/app/backend/VERSION` whenever `published=true`. Customer installs see the SAME version that admin published as soon as they pull the repo — no more drift between admin-panel "current" and customer "installed".
+- **`backend/server.py`**:
+  - Adds startup log line `RUT proxy mode: STRICT (no direct-bypass — proxy-only enforced)` (or `PERMISSIVE` when the env override is on) so the admin can verify from `/var/log/supervisor/backend.err.log`.
+- **Frontend**:
+  - New `components/InstalledVersionBadge.js` — polls `/api/system/public-latest` every 60s, shows e.g. `v1.0.4` next to the app name. Turns blue with a `•` dot when a newer published release exists.
+  - `DashboardLayout.js` mounts the badge inline with the Krexion logo (top-left of sidebar) — visible on every page.
+
+### Why this is safe for the existing prod codebase
+- All changes are ADDITIVE — original code paths still exist; the bypass mechanism just requires opt-in via `RUT_ALLOW_DIRECT_BYPASS=true` for backward compat.
+- No endpoints removed. No DB schema changed. No frontend routes changed.
+- Failure screenshots and capture-on-failure are best-effort try/except blocks — a transient screenshot error can NEVER fail a visit.
+
+### Tested
+- Visual Recorder proxy parser: all 9 input variants parse correctly (host:port, host:port:user:pass, user:pass@host:port, http/https/socks5 schemes, invalid + None).
+- Admin login + Quick Publish via API: VERSION file went `1.0.4 → 1.0.5` automatically.
+- Frontend: live badge correctly shows `v1.0.4` in sidebar after login (Playwright verified).
+- Backend startup log confirms `RUT proxy mode: STRICT (no direct-bypass — proxy-only enforced)`.
+
+### How to revert strict-mode (if ever needed)
+Add to `backend/.env`:
+```
+RUT_ALLOW_DIRECT_BYPASS=true
+```
+Then `sudo supervisorctl restart backend`. Original behaviour restored without code changes.
+
+### Next Action Items (for the user)
+- Save to GitHub from Emergent UI → VPS auto-deploy will roll out fixes.
+- Test a RUT job with a working US proxy that CAN reach `anyunclaimedassets.com` → confirm visit completes to thank-you page and final screenshot is captured.
+- Publish a new release (e.g. 1.0.5) from the admin Releases page → VPS will sync the VERSION file automatically; customer PCs see new version after pulling the update.
+
+### Backlog (unchanged from earlier sessions, plus)
+- **P2**: Add an admin-panel toggle to flip `RUT_ALLOW_DIRECT_BYPASS` without editing `.env` (currently env-only for safety).
+- **P2**: Show "Strict Proxy Mode: ON" badge in the RUT job-create dialog so the customer is aware.

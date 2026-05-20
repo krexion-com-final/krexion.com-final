@@ -934,6 +934,17 @@ async def _detect_validation_errors(page: Page) -> Tuple[bool, str]:
 # "krexion.com,api.krexion.com,localhost,127.0.0.1") AND the proxy's
 # tunnel failed with a 502 / tunnel error after all MAX_TUNNEL_RETRIES.
 # Set RUT_LOCALHOST_BYPASS_HOSTS="" to fully disable the bypass.
+#
+# ── 2026-05: STRICT PROXY MODE ──────────────────────────────────────────
+# The bypass mechanism uses the SERVER's network connection to register
+# the click (with X-Forwarded-For set to the proxy IP). The customer's
+# real network/server IP IS the TCP source for that one hop, which the
+# user wants to avoid at all costs. We therefore default to STRICT mode:
+# the direct bypass is DISABLED unless the operator explicitly sets
+#     RUT_ALLOW_DIRECT_BYPASS=true
+# in backend/.env. In strict mode, if no proxy can reach the tracker,
+# the visit fails cleanly — guaranteeing that NO traffic ever leaves
+# the customer's box bypassing the proxy.
 
 def _bypass_hosts() -> set:
     raw = os.environ.get(
@@ -2160,9 +2171,25 @@ async def run_real_user_traffic_job(
                             or "bad gateway" in _err_text_bp.lower()
                             or "ERR_HTTP_RESPONSE_CODE_FAILURE" in _err_text_bp
                         )
+                        # ── 2026-05: STRICT PROXY MODE (default on) ────────
+                        # User requirement: job kabhi customer IP se na chale.
+                        # Direct bypass would use server's network connection
+                        # (with X-Forwarded-For forging the proxy IP), so the
+                        # tracker's HTTP backend logs see the SERVER IP at
+                        # the TCP layer — a real IP leak from the customer's
+                        # perspective. We now require RUT_ALLOW_DIRECT_BYPASS
+                        # to be explicitly set to "true" to enable the
+                        # fallback. By default we skip it and let the visit
+                        # fail cleanly so the user knows their proxy can't
+                        # reach the tracker.
+                        _strict_proxy = (
+                            os.environ.get("RUT_ALLOW_DIRECT_BYPASS", "false")
+                            .strip().lower() not in ("1", "true", "yes", "on")
+                        )
                         if (
                             (_is_tunnel_bp or _is_502_bp)
                             and _url_host_matches_bypass(target_url)
+                            and not _strict_proxy
                         ):
                             push_live_step(
                                 job_id, i + 1, "bypass", "info",
@@ -2225,6 +2252,22 @@ async def run_real_user_traffic_job(
                                     "Could not detect proxy exit IP — bypass skipped.",
                                 )
                         if goto_exc is not None:
+                            # ── 2026-05: Strict proxy mode notice ───────────
+                            # When strict mode blocked the direct-bypass
+                            # fallback, surface the reason so the user knows
+                            # to use a different proxy provider that can
+                            # actually reach the tracker domain.
+                            if (
+                                _strict_proxy
+                                and (_is_tunnel_bp or _is_502_bp)
+                                and _url_host_matches_bypass(target_url)
+                            ):
+                                push_live_step(
+                                    job_id, i + 1, "bypass", "failed",
+                                    "Strict proxy mode ON — proxy can't reach tracker domain. "
+                                    "Visit failed (no direct fallback). "
+                                    "Use a residential proxy that allows your tracker domain.",
+                                )
                             raise goto_exc
                     entry["http_status"] = str(resp.status) if resp else ""
                     # Detect chrome-error pages — happens when the residential
@@ -2453,6 +2496,32 @@ async def run_real_user_traffic_job(
                     entry["status"] = step_res["status"]
                     if step_res.get("error"):
                         entry["error"] = step_res["error"]
+                    # ── 2026-05: best-effort `screenshot` steps on failure ──
+                    # If automation failed mid-way, the user's later
+                    # {"action":"screenshot"} steps (added via Visual
+                    # Recorder's Capture tool) would normally be lost.
+                    # Run any remaining screenshot steps now as
+                    # best-effort so the customer can see WHAT the page
+                    # looked like when the submit broke (often reveals
+                    # validation errors, captcha, blank pages, etc.).
+                    if (
+                        step_res.get("status") == "failed"
+                        and step_res.get("remaining_steps")
+                        and automation_steps
+                    ):
+                        for _rem in step_res["remaining_steps"]:
+                            try:
+                                if (
+                                    isinstance(_rem, dict)
+                                    and (_rem.get("action") or "").strip().lower() == "screenshot"
+                                ):
+                                    _png = await page.screenshot(
+                                        type="png", timeout=8000, full_page=True
+                                    )
+                                    _nm = str(_rem.get("name") or "post_failure").strip() or "post_failure"
+                                    await _on_user_capture(0, _nm, _png)
+                            except Exception:  # noqa: BLE001
+                                pass
                     # FlashRewards-style: track survey answers + deals
                     # completed on this attempt (if helper ran). These
                     # surface in the UI report and are required for
@@ -2806,6 +2875,31 @@ async def run_real_user_traffic_job(
                                 logger.debug(f"target screenshot compare failed: {e}")
                     except Exception as e:
                         logger.debug(f"thank-you screenshot failed: {e}")
+                else:
+                    # ── 2026-05: Failure-debug screenshot ───────────────────
+                    # Form/visit didn't reach the thank-you page. Capture
+                    # the page as-is so the customer can see WHY in the UI
+                    # (e.g. validation error, captcha, blank, redirect to
+                    # error page, etc.). Saved as `_final.png` to avoid
+                    # confusion with successful conversion shots.
+                    try:
+                        fail_shot = shots_dir / f"visit_{i+1:05d}_final.png"
+                        # short settle so animations / errors render
+                        await asyncio.sleep(0.5)
+                        await page.screenshot(path=str(fail_shot), full_page=True, timeout=6000)
+                        entry["final_screenshot"] = fail_shot.name
+                        # If no other screenshot field is set, use this for
+                        # the visit row preview so the user always sees
+                        # SOMETHING.
+                        if not entry.get("screenshot"):
+                            entry["screenshot"] = fail_shot.name
+                        push_live_step(
+                            job_id, i + 1, "final", "info",
+                            f"📷 4/4 Final page (no conversion) → {entry.get('final_url', '')[:90]}",
+                            screenshot=fail_shot.name,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug(f"failure screenshot failed: {e}")
 
                 # Final live step — always push, include screenshot if we have one
                 push_live_step(
@@ -3612,7 +3706,8 @@ async def _execute_automation_steps(
                             return {"status": "failed",
                                     "error": f"Step {idx+1} ({action}) failed after self-heal: {str(e2)[:200]}",
                                     "executed_steps": executed}
-                return {"status": "failed", "error": f"Step {idx+1} ({action}) failed: {str(e)[:200]}", "executed_steps": executed}
+                return {"status": "failed", "error": f"Step {idx+1} ({action}) failed: {str(e)[:200]}", "executed_steps": executed,
+                        "failed_at_idx": idx, "remaining_steps": list(steps[idx+1:])}
         return {"status": "ok", "executed_steps": executed}
     except Exception as e:
         return {"status": "failed", "error": f"Automation crashed: {str(e)[:200]}", "executed_steps": executed}

@@ -3910,6 +3910,16 @@ logger.info(
     f"throttle@{_RUT_MEM_THROTTLE_PCT}%, resume@{_RUT_MEM_RESUME_PCT}%"
 )
 
+# 2026-05: Surface the strict-proxy setting on startup so the admin can
+# see at a glance whether direct-bypass leak protection is active.
+_RUT_STRICT_PROXY = (
+    os.environ.get("RUT_ALLOW_DIRECT_BYPASS", "false").strip().lower()
+    not in ("1", "true", "yes", "on")
+)
+logger.info(
+    f"RUT proxy mode: {'STRICT (no direct-bypass — proxy-only enforced)' if _RUT_STRICT_PROXY else 'PERMISSIVE (direct-bypass enabled for tracker domains)'}"
+)
+
 
 def _backend_rss_pct() -> float:
     """Return current process RSS as a percentage of the container

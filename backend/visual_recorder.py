@@ -48,6 +48,58 @@ SESSIONS_ROOT = Path(__file__).parent / "visual_recorder_sessions"
 SESSIONS_ROOT.mkdir(parents=True, exist_ok=True)
 
 
+# ── Proxy parsing ───────────────────────────────────────────────────────
+# Visual Recorder accepts the same flexible proxy string format used by
+# the rest of Krexion (RUT, AdsPower, etc.):
+#   host:port
+#   host:port:user:pass
+#   user:pass@host:port
+#   http://user:pass@host:port
+#   socks5://user:pass@host:port
+# Returns Playwright's proxy dict ({server, username, password}) or None
+# on invalid input. Without this, credentials were silently dropped and
+# authenticated residential proxies returned ERR_TUNNEL_CONNECTION_FAILED
+# (visible to the user as a blank live-preview).
+def _parse_proxy_for_playwright(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not raw:
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    scheme = "http"
+    for prefix, sch in (("http://", "http"), ("https://", "https"),
+                        ("socks5://", "socks5"), ("socks4://", "socks4")):
+        if s.lower().startswith(prefix):
+            scheme = sch
+            s = s[len(prefix):]
+            break
+    user, pwd = None, None
+    if "@" in s:
+        auth, s = s.rsplit("@", 1)
+        if ":" in auth:
+            user, pwd = auth.split(":", 1)
+        else:
+            user = auth
+    parts = s.split(":")
+    if len(parts) == 2:
+        host, port = parts
+    elif len(parts) == 4:
+        # host:port:user:pass
+        host, port, user, pwd = parts
+    else:
+        return None
+    try:
+        int(port)
+    except ValueError:
+        return None
+    out: Dict[str, Any] = {"server": f"{scheme}://{host}:{port}"}
+    if user:
+        out["username"] = user
+    if pwd:
+        out["password"] = pwd
+    return out
+
+
 # ── Step builders ───────────────────────────────────────────────────────
 def _build_text_click_evaluate(text: str) -> Dict[str, Any]:
     """JS that finds an element by visible text and clicks it.
@@ -235,8 +287,19 @@ async def _init_browser_inner(sess: RecorderSession) -> None:
         "timeout": LAUNCH_TIMEOUT_S * 1000,  # Playwright launch budget
     }
     if sess.proxy:
-        proxy_str = sess.proxy if sess.proxy.startswith(("http://", "socks5://", "https://")) else f"http://{sess.proxy}"
-        launch_opts["proxy"] = {"server": proxy_str}
+        # 2026-05: Use full proxy parser so user:pass@host:port style
+        # residential proxies (proxy-jet, brightdata, etc.) actually
+        # authenticate. Previously credentials were silently dropped and
+        # the recorder showed a blank preview because the proxy refused
+        # the tunnel.
+        parsed_proxy = _parse_proxy_for_playwright(sess.proxy)
+        if parsed_proxy:
+            launch_opts["proxy"] = parsed_proxy
+        else:
+            logger.warning(
+                f"Visual recorder: could not parse proxy '{sess.proxy[:60]}'. "
+                "Falling back to no-proxy mode."
+            )
 
     sess.browser = await pw.chromium.launch(**launch_opts)
     sess.context = await sess.browser.new_context(

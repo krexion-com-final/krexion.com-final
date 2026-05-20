@@ -276,6 +276,17 @@ def _build_admin_endpoints(get_admin_dep):
         }
         await _db.app_releases.insert_one(doc)
         doc.pop("_id", None)
+        # ── 2026-05: Sync VERSION file with the published release so the
+        # customer's local install shows the SAME number after pulling
+        # the repo. Without this the file stays at whatever was last
+        # committed (e.g. 1.0.4) and customers always see an outdated
+        # version even after admin clicks Quick Publish.
+        if doc.get("published"):
+            try:
+                VERSION_FILE.write_text(ver + "\n", encoding="utf-8")
+                logger.info(f"VERSION file updated to {ver}")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Could not update VERSION file: {e}")
         return doc
 
     @router.get("/api/admin/releases")

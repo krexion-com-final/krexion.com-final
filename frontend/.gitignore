@@ -21,3 +21,6 @@
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Preserve original repo convention — lockfile not committed
+yarn.lock
