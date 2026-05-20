@@ -888,6 +888,19 @@ async def type_text(sess: RecorderSession, selector: str, value: str, header_nam
     This makes one-click "bind to column" recording workflow feasible.
     """
     sess.touch()
+    # ── 2026-05 (defense-in-depth) ──
+    # Some older clients send `value="{{first}}"` (the literal
+    # placeholder) when binding to a header — that string was then
+    # typed into the live form, the field failed validation, and the
+    # user couldn't submit. We detect a `{{...}}` placeholder in
+    # `value` and treat it as a binding marker — the live browser is
+    # filled with the resolved sample value, not the literal text.
+    import re
+    placeholder_match = re.fullmatch(r"\s*\{\{\s*([^}]+?)\s*\}\}\s*", value or "")
+    if placeholder_match and not header_name:
+        header_name = placeholder_match.group(1).strip()
+    if placeholder_match:
+        value = ""  # treat as empty so the sample-row branch fires
     # Resolve the value to ACTUALLY type into the live browser. The
     # recorded JSON step still uses the `{{header}}` placeholder so
     # RUT replays with the real lead's data.
@@ -909,9 +922,10 @@ async def type_text(sess: RecorderSession, selector: str, value: str, header_nam
                 extra["fill_warning"] = f"{type(e).__name__}: {str(e)[:100]}"
         elif header_name:
             extra["sample_hint"] = (
-                f"No sample value for column '{header_name}'. The step is "
-                "recorded; provide sample_row when starting the recorder "
-                "so the live form fills automatically during recording."
+                f"No sample value for column '{header_name}'. Upload an "
+                "Excel file BEFORE starting the recorder so the live form "
+                "fills automatically (you'll be able to submit and "
+                "continue recording on the next page)."
             )
 
     template = f"{{{{{header_name}}}}}" if header_name else value

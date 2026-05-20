@@ -544,18 +544,31 @@ export default function VisualRecorderPage() {
     if (!pendingFormFill || !sessionId) return;
     setBusy(true);
     try {
+      // ── 2026-05 fix ──
+      // When binding to a header (no plain value), send `value=""` and
+      // let the backend resolve the sample value via `sample_row[header]`.
+      // Previously we sent `{{first}}` literally which got typed into the
+      // live form input (visible as `{{first}}` text in the field) — the
+      // form then failed validation and the user couldn't proceed.
+      const sendValue = plainValue || "";
       const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/type`, {
         method: "POST",
         headers: authH(),
         body: JSON.stringify({
           selector: pendingFormFill.selector,
-          value: plainValue || `{{${headerName}}}`,
+          value: sendValue,
           header_name: headerName || null,
         }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
-      toast.success(headerName ? `Bound to {{${headerName}}}` : "Plain value set");
+      const filled = d.filled_sample;
+      toast.success(
+        headerName
+          ? `Bound to {{${headerName}}}${filled ? ` · live page filled with "${filled}"` : ""}`
+          : "Plain value set"
+      );
+      if (d.sample_hint) toast(d.sample_hint, { icon: "ℹ️" });
       setPendingFormFill(null);
       refreshState();
       refreshScreenshot();
