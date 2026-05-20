@@ -213,6 +213,12 @@ class RecorderSession:
     proxy: Optional[str]
     user_agent: Optional[str]
     headers: List[str]                          # Excel column names for form-fill binding
+    # ── 2026-05 ──
+    # Sample data row used DURING recording so the form fills with
+    # realistic values (lets the user proceed past form validation
+    # and record steps on the page that comes AFTER submit). At
+    # replay time the RUT engine substitutes the actual lead row.
+    sample_row: Dict[str, Any] = field(default_factory=dict)
     viewport: Tuple[int, int] = DEFAULT_VIEWPORT
     steps: List[Dict[str, Any]] = field(default_factory=list)
     last_activity: float = field(default_factory=time.time)
@@ -250,6 +256,7 @@ async def start_session(
     proxy: Optional[str] = None,
     user_agent: Optional[str] = None,
     headers: Optional[List[str]] = None,
+    sample_row: Optional[Dict[str, Any]] = None,
 ) -> RecorderSession:
     """Create a session and kick off browser launch in the background.
 
@@ -257,6 +264,11 @@ async def start_session(
     poll `/state` until `state` becomes "ready" or "error". This avoids
     tying up a request thread for 30+ seconds while a slow residential
     proxy negotiates a TCP tunnel.
+
+    `sample_row` (optional): one dict of Excel column → value used to
+    populate form inputs DURING recording so the user can proceed past
+    form validation and record steps on the post-submit page. At RUT
+    replay time the actual lead row substitutes via `{{column}}`.
     """
     if len(_SESSIONS) >= MAX_CONCURRENT_SESSIONS:
         # Reap before refusing
@@ -268,6 +280,13 @@ async def start_session(
             )
 
     sid = str(uuid.uuid4())
+    # Normalise sample_row keys to lowercase for case-insensitive lookups
+    norm_sample: Dict[str, Any] = {}
+    if sample_row:
+        for k, v in sample_row.items():
+            if k is None:
+                continue
+            norm_sample[str(k).strip().lower()] = v
     sess = RecorderSession(
         session_id=sid,
         user_id=user_id,
@@ -278,6 +297,7 @@ async def start_session(
             "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
         ),
         headers=headers or [],
+        sample_row=norm_sample,
     )
     sess.lock = asyncio.Lock()
     sess.state = "starting"
@@ -384,18 +404,33 @@ async def _init_browser_inner(sess: RecorderSession) -> None:
     sess.steps.append(_build_wait_load(60000))
     sess.steps.append(_build_wait(2000))
 
-    # Navigate (best-effort — even if goto fails we keep the session
-    # so the user can navigate manually via /navigate).
-    # Use networkidle for better compatibility with slow proxies
+    # Navigate — proxy-friendly strategy:
+    # 1. First try `domcontentloaded` with a SHORT timeout so the user
+    #    gets a visible page within a few seconds even on slow
+    #    residential proxies (was previously blocking on networkidle
+    #    for the full 35s — looked like "page never loaded" to the
+    #    customer).
+    # 2. Then optionally chase `load` in the background (best-effort)
+    #    so analytics scripts finish without blocking interaction.
+    # ── 2026-05 (proxy fix) ──
     try:
-        await sess.page.goto(sess.url, wait_until="networkidle", timeout=GOTO_TIMEOUT_MS)
+        await sess.page.goto(sess.url, wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
     except Exception as e:
-        logger.warning(f"Initial goto failed for {sess.session_id}: {e}")
-        # If networkidle fails, try with just domcontentloaded as fallback
+        logger.warning(f"Initial goto (domcontentloaded) failed for {sess.session_id}: {e}")
+        # Last-resort: a bare `commit` so at least the URL changes and
+        # the next /screenshot poll returns SOMETHING the user can see.
         try:
-            await sess.page.goto(sess.url, wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
+            await sess.page.goto(sess.url, wait_until="commit", timeout=GOTO_TIMEOUT_MS)
         except Exception as e2:
             logger.warning(f"Fallback goto also failed for {sess.session_id}: {e2}")
+
+    # Best-effort: wait for `load` for up to 6s more so the page is
+    # interactive. This runs AFTER domcontentloaded so a stuck
+    # advertiser tracker can't block the initial preview.
+    try:
+        await sess.page.wait_for_load_state("load", timeout=6000)
+    except Exception:
+        pass
 
 
 async def _cleanup_handles(sess: RecorderSession) -> None:
@@ -640,11 +675,53 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
     elif mode == "form_fill":
         # Build a selector for the input
         sel = _make_selector_for_input(info)
-        # If a header is mapped, the actual fill step is added later via /type
-        # Here we just record a "wait_for_selector" + "click" so the input is focused
-        step = {"action": "wait_for_selector", "selector": sel, "timeout": 8000, "optional": True}
         extra["selector"] = sel
         extra["header_name"] = header_name
+
+        # ── 2026-05 ──
+        # If a header is mapped AND the recorder has a sample_row,
+        # AUTO-FILL the live browser input with the sample value so
+        # the user can move past form validation and record steps on
+        # the NEXT page. The recorded step still uses the {{header}}
+        # template — at RUT replay time the real lead row substitutes.
+        sample_val: Optional[str] = None
+        if header_name:
+            key = str(header_name).strip().lower()
+            if key in sess.sample_row:
+                raw = sess.sample_row[key]
+                if raw is not None and str(raw).strip() != "":
+                    sample_val = str(raw)
+        # Always emit a real `fill` step in the JSON so the runner
+        # populates the input with the lead's value. The placeholder
+        # `{{header_name}}` is substituted by the RUT engine's
+        # _substitute() function. If no header is mapped yet, we still
+        # add a wait_for_selector so the user can /type later.
+        if header_name:
+            step = {
+                "action": "fill",
+                "selector": sel,
+                "value": "{{" + header_name + "}}",
+                "optional": True,
+            }
+            # During recording, also fill the live browser with the
+            # sample value so the page sees a populated field.
+            if sample_val is not None:
+                try:
+                    await sess.page.fill(sel, sample_val, timeout=4000)
+                    extra["filled_sample"] = sample_val[:30]
+                except Exception as e:  # noqa: BLE001
+                    extra["fill_warning"] = (
+                        f"Selector did not match in the live page ({type(e).__name__}). "
+                        "Step recorded anyway; verify the column name matches the field."
+                    )
+            else:
+                extra["sample_hint"] = (
+                    "No sample data for this column. Pass `sample_row` when "
+                    "starting the recorder (or upload an Excel data file) so "
+                    "forms fill automatically during recording."
+                )
+        else:
+            step = {"action": "wait_for_selector", "selector": sel, "timeout": 8000, "optional": True}
     elif mode == "random":
         # Don't add a step — caller will batch via /group-random
         extra["pending_random_text"] = text
@@ -714,6 +791,15 @@ async def bind_dropdown(
 
     `match_by` is either 'label' (visible text — default, most forgiving)
     or 'value' (the option's value attribute).
+
+    ── 2026-05 ──
+    During recording we ALSO call `page.select_option()` on the live
+    browser so the dropdown VISIBLY changes and the form's onchange
+    handlers fire. This is essential because many offer-page forms
+    enable/show subsequent fields only after a dropdown is set, and
+    server-side validation blocks submit if any required select is
+    untouched. The placeholder `{{header}}` remains in the recorded
+    step → RUT engine substitutes per-lead at replay time.
     """
     sess.touch()
     if not selector:
@@ -721,16 +807,53 @@ async def bind_dropdown(
     if not value and not header_name:
         return {"recorded": False, "error": "either value or header_name required"}
     chosen = f"{{{{{header_name}}}}}" if header_name else str(value)
+    match_by_norm = match_by if match_by in ("label", "value") else "label"
     step = {
         "action": "select",
         "selector": selector,
         "value": chosen,
-        "match_by": match_by if match_by in ("label", "value") else "label",
+        "match_by": match_by_norm,
     }
     sess.steps.append(step)
     # Brief settle wait so subsequent steps see the post-change DOM.
     sess.steps.append(_build_wait(500))
-    return {"recorded": True, "step": step}
+
+    # Live-browser select using literal value OR sample-row lookup.
+    live_val: Optional[str] = None
+    if value:
+        live_val = str(value)
+    elif header_name:
+        key = str(header_name).strip().lower()
+        if key in sess.sample_row:
+            raw = sess.sample_row[key]
+            if raw is not None and str(raw).strip() != "":
+                live_val = str(raw)
+    extra: Dict[str, Any] = {}
+    if live_val is not None:
+        async with sess.lock:
+            try:
+                if match_by_norm == "value":
+                    await sess.page.select_option(selector, value=live_val, timeout=4000)
+                else:
+                    # 'label' — try label first (most forgiving), fall back to value
+                    try:
+                        await sess.page.select_option(selector, label=live_val, timeout=3000)
+                    except Exception:
+                        await sess.page.select_option(selector, value=live_val, timeout=3000)
+                extra["selected_sample"] = live_val[:30]
+            except Exception as e:  # noqa: BLE001
+                extra["select_warning"] = (
+                    f"Live <select> did not accept '{live_val}' ({type(e).__name__}). "
+                    "Step recorded anyway; verify the option matches one of the dropdown values."
+                )
+    else:
+        extra["sample_hint"] = (
+            "No sample data — provide a literal `value` or supply "
+            "`sample_row` at session start so this dropdown gets a "
+            "value during recording (so you can submit the form and "
+            "continue recording on the NEXT page)."
+        )
+    return {"recorded": True, "step": step, **extra}
 
 
 def _make_selector_for_input(info: Dict[str, Any]) -> str:
@@ -757,19 +880,45 @@ async def type_text(sess: RecorderSession, selector: str, value: str, header_nam
     """Type into the element matched by `selector`. If header_name is set,
     the recorded step uses `{{header_name}}` placeholder so the RUT engine
     substitutes from the Excel row at runtime.
+
+    ── 2026-05 ──
+    If `value` is empty AND a `header_name` is set, automatically fill
+    the live browser with the value from `sample_row[header_name]` so
+    the user can navigate to the next page without manually typing.
+    This makes one-click "bind to column" recording workflow feasible.
     """
     sess.touch()
+    # Resolve the value to ACTUALLY type into the live browser. The
+    # recorded JSON step still uses the `{{header}}` placeholder so
+    # RUT replays with the real lead's data.
+    live_val = value
+    if (not live_val) and header_name:
+        key = str(header_name).strip().lower()
+        if key in sess.sample_row:
+            raw = sess.sample_row[key]
+            if raw is not None and str(raw).strip() != "":
+                live_val = str(raw)
+    extra: Dict[str, Any] = {}
     async with sess.lock:
-        try:
-            await sess.page.fill(selector, value, timeout=6000)
-        except Exception as e:
-            logger.warning(f"type fill failed selector={selector}: {e}")
+        if live_val:
+            try:
+                await sess.page.fill(selector, live_val, timeout=6000)
+                extra["filled_sample"] = live_val[:30]
+            except Exception as e:
+                logger.warning(f"type fill failed selector={selector}: {e}")
+                extra["fill_warning"] = f"{type(e).__name__}: {str(e)[:100]}"
+        elif header_name:
+            extra["sample_hint"] = (
+                f"No sample value for column '{header_name}'. The step is "
+                "recorded; provide sample_row when starting the recorder "
+                "so the live form fills automatically during recording."
+            )
 
     template = f"{{{{{header_name}}}}}" if header_name else value
     step = _build_fill_step(selector, template)
     sess.steps.append(step)
     sess.steps.append(_build_wait(800))
-    return {"recorded": True, "step": step, "header_name": header_name}
+    return {"recorded": True, "step": step, "header_name": header_name, **extra}
 
 
 async def add_wait_step(sess: RecorderSession, ms: int) -> Dict[str, Any]:

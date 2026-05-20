@@ -98,6 +98,10 @@ export default function VisualRecorderPage() {
   const [headers, setHeaders] = useState([]);
   const [headersInput, setHeadersInput] = useState("");
   const [excelFile, setExcelFile] = useState(null);
+  // 2026-05: first data row → auto-fill form inputs during recording
+  // so the user can submit forms and continue recording on the
+  // post-submit page. Empty {} means no sample data yet.
+  const [sampleRow, setSampleRow] = useState({});
 
   const [sessionId, setSessionId] = useState(null);
   const [sessionState, setSessionState] = useState("starting"); // starting | ready | error | stopped
@@ -216,7 +220,24 @@ export default function VisualRecorderPage() {
       const hdr = (rows[0] || []).filter((h) => String(h).trim()).map((h) => String(h).trim());
       setHeaders(hdr);
       setHeadersInput(hdr.join(", "));
-      toast.success(`Detected ${hdr.length} columns: ${hdr.slice(0, 5).join(", ")}${hdr.length > 5 ? "…" : ""}`);
+      // 2026-05: Build sample_row from the FIRST data row (row 2 of the
+      // spreadsheet). This row is used to auto-fill form inputs during
+      // recording so the user can submit forms and continue recording
+      // on the next page.
+      const first = rows[1] || [];
+      const sample = {};
+      hdr.forEach((h, i) => {
+        const v = first[i];
+        if (v !== undefined && v !== null && String(v).trim() !== "") {
+          sample[h] = v;
+        }
+      });
+      setSampleRow(sample);
+      const sampleCount = Object.keys(sample).length;
+      toast.success(
+        `Detected ${hdr.length} columns: ${hdr.slice(0, 5).join(", ")}${hdr.length > 5 ? "…" : ""}` +
+        (sampleCount > 0 ? ` · using ${sampleCount} sample values for live form-fill` : "")
+      );
     } catch (err) {
       toast.error(`Excel parse failed: ${err.message}`);
     }
@@ -248,6 +269,10 @@ export default function VisualRecorderPage() {
           proxy: proxy.trim() || null,
           user_agent: ua.trim() || null,
           headers: headers,
+          // 2026-05: pass first data row so form inputs auto-fill
+          // during recording (lets the user submit forms and continue
+          // recording on the post-submit page)
+          sample_row: Object.keys(sampleRow || {}).length ? sampleRow : null,
         }),
       });
       const d = await r.json();

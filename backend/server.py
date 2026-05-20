@@ -12982,6 +12982,11 @@ class VRStartReq(BaseModel):
     proxy: Optional[str] = None
     user_agent: Optional[str] = None
     headers: Optional[List[str]] = None  # excel column names
+    # 2026-05: One sample data row used DURING recording so form
+    # inputs auto-fill with realistic values (so the user can submit
+    # forms and continue recording on the POST-submit page). At RUT
+    # replay time the real lead's row substitutes via {{column}}.
+    sample_row: Optional[Dict[str, Any]] = None
 
 
 @api_router.post("/visual-recorder/start")
@@ -13000,6 +13005,7 @@ async def vr_start(
             proxy=req.proxy,
             user_agent=req.user_agent,
             headers=req.headers or [],
+            sample_row=req.sample_row or None,
         )
     except RuntimeError as e:
         raise HTTPException(status_code=429, detail=str(e))

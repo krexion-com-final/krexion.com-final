@@ -491,3 +491,48 @@ Compounding issue: **the runner's `evaluate` step did NOT await JS-triggered nav
 ### Next Action Items
 - **User**: "Save to Github" → VPS auto-deploy → existing recorded JSONs will now work without re-recording.
 - For NEW recordings, the generator produces the corrected JS straight away.
+
+---
+
+## 2026-05-20 (Session 4) — Visual Recorder: proxy + sample-row auto-fill + dropdown live-select
+
+### User-reported issues
+1. **Proxy ke saath VR mein page hi nahi load hota** — visual preview blank rehti.
+2. **Form fields mein header bind karne pe live page mein data fill nahi hota** — user submit nahi kar pata, agle page tak nahi pohonchta, JSON aage tak record nahi hota.
+3. **Bohot offers proxy-only hain** (country restriction) — VR proxy ke saath kaam karna chahiye.
+
+### Root cause
+- VR was using `wait_until="networkidle"` in initial `page.goto` — many residential proxies never reach networkidle (ad pixels/analytics keep firing). Customer saw a 30s+ blank preview.
+- `click_at(mode="form_fill")` ne sirf `wait_for_selector` step record kiya — actual `page.fill()` nahi karta tha.
+- `bind_dropdown` ne sirf `select` step record kiya — actual `page.select_option()` nahi karta tha.
+- `type_text` ne live fill kiya BUT only if user provided a literal value; one-click "bind to column" workflow se field empty rehta.
+
+### Fixed (additive — no breakage)
+**`backend/visual_recorder.py`**:
+- New `RecorderSession.sample_row` field (case-insensitive lookup) carries one Excel-row dict throughout the session.
+- `_init_browser_inner`: now does `goto(wait_until="domcontentloaded", timeout=35s)` → fast preview → THEN best-effort `wait_for_load_state("load", timeout=6s)` for analytics. Falls back to `commit` if domcontentloaded itself fails. Proxy preview now ready in ~10s consistently.
+- `click_at(mode="form_fill")`: when `header_name` is provided, the recorded step is now `{"action":"fill","selector":sel,"value":"{{header}}","optional":true}` (was just a `wait_for_selector`). Live browser also fills with `sess.sample_row[header]` so the user sees the realistic value and form validation passes.
+- `bind_dropdown`: now calls `page.select_option()` on the live browser with literal value (if user supplied) OR `sess.sample_row[header]` (if header bound). Label-first match, value-fallback.
+- `type_text`: when `value` is empty AND `header_name` is set, auto-fills the live browser with `sess.sample_row[header]`. Records `{{header}}` placeholder regardless.
+
+**`backend/server.py`**:
+- `VRStartReq` now accepts optional `sample_row: Dict[str, Any]`.
+- `vr_start` endpoint passes it through to `vr.start_session`.
+
+**`frontend/src/pages/VisualRecorderPage.js`**:
+- `onExcelUpload` now also extracts ROW 2 of the spreadsheet as `sampleRow` state and shows a toast hint ("using N sample values for live form-fill").
+- `startRecording` posts `sample_row` to the backend.
+
+### Tested END-TO-END (2026-05-20)
+- **Proxy + page load**: started VR session with ProxyJet proxy → page reached `ready` state in **~10s** (was hanging at 30s+ before). Screenshot returned a 49 KB JPEG showing the actual offer landing page.
+- **Form-fill auto-fill**: navigated to `indexform.php`, clicked at coords matching `#first` input with `mode=form_fill, header_name=first`. Response: `selector=#first tag=INPUT filled=JohnDoe-SampleFill` → live page screenshot shows the input populated with the sample value (verified visually). Recorded JSON: `{"action":"fill","selector":"#first","value":"{{first}}","optional":true}` ✓.
+
+### Why this is safe for the existing prod codebase
+- All recorded JSONs from BEFORE this change still work — RUT engine's `_substitute()` handles `{{column}}` placeholders identically.
+- Sessions started WITHOUT a sample_row still work — fields just stay empty during recording (same as before), so the user can type manually via `/type`.
+- Live browser fills are best-effort try/except — any selector mismatch surfaces as a `fill_warning` field in the response, not a session failure.
+- No env vars added, no schema changes, no breaking API changes.
+
+### Files changed
+- `backend/visual_recorder.py`, `backend/server.py`
+- `frontend/src/pages/VisualRecorderPage.js`
