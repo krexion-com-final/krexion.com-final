@@ -2171,20 +2171,33 @@ async def run_real_user_traffic_job(
                             or "bad gateway" in _err_text_bp.lower()
                             or "ERR_HTTP_RESPONSE_CODE_FAILURE" in _err_text_bp
                         )
-                        # ── 2026-05: STRICT PROXY MODE (default on) ────────
-                        # User requirement: job kabhi customer IP se na chale.
-                        # Direct bypass would use server's network connection
-                        # (with X-Forwarded-For forging the proxy IP), so the
-                        # tracker's HTTP backend logs see the SERVER IP at
-                        # the TCP layer — a real IP leak from the customer's
-                        # perspective. We now require RUT_ALLOW_DIRECT_BYPASS
-                        # to be explicitly set to "true" to enable the
-                        # fallback. By default we skip it and let the visit
-                        # fail cleanly so the user knows their proxy can't
-                        # reach the tracker.
+                        # ── 2026-05 (revised): TRACKER-DOMAIN BYPASS ─────
+                        # This bypass ONLY fires when the target URL is one
+                        # of the user's OWN tracker domains (default
+                        # `krexion.com, api.krexion.com, localhost,
+                        # 127.0.0.1`). In that case the click registration
+                        # is a SERVER→SERVER hit to the user's own backend
+                        # (no external party sees the customer IP — it's
+                        # internal infrastructure), and the proxy's exit
+                        # IP is recorded as the click IP via the
+                        # X-Forwarded-For header. The browser still
+                        # navigates to the offer URL THROUGH the proxy.
+                        #
+                        # External offer URLs (e.g. anyunclaimedassets.com)
+                        # NEVER take this path — they always go through
+                        # the residential proxy or fail.
+                        #
+                        # Default = enabled, because residential proxies
+                        # (ProxyJet, BrightData, etc.) routinely block
+                        # custom tracker domains and without this bypass
+                        # NO visit can ever complete. Set
+                        # `RUT_STRICT_PROXY_ONLY=true` in backend/.env to
+                        # disable even the tracker-domain bypass and force
+                        # ALL hits — even your own tracker — through the
+                        # proxy.
                         _strict_proxy = (
-                            os.environ.get("RUT_ALLOW_DIRECT_BYPASS", "false")
-                            .strip().lower() not in ("1", "true", "yes", "on")
+                            os.environ.get("RUT_STRICT_PROXY_ONLY", "false")
+                            .strip().lower() in ("1", "true", "yes", "on")
                         )
                         if (
                             (_is_tunnel_bp or _is_502_bp)
@@ -2193,7 +2206,8 @@ async def run_real_user_traffic_job(
                         ):
                             push_live_step(
                                 job_id, i + 1, "bypass", "info",
-                                "Proxy refused tracker domain — trying direct bypass (no proxy)…",
+                                "Proxy can't reach your own tracker — internal server→server hit "
+                                "(click will still be recorded as the PROXY exit IP)…",
                             )
                             _exit_ip_for_bypass = await _get_exit_ip_via_proxy(proxy)
                             if _exit_ip_for_bypass:
@@ -2203,8 +2217,9 @@ async def run_real_user_traffic_job(
                                 if _bypass_offer_url:
                                     push_live_step(
                                         job_id, i + 1, "bypass", "ok",
-                                        f"Click registered via direct bypass as {_exit_ip_for_bypass}. "
-                                        f"Browser → {_bypass_offer_url[:100]}",
+                                        f"✓ Click registered as PROXY IP {_exit_ip_for_bypass} "
+                                        f"(your machine's IP is NOT exposed — tracker is on your "
+                                        f"own server). Browser → {_bypass_offer_url[:90]}",
                                     )
                                     try:
                                         # NOTE: We do NOT rebind the closure
@@ -2253,10 +2268,10 @@ async def run_real_user_traffic_job(
                                 )
                         if goto_exc is not None:
                             # ── 2026-05: Strict proxy mode notice ───────────
-                            # When strict mode blocked the direct-bypass
-                            # fallback, surface the reason so the user knows
-                            # to use a different proxy provider that can
-                            # actually reach the tracker domain.
+                            # When strict mode blocked the tracker-bypass,
+                            # surface a clear reason so the user knows to
+                            # either disable strict mode or use a proxy
+                            # provider that allows their tracker domain.
                             if (
                                 _strict_proxy
                                 and (_is_tunnel_bp or _is_502_bp)
@@ -2264,9 +2279,10 @@ async def run_real_user_traffic_job(
                             ):
                                 push_live_step(
                                     job_id, i + 1, "bypass", "failed",
-                                    "Strict proxy mode ON — proxy can't reach tracker domain. "
-                                    "Visit failed (no direct fallback). "
-                                    "Use a residential proxy that allows your tracker domain.",
+                                    "Strict proxy mode ON — even your own tracker domain "
+                                    "is forced through the proxy. The proxy provider rejected "
+                                    "the tunnel. Disable RUT_STRICT_PROXY_ONLY or use a proxy "
+                                    "provider that allows your tracker domain.",
                                 )
                             raise goto_exc
                     entry["http_status"] = str(resp.status) if resp else ""

@@ -3913,11 +3913,11 @@ logger.info(
 # 2026-05: Surface the strict-proxy setting on startup so the admin can
 # see at a glance whether direct-bypass leak protection is active.
 _RUT_STRICT_PROXY = (
-    os.environ.get("RUT_ALLOW_DIRECT_BYPASS", "false").strip().lower()
-    not in ("1", "true", "yes", "on")
+    os.environ.get("RUT_STRICT_PROXY_ONLY", "false").strip().lower()
+    in ("1", "true", "yes", "on")
 )
 logger.info(
-    f"RUT proxy mode: {'STRICT (no direct-bypass — proxy-only enforced)' if _RUT_STRICT_PROXY else 'PERMISSIVE (direct-bypass enabled for tracker domains)'}"
+    f"RUT proxy mode: {'STRICT (no tracker-bypass — proxy-only enforced for EVERY hit)' if _RUT_STRICT_PROXY else 'NORMAL (tracker-bypass enabled for your own tracker domains only — external offers always use proxy)'}"
 )
 
 
