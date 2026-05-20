@@ -70,6 +70,41 @@ def current_version() -> str:
     return "0.0.0"
 
 
+# ── 2026-01: DB-aware version display ────────────────────────────────
+# The static VERSION file gets reset to whatever's in git on every
+# container restart / git-pull, which means after an admin publishes a
+# new release (writes the file → record in DB), the next deployment
+# wipes the file back to 1.0.4 and the banner permanently shows the
+# wrong "you're on v1.0.4" message.
+#
+# Fix: every customer-facing version-display endpoint now consults the
+# DB's latest PUBLISHED release in addition to the file, and returns the
+# NEWER of the two. The publish flow still writes VERSION_FILE (so a
+# fresh-clone customer install starts at the right version), but the
+# admin panel never depends solely on the static file.
+async def _displayed_current_version() -> str:
+    """Return the version to display in UI. Prefers the latest published
+    release in the DB over the static VERSION file. Falls back to the
+    file when DB lookup fails or no published release exists."""
+    file_ver = current_version()
+    try:
+        if _db is None:
+            return file_ver
+        rel = await _db.app_releases.find_one(
+            {"published": True},
+            sort=[("created_at", -1)],
+            projection={"version": 1, "_id": 0},
+        )
+        if rel and rel.get("version"):
+            db_ver = str(rel["version"]).strip()
+            # Return the newer of the two
+            if is_newer(db_ver, file_ver):
+                return db_ver
+    except Exception:  # noqa: BLE001
+        pass
+    return file_ver
+
+
 def _parse(v: str) -> tuple:
     m = SEMVER_RE.match((v or "").strip())
     if not m:
@@ -292,7 +327,10 @@ def _build_admin_endpoints(get_admin_dep):
     @router.get("/api/admin/releases")
     async def list_releases(admin: dict = Depends(get_admin_dep)):
         items = await _db.app_releases.find({}, {"_id": 0}).sort("created_at", -1).to_list(200)
-        return {"releases": items, "current_version": current_version()}
+        # 2026-01: DB-aware version (newest of file + latest published)
+        # so the admin panel always shows the freshly-published version
+        # even when the static VERSION file is stale.
+        return {"releases": items, "current_version": await _displayed_current_version()}
 
     @router.get("/api/admin/releases/auto-detect")
     async def auto_detect(admin: dict = Depends(get_admin_dep)):
@@ -490,8 +528,10 @@ def _build_customer_endpoints(get_user_dep):
     @router.get("/api/system/version")
     async def get_version():
         """Public — returns the running version of this install."""
+        # 2026-01: DB-aware so the displayed version survives static
+        # VERSION-file resets caused by container restarts / git pulls.
         return {
-            "version": current_version(),
+            "version": await _displayed_current_version(),
             "mode": (os.environ.get("KREXION_MODE") or "local").lower(),
         }
 
@@ -500,7 +540,7 @@ def _build_customer_endpoints(get_user_dep):
         """License-authenticated — returns the latest published release plus
         whether the caller is behind."""
         await _validate_license(x_krexion_license)
-        local = current_version()
+        local = await _displayed_current_version()
         rel = await _db.app_releases.find_one(
             {"published": True}, sort=[("created_at", -1)], projection={"_id": 0}
         )
@@ -521,7 +561,7 @@ def _build_customer_endpoints(get_user_dep):
             sort=[("created_at", -1)],
             projection={"_id": 0, "version": 1, "title": 1, "severity": 1, "created_at": 1, "notes": 1},
         )
-        local = current_version()
+        local = await _displayed_current_version()
         if not rel:
             return {"current": local, "latest": None, "update_available": False}
         return {
