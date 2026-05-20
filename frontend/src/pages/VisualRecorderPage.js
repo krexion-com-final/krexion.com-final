@@ -22,6 +22,16 @@ import {
   RefreshCw,
   Image as ImageIcon,
   ChevronDown,
+  Undo2,
+  Keyboard,
+  History,
+  Smartphone,
+  Tablet,
+  Monitor,
+  Save,
+  Zap,
+  AlertCircle,
+  Activity,
 } from "lucide-react";
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
@@ -34,14 +44,51 @@ const authH = () => ({
   "Content-Type": "application/json",
 });
 
+// Keyboard-shortcut hint shown inside the tool buttons. Each tool gets
+// a number key 1-6 matching its position in TOOLS.
 const TOOLS = [
-  { id: "default", icon: Hand, label: "Click", help: "Normal click — captures button/link text" },
-  { id: "form_fill", icon: Type, label: "Form Fill", help: "Click an input, then bind to Excel column" },
-  { id: "dropdown", icon: ChevronDown, label: "Dropdown", help: "Click a <select> dropdown to bind an option or Excel column" },
-  { id: "random", icon: Shuffle, label: "Random Pick", help: "Click 2+ buttons → random one each run" },
-  { id: "capture", icon: ImageIcon, label: "Capture", help: "Insert a screenshot marker — shown in Live Activity during the job" },
-  { id: "final", icon: Flag, label: "Mark Final", help: "Capture this page as conversion target" },
+  { id: "default",   icon: Hand,        label: "Click",       key: "1", help: "Normal click — captures button/link text" },
+  { id: "form_fill", icon: Type,        label: "Form Fill",   key: "2", help: "Click an input, then bind to Excel column" },
+  { id: "dropdown",  icon: ChevronDown, label: "Dropdown",    key: "3", help: "Click a <select> dropdown to bind option / Excel column" },
+  { id: "random",    icon: Shuffle,     label: "Random Pick", key: "4", help: "Click 2+ buttons → random one each run" },
+  { id: "capture",   icon: ImageIcon,   label: "Capture",     key: "5", help: "Insert a screenshot marker — shown in Live Activity" },
+  { id: "final",     icon: Flag,        label: "Mark Final",  key: "6", help: "Capture this page as conversion target" },
 ];
+
+// Device-viewport presets — applied at session start so the recording
+// resembles the target audience's typical screen. The actual viewport
+// is set server-side via the proxy/UA combo; this is a hint for the UI
+// scaling + UA defaults.
+const DEVICE_PRESETS = [
+  { id: "mobile",  label: "Mobile",  icon: Smartphone, width: 412, height: 914,  hint: "Pixel-8 / iPhone-14 size" },
+  { id: "tablet",  label: "Tablet",  icon: Tablet,     width: 820, height: 1180, hint: "iPad / Galaxy Tab"        },
+  { id: "desktop", label: "Desktop", icon: Monitor,    width: 1280, height: 800, hint: "1280×800 laptop"          },
+];
+
+// localStorage keys for recent recordings + draft state
+const LS_RECENT_KEY = "vr_recent_v1";
+const LS_DRAFT_KEY = "vr_draft_v1";
+
+// Tiny JSON colorizer — safe (escapes HTML, only adds <span class>)
+function colorizeJson(obj) {
+  const json = typeof obj === "string" ? obj : JSON.stringify(obj, null, 2);
+  // Escape HTML
+  const esc = json.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return esc.replace(
+    /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/g,
+    (match) => {
+      let cls = "text-amber-300"; // numbers
+      if (/^"/.test(match)) {
+        cls = /:$/.test(match) ? "text-sky-300" : "text-emerald-300";
+      } else if (/true|false/.test(match)) {
+        cls = "text-fuchsia-300";
+      } else if (/null/.test(match)) {
+        cls = "text-zinc-500";
+      }
+      return `<span class="${cls}">${match}</span>`;
+    }
+  );
+}
 
 export default function VisualRecorderPage() {
   const [setupStage, setSetupStage] = useState("setup"); // setup | recording | done
@@ -70,7 +117,91 @@ export default function VisualRecorderPage() {
   const [busy, setBusy] = useState(false);
   const [finalBundle, setFinalBundle] = useState(null);
   const [showHelp, setShowHelp] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const [recentRecordings, setRecentRecordings] = useState([]);
+  const [devicePreset, setDevicePreset] = useState("mobile");
+  const [pjAvailable, setPjAvailable] = useState(false);
+  const [pjCountry, setPjCountry] = useState("US");
+  const [saving, setSaving] = useState(false);
+  const [savedToLibraryId, setSavedToLibraryId] = useState(null);
   const imgRef = useRef(null);
+  const sessionStartedAt = useRef(null);
+  const [recordingElapsed, setRecordingElapsed] = useState(0);
+
+  // ── Recent recordings (localStorage) ───────────────────────────────
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(LS_RECENT_KEY);
+      if (raw) setRecentRecordings(JSON.parse(raw));
+    } catch {}
+  }, []);
+
+  const pushRecent = (item) => {
+    try {
+      const next = [item, ...recentRecordings.filter((r) => r.url !== item.url)].slice(0, 5);
+      setRecentRecordings(next);
+      localStorage.setItem(LS_RECENT_KEY, JSON.stringify(next));
+    } catch {}
+  };
+
+  // ── ProxyJet availability check ────────────────────────────────────
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await fetch(`${API_URL}/api/proxyjet/credentials`, { headers: authH() });
+        if (r.ok) {
+          const d = await r.json();
+          setPjAvailable(!!d.configured);
+          if (d.default_country) setPjCountry(d.default_country);
+        }
+      } catch {}
+    })();
+  }, []);
+
+  // ── Live recording-elapsed counter ─────────────────────────────────
+  useEffect(() => {
+    if (setupStage !== "recording" || sessionState !== "ready") {
+      sessionStartedAt.current = null;
+      setRecordingElapsed(0);
+      return;
+    }
+    if (!sessionStartedAt.current) sessionStartedAt.current = Date.now();
+    const t = setInterval(() => {
+      if (sessionStartedAt.current) {
+        setRecordingElapsed(Math.floor((Date.now() - sessionStartedAt.current) / 1000));
+      }
+    }, 1000);
+    return () => clearInterval(t);
+  }, [setupStage, sessionState]);
+
+  // Fetch ONE fresh ProxyJet proxy via the existing generate-batch API.
+  // Lets the user populate the proxy field with a single click on setup.
+  const useProxyJetProxy = async () => {
+    if (!pjAvailable) {
+      toast.error("Save ProxyJet credentials first (Proxies page → ProxyJet Auto)");
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await fetch(`${API_URL}/api/proxyjet/generate-batch`, {
+        method: "POST",
+        headers: authH(),
+        body: JSON.stringify({ count: 1, country: pjCountry }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      if (d.proxies?.[0]) {
+        setProxy(d.proxies[0]);
+        toast.success(`Fresh ${pjCountry} residential proxy loaded`);
+      } else {
+        toast.error("No proxy returned");
+      }
+    } catch (e) {
+      toast.error(e.message || "ProxyJet fetch failed");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   // ── Excel header parsing ──────────────────────────────────────────
   const onExcelUpload = async (e) => {
@@ -127,6 +258,15 @@ export default function VisualRecorderPage() {
       setConnectElapsed(0);
       setSetupStage("recording");
       toast.success("Recording session created — connecting…");
+      // Save to recent recordings (localStorage) for one-click re-use
+      pushRecent({
+        url: url.trim(),
+        proxy: proxy.trim() || null,
+        ua: ua.trim() || null,
+        headers,
+        device: devicePreset,
+        ts: Date.now(),
+      });
     } catch (e) {
       toast.error(`Start failed: ${e.message || e}`);
     } finally {
@@ -171,6 +311,62 @@ export default function VisualRecorderPage() {
     const t = setInterval(() => setShotTick((x) => x + 1), 1000);
     return () => clearInterval(t);
   }, [setupStage, sessionId, sessionState]);
+
+  // ── Keyboard shortcuts ─────────────────────────────────────────────
+  // 1-6  → switch tool
+  // Esc  → cancel any pending binding (form-fill / dropdown / random)
+  // Ctrl/Cmd+Z → undo last step
+  // Ctrl/Cmd+Enter → finalize (if ≥ 2 steps)
+  // Ignored when focus is in an <input>/<textarea>/contenteditable so
+  // typing inside the URL / Excel / wait-ms fields is never hijacked.
+  useEffect(() => {
+    if (setupStage !== "recording") return;
+    const onKey = (e) => {
+      const target = e.target;
+      const tag = (target?.tagName || "").toUpperCase();
+      const editable =
+        tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable;
+      const ctrl = e.ctrlKey || e.metaKey;
+
+      // Ctrl+Z anywhere (except editable fields) — undo last step
+      if (!editable && ctrl && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        undoLastStep();
+        return;
+      }
+      // Ctrl+Enter — finalize
+      if (!editable && ctrl && e.key === "Enter") {
+        e.preventDefault();
+        if (steps.length >= 2 && !busy) finalize();
+        return;
+      }
+      // Esc — cancel pending bindings
+      if (e.key === "Escape") {
+        if (pendingFormFill) { setPendingFormFill(null); e.preventDefault(); return; }
+        if (pendingDropdown) { setPendingDropdown(null); e.preventDefault(); return; }
+        if (pendingRandom.length) { setPendingRandom([]); e.preventDefault(); return; }
+      }
+      // 1-6 — switch tool (only when nothing has focus)
+      if (!editable && !ctrl && /^[1-6]$/.test(e.key)) {
+        const t = TOOLS[Number(e.key) - 1];
+        if (t) {
+          setTool(t.id);
+          if (t.id !== "random") setPendingRandom([]);
+          e.preventDefault();
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [setupStage, steps.length, busy, pendingFormFill, pendingDropdown, pendingRandom]);
+
+  // Format the live recording timer as mm:ss
+  const fmtTimer = (sec) => {
+    const m = Math.floor(sec / 60).toString().padStart(2, "0");
+    const s = (sec % 60).toString().padStart(2, "0");
+    return `${m}:${s}`;
+  };
 
   // Build the direct img src with ?t=<token>&ts=<tick> so the browser handles
   // load + retries natively (no blob URL plumbing — removes a class of races).
@@ -447,6 +643,61 @@ export default function VisualRecorderPage() {
     } catch {}
   };
 
+  // Undo = delete the most recently added step. Visible only when there
+  // is at least one step. Maps to Ctrl/Cmd+Z keyboard shortcut.
+  const undoLastStep = async () => {
+    if (!sessionId || steps.length === 0) return;
+    await deleteStep(steps.length - 1);
+    toast.success("Undid last step");
+  };
+
+  // Load a recent recording from localStorage into the setup form.
+  const loadRecent = (r) => {
+    setUrl(r.url || "");
+    setProxy(r.proxy || "");
+    setUa(r.ua || "");
+    setHeaders(r.headers || []);
+    setHeadersInput((r.headers || []).join(", "));
+    if (r.device) setDevicePreset(r.device);
+    toast.success("Recent recording loaded — review and Start");
+  };
+
+  const clearRecent = () => {
+    if (!window.confirm("Clear all recent recordings?")) return;
+    setRecentRecordings([]);
+    try { localStorage.removeItem(LS_RECENT_KEY); } catch {}
+  };
+
+  // Save the finalized automation JSON into the user's Uploaded Things
+  // library so they can pick it from a dropdown in the RUT page on every
+  // future job without copy-pasting.
+  const saveToLibrary = async () => {
+    if (!finalBundle) return;
+    const defaultName = `Recording-${new Date().toISOString().slice(0, 16).replace("T", " ")}`;
+    const name = window.prompt("Save as template — name?", defaultName);
+    if (!name) return;
+    setSaving(true);
+    try {
+      const fd = new FormData();
+      fd.append("name", name);
+      fd.append("automation_json", JSON.stringify(finalBundle.automation_json));
+      fd.append("description", `Recorded on ${new Date().toLocaleString()} · ${finalBundle.step_count} steps`);
+      const r = await fetch(`${API_URL}/api/uploads/automation-json`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
+        body: fd,
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      setSavedToLibraryId(d.id);
+      toast.success(`Saved to library as "${name}"`);
+    } catch (e) {
+      toast.error(`Save failed: ${e.message || e}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   // ── Finalize ──────────────────────────────────────────────────────
   const finalize = async () => {
     if (!sessionId) return;
@@ -525,36 +776,130 @@ export default function VisualRecorderPage() {
 
   // ── UI ────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100" data-testid="visual-recorder-page">
+    <div className="min-h-screen bg-gradient-to-b from-zinc-950 via-zinc-950 to-black text-zinc-100" data-testid="visual-recorder-page">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-5">
-          <div className="flex items-center gap-3">
+        {/* ─── Header (pro-grade, with live session badge) ─── */}
+        <div className="flex flex-wrap items-center justify-between mb-5 gap-3">
+          <div className="flex items-center gap-3 min-w-0">
             <Link
               to="/real-user-traffic"
-              className="p-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-zinc-200"
+              className="p-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-zinc-200 transition-colors"
               data-testid="vr-back-btn"
+              title="Back to Real-User-Traffic"
             >
               <ArrowLeft className="w-5 h-5" />
             </Link>
-            <div>
+            <div className="min-w-0">
               <h1 className="text-2xl font-semibold flex items-center gap-2">
-                <Camera className="w-6 h-6 text-emerald-400" />
+                <span className="relative inline-flex">
+                  <Camera className="w-6 h-6 text-emerald-400" />
+                  {setupStage === "recording" && sessionState === "ready" && (
+                    <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-red-500 rounded-full animate-pulse" />
+                  )}
+                </span>
                 Visual Recorder
+                <span className="text-[10px] font-normal text-zinc-500 ml-1 hidden sm:inline">PRO</span>
               </h1>
-              <p className="text-sm text-zinc-400">
+              <p className="text-sm text-zinc-400 truncate">
                 Click your way through any offer page → automatic JSON for RUT
               </p>
             </div>
           </div>
-          <button
-            onClick={() => setShowHelp(!showHelp)}
-            className="text-xs text-zinc-400 hover:text-emerald-400"
-            data-testid="vr-help-toggle"
-          >
-            {showHelp ? "Hide help" : "Show help"}
-          </button>
+
+          {/* Right-side cluster — live stats during recording */}
+          <div className="flex items-center gap-2 flex-wrap">
+            {setupStage === "recording" && (
+              <>
+                <div
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium border ${
+                    sessionState === "ready"
+                      ? "bg-emerald-950/50 border-emerald-700/40 text-emerald-300"
+                      : sessionState === "error"
+                      ? "bg-rose-950/50 border-rose-700/40 text-rose-300"
+                      : "bg-amber-950/50 border-amber-700/40 text-amber-300"
+                  }`}
+                  data-testid="vr-session-badge"
+                >
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      sessionState === "ready"
+                        ? "bg-emerald-400 animate-pulse"
+                        : sessionState === "error"
+                        ? "bg-rose-400"
+                        : "bg-amber-400 animate-pulse"
+                    }`}
+                  />
+                  {sessionState === "ready" ? "REC" : sessionState === "error" ? "ERROR" : "CONNECTING"}
+                </div>
+                {sessionState === "ready" && (
+                  <div
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-mono bg-zinc-900 border border-zinc-800 text-zinc-300"
+                    data-testid="vr-elapsed-timer"
+                    title="Recording elapsed time"
+                  >
+                    <Clock className="w-3 h-3 text-emerald-400" />
+                    {fmtTimer(recordingElapsed)}
+                  </div>
+                )}
+                <div
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-indigo-950/40 border border-indigo-700/40 text-indigo-300"
+                  data-testid="vr-step-counter"
+                  title="Steps recorded so far"
+                >
+                  <Activity className="w-3 h-3" />
+                  {steps.length} step{steps.length === 1 ? "" : "s"}
+                </div>
+              </>
+            )}
+            <button
+              onClick={() => setShowShortcuts((v) => !v)}
+              className="p-1.5 rounded-md bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-emerald-400"
+              data-testid="vr-shortcuts-toggle"
+              title="Keyboard shortcuts"
+            >
+              <Keyboard className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => setShowHelp(!showHelp)}
+              className="text-xs px-2 py-1 rounded-md bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-emerald-400"
+              data-testid="vr-help-toggle"
+            >
+              {showHelp ? "Hide help" : "Help"}
+            </button>
+          </div>
         </div>
+
+        {/* Keyboard-shortcut cheat sheet (toggle) */}
+        {showShortcuts && (
+          <div
+            className="mb-5 p-4 rounded-xl bg-zinc-900/60 border border-zinc-800 text-sm"
+            data-testid="vr-shortcuts-panel"
+          >
+            <div className="flex items-center gap-2 font-medium text-emerald-400 mb-3">
+              <Keyboard className="w-4 h-4" /> Keyboard Shortcuts
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs text-zinc-300">
+              {TOOLS.map((t) => (
+                <div key={t.id} className="flex items-center gap-2">
+                  <kbd className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 font-mono">{t.key}</kbd>
+                  <span className="text-zinc-400">→ {t.label}</span>
+                </div>
+              ))}
+              <div className="flex items-center gap-2">
+                <kbd className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 font-mono">Esc</kbd>
+                <span className="text-zinc-400">→ Cancel pending</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <kbd className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 font-mono">Ctrl+Z</kbd>
+                <span className="text-zinc-400">→ Undo last step</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <kbd className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 font-mono">Ctrl+Enter</kbd>
+                <span className="text-zinc-400">→ Finalize</span>
+              </div>
+            </div>
+          </div>
+        )}
 
         {showHelp && (
           <div className="mb-5 p-4 rounded-xl bg-zinc-900/60 border border-zinc-800 text-sm text-zinc-300 space-y-2">
@@ -572,39 +917,121 @@ export default function VisualRecorderPage() {
 
         {/* SETUP stage */}
         {setupStage === "setup" && (
-          <div className="grid md:grid-cols-2 gap-5">
-            <div className="p-5 rounded-xl bg-zinc-900/60 border border-zinc-800">
-              <h2 className="text-lg font-medium mb-3 flex items-center gap-2"><Globe className="w-5 h-5 text-emerald-400" />Target</h2>
-              <label className="block text-sm font-medium text-zinc-300 mb-1">Offer URL <span className="text-rose-400">*</span></label>
-              <input
-                type="text"
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://your-offer.com/landing"
-                className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-zinc-100 placeholder-zinc-600 focus:border-emerald-500 focus:outline-none"
-                data-testid="vr-url-input"
-              />
+          <div className="space-y-5">
+            {/* Recent recordings — quick re-use (last 5) */}
+            {recentRecordings.length > 0 && (
+              <div className="p-4 rounded-xl bg-zinc-900/40 border border-zinc-800" data-testid="vr-recent-panel">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2 text-sm font-medium text-zinc-300">
+                    <History className="w-4 h-4 text-emerald-400" /> Recent recordings
+                  </div>
+                  <button
+                    onClick={clearRecent}
+                    className="text-[11px] text-zinc-500 hover:text-rose-400"
+                    data-testid="vr-clear-recent"
+                  >
+                    clear
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {recentRecordings.map((r, i) => (
+                    <button
+                      key={i}
+                      onClick={() => loadRecent(r)}
+                      className="text-xs px-2.5 py-1 rounded-md bg-zinc-800/80 hover:bg-emerald-700/40 border border-zinc-700 hover:border-emerald-500/40 text-zinc-300 hover:text-emerald-200 max-w-[280px] truncate transition-colors"
+                      title={r.url}
+                      data-testid={`vr-recent-${i}`}
+                    >
+                      <Globe className="w-3 h-3 inline mr-1" />
+                      {(() => {
+                        try { return new URL(r.url).hostname; } catch { return r.url.slice(0, 40); }
+                      })()}
+                      <span className="text-[10px] text-zinc-500 ml-1">· {r.device || "mobile"}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
-              <label className="block text-sm font-medium text-zinc-300 mb-1 mt-3">Proxy <span className="text-zinc-500 font-normal">(optional)</span></label>
-              <input
-                type="text"
-                value={proxy}
-                onChange={(e) => setProxy(e.target.value)}
-                placeholder="http://user:pass@host:port  or  host:port"
-                className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-zinc-100 placeholder-zinc-600 focus:border-emerald-500 focus:outline-none"
-                data-testid="vr-proxy-input"
-              />
+            <div className="grid md:grid-cols-2 gap-5">
+              <div className="p-5 rounded-xl bg-zinc-900/60 border border-zinc-800">
+                <h2 className="text-lg font-medium mb-3 flex items-center gap-2"><Globe className="w-5 h-5 text-emerald-400" />Target</h2>
+                <label className="block text-sm font-medium text-zinc-300 mb-1">Offer URL <span className="text-rose-400">*</span></label>
+                <input
+                  type="text"
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  placeholder="https://your-offer.com/landing"
+                  className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-zinc-100 placeholder-zinc-600 focus:border-emerald-500 focus:outline-none transition-colors"
+                  data-testid="vr-url-input"
+                />
 
-              <label className="block text-sm font-medium text-zinc-300 mb-1 mt-3">User Agent <span className="text-zinc-500 font-normal">(optional)</span></label>
-              <input
-                type="text"
-                value={ua}
-                onChange={(e) => setUa(e.target.value)}
-                placeholder="Defaults to Pixel 7 mobile UA"
-                className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-zinc-100 placeholder-zinc-600 focus:border-emerald-500 focus:outline-none text-xs"
-                data-testid="vr-ua-input"
-              />
-            </div>
+                {/* Device preset selector */}
+                <label className="block text-sm font-medium text-zinc-300 mb-1 mt-3">Device preset</label>
+                <div className="grid grid-cols-3 gap-2" data-testid="vr-device-presets">
+                  {DEVICE_PRESETS.map((d) => {
+                    const Ic = d.icon;
+                    const active = devicePreset === d.id;
+                    return (
+                      <button
+                        key={d.id}
+                        onClick={() => setDevicePreset(d.id)}
+                        className={`flex flex-col items-center justify-center gap-1 py-2.5 rounded-lg border text-xs font-medium transition-colors ${
+                          active
+                            ? "bg-emerald-600 text-white border-emerald-500"
+                            : "bg-zinc-950 hover:bg-zinc-800 border-zinc-800 text-zinc-300"
+                        }`}
+                        title={d.hint}
+                        data-testid={`vr-device-${d.id}`}
+                      >
+                        <Ic className="w-4 h-4" />
+                        {d.label}
+                        <span className="text-[9px] opacity-70">{d.width}×{d.height}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-3 flex items-center justify-between">
+                  <label className="block text-sm font-medium text-zinc-300 mb-1">
+                    Proxy <span className="text-zinc-500 font-normal">(optional)</span>
+                  </label>
+                  {pjAvailable && (
+                    <button
+                      onClick={useProxyJetProxy}
+                      disabled={busy}
+                      className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md bg-indigo-600/30 hover:bg-indigo-600/60 border border-indigo-500/40 text-indigo-200 disabled:opacity-50"
+                      data-testid="vr-use-pj-proxy"
+                      title="Fetch a fresh unique ProxyJet residential proxy"
+                    >
+                      <Zap className="w-3 h-3" /> ProxyJet
+                    </button>
+                  )}
+                </div>
+                <input
+                  type="text"
+                  value={proxy}
+                  onChange={(e) => setProxy(e.target.value)}
+                  placeholder="http://user:pass@host:port  or  host:port"
+                  className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-zinc-100 placeholder-zinc-600 focus:border-emerald-500 focus:outline-none font-mono text-xs transition-colors"
+                  data-testid="vr-proxy-input"
+                />
+                {!pjAvailable && (
+                  <p className="text-[10px] text-zinc-500 mt-1">
+                    Tip: save ProxyJet credentials on the Proxies page for one-click fresh proxies here.
+                  </p>
+                )}
+
+                <label className="block text-sm font-medium text-zinc-300 mb-1 mt-3">User Agent <span className="text-zinc-500 font-normal">(optional)</span></label>
+                <input
+                  type="text"
+                  value={ua}
+                  onChange={(e) => setUa(e.target.value)}
+                  placeholder={devicePreset === "desktop" ? "Defaults to Chrome desktop UA" : devicePreset === "tablet" ? "Defaults to iPad UA" : "Defaults to Pixel 7 mobile UA"}
+                  className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-zinc-100 placeholder-zinc-600 focus:border-emerald-500 focus:outline-none text-xs transition-colors"
+                  data-testid="vr-ua-input"
+                />
+              </div>
 
             <div className="p-5 rounded-xl bg-zinc-900/60 border border-zinc-800">
               <h2 className="text-lg font-medium mb-3 flex items-center gap-2"><ListPlus className="w-5 h-5 text-emerald-400" />Excel Headers <span className="text-xs text-zinc-500 font-normal">(for form fill)</span></h2>
@@ -648,13 +1075,14 @@ export default function VisualRecorderPage() {
               <button
                 onClick={startRecording}
                 disabled={busy || !url.trim()}
-                className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white font-medium text-base transition-colors"
+                className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white font-medium text-base transition-colors shadow-lg shadow-emerald-900/30"
                 data-testid="vr-start-btn"
               >
                 {busy ? <Loader2 className="w-5 h-5 animate-spin" /> : <Play className="w-5 h-5" />}
                 Start Recording
               </button>
             </div>
+          </div>
           </div>
         )}
 
@@ -677,29 +1105,53 @@ export default function VisualRecorderPage() {
               <div className="relative bg-zinc-950 rounded-lg overflow-hidden flex justify-center">
                 {sessionState === "error" ? (
                   <div className="aspect-[412/914] w-full flex flex-col items-center justify-center text-rose-300 text-sm gap-3 px-6 text-center" data-testid="vr-error-state">
-                    <div className="text-2xl">⚠️</div>
+                    <AlertCircle className="w-12 h-12 text-rose-400" />
                     <div className="font-medium text-rose-200">Connection failed</div>
                     <div className="text-xs text-zinc-400 max-w-xs leading-relaxed">{sessionError}</div>
+                    <div className="text-[11px] text-zinc-500 max-w-xs leading-relaxed bg-zinc-900/60 rounded-md p-2 border border-zinc-800">
+                      <span className="text-amber-300 font-medium">Common fixes:</span>{" "}
+                      {sessionError.toLowerCase().includes("proxy") || sessionError.toLowerCase().includes("auth")
+                        ? "Verify proxy credentials, ensure your IP is whitelisted at the proxy provider, or try a different gateway."
+                        : sessionError.toLowerCase().includes("timeout") || sessionError.toLowerCase().includes("nav")
+                        ? "Page may be slow — try without proxy first, or pick a closer proxy region."
+                        : "Check the URL is correct & publicly reachable; confirm proxy is alive."}
+                    </div>
                     <button
                       onClick={async () => {
-                        // discard + go back to setup
                         try { await fetch(`${API_URL}/api/visual-recorder/${sessionId}`, { method: "DELETE", headers: authH() }); } catch {}
                         setSessionId(null);
                         setSessionState("starting");
                         setSessionError("");
                         setSetupStage("setup");
                       }}
-                      className="mt-1 px-4 py-2 rounded-lg bg-rose-700 hover:bg-rose-600 text-white text-xs font-medium"
+                      className="mt-1 px-4 py-2 rounded-lg bg-rose-700 hover:bg-rose-600 text-white text-xs font-medium transition-colors"
                       data-testid="vr-retry-btn"
                     >
-                      Try Again
+                      <ArrowLeft className="w-3 h-3 inline mr-1" /> Back to Setup
                     </button>
                   </div>
                 ) : sessionState !== "ready" ? (
-                  <div className="aspect-[412/914] w-full flex flex-col items-center justify-center text-zinc-400 text-sm gap-2" data-testid="vr-connecting-state">
-                    <Loader2 className="w-8 h-8 animate-spin text-emerald-400" />
-                    <div className="font-medium text-zinc-200">Connecting via {proxy ? "proxy" : "direct"}…</div>
-                    <div className="text-xs text-zinc-500">{connectElapsed}s elapsed · timeout 45s</div>
+                  <div className="aspect-[412/914] w-full flex flex-col items-center justify-center text-zinc-400 text-sm gap-3 px-6" data-testid="vr-connecting-state">
+                    <div className="relative">
+                      <Loader2 className="w-10 h-10 animate-spin text-emerald-400" />
+                      <div className="absolute inset-0 flex items-center justify-center text-[10px] text-emerald-300 font-mono">
+                        {connectElapsed}s
+                      </div>
+                    </div>
+                    <div className="font-medium text-zinc-200">
+                      Spinning up Chromium {proxy ? "via proxy" : "directly"}…
+                    </div>
+                    <div className="text-[11px] text-zinc-500 text-center max-w-xs leading-relaxed">
+                      Launching anti-detect browser → resolving DNS → opening page.<br />
+                      <span className="text-amber-300">Slow proxies can take up to 45 seconds.</span>
+                    </div>
+                    {/* Progress shimmer */}
+                    <div className="w-32 h-1 rounded-full bg-zinc-800 overflow-hidden">
+                      <div
+                        className="h-full bg-emerald-500 transition-all"
+                        style={{ width: `${Math.min(100, (connectElapsed / 45) * 100)}%` }}
+                      />
+                    </div>
                   </div>
                 ) : screenshotSrc ? (
                   <img
@@ -725,8 +1177,8 @@ export default function VisualRecorderPage() {
                 )}
               </div>
 
-              {/* Toolbar */}
-              <div className="mt-3 grid grid-cols-4 gap-2">
+              {/* Toolbar — 6-col grid with kbd hints */}
+              <div className="mt-3 grid grid-cols-3 sm:grid-cols-6 gap-2">
                 {TOOLS.map((t) => {
                   const Ic = t.icon;
                   const active = tool === t.id;
@@ -737,16 +1189,23 @@ export default function VisualRecorderPage() {
                         setTool(t.id);
                         if (t.id !== "random") setPendingRandom([]);
                       }}
-                      title={t.help}
-                      className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-sm font-medium transition-colors ${
+                      title={`${t.help} (key: ${t.key})`}
+                      className={`relative flex flex-col items-center justify-center gap-1 py-2 px-1.5 rounded-lg text-xs font-medium transition-all ${
                         active
-                          ? "bg-emerald-600 text-white"
+                          ? "bg-emerald-600 text-white shadow-md shadow-emerald-900/30"
                           : "bg-zinc-800 hover:bg-zinc-700 text-zinc-300"
                       }`}
                       data-testid={`vr-tool-${t.id}`}
                     >
                       <Ic className="w-4 h-4" />
-                      {t.label}
+                      <span className="truncate w-full text-center">{t.label}</span>
+                      <kbd
+                        className={`absolute top-0.5 right-1 text-[9px] px-1 rounded font-mono ${
+                          active ? "bg-emerald-800 text-emerald-200" : "bg-zinc-900 text-zinc-500"
+                        }`}
+                      >
+                        {t.key}
+                      </kbd>
                     </button>
                   );
                 })}
@@ -922,7 +1381,23 @@ export default function VisualRecorderPage() {
             {/* Steps panel */}
             <div className="lg:col-span-1 p-3 rounded-xl bg-zinc-900/60 border border-zinc-800 flex flex-col" style={{ maxHeight: "85vh" }}>
               <div className="flex items-center justify-between mb-2 px-1">
-                <h3 className="text-sm font-medium flex items-center gap-1.5"><ScrollText className="w-4 h-4 text-emerald-400" />Recorded Steps ({steps.length})</h3>
+                <h3 className="text-sm font-medium flex items-center gap-1.5">
+                  <ScrollText className="w-4 h-4 text-emerald-400" />
+                  Recorded Steps
+                  <span className="px-1.5 py-0.5 rounded bg-emerald-700/30 border border-emerald-500/30 text-emerald-200 text-[10px] font-mono">
+                    {steps.length}
+                  </span>
+                </h3>
+                {steps.length > 0 && (
+                  <button
+                    onClick={undoLastStep}
+                    title="Undo last step (Ctrl+Z)"
+                    className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md bg-zinc-800 hover:bg-amber-700/40 border border-zinc-700 hover:border-amber-500/40 text-zinc-300 hover:text-amber-200 transition-colors"
+                    data-testid="vr-undo-btn"
+                  >
+                    <Undo2 className="w-3 h-3" /> Undo
+                  </button>
+                )}
               </div>
 
               <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
@@ -1001,22 +1476,32 @@ export default function VisualRecorderPage() {
             <div className="flex flex-wrap gap-2 mb-4">
               <button
                 onClick={copyJson}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-700/40 hover:bg-emerald-700/60 border border-emerald-500/40 text-emerald-100 text-sm font-medium"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-700/40 hover:bg-emerald-700/60 border border-emerald-500/40 text-emerald-100 text-sm font-medium transition-colors"
                 data-testid="vr-copy-json-btn"
               >
                 <Copy className="w-4 h-4" /> Copy JSON
               </button>
               <button
                 onClick={downloadJson}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-700/40 hover:bg-emerald-700/60 border border-emerald-500/40 text-emerald-100 text-sm font-medium"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-700/40 hover:bg-emerald-700/60 border border-emerald-500/40 text-emerald-100 text-sm font-medium transition-colors"
                 data-testid="vr-download-json-btn"
               >
                 <Download className="w-4 h-4" /> Download JSON
               </button>
+              <button
+                onClick={saveToLibrary}
+                disabled={saving || savedToLibraryId}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-700/40 hover:bg-indigo-700/60 border border-indigo-500/40 text-indigo-100 text-sm font-medium disabled:opacity-60 transition-colors"
+                data-testid="vr-save-library-btn"
+                title="Save as reusable template in Uploaded Things library"
+              >
+                {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : savedToLibraryId ? <CheckCircle2 className="w-4 h-4" /> : <Save className="w-4 h-4" />}
+                {savedToLibraryId ? "Saved to Library" : "Save to Library"}
+              </button>
               {finalBundle.target_screenshot_path && (
                 <button
                   onClick={downloadTargetScreenshot}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-700/40 hover:bg-blue-700/60 border border-blue-500/40 text-blue-100 text-sm font-medium"
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-700/40 hover:bg-blue-700/60 border border-blue-500/40 text-blue-100 text-sm font-medium transition-colors"
                   data-testid="vr-download-target-btn"
                 >
                   <Download className="w-4 h-4" /> Download Final Screenshot
@@ -1024,11 +1509,17 @@ export default function VisualRecorderPage() {
               )}
             </div>
 
-            <details className="mt-4">
-              <summary className="cursor-pointer text-sm text-zinc-400 hover:text-zinc-200">Preview JSON</summary>
-              <pre className="mt-2 p-3 rounded bg-zinc-950 border border-zinc-800 text-xs text-zinc-300 overflow-x-auto max-h-96">
-                {JSON.stringify(finalBundle.automation_json, null, 2)}
-              </pre>
+            <details className="mt-4" open>
+              <summary className="cursor-pointer text-sm text-zinc-400 hover:text-zinc-200 select-none flex items-center gap-1">
+                <ChevronDown className="w-4 h-4" /> Preview JSON
+                <span className="text-[10px] text-zinc-600 ml-auto">syntax-highlighted</span>
+              </summary>
+              <pre
+                className="mt-2 p-3 rounded bg-zinc-950 border border-zinc-800 text-xs overflow-x-auto max-h-96 font-mono leading-relaxed"
+                dangerouslySetInnerHTML={{
+                  __html: colorizeJson(finalBundle.automation_json),
+                }}
+              />
             </details>
 
             <div className="mt-5 flex gap-3">
