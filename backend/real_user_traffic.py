@@ -295,6 +295,229 @@ def _get_referer_from_ua(ua: str) -> str:
     return ""
 
 
+# ──────────────────────────────────────────────────────────────────────
+# 2026-01: ENHANCED ANTI-DETECT HELPERS
+# ──────────────────────────────────────────────────────────────────────
+# These helpers feed the per-visit fingerprint with extra fields that
+# the stealth init-script uses to mask the headless Chrome signature
+# against advanced fraud-detection tools (MaxMind minFraud, IPQuality
+# Score, Anura, ArkoseLabs). All helpers are pure-Python, dependency-
+# free, and never raise — failures fall back to safe defaults so the
+# RUT engine's existing flow is NEVER blocked by these enhancements.
+# ──────────────────────────────────────────────────────────────────────
+import re as _re
+
+_CHROME_VERSION_RE = _re.compile(r"Chrome/(\d+)(?:\.(\d+))?", _re.IGNORECASE)
+_SAFARI_VERSION_RE = _re.compile(r"Version/(\d+)(?:\.(\d+))?", _re.IGNORECASE)
+
+
+def _extract_chrome_version(ua: str) -> Tuple[int, int]:
+    """Return (major, minor) of the Chrome/Chromium version in the UA, or
+    (142, 0) as a safe fallback for non-Chromium UAs."""
+    if ua:
+        m = _CHROME_VERSION_RE.search(ua)
+        if m:
+            return int(m.group(1)), int(m.group(2) or 0)
+    return 142, 0
+
+
+def _extract_safari_version(ua: str) -> Tuple[int, int]:
+    """Return (major, minor) of the Safari version in the UA, or (17, 0)."""
+    if ua:
+        m = _SAFARI_VERSION_RE.search(ua)
+        if m:
+            return int(m.group(1)), int(m.group(2) or 0)
+    return 17, 0
+
+
+# Per-OS realistic system font lists. Fingerprint libraries enumerate a
+# known font set and bucket the result; matching one of these distributions
+# makes the fingerprint indistinguishable from a real user's machine.
+_OS_FONTS = {
+    "windows": [
+        "Arial", "Arial Black", "Arial Narrow", "Bahnschrift", "Calibri",
+        "Cambria", "Cambria Math", "Candara", "Comic Sans MS", "Consolas",
+        "Constantia", "Corbel", "Courier", "Courier New", "Ebrima",
+        "Franklin Gothic Medium", "Gabriola", "Gadugi", "Georgia",
+        "Impact", "Ink Free", "Javanese Text", "Leelawadee UI",
+        "Lucida Console", "Lucida Sans Unicode", "Malgun Gothic", "Marlett",
+        "Microsoft Himalaya", "Microsoft JhengHei", "Microsoft New Tai Lue",
+        "Microsoft PhagsPa", "Microsoft Sans Serif", "Microsoft Tai Le",
+        "Microsoft YaHei", "Microsoft Yi Baiti", "MingLiU-ExtB",
+        "Mongolian Baiti", "MS Gothic", "MV Boli", "Myanmar Text",
+        "Nirmala UI", "Palatino Linotype", "Segoe MDL2 Assets",
+        "Segoe Print", "Segoe Script", "Segoe UI", "Segoe UI Emoji",
+        "Segoe UI Historic", "Segoe UI Symbol", "SimSun", "Sitka",
+        "Sylfaen", "Symbol", "Tahoma", "Times New Roman", "Trebuchet MS",
+        "Verdana", "Webdings", "Wingdings", "Yu Gothic",
+    ],
+    "macos": [
+        "American Typewriter", "Andale Mono", "Arial", "Arial Black",
+        "Arial Narrow", "Arial Rounded MT Bold", "Avenir", "Avenir Next",
+        "Avenir Next Condensed", "Baskerville", "Big Caslon", "Bodoni 72",
+        "Bradley Hand", "Brush Script MT", "Chalkboard", "Chalkboard SE",
+        "Chalkduster", "Charter", "Cochin", "Comic Sans MS", "Copperplate",
+        "Courier", "Courier New", "Didot", "DIN Alternate", "DIN Condensed",
+        "Futura", "Geneva", "Georgia", "Gill Sans", "Helvetica",
+        "Helvetica Neue", "Herculanum", "Hoefler Text", "Impact",
+        "Lucida Grande", "Luminari", "Marker Felt", "Menlo", "Monaco",
+        "Noteworthy", "Optima", "Palatino", "Papyrus", "Phosphate",
+        "Rockwell", "Savoye LET", "SignPainter", "Skia", "Snell Roundhand",
+        "Tahoma", "Times", "Times New Roman", "Trattatello", "Trebuchet MS",
+        "Verdana", "Zapfino",
+    ],
+    "android": [
+        "Roboto", "Noto Sans", "Noto Serif", "Noto Color Emoji",
+        "Droid Sans", "Droid Sans Mono", "Droid Serif", "Cutive Mono",
+        "Coming Soon", "Dancing Script", "Carrois Gothic", "Carrois Gothic SC",
+        "sans-serif", "sans-serif-condensed", "sans-serif-light",
+        "sans-serif-medium", "sans-serif-thin", "serif", "monospace",
+    ],
+    "ios": [
+        ".SF NS Text", "Academy Engraved LET", "Al Nile", "American Typewriter",
+        "Apple Color Emoji", "Apple SD Gothic Neo", "Arial", "Arial Hebrew",
+        "Arial Rounded MT Bold", "Avenir", "Avenir Next", "Avenir Next Condensed",
+        "Baskerville", "Bodoni 72", "Bradley Hand", "Chalkboard SE", "Chalkduster",
+        "Charter", "Cochin", "Copperplate", "Courier", "Courier New",
+        "Damascus", "Devanagari Sangam MN", "Didot", "Euphemia UCAS", "Farah",
+        "Futura", "Galvji", "Geeza Pro", "Georgia", "Gill Sans",
+        "Grantha Sangam MN", "Helvetica", "Helvetica Neue", "Impact",
+        "Iowan Old Style", "Kefa", "Khmer Sangam MN", "Kohinoor Bangla",
+        "Kohinoor Devanagari", "Marker Felt", "Menlo", "Monaco", "Myanmar Sangam MN",
+        "Noteworthy", "Optima", "Palatino", "Papyrus", "Party LET",
+        "PingFang HK", "PingFang SC", "PingFang TC", "Rockwell", "Savoye LET",
+        "Snell Roundhand", "Symbol", "Thonburi", "Times New Roman", "Trebuchet MS",
+        "Verdana", "Zapfino",
+    ],
+    "linux": [
+        "DejaVu Sans", "DejaVu Sans Mono", "DejaVu Serif", "Liberation Mono",
+        "Liberation Sans", "Liberation Serif", "Nimbus Mono", "Nimbus Sans",
+        "Nimbus Roman", "Ubuntu", "Ubuntu Condensed", "Ubuntu Mono",
+        "Cantarell", "Noto Sans", "Noto Serif", "Noto Mono", "FreeMono",
+        "FreeSans", "FreeSerif", "URW Bookman", "URW Gothic", "URW Palladio",
+    ],
+}
+
+
+def _build_client_hint_headers(fp: Dict[str, Any], ua: str) -> Dict[str, str]:
+    """Build Sec-CH-UA / Sec-CH-UA-Mobile / Sec-CH-UA-Platform headers
+    that match the user-agent's Chrome version and OS. Modern fraud
+    detectors cross-check these against the UA string — a mismatch is
+    a HARD bot signal. Returns {} for non-Chromium UAs so the existing
+    Playwright defaults remain untouched.
+    """
+    headers: Dict[str, str] = {}
+    os_key = fp.get("os", "")
+    ua_l = (ua or "").lower()
+
+    platform_label = {
+        "windows": "Windows", "macos": "macOS", "ios": "iOS",
+        "android": "Android", "linux": "Linux",
+    }.get(os_key, "")
+    if platform_label:
+        headers["Sec-CH-UA-Platform"] = f'"{platform_label}"'
+
+    headers["Sec-CH-UA-Mobile"] = "?1" if fp.get("is_mobile") else "?0"
+
+    is_chromium = any(tok in ua_l for tok in ("chrome/", "crios/", "edg/", "edga/", "chromium/"))
+    if is_chromium:
+        chrome_major, _ = _extract_chrome_version(ua)
+        not_brand_variants = [
+            '"Not_A Brand";v="24"',
+            '"Not(A:Brand";v="24"',
+            '"Not.A/Brand";v="24"',
+            '" Not;A=Brand";v="99"',
+        ]
+        not_brand = random.choice(not_brand_variants)
+        headers["Sec-CH-UA"] = (
+            f'"Chromium";v="{chrome_major}", '
+            f'"Google Chrome";v="{chrome_major}", '
+            f'{not_brand}'
+        )
+        platform_version = {
+            "windows": "15.0.0", "macos": "14.4.0", "ios": "17.4.0",
+            "android": "14.0.0", "linux": "6.5.0",
+        }.get(os_key, "")
+        if platform_version:
+            headers["Sec-CH-UA-Platform-Version"] = f'"{platform_version}"'
+
+    return headers
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 2026-01: HUMAN-LIKE BEHAVIOUR HELPERS
+# ──────────────────────────────────────────────────────────────────────
+# Anura / IPQS / ArkoseLabs measure mouse-movement entropy, scroll-
+# velocity variance, and dwell time. A bot that jumps cursor straight
+# to a button + fills a form in 800ms = instant fraud flag even if every
+# JS API is masked. These helpers add realistic warm-up behaviour at
+# the right moments without touching the existing form_filler flow.
+# ──────────────────────────────────────────────────────────────────────
+async def _human_warmup(page: Any, fp: Dict[str, Any]) -> None:
+    """Simulate a real user landing on a page: read pause + mouse jitter
+    + a few realistic scrolls. NEVER raises — every failure is swallowed
+    so an unrelated runtime quirk in the page can't abort the visit."""
+    try:
+        viewport = fp.get("viewport") or {"width": 1280, "height": 800}
+        vw = max(320, int(viewport.get("width", 1280)))
+        vh = max(480, int(viewport.get("height", 800)))
+
+        # Initial read pause — real users don't move for ~0.8-2.5s on land
+        await asyncio.sleep(random.uniform(0.8, 2.5))
+
+        # Mouse jitter — 3-6 small bezier-style moves
+        if not fp.get("is_mobile"):
+            try:
+                x, y = random.randint(50, vw - 50), random.randint(50, vh - 50)
+                await page.mouse.move(x, y, steps=random.randint(8, 20))
+                await asyncio.sleep(random.uniform(0.15, 0.45))
+                for _ in range(random.randint(3, 6)):
+                    x = max(10, min(vw - 10, x + random.randint(-180, 180)))
+                    y = max(10, min(vh - 10, y + random.randint(-120, 120)))
+                    await page.mouse.move(x, y, steps=random.randint(6, 14))
+                    await asyncio.sleep(random.uniform(0.08, 0.32))
+            except Exception:
+                pass
+
+        # Scroll down 1-3 times then occasional scroll back up
+        try:
+            for _ in range(random.randint(1, 3)):
+                await page.mouse.wheel(0, random.randint(180, 620))
+                await asyncio.sleep(random.uniform(0.35, 1.4))
+            if random.random() < 0.4:
+                await page.mouse.wheel(0, -random.randint(80, 240))
+                await asyncio.sleep(random.uniform(0.25, 0.8))
+        except Exception:
+            pass
+
+        # Final settle pause
+        await asyncio.sleep(random.uniform(0.3, 1.1))
+    except Exception:
+        pass
+
+
+async def _human_pre_submit_dwell(page: Any, fp: Dict[str, Any]) -> None:
+    """Pause + small jitter right before submit so the form-fill-to-submit
+    interval matches a real human's review cadence (3-9s)."""
+    try:
+        await asyncio.sleep(random.uniform(2.2, 6.5))
+        if not fp.get("is_mobile"):
+            try:
+                viewport = fp.get("viewport") or {"width": 1280, "height": 800}
+                vw = max(320, int(viewport.get("width", 1280)))
+                vh = max(480, int(viewport.get("height", 800)))
+                x = random.randint(50, vw - 50)
+                y = random.randint(50, vh - 50)
+                await page.mouse.move(x, y, steps=random.randint(6, 16))
+            except Exception:
+                pass
+        await asyncio.sleep(random.uniform(0.4, 1.5))
+    except Exception:
+        pass
+
+
+
+
 def _device_name_from_ua(ua_str: str) -> str:
     """Extract a human-readable device name from a user-agent string.
 
@@ -479,6 +702,91 @@ def _fingerprint_from_ua(ua_str: str) -> Dict[str, Any]:
         "height": max(568, viewport["height"] + random.randint(-8, 8)),
     }
 
+    # ── 2026-01: extra fingerprint fields for deep anti-detect ──
+    # All ADDITIVE — existing callers that only read the old keys are
+    # unaffected. Values are realistic per-OS so MaxMind / IPQS / Anura
+    # cannot fingerprint the headless-Chrome signature.
+    chrome_major, _chrome_minor = _extract_chrome_version(ua_str)
+    safari_major, _safari_minor = _extract_safari_version(ua_str)
+
+    # Screen dimensions match viewport + realistic toolbar/taskbar.
+    # Desktop OSs have a taskbar (~40-100px); mobile = viewport.
+    if os_key == "windows":
+        screen_w = max(1024, viewport["width"])
+        screen_h = max(768, viewport["height"] + random.choice([40, 60, 80]))
+        avail_w = screen_w
+        avail_h = max(768, screen_h - random.choice([40, 48, 60]))  # taskbar
+        outer_w_delta = 0  # outerWidth == innerWidth (window borders thin in modern Win)
+        outer_h_delta = random.choice([74, 87, 117, 138])  # tab bar + URL bar + bookmarks
+        color_depth = 24
+        max_touch = 0
+    elif os_key == "macos":
+        screen_w = max(1280, viewport["width"])
+        screen_h = max(800, viewport["height"] + random.choice([22, 25, 28]))
+        avail_w = screen_w
+        avail_h = max(800, screen_h - random.choice([22, 25, 28]))  # menu bar
+        outer_w_delta = 0
+        outer_h_delta = random.choice([74, 87, 105, 130])
+        color_depth = 30 if dpr >= 2 else 24
+        max_touch = 0
+    elif os_key == "linux":
+        screen_w = max(1024, viewport["width"])
+        screen_h = max(768, viewport["height"] + random.choice([24, 40, 60]))
+        avail_w = screen_w
+        avail_h = max(768, screen_h - random.choice([24, 40]))
+        outer_w_delta = 0
+        outer_h_delta = random.choice([74, 100, 130])
+        color_depth = 24
+        max_touch = 0
+    elif os_key == "android":
+        screen_w = viewport["width"]
+        screen_h = viewport["height"]
+        avail_w = viewport["width"]
+        avail_h = viewport["height"]
+        outer_w_delta = 0
+        outer_h_delta = 0
+        color_depth = 24
+        max_touch = random.choice([5, 10])
+    elif os_key == "ios":
+        screen_w = viewport["width"]
+        screen_h = viewport["height"]
+        avail_w = viewport["width"]
+        avail_h = viewport["height"]
+        outer_w_delta = 0
+        outer_h_delta = 0
+        color_depth = 24
+        max_touch = 5
+    else:
+        screen_w = max(1024, viewport["width"])
+        screen_h = max(768, viewport["height"] + 40)
+        avail_w = screen_w
+        avail_h = screen_h - 40
+        outer_w_delta = 0
+        outer_h_delta = 80
+        color_depth = 24
+        max_touch = 0
+
+    # Network Information API — realistic per-device-type effective type
+    if os_key in ("android", "ios"):
+        effective_type = random.choice(["4g", "4g", "4g", "3g"])  # mostly 4g
+        downlink = round(random.uniform(2.5, 10.0), 1)
+        rtt = random.choice([50, 100, 150, 200, 300])
+        connection_type = "cellular"
+    else:
+        effective_type = "4g"
+        downlink = round(random.uniform(5.0, 20.0), 1)
+        rtt = random.choice([25, 50, 75, 100])
+        connection_type = "wifi"
+
+    # Battery API — realistic snapshot. Mobile usually mid-charge,
+    # desktop often plugged in.
+    if os_key in ("android", "ios"):
+        battery_level = round(random.uniform(0.18, 0.92), 2)
+        battery_charging = random.random() < 0.35  # 35% plugged-in chance
+    else:
+        battery_level = round(random.uniform(0.45, 0.98), 2)
+        battery_charging = random.random() < 0.7  # 70% plugged in for desktop
+
     return {
         "os": os_key,
         "platform": platform,
@@ -494,6 +802,26 @@ def _fingerprint_from_ua(ua_str: str) -> Dict[str, Any]:
         # Canvas noise seed — unique per visit so canvas fingerprint differs too
         "canvas_seed": random.randint(1, 2**30),
         "label": f"{(ua.os.family + ' ' + ua.os.version_string) if ua else os_key}".strip() or ua_str[:40],
+        # ── 2026-01 additions ──
+        "chrome_version": chrome_major,
+        "safari_version": safari_major,
+        "audio_seed": random.randint(1, 2**30),
+        "font_seed": random.randint(1, 2**30),
+        "screen_width": screen_w,
+        "screen_height": screen_h,
+        "avail_width": avail_w,
+        "avail_height": avail_h,
+        "outer_width_delta": outer_w_delta,
+        "outer_height_delta": outer_h_delta,
+        "color_depth": color_depth,
+        "max_touch_points": max_touch,
+        "effective_type": effective_type,
+        "downlink": downlink,
+        "rtt": rtt,
+        "connection_type": connection_type,
+        "battery_level": battery_level,
+        "battery_charging": battery_charging,
+        "fonts": _OS_FONTS.get(os_key, _OS_FONTS["windows"]),
     }
 
 
@@ -659,88 +987,490 @@ async def _probe_proxy_geo(proxy: Dict[str, Any], ua: str) -> Dict[str, Any]:
 
 
 # ─── Stealth init script ────────────────────────────────────────
+# 2026-01: comprehensive anti-detect coverage. Spoofs every JS API that
+# MaxMind minFraud / IPQualityScore / Anura / ArkoseLabs / FingerprintJS
+# / CreepJS / BotD probe. Per-visit unique noise so two visits from the
+# same OS+UA still get different audio/canvas/font fingerprints.
 def _build_stealth_script(fp: Dict[str, Any], geo: Dict[str, Any]) -> str:
+    import json as _json
     langs = [s.split(";")[0].strip() for s in geo["accept_language"].split(",") if s.strip()]
     langs = [lg for lg in langs if lg]
-    lang_json = "[" + ",".join(f'"{lg}"' for lg in langs[:4]) + "]"
-    return f"""
-(() => {{
-  try {{ Object.defineProperty(navigator, 'webdriver', {{ get: () => false }}); }} catch(e) {{}}
-  try {{ if (!window.chrome) window.chrome = {{}}; if (!window.chrome.runtime) window.chrome.runtime = {{}}; }} catch(e) {{}}
-  try {{ Object.defineProperty(navigator, 'platform', {{ get: () => {fp['platform']!r} }}); }} catch(e) {{}}
-  try {{ Object.defineProperty(navigator, 'vendor',   {{ get: () => {fp['vendor']!r}   }}); }} catch(e) {{}}
-  try {{ Object.defineProperty(navigator, 'hardwareConcurrency', {{ get: () => {int(fp['hardware_concurrency'])} }}); }} catch(e) {{}}
-  try {{ Object.defineProperty(navigator, 'deviceMemory',        {{ get: () => {int(fp['device_memory'])} }}); }} catch(e) {{}}
-  try {{ Object.defineProperty(navigator, 'languages',           {{ get: () => {lang_json} }}); }} catch(e) {{}}
-  try {{
-    const orig = navigator.permissions.query.bind(navigator.permissions);
-    navigator.permissions.query = (p) => p && p.name === 'notifications'
-      ? Promise.resolve({{ state: Notification.permission, onchange: null }}) : orig(p);
-  }} catch(e) {{}}
-  try {{
-    if (navigator.plugins.length === 0) {{
-      Object.defineProperty(navigator, 'plugins', {{ get: () => [
-        {{ name: 'PDF Viewer', filename: 'internal-pdf-viewer' }},
-        {{ name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer' }},
-        {{ name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer' }}
-      ]}});
-    }}
-  }} catch(e) {{}}
-  try {{
-    const getParameter = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = function(param) {{
-      if (param === 37445) return {fp['webgl_vendor']!r};       // UNMASKED_VENDOR_WEBGL
-      if (param === 37446) return {fp['webgl_renderer']!r};     // UNMASKED_RENDERER_WEBGL
-      return getParameter.call(this, param);
-    }};
-    // Also cover WebGL2
-    if (window.WebGL2RenderingContext) {{
-      const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
-      WebGL2RenderingContext.prototype.getParameter = function(param) {{
-        if (param === 37445) return {fp['webgl_vendor']!r};
-        if (param === 37446) return {fp['webgl_renderer']!r};
-        return getParameter2.call(this, param);
-      }};
-    }}
-  }} catch(e) {{}}
-  // Canvas fingerprint noise — unique per visit via seed
-  try {{
-    const SEED = {int(fp['canvas_seed'])};
-    // tiny deterministic PRNG seeded per visit
-    let _rng_s = SEED;
-    const rng = () => {{ _rng_s = (_rng_s * 1664525 + 1013904223) >>> 0; return _rng_s; }};
-    const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
-    HTMLCanvasElement.prototype.toDataURL = function(...args) {{
+    langs = langs[:4] or ["en-US", "en"]
+
+    # Inject all per-visit constants into a single __KX namespace at the top
+    # of the JS so the rest of the script is a normal raw JS string (no
+    # f-string brace escaping nightmare).
+    kx = {
+        "platform": fp["platform"],
+        "vendor": fp["vendor"],
+        "languages": langs,
+        "primaryLang": langs[0],
+        "hardwareConcurrency": int(fp["hardware_concurrency"]),
+        "deviceMemory": int(fp["device_memory"]),
+        "webglVendor": fp["webgl_vendor"],
+        "webglRenderer": fp["webgl_renderer"],
+        "canvasSeed": int(fp["canvas_seed"]),
+        "audioSeed": int(fp.get("audio_seed", random.randint(1, 2**30))),
+        "fontSeed": int(fp.get("font_seed", random.randint(1, 2**30))),
+        "screenW": int(fp.get("screen_width", fp["viewport"]["width"])),
+        "screenH": int(fp.get("screen_height", fp["viewport"]["height"])),
+        "availW": int(fp.get("avail_width", fp["viewport"]["width"])),
+        "availH": int(fp.get("avail_height", fp["viewport"]["height"])),
+        "outerHDelta": int(fp.get("outer_height_delta", 0)),
+        "outerWDelta": int(fp.get("outer_width_delta", 0)),
+        "colorDepth": int(fp.get("color_depth", 24)),
+        "maxTouchPoints": int(fp.get("max_touch_points", 0)),
+        "effectiveType": fp.get("effective_type", "4g"),
+        "downlink": float(fp.get("downlink", 10.0)),
+        "rtt": int(fp.get("rtt", 50)),
+        "saveData": False,
+        "batteryLevel": float(fp.get("battery_level", 0.85)),
+        "batteryCharging": bool(fp.get("battery_charging", True)),
+        "fonts": fp.get("fonts", []),
+        "os": fp.get("os", "windows"),
+        "isMobile": bool(fp.get("is_mobile", False)),
+        "chromeVersion": int(fp.get("chrome_version", 142)),
+        "dpr": float(fp.get("device_scale_factor", 1.0)),
+        "tz": geo.get("timezone", "America/New_York"),
+    }
+    config_js = "const __KX = " + _json.dumps(kx) + ";"
+
+    # Big raw JS body — uses __KX.* values, no Python interpolation here.
+    js_body = r"""
+const safe = (fn) => { try { fn(); } catch (e) {} };
+const safeDefine = (obj, prop, getter) => { try { Object.defineProperty(obj, prop, { get: getter, configurable: true }); } catch (e) {} };
+// Tiny seeded PRNG — same for canvas, audio, font jitter so each visit is
+// deterministic per-seed but unique vs other visits.
+const makeRng = (seed) => { let s = seed >>> 0 || 1; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; };
+
+// ── navigator.* core props ──────────────────────────────────────
+safe(() => safeDefine(navigator, 'webdriver', () => false));
+safe(() => safeDefine(navigator, 'platform', () => __KX.platform));
+safe(() => safeDefine(navigator, 'vendor', () => __KX.vendor));
+safe(() => safeDefine(navigator, 'hardwareConcurrency', () => __KX.hardwareConcurrency));
+safe(() => safeDefine(navigator, 'deviceMemory', () => __KX.deviceMemory));
+safe(() => safeDefine(navigator, 'languages', () => __KX.languages));
+safe(() => safeDefine(navigator, 'language', () => __KX.primaryLang));
+safe(() => safeDefine(navigator, 'maxTouchPoints', () => __KX.maxTouchPoints));
+safe(() => safeDefine(navigator, 'doNotTrack', () => null));
+safe(() => safeDefine(navigator, 'cookieEnabled', () => true));
+safe(() => safeDefine(navigator, 'pdfViewerEnabled', () => true));
+
+// ── window.chrome stub ──────────────────────────────────────────
+safe(() => {
+  if (!window.chrome) window.chrome = {};
+  if (!window.chrome.runtime) {
+    window.chrome.runtime = {
+      OnInstalledReason: { CHROME_UPDATE: 'chrome_update', INSTALL: 'install', SHARED_MODULE_UPDATE: 'shared_module_update', UPDATE: 'update' },
+      OnRestartRequiredReason: { APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' },
+      PlatformArch: { ARM: 'arm', ARM64: 'arm64', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },
+      PlatformNaclArch: { ARM: 'arm', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },
+      PlatformOs: { ANDROID: 'android', CROS: 'cros', LINUX: 'linux', MAC: 'mac', OPENBSD: 'openbsd', WIN: 'win' },
+      RequestUpdateCheckStatus: { NO_UPDATE: 'no_update', THROTTLED: 'throttled', UPDATE_AVAILABLE: 'update_available' },
+    };
+  }
+  if (!window.chrome.app) {
+    window.chrome.app = {
+      isInstalled: false,
+      InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
+      RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' },
+      getDetails: function () { return null; },
+      getIsInstalled: function () { return false; },
+      runningState: function () { return 'cannot_run'; },
+    };
+  }
+  if (!window.chrome.csi) window.chrome.csi = function () { return { startE: Date.now(), onloadT: Date.now(), pageT: 0, tran: 15 }; };
+  if (!window.chrome.loadTimes) window.chrome.loadTimes = function () { return { commitLoadTime: Date.now() / 1000, finishDocumentLoadTime: Date.now() / 1000, finishLoadTime: Date.now() / 1000, firstPaintAfterLoadTime: 0, firstPaintTime: Date.now() / 1000, navigationType: 'Other', npnNegotiatedProtocol: 'h2', requestTime: Date.now() / 1000, startLoadTime: Date.now() / 1000, wasAlternateProtocolAvailable: false, wasFetchedViaSpdy: true, wasNpnNegotiated: true }; };
+});
+
+// ── permissions.query: realistic states ─────────────────────────
+safe(() => {
+  const orig = navigator.permissions.query.bind(navigator.permissions);
+  navigator.permissions.query = (p) => {
+    if (p && p.name === 'notifications') return Promise.resolve({ state: Notification.permission || 'default', onchange: null });
+    if (p && p.name === 'geolocation') return Promise.resolve({ state: 'prompt', onchange: null });
+    if (p && p.name === 'midi') return Promise.resolve({ state: 'prompt', onchange: null });
+    if (p && p.name === 'camera') return Promise.resolve({ state: 'prompt', onchange: null });
+    if (p && p.name === 'microphone') return Promise.resolve({ state: 'prompt', onchange: null });
+    return orig(p);
+  };
+});
+
+// ── plugins / mimeTypes (real Chrome has PDF viewer plugin) ────
+safe(() => {
+  if (navigator.plugins.length === 0) {
+    const fakePlugins = [
+      { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+      { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+      { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+      { name: 'Microsoft Edge PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+      { name: 'WebKit built-in PDF', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+    ];
+    safeDefine(navigator, 'plugins', () => fakePlugins);
+    safeDefine(navigator, 'mimeTypes', () => [
+      { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+      { type: 'text/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+    ]);
+  }
+});
+
+// ── WebGL UNMASKED_VENDOR / UNMASKED_RENDERER ──────────────────
+safe(() => {
+  const patch = (proto) => {
+    if (!proto) return;
+    const orig = proto.getParameter;
+    proto.getParameter = function (p) {
+      if (p === 37445) return __KX.webglVendor;
+      if (p === 37446) return __KX.webglRenderer;
+      // VENDOR / RENDERER (non-unmasked) — also return realistic strings
+      if (p === 7936) return 'WebKit';
+      if (p === 7937) return 'WebKit WebGL';
+      return orig.call(this, p);
+    };
+  };
+  patch(WebGLRenderingContext && WebGLRenderingContext.prototype);
+  if (window.WebGL2RenderingContext) patch(WebGL2RenderingContext.prototype);
+});
+
+// ── Canvas fingerprint noise (per-visit seed) ──────────────────
+safe(() => {
+  const rng = makeRng(__KX.canvasSeed);
+  const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+  HTMLCanvasElement.prototype.toDataURL = function () {
+    safe(() => {
       const ctx = this.getContext('2d');
-      if (ctx) {{ try {{
-        const w = this.width, h = this.height;
-        if (w > 0 && h > 0 && w * h < 2000000) {{
-          const data = ctx.getImageData(0, 0, w, h);
-          for (let i = 0; i < data.data.length; i += 4) {{
-            const r = rng() & 3;
-            data.data[i]   ^= (r & 1);
-            data.data[i+1] ^= (r >> 1) & 1;
-          }}
-          ctx.putImageData(data, 0, 0);
-        }}
-      }} catch(e) {{}} }}
-      return origToDataURL.apply(this, args);
-    }};
-    // Also spoof getImageData for readback-style fingerprinting
-    const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
-    CanvasRenderingContext2D.prototype.getImageData = function(...args) {{
-      const d = origGetImageData.apply(this, args);
-      if (d && d.data) {{
-        for (let i = 0; i < d.data.length; i += 4) {{
-          const r = rng() & 1;
-          d.data[i+3] ^= r; // alpha jitter
-        }}
-      }}
-      return d;
-    }};
-  }} catch(e) {{}}
-}})();
+      const w = this.width, h = this.height;
+      if (ctx && w > 0 && h > 0 && w * h < 2000000) {
+        const data = ctx.getImageData(0, 0, w, h);
+        for (let i = 0; i < data.data.length; i += 4) {
+          const r = (rng() * 4) | 0;
+          data.data[i] ^= (r & 1);
+          data.data[i + 1] ^= (r >> 1) & 1;
+        }
+        ctx.putImageData(data, 0, 0);
+      }
+    });
+    return origToDataURL.apply(this, arguments);
+  };
+  const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+  CanvasRenderingContext2D.prototype.getImageData = function () {
+    const d = origGetImageData.apply(this, arguments);
+    if (d && d.data) {
+      for (let i = 0; i < d.data.length; i += 4) {
+        const r = (rng() * 2) | 0;
+        d.data[i + 3] ^= r;
+      }
+    }
+    return d;
+  };
+  // Also nudge measureText so font fingerprinting via text width differs
+  const origMeasure = CanvasRenderingContext2D.prototype.measureText;
+  CanvasRenderingContext2D.prototype.measureText = function (txt) {
+    const m = origMeasure.apply(this, arguments);
+    try {
+      const jitter = (rng() - 0.5) * 0.04;
+      const proxy = Object.create(Object.getPrototypeOf(m));
+      Object.getOwnPropertyNames(m).forEach((k) => {
+        try { proxy[k] = m[k]; } catch (e) {}
+      });
+      ['width', 'actualBoundingBoxLeft', 'actualBoundingBoxRight'].forEach((k) => {
+        if (typeof m[k] === 'number') {
+          try { Object.defineProperty(proxy, k, { value: m[k] + jitter, writable: false, configurable: true }); } catch (e) {}
+        }
+      });
+      return proxy;
+    } catch (e) { return m; }
+  };
+});
+
+// ── AudioContext fingerprint noise ─────────────────────────────
+// IPQS specifically uses OfflineAudioContext fingerprinting. We add
+// tiny noise to every float-frequency / time-domain readback so the
+// hash changes per visit but the audio itself remains audible.
+safe(() => {
+  const arng = makeRng(__KX.audioSeed);
+  const patchFloat32Output = (proto, methodName) => {
+    if (!proto || !proto[methodName]) return;
+    const orig = proto[methodName];
+    proto[methodName] = function (arr) {
+      const r = orig.apply(this, arguments);
+      try {
+        if (arr && arr.length) {
+          for (let i = 0; i < arr.length; i += 100) {
+            arr[i] = arr[i] + (arng() - 0.5) * 1e-7;
+          }
+        }
+      } catch (e) {}
+      return r;
+    };
+  };
+  if (window.AnalyserNode) {
+    patchFloat32Output(AnalyserNode.prototype, 'getFloatFrequencyData');
+    patchFloat32Output(AnalyserNode.prototype, 'getByteFrequencyData');
+    patchFloat32Output(AnalyserNode.prototype, 'getFloatTimeDomainData');
+    patchFloat32Output(AnalyserNode.prototype, 'getByteTimeDomainData');
+  }
+  if (window.AudioBuffer) {
+    const origGCD = AudioBuffer.prototype.getChannelData;
+    AudioBuffer.prototype.getChannelData = function () {
+      const arr = origGCD.apply(this, arguments);
+      try {
+        for (let i = 0; i < arr.length; i += 100) {
+          arr[i] = arr[i] + (arng() - 0.5) * 1e-7;
+        }
+      } catch (e) {}
+      return arr;
+    };
+  }
+  // OfflineAudioContext rendering — return value identity changes per seed
+  if (window.OfflineAudioContext) {
+    const origStart = OfflineAudioContext.prototype.startRendering;
+    OfflineAudioContext.prototype.startRendering = function () {
+      const p = origStart.apply(this, arguments);
+      return p.then((buf) => {
+        try {
+          for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+            const data = buf.getChannelData(ch);
+            for (let i = 0; i < data.length; i += 500) {
+              data[i] = data[i] + (arng() - 0.5) * 1e-7;
+            }
+          }
+        } catch (e) {}
+        return buf;
+      });
+    };
+  }
+});
+
+// ── screen.* and window outer dimensions ───────────────────────
+safe(() => safeDefine(screen, 'width', () => __KX.screenW));
+safe(() => safeDefine(screen, 'height', () => __KX.screenH));
+safe(() => safeDefine(screen, 'availWidth', () => __KX.availW));
+safe(() => safeDefine(screen, 'availHeight', () => __KX.availH));
+safe(() => safeDefine(screen, 'colorDepth', () => __KX.colorDepth));
+safe(() => safeDefine(screen, 'pixelDepth', () => __KX.colorDepth));
+safe(() => {
+  if (window.outerWidth === 0 || window.outerWidth === window.innerWidth) {
+    safeDefine(window, 'outerWidth', () => window.innerWidth + __KX.outerWDelta);
+  }
+  if (window.outerHeight === 0 || window.outerHeight === window.innerHeight) {
+    safeDefine(window, 'outerHeight', () => window.innerHeight + __KX.outerHDelta);
+  }
+});
+safe(() => safeDefine(window, 'devicePixelRatio', () => __KX.dpr));
+
+// ── userAgentData (Sec-CH-UA equivalent in JS) ─────────────────
+safe(() => {
+  if (navigator.userAgent && /Chrome\//.test(navigator.userAgent)) {
+    const cv = String(__KX.chromeVersion);
+    const platformName = ({ windows: 'Windows', macos: 'macOS', ios: 'iOS', android: 'Android', linux: 'Linux' })[__KX.os] || 'Windows';
+    const brands = [
+      { brand: 'Chromium', version: cv },
+      { brand: 'Google Chrome', version: cv },
+      { brand: 'Not_A Brand', version: '24' },
+    ];
+    const uaData = {
+      brands: brands,
+      mobile: __KX.isMobile,
+      platform: platformName,
+      getHighEntropyValues: function (hints) {
+        return Promise.resolve({
+          architecture: 'x86', bitness: '64', brands: brands,
+          fullVersionList: brands.map((b) => ({ brand: b.brand, version: cv + '.0.0.0' })),
+          mobile: __KX.isMobile, model: '', platform: platformName, platformVersion: '15.0.0',
+          uaFullVersion: cv + '.0.0.0', wow64: false,
+        });
+      },
+      toJSON: function () { return { brands: brands, mobile: __KX.isMobile, platform: platformName }; },
+    };
+    safeDefine(navigator, 'userAgentData', () => uaData);
+  }
+});
+
+// ── Battery API — realistic per-device snapshot ────────────────
+safe(() => {
+  const battery = {
+    charging: __KX.batteryCharging,
+    chargingTime: __KX.batteryCharging ? 1800 : Infinity,
+    dischargingTime: __KX.batteryCharging ? Infinity : 7200,
+    level: __KX.batteryLevel,
+    onchargingchange: null, onchargingtimechange: null,
+    ondischargingtimechange: null, onlevelchange: null,
+    addEventListener: function () {}, removeEventListener: function () {},
+    dispatchEvent: function () { return true; },
+  };
+  navigator.getBattery = function () { return Promise.resolve(battery); };
+});
+
+// ── Network Information API ────────────────────────────────────
+safe(() => {
+  const conn = {
+    effectiveType: __KX.effectiveType,
+    downlink: __KX.downlink, rtt: __KX.rtt, saveData: __KX.saveData,
+    onchange: null, type: __KX.effectiveType === '4g' ? 'cellular' : 'wifi',
+    addEventListener: function () {}, removeEventListener: function () {},
+  };
+  safeDefine(navigator, 'connection', () => conn);
+  // Also expose deprecated mozConnection / webkitConnection
+  safeDefine(navigator, 'mozConnection', () => conn);
+  safeDefine(navigator, 'webkitConnection', () => conn);
+});
+
+// ── speechSynthesis voices (Chrome has 21+ by default) ─────────
+safe(() => {
+  if (!window.speechSynthesis || (window.speechSynthesis.getVoices && window.speechSynthesis.getVoices().length === 0)) {
+    const realisticVoices = [
+      { name: 'Google US English', lang: 'en-US', localService: false, voiceURI: 'Google US English', default: true },
+      { name: 'Google UK English Female', lang: 'en-GB', localService: false, voiceURI: 'Google UK English Female', default: false },
+      { name: 'Google UK English Male', lang: 'en-GB', localService: false, voiceURI: 'Google UK English Male', default: false },
+      { name: 'Google español', lang: 'es-ES', localService: false, voiceURI: 'Google español', default: false },
+      { name: 'Google français', lang: 'fr-FR', localService: false, voiceURI: 'Google français', default: false },
+      { name: 'Google Deutsch', lang: 'de-DE', localService: false, voiceURI: 'Google Deutsch', default: false },
+      { name: 'Google italiano', lang: 'it-IT', localService: false, voiceURI: 'Google italiano', default: false },
+      { name: 'Google português do Brasil', lang: 'pt-BR', localService: false, voiceURI: 'Google português do Brasil', default: false },
+      { name: 'Google русский', lang: 'ru-RU', localService: false, voiceURI: 'Google русский', default: false },
+      { name: 'Google 日本語', lang: 'ja-JP', localService: false, voiceURI: 'Google 日本語', default: false },
+      { name: 'Google 한국의', lang: 'ko-KR', localService: false, voiceURI: 'Google 한국의', default: false },
+      { name: 'Google हिन्दी', lang: 'hi-IN', localService: false, voiceURI: 'Google हिन्दी', default: false },
+      { name: 'Google 中文（普通话）', lang: 'zh-CN', localService: false, voiceURI: 'Google 中文（普通话）', default: false },
+    ];
+    if (window.speechSynthesis) {
+      try { window.speechSynthesis.getVoices = function () { return realisticVoices; }; } catch (e) {}
+    }
+  }
+});
+
+// ── document.fonts — realistic OS font list ────────────────────
+// Fingerprinters enumerate a known set; we return true for our OS list
+// and let the browser handle the rest.
+safe(() => {
+  if (document.fonts && document.fonts.check) {
+    const origCheck = document.fonts.check.bind(document.fonts);
+    const fontSet = new Set(__KX.fonts.map((f) => f.toLowerCase()));
+    document.fonts.check = function (font, text) {
+      try {
+        const m = String(font || '').match(/['"]([^'"]+)['"]/);
+        if (m && fontSet.has(m[1].toLowerCase())) return true;
+      } catch (e) {}
+      return origCheck(font, text);
+    };
+  }
+});
+
+// ── WebRTC IP leak — block local IPs in ICE candidates ─────────
+safe(() => {
+  if (window.RTCPeerConnection) {
+    const OrigRTC = window.RTCPeerConnection;
+    const PatchedRTC = function (config) {
+      const pc = new OrigRTC(config);
+      const origAdd = pc.addIceCandidate.bind(pc);
+      pc.addIceCandidate = function (cand) {
+        try {
+          if (cand && cand.candidate) {
+            // Filter host/local IPs — only allow srflx (server reflexive, =proxy IP)
+            if (/typ host/.test(cand.candidate) || /\.local /.test(cand.candidate)) {
+              return Promise.resolve();
+            }
+          }
+        } catch (e) {}
+        return origAdd(cand);
+      };
+      // Also strip local candidates from generated ICE
+      const origCreateOffer = pc.createOffer.bind(pc);
+      pc.createOffer = function () {
+        return origCreateOffer.apply(this, arguments).then((offer) => {
+          try {
+            offer.sdp = offer.sdp.replace(/^a=candidate.+typ host.+\r?\n/gm, '');
+            offer.sdp = offer.sdp.replace(/^a=candidate.+\.local .+\r?\n/gm, '');
+          } catch (e) {}
+          return offer;
+        });
+      };
+      return pc;
+    };
+    PatchedRTC.prototype = OrigRTC.prototype;
+    window.RTCPeerConnection = PatchedRTC;
+    if (window.webkitRTCPeerConnection) window.webkitRTCPeerConnection = PatchedRTC;
+    if (window.mozRTCPeerConnection) window.mozRTCPeerConnection = PatchedRTC;
+  }
+  // Block enumerateDevices from exposing too many media devices
+  if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+    const origEnum = navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices);
+    navigator.mediaDevices.enumerateDevices = function () {
+      return origEnum().then((devices) => {
+        // Return realistic 2-4 devices for desktop, 2-3 for mobile
+        return devices.length > 0 ? devices : [
+          { deviceId: 'default', kind: 'audioinput', label: '', groupId: 'g1' },
+          { deviceId: 'default', kind: 'audiooutput', label: '', groupId: 'g1' },
+          ...(__KX.isMobile ? [] : [{ deviceId: 'default', kind: 'videoinput', label: '', groupId: 'g2' }]),
+        ];
+      });
+    };
+  }
+});
+
+// ── Hide Function.prototype.toString tampering (CDP detection) ─
+safe(() => {
+  const origToString = Function.prototype.toString;
+  const proxyMap = new WeakMap();
+  Function.prototype.toString = function () {
+    if (proxyMap.has(this)) return proxyMap.get(this);
+    return origToString.apply(this, arguments);
+  };
+  // Mark common patched fns to return "native code" string
+  const nativeShim = (name) => `function ${name}() { [native code] }`;
+  try { proxyMap.set(navigator.permissions.query, nativeShim('query')); } catch (e) {}
+  try { proxyMap.set(WebGLRenderingContext.prototype.getParameter, nativeShim('getParameter')); } catch (e) {}
+  try { proxyMap.set(HTMLCanvasElement.prototype.toDataURL, nativeShim('toDataURL')); } catch (e) {}
+  try { proxyMap.set(CanvasRenderingContext2D.prototype.getImageData, nativeShim('getImageData')); } catch (e) {}
+  try { proxyMap.set(navigator.getBattery, nativeShim('getBattery')); } catch (e) {}
+});
+
+// ── Notification API ───────────────────────────────────────────
+safe(() => {
+  if (window.Notification) {
+    safeDefine(window.Notification, 'permission', () => 'default');
+  }
+});
+
+// ── Date timezone sanity — match the proxy region ──────────────
+// Playwright already sets timezone via context option; we just ensure
+// the Intl object reports the same in case some detector compares.
+safe(() => {
+  try {
+    const origResolved = Intl.DateTimeFormat.prototype.resolvedOptions;
+    Intl.DateTimeFormat.prototype.resolvedOptions = function () {
+      const r = origResolved.apply(this, arguments);
+      r.timeZone = __KX.tz;
+      return r;
+    };
+  } catch (e) {}
+});
+
+// ── window.history.length — realistic browsing depth ───────────
+safe(() => {
+  if (window.history && window.history.length <= 1) {
+    safeDefine(window.history, 'length', () => 2);
+  }
+});
+
+// ── Block automation-only debugger statements ──────────────────
+// Some bot-test pages call `debugger;` in a tight loop to detect CDP.
+// We can't stop them but they don't hurt our runtime.
+
+// ── Final touch: hide ourselves from common detector libs ──────
+safe(() => {
+  // BotD / CreepJS look at Notification.requestPermission's
+  // result-after-call behaviour; make it pass.
+  if (window.Notification && Notification.requestPermission) {
+    const orig = Notification.requestPermission;
+    Notification.requestPermission = function () {
+      return orig.apply(this, arguments).catch(() => 'default');
+    };
+  }
+});
 """
+    return "(()=>{" + config_js + js_body + "})();"
 
 
 # ─── Validation-error detection (invalid data on landing) ──────────
@@ -2016,6 +2746,13 @@ async def run_real_user_traffic_job(
                 _ctx_headers = {"Accept-Language": geo["accept_language"]}
                 if _ua_referer:
                     _ctx_headers["Referer"] = _ua_referer
+                # 2026-01: Sec-CH-UA client hint headers matching UA's
+                # Chrome version + OS. MaxMind / IPQS / Anura cross-check
+                # these against the UA — a mismatch is a HARD bot signal.
+                try:
+                    _ctx_headers.update(_build_client_hint_headers(fp, ua))
+                except Exception:
+                    pass
                 context = await browser.new_context(
                     proxy={
                         "server": proxy["server"],
@@ -2045,6 +2782,11 @@ async def run_real_user_traffic_job(
                     _ctx_headers_retry = {"Accept-Language": geo["accept_language"]}
                     if _ua_referer_retry:
                         _ctx_headers_retry["Referer"] = _ua_referer_retry
+                    # 2026-01: Sec-CH-UA client hints on retry context too
+                    try:
+                        _ctx_headers_retry.update(_build_client_hint_headers(fp, ua))
+                    except Exception:
+                        pass
                     context = await browser.new_context(
                         proxy={
                             "server": proxy["server"],
@@ -2390,6 +3132,16 @@ async def run_real_user_traffic_job(
                     entry["landing_url"] = page.url
                 except Exception:
                     pass
+
+                # ── 2026-01: Human-like warm-up behaviour ─────────────
+                # Real users read, scroll, hover before interacting.
+                # Anura / IPQS / ArkoseLabs measure mouse-movement
+                # entropy + dwell time — a bot that fills + submits in
+                # 800ms is an instant fraud flag. _human_warmup adds
+                # 3-8 seconds of realistic mouse/scroll/pause behaviour.
+                # Errors swallowed inside the helper so a quirky page
+                # can NEVER abort a visit.
+                await _human_warmup(page, fp)
 
                 if follow_redirect:
                     # Give the page a bit more time to do any JS redirect
