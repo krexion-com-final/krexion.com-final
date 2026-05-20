@@ -65,15 +65,23 @@ def build_proxy_string(
     server: str = DEFAULT_SERVER,
     port: int = DEFAULT_PORT,
     product: str = DEFAULT_PRODUCT,
+    state: Optional[str] = None,
 ) -> Tuple[str, str]:
     """Build a single ProxyJet proxy line. Returns ``(proxy_string, session_id)``.
 
     The returned string is in the standard
     ``user:pass@host:port`` shape that the existing RUT engine already
     accepts (see ``_parse_proxy_line`` in ``real_user_traffic.py``).
+
+    Optional ``state`` (2-letter US state code like ``CA``, ``TX``) is
+    appended via ProxyJet's ``-st-{STATE}`` filter for geo-targeted runs.
     """
     sid = session_id or _new_session_id()
-    full_user = f"{username}-{product}-{country.upper()}-ip-{sid}"
+    parts = [username, product, country.upper()]
+    if state:
+        parts.extend(["st", state.upper()])
+    parts.extend(["ip", sid])
+    full_user = "-".join(parts)
     proxy_str = f"{full_user}:{password}@{gateway}.{server}:{port}"
     return proxy_str, sid
 
@@ -136,6 +144,7 @@ async def save_credentials(
     default_country: str = DEFAULT_COUNTRY,
     gateway: str = DEFAULT_GATEWAY,
     product: str = DEFAULT_PRODUCT,
+    default_state: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Upsert ProxyJet credentials for a user. Returns the stored doc."""
     now = datetime.now(timezone.utc).isoformat()
@@ -146,6 +155,7 @@ async def save_credentials(
         "username": (username or "").strip(),
         "password": (password or "").strip(),
         "default_country": (default_country or DEFAULT_COUNTRY).strip().upper(),
+        "default_state": (default_state or "").strip().upper() or None,
         "gateway": (gateway or DEFAULT_GATEWAY).strip(),
         "product": (product or DEFAULT_PRODUCT).strip(),
         "updated_at": now,
@@ -172,6 +182,7 @@ async def generate_unique_proxies(
     count: int,
     *,
     country: Optional[str] = None,
+    state: Optional[str] = None,
     job_id: Optional[str] = None,
     max_attempts_per_pick: int = 6,
 ) -> List[str]:
@@ -181,6 +192,9 @@ async def generate_unique_proxies(
     Each new session_id is recorded in ``proxyjet_used_sessions`` BEFORE
     the function returns, so a follow-up call (even from a parallel job)
     will never get the same session_id again.
+
+    Optional ``state`` (e.g. "CA") narrows the residential pool to that
+    US state at the gateway level.
 
     Raises ``RuntimeError`` if credentials aren't configured.
     """
@@ -192,6 +206,7 @@ async def generate_unique_proxies(
         )
 
     country = (country or creds.get("default_country") or DEFAULT_COUNTRY).upper()
+    effective_state = (state or creds.get("default_state") or "").strip().upper() or None
     if count < 1:
         return []
     if count > 200_000:
@@ -230,12 +245,14 @@ async def generate_unique_proxies(
             server=creds.get("server", DEFAULT_SERVER),
             port=int(creds.get("port", DEFAULT_PORT)),
             product=creds.get("product", DEFAULT_PRODUCT),
+            state=effective_state,
         )
         out.append(proxy_str)
         inserts.append({
             "user_id": user_id,
             "session_id": sid,
             "country": country,
+            "state": effective_state,
             "created_at": now,
             "job_id": job_id,
             "exit_ip": None,

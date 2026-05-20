@@ -632,6 +632,90 @@ export default function VisualRecorderPage() {
     }
   };
 
+  // Send keyboard key to live session + auto-record as a step
+  const pressKey = async (key) => {
+    if (!sessionId || sessionState !== "ready") return;
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/press-key`, {
+        method: "POST",
+        headers: authH(),
+        body: JSON.stringify({ key }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.recorded) {
+        toast.error(d.error || d.detail || "Press key failed");
+        return;
+      }
+      toast.success(`Pressed ${key}`);
+      refreshState();
+    } catch (e) {
+      toast.error(e.message || "Press key failed");
+    }
+  };
+
+  // Wait for a CSS selector (recorded as step too)
+  const waitForSelectorAction = async () => {
+    const sel = window.prompt("CSS selector to wait for (e.g. 'button.cta' or '#thank-you-msg'):", "");
+    if (!sel) return;
+    const t = window.prompt("Max wait time in ms (default 15000):", "15000");
+    if (!sessionId) return;
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/wait-for-selector`, {
+        method: "POST",
+        headers: authH(),
+        body: JSON.stringify({ selector: sel.trim(), timeout_ms: Math.max(500, Number(t) || 15000) }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.recorded) {
+        toast.error(d.error || d.detail || "Wait failed");
+        return;
+      }
+      toast.success("Selector appeared — recorded");
+      refreshState();
+    } catch (e) {
+      toast.error(e.message || "Wait failed");
+    }
+  };
+
+  // Move step up or down
+  const moveStep = async (idx, direction) => {
+    if (!sessionId) return;
+    try {
+      await fetch(`${API_URL}/api/visual-recorder/${sessionId}/step/${idx}/move`, {
+        method: "POST",
+        headers: authH(),
+        body: JSON.stringify({ direction }),
+      });
+      refreshState();
+    } catch {}
+  };
+
+  // Duplicate step
+  const duplicateStep = async (idx) => {
+    if (!sessionId) return;
+    try {
+      await fetch(`${API_URL}/api/visual-recorder/${sessionId}/step/${idx}/duplicate`, {
+        method: "POST",
+        headers: authH(),
+      });
+      refreshState();
+      toast.success("Step duplicated");
+    } catch {}
+  };
+
+  // Rename step (inline edit)
+  const renameStep = async (idx, name) => {
+    if (!sessionId) return;
+    try {
+      await fetch(`${API_URL}/api/visual-recorder/${sessionId}/step/${idx}/rename`, {
+        method: "PATCH",
+        headers: authH(),
+        body: JSON.stringify({ name }),
+      });
+      refreshState();
+    } catch {}
+  };
+
   const deleteStep = async (idx) => {
     if (!sessionId) return;
     try {
@@ -1375,6 +1459,32 @@ export default function VisualRecorderPage() {
                     Go
                   </button>
                 </div>
+
+                {/* Keyboard quick-keys + wait-for-selector — power-user actions */}
+                <div className="inline-flex items-center gap-1 ml-auto" data-testid="vr-key-row">
+                  <span className="text-[10px] text-zinc-500 mr-1">Press:</span>
+                  {["Enter","Tab","Escape","Backspace","ArrowDown"].map((k) => (
+                    <button
+                      key={k}
+                      onClick={() => pressKey(k)}
+                      disabled={sessionState !== "ready"}
+                      title={`Press ${k} key`}
+                      className="px-2 py-1 rounded bg-zinc-800 hover:bg-emerald-700/40 border border-zinc-700 hover:border-emerald-500/40 text-zinc-300 text-[10px] font-mono disabled:opacity-40"
+                      data-testid={`vr-press-${k}`}
+                    >
+                      {k === "Backspace" ? "⌫" : k === "ArrowDown" ? "↓" : k}
+                    </button>
+                  ))}
+                  <button
+                    onClick={waitForSelectorAction}
+                    disabled={sessionState !== "ready"}
+                    title="Wait until a CSS selector becomes visible"
+                    className="px-2 py-1 rounded bg-zinc-800 hover:bg-sky-700/40 border border-zinc-700 hover:border-sky-500/40 text-zinc-300 text-[10px] disabled:opacity-40 ml-1"
+                    data-testid="vr-wait-selector-btn"
+                  >
+                    ⏳ Wait for selector
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -1405,26 +1515,65 @@ export default function VisualRecorderPage() {
                   <div className="text-zinc-600 text-xs text-center py-4">No steps yet — click on the preview to record</div>
                 )}
                 {steps.map((s, i) => (
-                  <div key={i} className="flex items-start gap-2 p-2 rounded bg-zinc-950 border border-zinc-800 text-xs">
-                    <span className="text-emerald-400 font-mono">#{i + 1}</span>
+                  <div key={i} className="flex items-start gap-1 p-2 rounded bg-zinc-950 border border-zinc-800 text-xs hover:border-zinc-700 transition-colors group">
+                    <span className="text-emerald-400 font-mono pt-0.5">#{i + 1}</span>
                     <div className="flex-1 min-w-0">
-                      <div className="text-zinc-300 font-medium">{s.action}</div>
+                      {/* Inline-editable name (click to edit) */}
+                      <input
+                        type="text"
+                        defaultValue={s.name || s.action}
+                        onBlur={(e) => {
+                          const newName = (e.target.value || "").trim();
+                          if (newName && newName !== (s.name || s.action)) renameStep(i, newName);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") e.target.blur();
+                          if (e.key === "Escape") { e.target.value = s.name || s.action; e.target.blur(); }
+                        }}
+                        className="w-full bg-transparent border-0 border-b border-transparent hover:border-zinc-700 focus:border-emerald-500 focus:outline-none text-zinc-300 font-medium px-0 py-0 text-xs"
+                        title={`Rename step (was: ${s.action})`}
+                        data-testid={`vr-step-name-${i}`}
+                      />
                       <div className="text-zinc-500 truncate">
                         {s.selector && <span>sel: <code className="text-zinc-400">{s.selector.slice(0, 28)}</code></span>}
                         {s.value && <span> → {String(s.value).slice(0, 30)}</span>}
                         {s.ms && <span>{s.ms}ms</span>}
                         {s.timeout && !s.ms && <span>tout: {s.timeout}</span>}
-                        {s.script && <span title={s.script}>{s.script.slice(0, 50)}…</span>}
+                        {s.key && <span>key: <code className="text-zinc-400">{s.key}</code></span>}
+                        {s.script && !s.name && <span title={s.script}>{s.script.slice(0, 50)}…</span>}
                       </div>
                     </div>
-                    <button
-                      onClick={() => deleteStep(i)}
-                      title="Delete"
-                      className="p-0.5 text-zinc-600 hover:text-rose-400"
-                      data-testid={`vr-step-del-${i}`}
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
+                    {/* Step actions — visible on hover */}
+                    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button
+                        onClick={() => moveStep(i, "up")}
+                        disabled={i === 0}
+                        title="Move up"
+                        className="p-0.5 text-zinc-600 hover:text-emerald-400 disabled:opacity-30 disabled:cursor-not-allowed"
+                        data-testid={`vr-step-up-${i}`}
+                      >▲</button>
+                      <button
+                        onClick={() => moveStep(i, "down")}
+                        disabled={i === steps.length - 1}
+                        title="Move down"
+                        className="p-0.5 text-zinc-600 hover:text-emerald-400 disabled:opacity-30 disabled:cursor-not-allowed"
+                        data-testid={`vr-step-down-${i}`}
+                      >▼</button>
+                      <button
+                        onClick={() => duplicateStep(i)}
+                        title="Duplicate"
+                        className="p-0.5 text-zinc-600 hover:text-sky-400 text-[10px]"
+                        data-testid={`vr-step-dup-${i}`}
+                      >⎘</button>
+                      <button
+                        onClick={() => deleteStep(i)}
+                        title="Delete"
+                        className="p-0.5 text-zinc-600 hover:text-rose-400"
+                        data-testid={`vr-step-del-${i}`}
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>

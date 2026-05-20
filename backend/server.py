@@ -4136,13 +4136,15 @@ async def _rut_prepare_and_run(
                     user["id"],
                     count=gen_count,
                     country=params.get("proxyjet_country", "US"),
+                    state=params.get("proxyjet_state") or None,
                     job_id=job_id,
                 )
             except RuntimeError as e:
                 return await _mark_failed(str(e))
             if not proxy_lines:
                 return await _mark_failed("ProxyJet returned zero proxies — check credentials.")
-            await _set_step(f"✓ Generated {len(proxy_lines)} unique ProxyJet proxies (auto-mode)")
+            _pj_st = params.get("proxyjet_state")
+            await _set_step(f"✓ Generated {len(proxy_lines)} unique ProxyJet proxies (auto-mode · {params.get('proxyjet_country','US')}{('-'+_pj_st) if _pj_st else ''})")
         elif upload_proxy_id:
             uploaded_proxy_lines = await _load_upload_items(user["id"], upload_proxy_id, "proxies")
             if not uploaded_proxy_lines:
@@ -4527,6 +4529,7 @@ async def rut_create_job(
     # When False (default), all legacy paths run identically.
     use_proxyjet_auto: bool = Form(False),
     proxyjet_country: str = Form("US"),
+    proxyjet_state: str = Form(""),
     user: dict = Depends(get_current_user_with_fresh_data),
     _cloud_gate: bool = Depends(require_local_mode),
 ):
@@ -4696,6 +4699,7 @@ async def rut_create_job(
         "force_tracker_url": force_tracker_url,
         "use_proxyjet_auto": bool(use_proxyjet_auto),
         "proxyjet_country": (proxyjet_country or "US").strip().upper() or "US",
+        "proxyjet_state": (proxyjet_state or "").strip().upper() or None,
         "paste_proxy_lines": paste_proxy_lines,
         "paste_ua_lines": paste_ua_lines,
     }
@@ -4762,6 +4766,7 @@ async def rut_create_job(
             "force_tracker_url": force_tracker_url,
             "use_proxyjet_auto": bool(use_proxyjet_auto),
             "proxyjet_country": (proxyjet_country or "US").strip().upper() or "US",
+            "proxyjet_state": (proxyjet_state or "").strip().upper() or None,
             "data_source": data_source,
             # Counts will be updated by the BG task after it loads from
             # gsheet / upload batches. Set to paste-mode counts now so
@@ -10786,6 +10791,7 @@ class ProxyJetCredentialsIn(BaseModel):
     server: Optional[str] = "proxy-jet.io"
     port: Optional[int] = 1010
     default_country: Optional[str] = "US"
+    default_state: Optional[str] = None
     gateway: Optional[str] = "ca"
     product: Optional[str] = "resi"
 
@@ -10793,6 +10799,7 @@ class ProxyJetCredentialsIn(BaseModel):
 class ProxyJetGenerateIn(BaseModel):
     count: int = 10
     country: Optional[str] = None
+    state: Optional[str] = None
 
 
 @api_router.get("/proxyjet/credentials")
@@ -10808,6 +10815,7 @@ async def proxyjet_get_credentials(user: dict = Depends(get_current_user)):
         "server": creds.get("server", _pj.DEFAULT_SERVER),
         "port": creds.get("port", _pj.DEFAULT_PORT),
         "default_country": creds.get("default_country", _pj.DEFAULT_COUNTRY),
+        "default_state": creds.get("default_state") or "",
         "gateway": creds.get("gateway", _pj.DEFAULT_GATEWAY),
         "product": creds.get("product", _pj.DEFAULT_PRODUCT),
         "updated_at": creds.get("updated_at"),
@@ -10827,6 +10835,7 @@ async def proxyjet_save_credentials(payload: ProxyJetCredentialsIn,
         server=payload.server or _pj.DEFAULT_SERVER,
         port=int(payload.port or _pj.DEFAULT_PORT),
         default_country=(payload.default_country or _pj.DEFAULT_COUNTRY).upper(),
+        default_state=(payload.default_state or "").strip().upper() or None,
         gateway=(payload.gateway or _pj.DEFAULT_GATEWAY).strip(),
         product=(payload.product or _pj.DEFAULT_PRODUCT).strip(),
     )
@@ -10837,6 +10846,7 @@ async def proxyjet_save_credentials(payload: ProxyJetCredentialsIn,
         "server": saved["server"],
         "port": saved["port"],
         "default_country": saved["default_country"],
+        "default_state": saved.get("default_state") or "",
         "gateway": saved["gateway"],
         "product": saved["product"],
         "updated_at": saved["updated_at"],
@@ -10867,13 +10877,18 @@ async def proxyjet_test_credentials(user: dict = Depends(get_current_user)):
         server=creds.get("server", _pj.DEFAULT_SERVER),
         port=int(creds.get("port", _pj.DEFAULT_PORT)),
         product=creds.get("product", _pj.DEFAULT_PRODUCT),
+        state=creds.get("default_state") or None,
     )
-    # httpx supports user:pass@host:port via the proxies= dict
+    # httpx 0.28+ removed the `proxies=` dict kwarg; the new API is
+    # either `proxy=` (singular) on AsyncClient OR explicit transport
+    # mounts. We use a transport so the same code works on older
+    # httpx versions as well (transport= is supported since 0.17).
     proxy_url = f"http://{proxy_str}"
     started = time.time()
     try:
+        transport = httpx.AsyncHTTPTransport(proxy=proxy_url, verify=False)
         async with httpx.AsyncClient(
-            proxies={"http://": proxy_url, "https://": proxy_url},
+            transport=transport,
             timeout=httpx.Timeout(20.0),
             verify=False,
         ) as client:
@@ -10908,6 +10923,7 @@ async def proxyjet_generate_batch(payload: ProxyJetGenerateIn,
             db, user["id"],
             count=payload.count,
             country=(payload.country or "").strip().upper() or None,
+            state=(payload.state or "").strip().upper() or None,
         )
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -13266,6 +13282,95 @@ async def vr_delete_step(session_id: str, index: int, user: dict = Depends(get_c
     except KeyError:
         raise HTTPException(status_code=404, detail="Session not found")
     return vr.remove_step(sess, index)
+
+
+# ── New step-management endpoints (move/duplicate/rename) ────────────
+class _VRMoveReq(BaseModel):
+    direction: str = "up"  # "up" or "down"
+
+class _VRRenameReq(BaseModel):
+    name: str = ""
+
+@api_router.post("/visual-recorder/{session_id}/step/{index}/move")
+async def vr_move_step(session_id: str, index: int, req: _VRMoveReq, user: dict = Depends(get_current_user)):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    direction = "down" if (req.direction or "").lower() == "down" else "up"
+    return vr.move_step(sess, index, direction)
+
+
+@api_router.post("/visual-recorder/{session_id}/step/{index}/duplicate")
+async def vr_duplicate_step(session_id: str, index: int, user: dict = Depends(get_current_user)):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return vr.duplicate_step(sess, index)
+
+
+@api_router.patch("/visual-recorder/{session_id}/step/{index}/rename")
+async def vr_rename_step(session_id: str, index: int, req: _VRRenameReq, user: dict = Depends(get_current_user)):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return vr.rename_step(sess, index, req.name or "")
+
+
+# ── New action endpoints (press-key, hover, wait-for-selector) ───────
+class _VRKeyReq(BaseModel):
+    key: str
+
+class _VRHoverReq(BaseModel):
+    x: int
+    y: int
+
+class _VRWaitSelectorReq(BaseModel):
+    selector: str
+    timeout_ms: int = 15000
+
+@api_router.post("/visual-recorder/{session_id}/press-key")
+async def vr_press_key(session_id: str, req: _VRKeyReq, user: dict = Depends(get_current_user)):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.press_key(sess, req.key)
+
+
+@api_router.post("/visual-recorder/{session_id}/hover")
+async def vr_hover(session_id: str, req: _VRHoverReq, user: dict = Depends(get_current_user)):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.hover_at(sess, req.x, req.y)
+
+
+@api_router.post("/visual-recorder/{session_id}/wait-for-selector")
+async def vr_wait_for_selector(session_id: str, req: _VRWaitSelectorReq, user: dict = Depends(get_current_user)):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.wait_for_selector(sess, req.selector, req.timeout_ms)
 
 
 @api_router.post("/visual-recorder/{session_id}/finalize")

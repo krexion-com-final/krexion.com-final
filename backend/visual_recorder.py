@@ -733,6 +733,106 @@ def remove_step(sess: RecorderSession, index: int) -> Dict[str, Any]:
     return {"removed": None, "remaining": len(sess.steps)}
 
 
+def move_step(sess: RecorderSession, index: int, direction: str) -> Dict[str, Any]:
+    """Move a step up or down in the recorded list. `direction` ∈ {'up','down'}.
+    Returns the swap result + new index, or no-op if out of bounds."""
+    sess.touch()
+    n = len(sess.steps)
+    if not (0 <= index < n):
+        return {"moved": False, "reason": "index out of range"}
+    target = index - 1 if direction == "up" else index + 1
+    if not (0 <= target < n):
+        return {"moved": False, "reason": "edge"}
+    sess.steps[index], sess.steps[target] = sess.steps[target], sess.steps[index]
+    return {"moved": True, "from": index, "to": target}
+
+
+def duplicate_step(sess: RecorderSession, index: int) -> Dict[str, Any]:
+    """Insert a deep copy of the step at `index` right after it."""
+    sess.touch()
+    if not (0 <= index < len(sess.steps)):
+        return {"duplicated": False, "reason": "index out of range"}
+    import copy as _copy
+    clone = _copy.deepcopy(sess.steps[index])
+    sess.steps.insert(index + 1, clone)
+    return {"duplicated": True, "step": clone, "new_index": index + 1}
+
+
+def rename_step(sess: RecorderSession, index: int, name: str) -> Dict[str, Any]:
+    """Set / update the `name` field of an existing step (purely a label,
+    surfaced by the UI + Live Activity panel during the job run)."""
+    sess.touch()
+    if not (0 <= index < len(sess.steps)):
+        return {"renamed": False, "reason": "index out of range"}
+    sess.steps[index]["name"] = (name or "").strip() or None
+    return {"renamed": True, "name": sess.steps[index].get("name")}
+
+
+async def press_key(sess: RecorderSession, key: str) -> Dict[str, Any]:
+    """Send a single keyboard key press to the page (Enter, Tab, Escape,
+    Backspace, ArrowLeft, ArrowRight, ArrowUp, ArrowDown, PageDown, etc.).
+    Step is recorded so it replays during the RUT run."""
+    sess.touch()
+    if sess.state != "ready" or not sess.page:
+        return {"recorded": False, "error": f"Session not ready ({sess.state})"}
+    safe_key = (key or "").strip()
+    if not safe_key:
+        return {"recorded": False, "error": "key required"}
+    try:
+        await sess.page.keyboard.press(safe_key)
+    except Exception as e:
+        return {"recorded": False, "error": f"Key press failed: {e}"}
+    step = {"action": "press", "key": safe_key}
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+async def hover_at(sess: RecorderSession, x: int, y: int) -> Dict[str, Any]:
+    """Hover the mouse over an (x,y) page coordinate. Useful for menus
+    that only reveal on hover. Step is recorded so it replays."""
+    sess.touch()
+    if sess.state != "ready" or not sess.page:
+        return {"recorded": False, "error": f"Session not ready ({sess.state})"}
+    try:
+        await sess.page.mouse.move(int(x), int(y))
+    except Exception as e:
+        return {"recorded": False, "error": f"Hover failed: {e}"}
+    step = {
+        "action": "evaluate",
+        "script": (
+            "(function(){var el=document.elementFromPoint("
+            + str(int(x)) + "," + str(int(y)) +
+            ");if(el){el.dispatchEvent(new MouseEvent('mouseover',{bubbles:true}));"
+            "el.dispatchEvent(new MouseEvent('mouseenter',{bubbles:true}));}})();"
+        ),
+        "name": f"Hover @ ({int(x)},{int(y)})",
+    }
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+async def wait_for_selector(
+    sess: RecorderSession, selector: str, timeout_ms: int = 15000
+) -> Dict[str, Any]:
+    """Wait until a CSS selector becomes visible on the page (max
+    `timeout_ms`). Useful when an offer takes a variable time to load
+    a CTA. Step is recorded — RUT will wait the same way at replay."""
+    sess.touch()
+    if sess.state != "ready" or not sess.page:
+        return {"recorded": False, "error": f"Session not ready ({sess.state})"}
+    sel = (selector or "").strip()
+    if not sel:
+        return {"recorded": False, "error": "selector required"}
+    timeout_ms = max(500, min(int(timeout_ms or 15000), 120000))
+    try:
+        await sess.page.wait_for_selector(sel, state="visible", timeout=timeout_ms)
+    except Exception as e:
+        return {"recorded": False, "error": f"Selector did not appear within {timeout_ms}ms: {e}"}
+    step = {"action": "wait_for_selector", "selector": sel, "timeout": timeout_ms}
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
 def get_steps(sess: RecorderSession) -> List[Dict[str, Any]]:
     return sess.steps
 

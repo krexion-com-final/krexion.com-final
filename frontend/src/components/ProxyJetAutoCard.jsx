@@ -20,6 +20,16 @@ import {
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
+// US state codes — appended via ProxyJet's `-st-{XX}` filter so the
+// residential pool resolves to that state only.
+const US_STATES = [
+  "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA",
+  "HI","ID","IL","IN","IA","KS","KY","LA","ME","MD",
+  "MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ",
+  "NM","NY","NC","ND","OH","OK","OR","PA","RI","SC",
+  "SD","TN","TX","UT","VT","VA","WA","WV","WI","WY",
+];
+
 // Country list for the dropdown (ProxyJet supports many — keep the
 // shortlist that matters most for traffic campaigns; user can paste a
 // custom 2-letter code as well).
@@ -57,6 +67,7 @@ export default function ProxyJetAutoCard() {
   const [port, setPort] = useState(1010);
   const [gateway, setGateway] = useState("ca");
   const [defaultCountry, setDefaultCountry] = useState("US");
+  const [defaultState, setDefaultState] = useState("");
   const [product, setProduct] = useState("resi");
 
   const [lastTest, setLastTest] = useState(null); // { ok, exit_ip, round_trip_ms }
@@ -76,6 +87,7 @@ export default function ProxyJetAutoCard() {
         setPort(r.data.port || 1010);
         setGateway(r.data.gateway || "ca");
         setDefaultCountry(r.data.default_country || "US");
+        setDefaultState(r.data.default_state || "");
         setProduct(r.data.product || "resi");
       } else {
         setConfigured(false);
@@ -119,6 +131,7 @@ export default function ProxyJetAutoCard() {
           port: Number(port) || 1010,
           gateway: gateway.trim(),
           default_country: defaultCountry.trim().toUpperCase(),
+          default_state: defaultState.trim().toUpperCase() || null,
           product: product.trim(),
         },
         auth()
@@ -300,7 +313,10 @@ export default function ProxyJetAutoCard() {
             <select
               data-testid="pj-country"
               value={defaultCountry}
-              onChange={(e) => setDefaultCountry(e.target.value)}
+              onChange={(e) => {
+                setDefaultCountry(e.target.value);
+                if (e.target.value !== "US") setDefaultState("");
+              }}
               className="w-full h-9 rounded-md bg-[var(--brand-bg)] border border-[var(--brand-border)] text-white px-2 text-sm"
             >
               {COUNTRIES.map((c) => (
@@ -308,6 +324,27 @@ export default function ProxyJetAutoCard() {
               ))}
             </select>
           </div>
+          {defaultCountry === "US" && (
+            <div>
+              <Label className="text-xs text-[#A1A1AA]">
+                Default State <span className="text-[10px] text-[#71717a]">(optional)</span>
+              </Label>
+              <select
+                data-testid="pj-state"
+                value={defaultState}
+                onChange={(e) => setDefaultState(e.target.value)}
+                className="w-full h-9 rounded-md bg-[var(--brand-bg)] border border-[var(--brand-border)] text-white px-2 text-sm"
+              >
+                <option value="">— Any state —</option>
+                {US_STATES.map((s) => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
+              <p className="text-[10px] text-[#71717a] mt-1">
+                Restrict exit IPs to a specific US state for geo-targeted offers.
+              </p>
+            </div>
+          )}
         </div>
 
         <div className="flex flex-wrap gap-2 pt-1">

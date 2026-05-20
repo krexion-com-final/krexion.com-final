@@ -258,7 +258,14 @@ export default function RealUserTrafficPage() {
   // page). Every exit-IP is guaranteed unused for this user.
   const [useProxyJetAuto, setUseProxyJetAuto] = useState(false);
   const [proxyJetCountry, setProxyJetCountry] = useState("US");
+  const [proxyJetState, setProxyJetState] = useState("");
   const [pjConfigured, setPjConfigured] = useState(null); // null=unknown, true/false
+  // ── Inline UA Generator (so user doesn't have to leave RUT page) ──
+  const [uaGenOpen, setUaGenOpen] = useState(false);
+  const [uaGenApp, setUaGenApp] = useState("chrome");
+  const [uaGenPlatform, setUaGenPlatform] = useState("android");
+  const [uaGenCount, setUaGenCount] = useState(50);
+  const [uaGenBusy, setUaGenBusy] = useState(false);
 
   // Uploaded Things — saved batch IDs (alternative to paste)
   const [uploadedLibrary, setUploadedLibrary] = useState([]);
@@ -407,10 +414,51 @@ export default function RealUserTrafficPage() {
         if (data.configured && data.default_country) {
           setProxyJetCountry((prev) => prev || data.default_country);
         }
+        if (data.configured && data.default_state) {
+          setProxyJetState((prev) => prev || data.default_state);
+        }
       } else {
         setPjConfigured(false);
       }
     } catch (e) { setPjConfigured(false); }
+  };
+
+  // ── Inline UA Generator ────────────────────────────────────────────
+  // Fetch UAs from /api/user-agents/generate and append into the UA
+  // textarea — avoids leaving the page just to populate user agents.
+  const generateUAsInline = async () => {
+    const n = Math.max(1, Math.min(Number(uaGenCount) || 10, 5000));
+    setUaGenBusy(true);
+    try {
+      const r = await fetch(`${API_URL}/api/user-agents/generate`, {
+        method: "POST",
+        headers: { ...authH(), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          app: uaGenApp,
+          platform: uaGenPlatform,
+          count: n,
+          format: "json",
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      const list = (d.user_agents || []).map((x) => x.user_agent).filter(Boolean);
+      if (!list.length) {
+        toast.error("Generator returned 0 UAs — try a different app/platform");
+        return;
+      }
+      // Append to existing list (preserve what user already pasted)
+      setUserAgents((prev) => {
+        const sep = prev.trim() ? "\n" : "";
+        return prev + sep + list.join("\n");
+      });
+      toast.success(`✓ Generated ${list.length} ${uaGenPlatform} ${uaGenApp} UAs`);
+      setUaGenOpen(false);
+    } catch (e) {
+      toast.error(`UA generation failed: ${e.message || e}`);
+    } finally {
+      setUaGenBusy(false);
+    }
   };
 
   const fetchJobDetail = async (jobId) => {
@@ -798,6 +846,7 @@ export default function RealUserTrafficPage() {
       // unique residential proxies (one-per-visit, no exit-IP ever reused).
       fd.append("use_proxyjet_auto", String(useProxyJetAuto));
       fd.append("proxyjet_country", (proxyJetCountry || "US").toUpperCase());
+      fd.append("proxyjet_state", (proxyJetState || "").toUpperCase());
 
       fd.append("form_fill_enabled", String(formFillEnabled));
       if (formFillEnabled) {
@@ -1164,7 +1213,10 @@ export default function RealUserTrafficPage() {
                     <Label className="text-xs text-zinc-300">Country:</Label>
                     <select
                       value={proxyJetCountry}
-                      onChange={(e) => setProxyJetCountry(e.target.value)}
+                      onChange={(e) => {
+                        setProxyJetCountry(e.target.value);
+                        if (e.target.value !== "US") setProxyJetState("");
+                      }}
                       className="h-8 px-2 rounded bg-zinc-800 border border-zinc-700 text-zinc-100 text-xs"
                       data-testid="rut-proxyjet-country"
                     >
@@ -1172,7 +1224,23 @@ export default function RealUserTrafficPage() {
                         <option key={c} value={c}>{c}</option>
                       ))}
                     </select>
-                    <span className="text-[10px] text-indigo-300">
+                    {proxyJetCountry === "US" && (
+                      <>
+                        <Label className="text-xs text-zinc-300 ml-2">State:</Label>
+                        <select
+                          value={proxyJetState}
+                          onChange={(e) => setProxyJetState(e.target.value)}
+                          className="h-8 px-2 rounded bg-zinc-800 border border-zinc-700 text-zinc-100 text-xs"
+                          data-testid="rut-proxyjet-state"
+                        >
+                          <option value="">Any</option>
+                          {["AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY"].map((s) => (
+                            <option key={s} value={s}>{s}</option>
+                          ))}
+                        </select>
+                      </>
+                    )}
+                    <span className="text-[10px] text-indigo-300 w-full">
                       Anti-detect safeties (no-repeated-proxy + skip-duplicate-IP) auto-enabled.
                     </span>
                   </div>
@@ -1362,6 +1430,87 @@ export default function RealUserTrafficPage() {
                   )}
                 </div>
               )}
+              <div className="flex items-center justify-between mb-1">
+                <Label className="text-zinc-300 text-sm" htmlFor="rut-user-agents">User Agents (one per line)</Label>
+                <button
+                  type="button"
+                  onClick={() => setUaGenOpen((v) => !v)}
+                  disabled={selectedUploadUaIds.length > 0}
+                  className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md bg-emerald-600/20 hover:bg-emerald-600/40 border border-emerald-500/40 text-emerald-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  data-testid="rut-ua-gen-toggle"
+                  title="Generate realistic UAs inline — no need to visit UA Generator page"
+                >
+                  <span className="text-xs">✨</span> Generate UAs
+                </button>
+              </div>
+
+              {/* Inline UA Generator panel (collapsed by default) */}
+              {uaGenOpen && (
+                <div
+                  className="mb-2 p-3 rounded-md bg-emerald-950/30 border border-emerald-500/30 space-y-2"
+                  data-testid="rut-ua-gen-panel"
+                >
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                    <div>
+                      <Label className="text-[10px] text-zinc-400 uppercase tracking-wide">App</Label>
+                      <select
+                        value={uaGenApp}
+                        onChange={(e) => setUaGenApp(e.target.value)}
+                        className="w-full h-8 px-2 rounded bg-zinc-800 border border-zinc-700 text-zinc-100 text-xs"
+                        data-testid="rut-ua-gen-app"
+                      >
+                        <option value="chrome">Chrome (web)</option>
+                        <option value="instagram">Instagram</option>
+                        <option value="facebook">Facebook</option>
+                        <option value="tiktok">TikTok</option>
+                        <option value="snapchat">Snapchat</option>
+                        <option value="pinterest">Pinterest</option>
+                      </select>
+                    </div>
+                    <div>
+                      <Label className="text-[10px] text-zinc-400 uppercase tracking-wide">Platform</Label>
+                      <select
+                        value={uaGenPlatform}
+                        onChange={(e) => setUaGenPlatform(e.target.value)}
+                        className="w-full h-8 px-2 rounded bg-zinc-800 border border-zinc-700 text-zinc-100 text-xs"
+                        data-testid="rut-ua-gen-platform"
+                      >
+                        <option value="any">Any (mix)</option>
+                        <option value="android">Android</option>
+                        <option value="ios">iOS</option>
+                        <option value="desktop">Desktop</option>
+                      </select>
+                    </div>
+                    <div>
+                      <Label className="text-[10px] text-zinc-400 uppercase tracking-wide">Count</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={5000}
+                        value={uaGenCount}
+                        onChange={(e) => setUaGenCount(Number(e.target.value) || 50)}
+                        className="h-8 bg-zinc-800 border-zinc-700 text-zinc-100 text-xs"
+                        data-testid="rut-ua-gen-count"
+                      />
+                    </div>
+                    <div className="flex items-end">
+                      <Button
+                        onClick={generateUAsInline}
+                        disabled={uaGenBusy}
+                        className="w-full h-8 bg-emerald-600 hover:bg-emerald-500 text-white text-xs"
+                        data-testid="rut-ua-gen-run"
+                      >
+                        {uaGenBusy ? "Generating…" : "Generate & Append"}
+                      </Button>
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-emerald-300/80">
+                    Generated UAs are <b>appended</b> below — existing ones are preserved. Want full advanced
+                    options (brand, regions, resolutions)? Open the <a href="/user-agent-generator" className="underline text-emerald-300">UA Generator page</a>.
+                  </p>
+                </div>
+              )}
+
               <Textarea
                 data-testid="rut-user-agents"
                 rows={selectedUploadUaIds.length > 0 ? 5 : 9}
