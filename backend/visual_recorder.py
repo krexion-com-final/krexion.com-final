@@ -192,6 +192,92 @@ def _build_fill_step(selector: str, value: str) -> Dict[str, Any]:
     return {"action": "fill", "selector": selector, "value": value, "timeout": 6000, "optional": True}
 
 
+# ── 2026-01: Fallback sample data ──────────────────────────────────────
+# When the user binds a form field to a column header (e.g. {{first}})
+# but the recorder has NO sample_row (Excel not uploaded) OR the column
+# is missing from the sample_row, the live browser input stays empty
+# → form validation blocks CONTINUE → user can't record subsequent
+# pages (survey / thank-you / etc.).
+#
+# This helper returns a sensible *temporary* value based on the column
+# name so the live form passes validation. The recorded JSON step STILL
+# uses the `{{header}}` placeholder — at RUT replay time the actual
+# lead row substitutes via the engine's _substitute() function. Production
+# behaviour is therefore unchanged; this only affects what's typed into
+# the live browser during recording.
+_FALLBACK_SAMPLES: Dict[str, str] = {
+    # Names
+    "first": "John", "firstname": "John", "first_name": "John", "fname": "John", "givenname": "John",
+    "last": "Smith", "lastname": "Smith", "last_name": "Smith", "lname": "Smith", "surname": "Smith", "familyname": "Smith",
+    "name": "John Smith", "fullname": "John Smith", "full_name": "John Smith",
+    "middle": "A", "middlename": "A", "middle_name": "A", "mname": "A",
+    # Contact
+    "email": "john.smith@example.com", "emailaddress": "john.smith@example.com", "email_address": "john.smith@example.com", "mail": "john.smith@example.com",
+    "phone": "5551234567", "phonenumber": "5551234567", "phone_number": "5551234567", "mobile": "5551234567", "tel": "5551234567", "telephone": "5551234567", "cell": "5551234567",
+    # Address
+    "address": "123 Main Street", "street": "123 Main Street", "streetaddress": "123 Main Street", "street_address": "123 Main Street", "address1": "123 Main Street", "addr": "123 Main Street",
+    "address2": "Apt 4B", "apt": "4B", "unit": "4B", "suite": "4B",
+    "city": "New York", "town": "New York",
+    "state": "NY", "region": "NY", "province": "NY",
+    "zip": "10001", "zipcode": "10001", "zip_code": "10001", "postal": "10001", "postalcode": "10001", "postal_code": "10001", "postcode": "10001",
+    "country": "United States",
+    # DOB
+    "day": "15", "birth_day": "15", "birthday": "15", "dob_day": "15", "dday": "15", "bday": "15",
+    "month": "6", "birth_month": "6", "birthmonth": "6", "dob_month": "6", "dmonth": "6", "bmonth": "6",
+    "year": "1990", "birth_year": "1990", "birthyear": "1990", "dob_year": "1990", "dyear": "1990", "byear": "1990",
+    "dob": "06/15/1990", "birthdate": "06/15/1990", "birth_date": "06/15/1990",
+    "age": "34",
+    # Misc
+    "gender": "Male", "sex": "Male",
+    "ssn": "123456789", "social": "123456789",
+    "income": "50000", "salary": "50000",
+    "password": "TempPass123!", "pwd": "TempPass123!", "passwd": "TempPass123!",
+    "username": "johnsmith", "user": "johnsmith", "userid": "johnsmith",
+    "company": "Acme Corp", "employer": "Acme Corp", "business": "Acme Corp",
+}
+
+
+def _get_fallback_sample_value(header_name: str) -> Optional[str]:
+    """Return a temporary sample value for a header name so the live
+    browser form fills with realistic data during recording.
+
+    Match is case-insensitive AND tries substring matching as a last
+    resort (e.g. "user_first_name" → "first" → "John").
+    """
+    if not header_name:
+        return None
+    key = str(header_name).strip().lower().replace("-", "_").replace(" ", "_")
+    # Exact match
+    if key in _FALLBACK_SAMPLES:
+        return _FALLBACK_SAMPLES[key]
+    # Try collapsed (no underscores)
+    collapsed = key.replace("_", "")
+    if collapsed in _FALLBACK_SAMPLES:
+        return _FALLBACK_SAMPLES[collapsed]
+    # Substring match — longest fallback key first
+    for fk in sorted(_FALLBACK_SAMPLES.keys(), key=len, reverse=True):
+        if fk in key or fk in collapsed:
+            return _FALLBACK_SAMPLES[fk]
+    return None
+
+
+def _resolve_live_value(sess: "RecorderSession", header_name: str) -> Optional[str]:
+    """Resolve the value to fill into the live browser for a header.
+
+    Priority:
+      1. sess.sample_row[header_name]  (user-uploaded Excel data)
+      2. _get_fallback_sample_value()  (sensible default based on column name)
+    """
+    if not header_name:
+        return None
+    key = str(header_name).strip().lower()
+    if key in sess.sample_row:
+        raw = sess.sample_row[key]
+        if raw is not None and str(raw).strip() != "":
+            return str(raw)
+    return _get_fallback_sample_value(header_name)
+
+
 def _build_wait(ms: int) -> Dict[str, Any]:
     return {"action": "wait", "ms": int(max(100, min(ms, 120000)))}
 
@@ -684,13 +770,12 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
         # the user can move past form validation and record steps on
         # the NEXT page. The recorded step still uses the {{header}}
         # template — at RUT replay time the real lead row substitutes.
-        sample_val: Optional[str] = None
-        if header_name:
-            key = str(header_name).strip().lower()
-            if key in sess.sample_row:
-                raw = sess.sample_row[key]
-                if raw is not None and str(raw).strip() != "":
-                    sample_val = str(raw)
+        # ── 2026-01 update ──
+        # If sample_row is missing OR the column is not in it, fall
+        # back to a sensible default (e.g. first→John, zip→10001)
+        # so the live form still fills and CONTINUE works. The recorded
+        # JSON step is unchanged; only the live browser uses the fallback.
+        sample_val: Optional[str] = _resolve_live_value(sess, header_name) if header_name else None
         # Always emit a real `fill` step in the JSON so the runner
         # populates the input with the lead's value. The placeholder
         # `{{header_name}}` is substituted by the RUT engine's
@@ -818,32 +903,23 @@ async def bind_dropdown(
     # Brief settle wait so subsequent steps see the post-change DOM.
     sess.steps.append(_build_wait(500))
 
-    # Live-browser select using literal value OR sample-row lookup.
+    # Live-browser select using literal value OR sample-row lookup
+    # OR fallback faker (2026-01) so the dropdown always gets a value
+    # during recording even when sample_row is empty or missing this col.
     live_val: Optional[str] = None
     if value:
         live_val = str(value)
     elif header_name:
-        key = str(header_name).strip().lower()
-        if key in sess.sample_row:
-            raw = sess.sample_row[key]
-            if raw is not None and str(raw).strip() != "":
-                live_val = str(raw)
+        live_val = _resolve_live_value(sess, header_name)
     extra: Dict[str, Any] = {}
     if live_val is not None:
         async with sess.lock:
-            try:
-                if match_by_norm == "value":
-                    await sess.page.select_option(selector, value=live_val, timeout=4000)
-                else:
-                    # 'label' — try label first (most forgiving), fall back to value
-                    try:
-                        await sess.page.select_option(selector, label=live_val, timeout=3000)
-                    except Exception:
-                        await sess.page.select_option(selector, value=live_val, timeout=3000)
-                extra["selected_sample"] = live_val[:30]
-            except Exception as e:  # noqa: BLE001
+            ok, used = await _smart_select_option(sess.page, selector, live_val, match_by_norm)
+            if ok:
+                extra["selected_sample"] = (used or live_val)[:30]
+            else:
                 extra["select_warning"] = (
-                    f"Live <select> did not accept '{live_val}' ({type(e).__name__}). "
+                    f"Live <select> did not accept '{live_val}' (tried multiple variants). "
                     "Step recorded anyway; verify the option matches one of the dropdown values."
                 )
     else:
@@ -854,6 +930,71 @@ async def bind_dropdown(
             "continue recording on the NEXT page)."
         )
     return {"recorded": True, "step": step, **extra}
+
+
+_MONTH_NAMES = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+
+
+async def _smart_select_option(page: Any, selector: str, live_val: str, match_by: str) -> Tuple[bool, Optional[str]]:
+    """Try selecting an <option> using multiple value variants so common
+    date / numeric dropdowns work even when the recorded value format
+    doesn't exactly match the option attribute.
+
+    Variants tried (in order):
+      - the live_val as-is (label, then value, then by index for digits)
+      - zero-padded version  ("6" → "06")
+      - un-padded version    ("06" → "6")
+      - month-name variants  ("6" → "June", "Jun")
+      - month-number from name ("June" → "6", "06")
+
+    Returns (success, variant_used).
+    """
+    val = str(live_val).strip()
+    if not val:
+        return False, None
+
+    candidates: List[str] = [val]
+    # Numeric variants (zero-pad / un-pad)
+    if val.isdigit():
+        n = int(val)
+        padded = f"{n:02d}"
+        unpadded = str(n)
+        for v in (padded, unpadded):
+            if v not in candidates:
+                candidates.append(v)
+        # Month: number → name (full + abbrev)
+        if 1 <= n <= 12:
+            full = _MONTH_NAMES[n - 1]
+            abbrev = full[:3]
+            for v in (full, abbrev, full.lower(), abbrev.lower(), full.upper(), abbrev.upper()):
+                if v not in candidates:
+                    candidates.append(v)
+    else:
+        # Month name → number variants
+        lower = val.lower()
+        for i, m in enumerate(_MONTH_NAMES, start=1):
+            if lower == m.lower() or lower == m.lower()[:3]:
+                for v in (str(i), f"{i:02d}"):
+                    if v not in candidates:
+                        candidates.append(v)
+                break
+
+    primary_modes = ("label", "value") if match_by == "label" else ("value", "label")
+
+    for candidate in candidates:
+        for mode in primary_modes:
+            try:
+                if mode == "label":
+                    await page.select_option(selector, label=candidate, timeout=2000)
+                else:
+                    await page.select_option(selector, value=candidate, timeout=2000)
+                return True, candidate
+            except Exception:
+                continue
+    return False, None
 
 
 def _make_selector_for_input(info: Dict[str, Any]) -> str:
@@ -904,13 +1045,11 @@ async def type_text(sess: RecorderSession, selector: str, value: str, header_nam
     # Resolve the value to ACTUALLY type into the live browser. The
     # recorded JSON step still uses the `{{header}}` placeholder so
     # RUT replays with the real lead's data.
+    # 2026-01: fall back to faker default when sample_row missing the col
+    # so the live form fills even without Excel data uploaded.
     live_val = value
     if (not live_val) and header_name:
-        key = str(header_name).strip().lower()
-        if key in sess.sample_row:
-            raw = sess.sample_row[key]
-            if raw is not None and str(raw).strip() != "":
-                live_val = str(raw)
+        live_val = _resolve_live_value(sess, header_name)
     extra: Dict[str, Any] = {}
     async with sess.lock:
         if live_val:
