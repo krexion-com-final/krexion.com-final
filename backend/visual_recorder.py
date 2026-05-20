@@ -133,20 +133,37 @@ def _build_text_click_evaluate(text: str) -> Dict[str, Any]:
     """
     safe = text.replace("\\", "\\\\").replace("'", "\\'")
     script = (
-        "(function(){var t='" + safe + "'.toLowerCase();"
+        "(function(){var t='" + safe + "'.replace(/\\s+/g,' ').trim().toLowerCase();"
         "var match=function(e){var s=window.getComputedStyle(e);"
         "if(s.display==='none'||s.visibility==='hidden')return false;"
-        "var x=((e.innerText||e.textContent||e.value||'')+'').trim().toLowerCase();return x===t;};"
+        # 2026-01: Normalize whitespace + use CONTAINS match for long text.
+        # Exact-match was too brittle — pages add trailing words like
+        # "below." or wrap CTAs in extra <span> children that break === .
+        # We use word-aware contains so we don't false-match short tokens.
+        "var x=((e.innerText||e.textContent||e.value||'')+'').replace(/\\s+/g,' ').trim().toLowerCase();"
+        "if(!x)return false;"
+        "if(x===t)return true;"
+        "if(t.length>=12&&x.indexOf(t)!==-1)return true;"
+        "if(t.length>=12&&x.length>=8&&t.indexOf(x)!==-1)return true;"
+        "return false;};"
         # 1. Prefer real anchors
         "var anchors=Array.from(document.querySelectorAll('a')).filter(match);"
         "if(anchors.length){var a=anchors[0];a.scrollIntoView({block:'center'});"
         "if(a.href&&!a.target){window.location.assign(a.href);}else{a.click();}return;}"
-        # 2. Fall back to other clickable elements
-        "var els=Array.from(document.querySelectorAll('button,div,span,label,input[type=submit]')).filter(match);"
+        # 2. Fall back to other clickable elements (added input + label-for handling)
+        "var els=Array.from(document.querySelectorAll('button,div,span,label,input,[role=button],[role=checkbox]')).filter(match);"
         "if(els.length){var el=els[0];el.scrollIntoView({block:'center'});"
+        # 2026-01: If matched element is a LABEL with `for=`, click the
+        # actual control it points to (fixes checkbox text-click failures
+        # where the visible text is in a <label> but the real input is
+        # a separate <input type=checkbox>).
+        "if(el.tagName==='LABEL'&&el.htmlFor){var ctl=document.getElementById(el.htmlFor);if(ctl){ctl.scrollIntoView({block:'center'});ctl.click();return;}}"
         # Peek inside for a wrapped anchor (CTA-card pattern)
         "var inner=el.querySelector&&el.querySelector('a[href]');"
         "if(inner&&inner.href&&!inner.target){window.location.assign(inner.href);return;}"
+        # 2026-01: If matched element contains a checkbox / radio, click that
+        "var box=el.querySelector&&el.querySelector('input[type=checkbox],input[type=radio]');"
+        "if(box&&!box.checked){box.click();return;}"
         # Otherwise plain click
         "el.click();"
         # If this was a submit button, force the form submission as a safety net
@@ -168,17 +185,28 @@ def _build_random_pick_evaluate(texts: List[str]) -> Dict[str, Any]:
     arr = "['" + "','".join(safe) + "']"
     script = (
         "(function(){var labels=" + arr + ";"
-        "var pick=labels[Math.floor(Math.random()*labels.length)].toLowerCase();"
+        "var pick=labels[Math.floor(Math.random()*labels.length)].replace(/\\s+/g,' ').trim().toLowerCase();"
         "var match=function(e){var s=window.getComputedStyle(e);"
         "if(s.display==='none'||s.visibility==='hidden')return false;"
-        "var x=((e.innerText||e.textContent||'')+'').trim().toLowerCase();return x===pick;};"
+        # 2026-01: same whitespace-normalised + contains match as
+        # _build_text_click_evaluate so random survey picks aren't
+        # broken by trailing "below." / extra <span> children.
+        "var x=((e.innerText||e.textContent||e.value||'')+'').replace(/\\s+/g,' ').trim().toLowerCase();"
+        "if(!x)return false;"
+        "if(x===pick)return true;"
+        "if(pick.length>=12&&x.indexOf(pick)!==-1)return true;"
+        "if(pick.length>=12&&x.length>=8&&pick.indexOf(x)!==-1)return true;"
+        "return false;};"
         "var anchors=Array.from(document.querySelectorAll('a')).filter(match);"
         "if(anchors.length){var a=anchors[0];a.scrollIntoView({block:'center'});"
         "if(a.href&&!a.target){window.location.assign(a.href);}else{a.click();}return;}"
-        "var els=Array.from(document.querySelectorAll('button,div,span,label,input[type=submit]')).filter(match);"
+        "var els=Array.from(document.querySelectorAll('button,div,span,label,input,[role=button],[role=checkbox]')).filter(match);"
         "if(els.length){var el=els[0];el.scrollIntoView({block:'center'});"
+        "if(el.tagName==='LABEL'&&el.htmlFor){var ctl=document.getElementById(el.htmlFor);if(ctl){ctl.scrollIntoView({block:'center'});ctl.click();return;}}"
         "var inner=el.querySelector&&el.querySelector('a[href]');"
         "if(inner&&inner.href&&!inner.target){window.location.assign(inner.href);return;}"
+        "var box=el.querySelector&&el.querySelector('input[type=checkbox],input[type=radio]');"
+        "if(box&&!box.checked){box.click();return;}"
         "el.click();"
         "var isSubmit=(el.tagName==='INPUT'||el.tagName==='BUTTON')&&(el.type==='submit'||el.getAttribute&&el.getAttribute('type')==='submit');"
         "if(isSubmit){var f=el.form||(el.closest&&el.closest('form'));"
@@ -652,13 +680,28 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
     sess.touch()
     async with sess.lock:
         # Find element at point + extract a robust label/selector
+        # 2026-01: enhanced text capture — also reads input.value (for
+        # <input type=submit value="CONTINUE">), walks up the DOM for
+        # any tag (not just SPAN) when current el has no text, and
+        # captures up to 200 chars so multi-sentence consent labels
+        # aren't truncated mid-sentence (which broke text-match clicks).
         info = await sess.page.evaluate(
             """([x,y])=>{
                 var el = document.elementFromPoint(x, y);
                 if(!el) return null;
-                while(el && el.tagName==='SPAN' && el.parentElement && el.parentElement.tagName!=='BODY'){el = el.parentElement; if((el.innerText||el.textContent||'').trim().length>0) break;}
+                // Walk up to find a meaningful clickable ancestor:
+                // any element whose direct text or value yields a
+                // usable label, OR a known interactive tag.
+                var depth = 0;
+                while(el && el.parentElement && el.parentElement.tagName!=='BODY' && depth < 5){
+                    var txt = ((el.innerText||el.textContent||el.value||'')+'').trim();
+                    var isInteractive = /^(A|BUTTON|INPUT|SELECT|TEXTAREA|LABEL)$/.test(el.tagName);
+                    if(isInteractive || (txt.length>0 && txt.length<400)) break;
+                    el = el.parentElement; depth++;
+                }
                 var r = el.getBoundingClientRect();
-                var text = ((el.innerText || el.textContent || '') + '').trim().slice(0, 80);
+                // Capture text from innerText, textContent, and value (for input[type=submit])
+                var text = ((el.innerText || el.textContent || el.value || '') + '').replace(/\\s+/g,' ').trim().slice(0, 200);
                 var ph = el.getAttribute && el.getAttribute('placeholder');
                 var name = el.getAttribute && el.getAttribute('name');
                 var id = el.id || '';

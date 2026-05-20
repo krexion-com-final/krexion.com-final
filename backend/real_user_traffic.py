@@ -4258,10 +4258,89 @@ async def run_real_user_traffic_job(
 #   {{random.N}}                    → N-digit random number
 #   {{randomletters.N}}             → N random letters
 # ──────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────
+# 2026-01: Column synonym map for {{placeholder}} substitution
+# ──────────────────────────────────────────────────────────────────
+# Visual Recorder users sometimes bind a field to a column name that
+# doesn't EXACTLY match the data file column (e.g. recorder used
+# `{{cellphone}}` but Excel has `phone`). Previously this left the
+# form field empty → form validation failed → CONTINUE didn't advance
+# → conversion lost. We now do a 2-stage lookup:
+#   1. Exact case-insensitive match (existing behaviour, unchanged)
+#   2. Synonym fallback — common field name aliases
+# Pure additive: if exact match succeeds we return it; synonym lookup
+# only fires when exact lookup misses. Production behaviour for
+# matching column names is therefore identical.
+_PLACEHOLDER_SYNONYMS: Dict[str, List[str]] = {
+    # phone
+    "phone":      ["cellphone", "cell_phone", "cell", "mobile", "mobilephone", "mobile_phone", "telephone", "tel", "phonenumber", "phone_number"],
+    "cellphone":  ["phone", "cell", "mobile", "mobilephone", "telephone", "tel", "phonenumber", "phone_number", "cell_phone"],
+    "cell":       ["phone", "cellphone", "mobile", "tel", "phonenumber", "phone_number"],
+    "mobile":     ["phone", "cellphone", "cell", "tel", "phonenumber", "phone_number"],
+    "telephone":  ["phone", "cellphone", "cell", "mobile", "tel"],
+    "tel":        ["phone", "cellphone", "telephone", "cell", "mobile"],
+    "phonenumber": ["phone", "cellphone", "cell", "mobile", "tel"],
+    "phone_number": ["phone", "cellphone", "cell", "mobile", "tel"],
+    # name
+    "first":      ["firstname", "first_name", "fname", "givenname", "given_name"],
+    "firstname":  ["first", "first_name", "fname", "givenname"],
+    "first_name": ["first", "firstname", "fname", "givenname"],
+    "fname":      ["first", "firstname", "first_name", "givenname"],
+    "last":       ["lastname", "last_name", "lname", "surname", "familyname", "family_name"],
+    "lastname":   ["last", "last_name", "lname", "surname", "familyname"],
+    "last_name":  ["last", "lastname", "lname", "surname"],
+    "lname":      ["last", "lastname", "last_name", "surname"],
+    "surname":    ["last", "lastname", "last_name"],
+    "fullname":   ["full_name", "name", "fname", "firstname"],
+    # address
+    "address":    ["street", "streetaddress", "street_address", "address1", "addr", "address_line_1", "addressline1"],
+    "street":     ["address", "streetaddress", "street_address", "address1"],
+    "streetaddress": ["address", "street", "street_address", "address1"],
+    "address1":   ["address", "street", "streetaddress", "address_line_1"],
+    "address2":   ["apt", "unit", "suite", "address_line_2", "addressline2"],
+    "apt":        ["address2", "unit", "suite"],
+    # city / state / zip
+    "city":       ["town", "locality"],
+    "state":      ["region", "province", "state_code", "statecode"],
+    "zip":        ["zipcode", "zip_code", "postal", "postalcode", "postal_code", "postcode"],
+    "zipcode":    ["zip", "zip_code", "postal", "postalcode", "postal_code", "postcode"],
+    "zip_code":   ["zip", "zipcode", "postal", "postalcode", "postal_code", "postcode"],
+    "postal":     ["zip", "zipcode", "postal_code", "postalcode", "postcode"],
+    "postalcode": ["zip", "zipcode", "postal", "postal_code", "postcode"],
+    "postcode":   ["zip", "zipcode", "postal", "postalcode", "postal_code"],
+    # email
+    "email":      ["emailaddress", "email_address", "mail", "e_mail", "e-mail"],
+    "emailaddress": ["email", "email_address", "mail"],
+    "email_address": ["email", "emailaddress", "mail"],
+    # DOB
+    "day":        ["birth_day", "birthday_day", "dob_day", "dday", "bday", "birth_d"],
+    "birth_day":  ["day", "birthday_day", "dob_day", "dday", "bday"],
+    "month":      ["birth_month", "birthmonth", "dob_month", "dmonth", "bmonth", "birth_m"],
+    "birth_month": ["month", "birthmonth", "dob_month", "dmonth"],
+    "year":       ["birth_year", "birthyear", "dob_year", "dyear", "byear", "birth_y"],
+    "birth_year": ["year", "birthyear", "dob_year", "dyear"],
+    "dob":        ["birthdate", "birth_date", "date_of_birth"],
+    "birthdate":  ["dob", "birth_date", "date_of_birth"],
+    # gender
+    "gender":     ["sex"],
+    "sex":        ["gender"],
+}
+
+
 def _substitute(template: str, row: Dict[str, Any]) -> str:
     if not isinstance(template, str):
         return template
     import re
+    # Build a normalised lookup dict ONCE per call so synonym lookups
+    # are O(1). Lowercase + strip + replace common separators.
+    row_norm: Dict[str, Any] = {}
+    for k, v in row.items():
+        if k is None:
+            continue
+        nk = str(k).strip().lower().replace("-", "_").replace(" ", "_")
+        if v is not None and str(v).strip() != "":
+            row_norm[nk] = v
+
     def repl(m):
         key = m.group(1).strip()
         if key.lower().startswith("row."):
@@ -4279,10 +4358,40 @@ def _substitute(template: str, row: Dict[str, Any]) -> str:
                 return "".join(random.choice(string.ascii_lowercase) for _ in range(max(1, n)))
             except Exception:
                 return ""
-        # Case-insensitive row lookup
+        # 1. Exact case-insensitive row lookup (legacy behaviour preserved)
         for k, v in row.items():
             if str(k).strip().lower() == key.lower():
                 return "" if v is None else str(v)
+        # 2. 2026-01 synonym fallback — common field aliases so
+        # `{{cellphone}}` resolves when the data file has `phone`, etc.
+        norm_key = key.strip().lower().replace("-", "_").replace(" ", "_")
+        # 2a. Direct normalised match (handles hyphen/space differences)
+        if norm_key in row_norm:
+            v = row_norm[norm_key]
+            return "" if v is None else str(v)
+        # 2b. Stripped-underscore variant (e.g. "first_name" -> "firstname")
+        collapsed = norm_key.replace("_", "")
+        for cand_key in row_norm:
+            if cand_key.replace("_", "") == collapsed:
+                v = row_norm[cand_key]
+                return "" if v is None else str(v)
+        # 2c. Synonym list lookup
+        for syn in _PLACEHOLDER_SYNONYMS.get(norm_key, []):
+            if syn in row_norm:
+                v = row_norm[syn]
+                return "" if v is None else str(v)
+            # Try collapsed variant of each synonym too
+            syn_col = syn.replace("_", "")
+            for cand_key in row_norm:
+                if cand_key.replace("_", "") == syn_col:
+                    v = row_norm[cand_key]
+                    return "" if v is None else str(v)
+        # 2d. Substring match — last resort (e.g. "homephone" → "phone")
+        if len(norm_key) >= 4:
+            for cand_key in row_norm:
+                if norm_key in cand_key or cand_key in norm_key:
+                    v = row_norm[cand_key]
+                    return "" if v is None else str(v)
         return ""
     return re.sub(r"\{\{\s*([^}]+?)\s*\}\}", repl, template)
 
