@@ -281,6 +281,181 @@ def _reformat_value(cand_keys: List[str], attrs: dict, raw_value: Any) -> str:
     return s
 
 
+# ─────── Human-like field interaction (anti-detect) ───────────────
+# These helpers replace Playwright's instant .fill() with a realistic
+# focus → mouse-move → click-with-offset → per-char typing pattern that
+# bypasses behavior-tracking fraud detectors (Anura, IPQS deep mode,
+# PerimeterX, HUMAN security, ArkoseLabs heuristics). Every helper is
+# wrapped in try/except so a quirky page can never abort a visit — we
+# always fall back to the original .fill() path on failure.
+
+async def _human_mouse_move_to(page: Page, el) -> bool:
+    """Move mouse from current position to a random point inside the
+    bounding box of `el`, using 8-18 micro-steps (bezier-like). Returns
+    True if movement landed inside the element so the caller knows it
+    can safely .click() / .focus() / type. NEVER raises."""
+    try:
+        box = await el.bounding_box()
+        if not box or box["width"] < 2 or box["height"] < 2:
+            return False
+        # Pick a random target point well inside the element (avoid edge
+        # rounding artifacts on rounded buttons).
+        pad_x = max(2, min(box["width"] * 0.15, 24))
+        pad_y = max(2, min(box["height"] * 0.15, 16))
+        tx = box["x"] + pad_x + random.random() * (box["width"] - 2 * pad_x)
+        ty = box["y"] + pad_y + random.random() * (box["height"] - 2 * pad_y)
+        # Mouse move with realistic step count — Playwright's `steps`
+        # parameter interpolates linearly so 8-18 steps look like a
+        # smooth human-speed motion.
+        await page.mouse.move(tx, ty, steps=random.randint(8, 18))
+        # Tiny dwell so the move event settles before the click —
+        # detectors check that mousemove → click is NOT instant.
+        await page.wait_for_timeout(random.randint(40, 140))
+        return True
+    except Exception:
+        return False
+
+
+async def _human_type_field(page: Page, el, value: str) -> bool:
+    """Fill `el` like a real human:
+       1. Mouse-move to a random offset inside the field
+       2. Click (focus) — uses keyboard.press('Tab') with 30% chance if
+          the field is the *next* logical sibling (currently always
+          mouse-click for simplicity; TAB navigation is added at the
+          loop level via `_human_tab_or_click`).
+       3. Clear any existing value
+       4. Type character-by-character with variable delay (50-180ms),
+          occasional "thinking pause" (300-800ms) every 3-8 chars, and
+          a small chance of typo+backspace (~6%).
+       5. Special handling: @ and . in emails get a slight pre-pause
+          (humans hesitate at punctuation in unfamiliar usernames).
+    Returns True on success. NEVER raises.
+    """
+    s = str(value or "")
+    if not s:
+        return False
+    try:
+        # Move + click to focus the field (realistic offset, not center).
+        moved = await _human_mouse_move_to(page, el)
+        if moved:
+            try:
+                await el.click(timeout=3000)
+            except Exception:
+                # If click failed (covered by overlay), just focus —
+                # focus still dispatches the focus event detectors look for.
+                try:
+                    await el.focus()
+                except Exception:
+                    pass
+        else:
+            try:
+                await el.focus()
+            except Exception:
+                pass
+
+        # Tiny pause after focus before typing — humans don't start
+        # hammering keys instantly.
+        await page.wait_for_timeout(random.randint(80, 260))
+
+        # Clear existing content (Ctrl+A → Delete). Done via keyboard so
+        # the field sees keyboard events, not a silent .fill('').
+        try:
+            await page.keyboard.press("Control+a")
+            await page.wait_for_timeout(random.randint(20, 60))
+            await page.keyboard.press("Delete")
+            await page.wait_for_timeout(random.randint(30, 90))
+        except Exception:
+            pass
+
+        # Type char-by-char with realistic variance
+        chars = list(s)
+        i = 0
+        chars_since_pause = 0
+        next_thinking_pause_at = random.randint(3, 8)
+        # ~6% typo rate per word boundary, only on alphabetic chars
+        typo_done = False
+        while i < len(chars):
+            ch = chars[i]
+
+            # Occasional "thinking pause" every 3-8 chars (15% of the time)
+            if chars_since_pause >= next_thinking_pause_at and random.random() < 0.15:
+                await page.wait_for_timeout(random.randint(300, 800))
+                chars_since_pause = 0
+                next_thinking_pause_at = random.randint(3, 8)
+
+            # Pre-pause at email/url punctuation (@ . - _)
+            if ch in "@._-" and random.random() < 0.45:
+                await page.wait_for_timeout(random.randint(120, 320))
+
+            # Small chance of typo on alphabetic chars (one typo per field max)
+            if (
+                not typo_done
+                and ch.isalpha()
+                and i > 1
+                and i < len(chars) - 2
+                and random.random() < 0.06
+            ):
+                # Pick a neighbouring letter on QWERTY for realism
+                neighbours = {
+                    "a": "sq", "s": "ad", "d": "sf", "f": "dg", "g": "fh",
+                    "h": "gj", "j": "hk", "k": "jl", "l": "k",
+                    "q": "wa", "w": "qe", "e": "wr", "r": "et", "t": "ry",
+                    "y": "tu", "u": "yi", "i": "uo", "o": "ip", "p": "o",
+                    "z": "xa", "x": "zc", "c": "xv", "v": "cb", "b": "vn",
+                    "n": "bm", "m": "n",
+                }.get(ch.lower(), ch)
+                wrong = random.choice(list(neighbours)) if neighbours else ch
+                if ch.isupper():
+                    wrong = wrong.upper()
+                try:
+                    await page.keyboard.type(wrong, delay=random.randint(50, 130))
+                    await page.wait_for_timeout(random.randint(180, 380))
+                    await page.keyboard.press("Backspace")
+                    await page.wait_for_timeout(random.randint(80, 200))
+                except Exception:
+                    pass
+                typo_done = True
+                # Don't advance i — type the correct char next iteration
+
+            # Variable per-char delay: most 50-150ms, some 150-280ms
+            if random.random() < 0.18:
+                delay = random.randint(150, 280)
+            else:
+                delay = random.randint(50, 150)
+            try:
+                await page.keyboard.type(ch, delay=delay)
+            except Exception:
+                return False
+            i += 1
+            chars_since_pause += 1
+
+        # Small "review" pause after finishing — humans glance back at
+        # what they typed before moving on.
+        await page.wait_for_timeout(random.randint(120, 380))
+
+        # Dispatch blur via Tab — but only here in the helper if caller
+        # doesn't take over field navigation. Caller decides via
+        # `_human_tab_or_click` so we DON'T press Tab inside this fn.
+        return True
+    except Exception as e:
+        logger.debug(f"_human_type_field failed: {e}")
+        return False
+
+
+async def _human_tab_or_pause(page: Page) -> None:
+    """Between fields: 30% chance press Tab (real users often tab),
+    70% chance just wait 600-2000ms before the loop moves mouse to the
+    next field. NEVER raises."""
+    try:
+        if random.random() < 0.30:
+            await page.keyboard.press("Tab")
+            await page.wait_for_timeout(random.randint(120, 320))
+        else:
+            await page.wait_for_timeout(random.randint(600, 2000))
+    except Exception:
+        pass
+
+
 # ─────── Landing-page CTA auto-click ───────────────────────────────
 _LANDING_CTA_SELECTORS = [
     'button:has-text("UNLOCK")', 'a:has-text("UNLOCK")',
@@ -554,6 +729,43 @@ async def _fill_form(page: Page, row: Dict[str, Any]) -> Dict[str, Any]:
                         except Exception:
                             continue
             else:
+                # ── 2026-01 Anti-detect: human-like typing first ─────
+                # Replaces the instant .fill() with a focus → mouse-move
+                # → click-with-offset → per-char typing flow. This
+                # dispatches realistic keyboard events (keydown/keypress/
+                # input/keyup) with variable per-char delay + occasional
+                # typo+backspace + thinking pauses — bypasses behaviour-
+                # tracking fraud detectors (Anura, IPQS deep, PerimeterX).
+                #
+                # We still keep the .fill() / JS-setter / keyboard.type
+                # fallbacks below in case the human-typed value gets
+                # blocked by a JS input mask (phone `000-000-0000`) or
+                # a React/Vue-controlled component that fights keystrokes.
+                human_ok = False
+                try:
+                    human_ok = await _human_type_field(page, el, str(final_value))
+                except Exception as e:
+                    logger.debug(f"human_type_field raised: {e}")
+
+                # Verify the human-typed value actually landed. If the
+                # field has a JS mask or React controlled-component
+                # state, the keystrokes may have been intercepted.
+                try:
+                    cur_val_h = await el.input_value()
+                except Exception:
+                    cur_val_h = None
+                _norm_target = re.sub(r"[\s\-()]", "", str(final_value))
+                _norm_cur_h = re.sub(r"[\s\-()]", "", cur_val_h or "")
+                if human_ok and _norm_cur_h == _norm_target:
+                    filled.append(cand_keys[0] if cand_keys else "")
+                    # Inter-field pause (TAB 30% / wait 70%) — prevents
+                    # the loop from racing through all fields in <1s.
+                    await _human_tab_or_pause(page)
+                    continue
+
+                # Fallback path — old behaviour preserved exactly so any
+                # mask-protected / react-controlled field that broke
+                # under human typing still gets filled the legacy way.
                 # Primary attempt: fast fill (works for most inputs)
                 try:
                     await el.fill(str(final_value))
@@ -594,13 +806,32 @@ async def _fill_form(page: Page, row: Dict[str, Any]) -> Dict[str, Any]:
                         cur_val2 = None
                     if not cur_val2:
                         try:
+                            # Move mouse to field before clicking (real users
+                            # don't teleport-click). Falls back to plain
+                            # click if bounding box unavailable.
+                            await _human_mouse_move_to(page, el)
                             await el.click()
+                            await page.wait_for_timeout(random.randint(80, 200))
                             await page.keyboard.press("Control+a")
+                            await page.wait_for_timeout(random.randint(30, 90))
                             await page.keyboard.press("Delete")
-                            await page.keyboard.type(str(final_value), delay=30)
+                            await page.wait_for_timeout(random.randint(40, 110))
+                            # Variable delay (was flat delay=30 — bot signature
+                            # at ~200 WPM). Each char goes through individually
+                            # so we can vary delay per char.
+                            for _ch in str(final_value):
+                                _d = random.randint(150, 280) if random.random() < 0.18 else random.randint(50, 150)
+                                await page.keyboard.type(_ch, delay=_d)
                         except Exception as e:
                             logger.debug(f"keyboard.type fallback failed on {cand_keys}: {e}")
             filled.append(cand_keys[0] if cand_keys else "")
+            # Inter-field pause for legacy fallback path too — prevents
+            # the loop from racing through fields when the human-typed
+            # path failed and we had to use .fill() / JS setter.
+            try:
+                await _human_tab_or_pause(page)
+            except Exception:
+                pass
         except Exception as e:
             logger.debug(f"fill failed on {cand_keys}: {e}")
             continue

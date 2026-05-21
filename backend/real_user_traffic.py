@@ -2587,7 +2587,11 @@ async def run_real_user_traffic_job(
                     "--no-first-run",
                     "--no-default-browser-check",
                     "--metrics-recording-only",
-                    "--mute-audio",
+                    # 2026-01 Anti-detect: removed `--mute-audio` — real
+                    # Chrome doesn't launch with audio muted by default,
+                    # and detectors comparing AudioContext.state can flag
+                    # the discrepancy. Audio output stays silent anyway
+                    # because no <audio>/<video> auto-plays on lead pages.
                 ],
             )
             _browser_holder["b"] = new_b
@@ -3811,7 +3815,8 @@ async def run_real_user_traffic_job(
                 "--no-first-run",
                 "--no-default-browser-check",
                 "--metrics-recording-only",
-                "--mute-audio",
+                # 2026-01 Anti-detect: removed `--mute-audio` — see note
+                # on the matching arg list above for rationale.
             ],
         )
         _browser_holder["b"] = shared_browser
@@ -4513,10 +4518,37 @@ async def _execute_automation_steps(
                     else:
                         await page.click(selector, timeout=timeout)
                 elif action == "fill":
-                    await page.fill(selector, str(value), timeout=timeout)
+                    # 2026-01 Anti-detect: humanise the fill (see notes
+                    # at the second fill handler ~4675 for the rationale).
+                    try:
+                        from form_filler import _human_type_field as _htf, _human_tab_or_pause as _htp
+                        el_h = await page.query_selector(selector)
+                        if el_h is not None:
+                            ok_h = await _htf(page, el_h, str(value))
+                            if ok_h:
+                                await _htp(page)
+                            else:
+                                await page.fill(selector, str(value), timeout=timeout)
+                        else:
+                            await page.fill(selector, str(value), timeout=timeout)
+                    except Exception:
+                        await page.fill(selector, str(value), timeout=timeout)
                 elif action == "type":
-                    # Slower per-char typing (more human)
-                    await page.type(selector, str(value), delay=int(step.get("delay") or 50), timeout=timeout)
+                    # Slower per-char typing (more human) — now with
+                    # variable delay + thinking pauses via the helper.
+                    try:
+                        from form_filler import _human_type_field as _htf, _human_tab_or_pause as _htp
+                        el_h = await page.query_selector(selector)
+                        if el_h is not None:
+                            ok_h = await _htf(page, el_h, str(value))
+                            if ok_h:
+                                await _htp(page)
+                            else:
+                                await page.type(selector, str(value), delay=int(step.get("delay") or 50), timeout=timeout)
+                        else:
+                            await page.type(selector, str(value), delay=int(step.get("delay") or 50), timeout=timeout)
+                    except Exception:
+                        await page.type(selector, str(value), delay=int(step.get("delay") or 50), timeout=timeout)
                 elif action == "select":
                     await page.select_option(selector, value=str(value), timeout=timeout)
                 elif action == "check":
@@ -4673,9 +4705,42 @@ async def _dispatch_single_action(page: Page, action: str, selector: str,
             except Exception:
                 pass
     elif action == "fill":
-        await page.fill(selector, str(value), timeout=timeout)
+        # 2026-01 Anti-detect: route the recorded "fill" through the
+        # human-typing helper too. Real users never paste an entire
+        # value instantly into a field, even if the original recording
+        # used Playwright's .fill(). Fall back to .fill() only if the
+        # element can't be queried (e.g. selector refers to a hidden
+        # form sync target).
+        try:
+            from form_filler import _human_type_field as _htf, _human_tab_or_pause as _htp
+            el_h = await page.query_selector(selector)
+            if el_h is not None:
+                ok_h = await _htf(page, el_h, str(value))
+                if ok_h:
+                    await _htp(page)
+                else:
+                    await page.fill(selector, str(value), timeout=timeout)
+            else:
+                await page.fill(selector, str(value), timeout=timeout)
+        except Exception:
+            await page.fill(selector, str(value), timeout=timeout)
     elif action == "type":
-        await page.type(selector, str(value), delay=int(step.get("delay") or 50), timeout=timeout)
+        # 2026-01 Anti-detect: humanise per-char typing — variable
+        # delay + occasional pause replaces the flat delay=50 which
+        # detectors histogram as a bot signature.
+        try:
+            from form_filler import _human_type_field as _htf, _human_tab_or_pause as _htp
+            el_h = await page.query_selector(selector)
+            if el_h is not None:
+                ok_h = await _htf(page, el_h, str(value))
+                if ok_h:
+                    await _htp(page)
+                else:
+                    await page.type(selector, str(value), delay=int(step.get("delay") or 50), timeout=timeout)
+            else:
+                await page.type(selector, str(value), delay=int(step.get("delay") or 50), timeout=timeout)
+        except Exception:
+            await page.type(selector, str(value), delay=int(step.get("delay") or 50), timeout=timeout)
     elif action == "select":
         # The Visual Recorder's dropdown tool defaults to match_by='label'
         # (visible option text) because customer Excel sheets typically
