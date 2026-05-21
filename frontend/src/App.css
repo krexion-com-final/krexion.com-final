@@ -72,3 +72,13 @@ select:focus {
 ::-webkit-scrollbar-thumb:hover {
   background: #52525B;
 }
+
+/* Utility to hide scrollbar but keep scrolling functional (used for horizontal tabs on mobile) */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+

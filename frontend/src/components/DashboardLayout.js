@@ -21,6 +21,12 @@ export default function DashboardLayout({ children }) {
   const navigate = useNavigate();
   const { branding } = useBranding();
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  // Mobile drawer state (separate from desktop collapse) — closed by default on mobile
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  // Close mobile drawer whenever route changes
+  useEffect(() => {
+    setMobileSidebarOpen(false);
+  }, [location.pathname]);
   // CPI group expanded by default if user is currently on a CPI page
   const initialCpiOpen = (() => {
     try { return location.pathname.startsWith("/cpi"); } catch { return false; }
@@ -131,7 +137,9 @@ export default function DashboardLayout({ children }) {
       <aside
         className={`${
           sidebarOpen ? "w-64" : "w-20"
-        } sidebar-themed transition-all duration-300 flex flex-col relative z-10`}
+        } sidebar-themed transition-all duration-300 flex-col z-40 fixed inset-y-0 left-0 transform ${
+          mobileSidebarOpen ? "translate-x-0" : "-translate-x-full"
+        } md:translate-x-0 md:relative md:flex md:z-10 flex`}
         style={{
           background: 'linear-gradient(180deg, rgba(0,0,0,0.85) 0%, rgba(10,10,20,0.85) 100%)',
           backdropFilter: 'blur(16px)',
@@ -283,17 +291,36 @@ export default function DashboardLayout({ children }) {
         </nav>
       </aside>
 
+      {/* Mobile backdrop — only visible when drawer is open on mobile */}
+      {mobileSidebarOpen && (
+        <div
+          className="md:hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-30"
+          onClick={() => setMobileSidebarOpen(false)}
+          data-testid="sidebar-mobile-backdrop"
+        />
+      )}
+
       <div className="flex-1 flex flex-col overflow-hidden relative z-10">
         <header
-          className="h-16 flex items-center justify-between px-6"
+          className="h-16 flex items-center justify-between px-4 md:px-6 gap-2"
           style={{
             background: 'rgba(0, 0, 0, 0.55)',
             backdropFilter: 'blur(16px)',
             borderBottom: '1px solid rgba(79, 127, 255, 0.2)',
           }}
         >
-          <div className="flex items-center gap-4">
-            <h2 className="text-lg font-semibold text-white" data-testid="page-title">
+          <div className="flex items-center gap-3 min-w-0">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setMobileSidebarOpen(true)}
+              className="md:hidden text-white hover:bg-[#4F7FFF]/10 shrink-0"
+              data-testid="mobile-sidebar-toggle"
+              aria-label="Open menu"
+            >
+              <Menu size={22} />
+            </Button>
+            <h2 className="text-base md:text-lg font-semibold text-white truncate" data-testid="page-title">
               {(() => {
                 for (const it of navigation) {
                   if (it.path === location.pathname) return it.name;
@@ -307,19 +334,21 @@ export default function DashboardLayout({ children }) {
             </h2>
           </div>
 
-          <div className="flex items-center gap-2">
-            <LocalPCStatusBadge />
+          <div className="flex items-center gap-2 shrink-0">
+            <div className="hidden sm:block">
+              <LocalPCStatusBadge />
+            </div>
             <ThemeToggle />
             <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" className="flex items-center gap-2 text-white hover:bg-[#4F7FFF]/10" data-testid="user-menu">
+              <Button variant="ghost" className="flex items-center gap-2 text-white hover:bg-[#4F7FFF]/10 px-2" data-testid="user-menu">
                 <div
-                  className="w-8 h-8 rounded-full flex items-center justify-center transition-all duration-300 hover:scale-110"
+                  className="w-8 h-8 rounded-full flex items-center justify-center transition-all duration-300 hover:scale-110 shrink-0"
                   style={{ background: 'linear-gradient(135deg, #4F7FFF 0%, #3D66D9 100%)', boxShadow: '0 4px 14px rgba(79,127,255,0.4)' }}
                 >
                   <User size={18} />
                 </div>
-                <span className="text-sm">{user.name || "User"}</span>
+                <span className="text-sm hidden sm:inline">{user.name || "User"}</span>
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-48 bg-black/95 border-[#4F7FFF]/30 text-white backdrop-blur-xl">
@@ -342,7 +371,7 @@ export default function DashboardLayout({ children }) {
         <main className="flex-1 overflow-auto data-testid-main" data-testid="main-content" style={{ backgroundColor: 'transparent' }}>
           <CloudModeBanner />
           <UpdateBanner />
-          <div className="p-6">
+          <div className="p-4 md:p-6">
           <AnimatePresence mode="wait">
             <motion.div
               key={location.pathname}

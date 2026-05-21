@@ -7,6 +7,7 @@ import {
   ArrowRight, Check, ChevronDown, Zap, Lock, Sparkles,
 } from "lucide-react";
 import WavyBackground from "../components/WavyBackground";
+import PublicMobileMenu from "../components/PublicMobileMenu";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -114,9 +115,19 @@ export default function HomePage() {
               Get started
             </Link>
           </nav>
-          <Link to="/pricing" className="md:hidden bg-blue-500 text-white px-3 py-1.5 rounded-md text-xs font-medium">
-            Start
-          </Link>
+          <PublicMobileMenu
+            accent="blue"
+            ctaTo="/pricing"
+            ctaLabel="Get started"
+            links={[
+              { to: "#features", label: "Features" },
+              { to: "#pricing", label: "Pricing" },
+              { to: "/download", label: "Download" },
+              { to: "/guide", label: "Guide" },
+              { to: "#faq", label: "FAQ" },
+              { to: "/login", label: "Login" },
+            ]}
+          />
         </div>
       </header>
 

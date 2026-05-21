@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import { Check, Sparkles, Zap, ArrowRight } from "lucide-react";
+import PublicMobileMenu from "../components/PublicMobileMenu";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -30,7 +31,7 @@ export default function PricingPage() {
             <Sparkles className="text-[#A78BFA]" size={22} />
             <span className="text-xl font-bold tracking-tight">KREXION</span>
           </a>
-          <nav className="flex items-center gap-6 text-sm">
+          <nav className="hidden md:flex items-center gap-6 text-sm">
             <a href="/" className="text-[#A1A1AA] hover:text-white transition">Home</a>
             <a href="/pricing" className="text-white">Pricing</a>
             <a href="/download" className="text-[#A1A1AA] hover:text-white transition">Download</a>
@@ -40,6 +41,18 @@ export default function PricingPage() {
               Sign Up
             </a>
           </nav>
+          <PublicMobileMenu
+            accent="purple"
+            ctaTo="/login"
+            ctaLabel="Sign Up"
+            links={[
+              { to: "/", label: "Home" },
+              { to: "/pricing", label: "Pricing" },
+              { to: "/download", label: "Download" },
+              { to: "/guide", label: "Guide" },
+              { to: "/login", label: "Login" },
+            ]}
+          />
         </div>
       </header>
 

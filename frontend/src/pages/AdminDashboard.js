@@ -20,8 +20,9 @@ import {
   LogOut, Settings, Trash2, CheckCircle, XCircle, 
   Clock, Search, RefreshCw, Eye, EyeOff, UserPlus,
   Palette, Image, Type, RotateCcw, Save, Server, Key, Plus, TestTube, Globe,
-  Activity, Mail, Send, ExternalLink, AlertCircle
+  Activity, Mail, Send, ExternalLink, AlertCircle, Menu
 } from "lucide-react";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator } from "../components/ui/dropdown-menu";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -693,15 +694,17 @@ export default function AdminDashboard() {
     <div className="min-h-screen bg-[var(--brand-card)]" data-testid="admin-dashboard">
       {/* Header */}
       <header className="border-b border-[var(--brand-border)] bg-[var(--brand-card)]/95 backdrop-blur sticky top-0 z-50">
-        <div className="container mx-auto px-4 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Shield className="w-8 h-8 text-[#EF4444]" />
-            <div>
-              <h1 className="text-xl font-bold text-white">Krexion Admin</h1>
-              <p className="text-xs text-[#A1A1AA]">System Administration</p>
+        <div className="container mx-auto px-4 py-4 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <Shield className="w-8 h-8 text-[#EF4444] shrink-0" />
+            <div className="min-w-0">
+              <h1 className="text-xl font-bold text-white truncate">Krexion Admin</h1>
+              <p className="text-xs text-[#A1A1AA] hidden sm:block">System Administration</p>
             </div>
           </div>
-          <div className="flex items-center gap-4">
+
+          {/* Desktop action buttons */}
+          <div className="hidden lg:flex items-center gap-4">
             <Button
               variant="outline"
               size="sm"
@@ -750,6 +753,43 @@ export default function AdminDashboard() {
               <LogOut size={16} className="mr-2" />
               Logout
             </Button>
+          </div>
+
+          {/* Mobile/tablet: collapsed dropdown menu */}
+          <div className="lg:hidden flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={fetchData} className="border-[var(--brand-border)] px-2" data-testid="admin-refresh-mobile">
+              <RefreshCw size={16} />
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="sm" className="border-[var(--brand-border)] px-2" data-testid="admin-menu-mobile">
+                  <Menu size={18} />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-56">
+                <DropdownMenuItem onClick={() => window.location.href = "/admin/crypto-orders"} data-testid="mobile-goto-crypto-orders">
+                  <DollarSign size={16} className="mr-2 text-[#A78BFA]" />
+                  Crypto Orders
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => window.location.href = "/admin/releases"} data-testid="mobile-goto-releases">
+                  <Settings size={16} className="mr-2 text-[#A78BFA]" />
+                  Releases
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => window.location.href = "/admin/sync-heartbeats"} data-testid="mobile-goto-sync-heartbeats">
+                  <RefreshCw size={16} className="mr-2" />
+                  Customer Installs
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => window.location.href = "/admin/licenses"} data-testid="mobile-goto-licenses">
+                  <Settings size={16} className="mr-2" />
+                  Licenses & Pricing
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={handleLogout} className="text-[#EF4444] focus:text-[#EF4444]" data-testid="mobile-admin-logout">
+                  <LogOut size={16} className="mr-2" />
+                  Logout
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
       </header>
@@ -828,7 +868,7 @@ export default function AdminDashboard() {
 
         {/* Tabs for Users, Sub-Users, Branding and API Settings */}
         <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-          <TabsList className="bg-[var(--brand-card)] border border-[var(--brand-border)] p-1">
+          <TabsList className="bg-[var(--brand-card)] border border-[var(--brand-border)] p-1 w-full overflow-x-auto flex justify-start no-scrollbar">
             <TabsTrigger 
               value="users" 
               className="data-[state=active]:bg-[#27272A] data-[state=active]:text-white"

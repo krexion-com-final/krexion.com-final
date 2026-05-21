@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import WavyBackground from "../components/WavyBackground";
+import PublicMobileMenu from "../components/PublicMobileMenu";
 
 const INSTALLER_URL = "/Krexion-User-Package.zip";
 const INSTALLER_SHA256 = "b21b9f7d7803d3748dfa3e41d5d5a5eee4127b3b592bf2a56395275f6a1502bc";
@@ -39,12 +40,24 @@ export default function DownloadPage() {
             <Sparkles className="text-blue-400" size={22} />
             <span className="text-xl font-bold tracking-tight">KREXION</span>
           </Link>
-          <nav className="flex items-center gap-5 text-sm">
+          <nav className="hidden md:flex items-center gap-5 text-sm">
             <Link to="/pricing" className="text-zinc-400 hover:text-white">Pricing</Link>
             <Link to="/download" className="text-white">Download</Link>
             <Link to="/guide" className="text-zinc-400 hover:text-white">Guide</Link>
             <Link to="/login" className="text-zinc-400 hover:text-white">Login</Link>
           </nav>
+          <PublicMobileMenu
+            accent="blue"
+            ctaTo="/pricing"
+            ctaLabel="Get started"
+            links={[
+              { to: "/", label: "Home" },
+              { to: "/pricing", label: "Pricing" },
+              { to: "/download", label: "Download" },
+              { to: "/guide", label: "Guide" },
+              { to: "/login", label: "Login" },
+            ]}
+          />
         </div>
       </header>
 
