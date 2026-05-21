@@ -2339,6 +2339,22 @@ export default function RealUserTrafficPage() {
                 as the lead (e.g. California lead → California proxy). Needs a <code className="text-amber-300">state</code> column in your data
                 (full name or 2-letter code). Visits with no matching lead are counted as <code className="text-amber-300">skipped_state_mismatch</code>.
               </p>
+              {/* Smart proxy-gen hint — visible only when state-match is ON AND
+                  ProxyJet Auto Mode is ON AND no specific state pinned.
+                  This is the configuration that triggers the "generate
+                  proxies in the same state distribution as your leads"
+                  shortcut, eliminating state-mismatch waste. */}
+              {stateMatchEnabled && useProxyJetAuto && !(proxyJetState || "").trim() && (
+                <div
+                  className="mt-2 ml-7 p-2 rounded border border-emerald-900/40 bg-emerald-950/20 text-[11px] text-emerald-200 leading-relaxed"
+                  data-testid="rut-smart-gen-hint"
+                >
+                  <span className="font-semibold">⚡ Smart sequence active:</span> for this run the engine will
+                  first read each lead's state and then ask ProxyJet for a fresh unique IP
+                  <em> from that same state</em>. Pre-loop state-mismatch skips become zero — every visit
+                  reaches form-fill + automation.
+                </div>
+              )}
             </div>
 
             {/* Invalid-data detection toggle — DEFAULT OFF */}

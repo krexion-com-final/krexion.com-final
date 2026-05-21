@@ -4140,21 +4140,131 @@ async def _rut_prepare_and_run(
                 base_need = total_clicks_val
             gen_count = max(base_need * 3, 50)
             gen_count = min(gen_count, 100000)
+
+            # ── State-aware generation ───────────────────────────────
+            # When the user has form-fill ON, state-match ON, and didn't
+            # pin a specific ProxyJet state ("Any"), generate proxies in
+            # the same state distribution as the lead file. This makes
+            # every proxy have a matching-state lead → ZERO state-mismatch
+            # skips, which is exactly what the user complained about.
+            state_distribution: Optional[Dict[str, int]] = None
+            needs_state_aware = (
+                bool(params.get("form_fill_enabled"))
+                and bool(params.get("state_match_enabled"))
+                and not (params.get("proxyjet_state") or "").strip()
+            )
+            if needs_state_aware:
+                try:
+                    from real_user_traffic import (
+                        _find_state_column as _fsc,
+                        _normalize_state as _nst,
+                    )
+                    # Re-parse the data file inline (cheap — same file as
+                    # step 3 will load again, parsing twice is negligible
+                    # for 200-row Excel files).
+                    _early_rows: List[Dict[str, Any]] = []
+                    _ds = params.get("data_source") or "excel"
+                    if _ds == "pending_from_job":
+                        _src_job = await db.real_user_traffic_jobs.find_one(
+                            {"job_id": params.get("import_pending_from_job_id"), "user_id": user["id"]},
+                            {"_id": 0}
+                        )
+                        if _src_job:
+                            from real_user_traffic import RESULTS_ROOT as _RR
+                            _pp = Path(_src_job.get("pending_leads_path") or (_RR / params["import_pending_from_job_id"] / "pending_leads.xlsx"))
+                            if _pp.exists():
+                                _early_rows = load_rows_from_excel(_pp.read_bytes(), _pp.name)
+                    elif _ds == "gsheet" and params.get("gsheet_url"):
+                        _early_rows = await load_rows_from_google_sheet(params["gsheet_url"])
+                    elif params.get("upload_data_file_id"):
+                        _pair = await _load_upload_data_file(user["id"], params["upload_data_file_id"])
+                        if _pair:
+                            _fp, _on = _pair
+                            _early_rows = load_rows_from_excel(Path(_fp).read_bytes(), _on)
+                    elif params.get("file_bytes"):
+                        _early_rows = load_rows_from_excel(
+                            params["file_bytes"],
+                            params.get("file_name") or "data.xlsx",
+                        )
+                    elif params.get("file_path"):
+                        _fp2 = Path(params["file_path"])
+                        if _fp2.exists():
+                            _early_rows = load_rows_from_excel(_fp2.read_bytes(), _fp2.name)
+
+                    if _early_rows:
+                        _sel_raw = (params.get("selected_states") or "").strip()
+                        _sel_codes = (
+                            {s.strip().upper() for s in _sel_raw.split(",") if s.strip()}
+                            if _sel_raw else None
+                        )
+                        _scol = _fsc(_early_rows)
+                        if _scol:
+                            _counts: Dict[str, int] = {}
+                            for _r in _early_rows:
+                                _code = _nst(_r.get(_scol))
+                                if not _code:
+                                    continue
+                                if _sel_codes and _code not in _sel_codes:
+                                    continue
+                                _counts[_code] = _counts.get(_code, 0) + 1
+                            if _counts:
+                                state_distribution = _counts
+                except Exception as _e:
+                    logger.warning(f"State-aware proxy pre-pass failed: {_e}")
+
             try:
-                proxy_lines = await _pj.generate_unique_proxies(
-                    db,
-                    user["id"],
-                    count=gen_count,
-                    country=params.get("proxyjet_country", "US"),
-                    state=params.get("proxyjet_state") or None,
-                    job_id=job_id,
-                )
+                if state_distribution:
+                    # Generate per-state proxies in the same proportion as
+                    # leads. Each state pool is over-sampled 3× for retries.
+                    proxy_lines = []
+                    _per_state_summary = []
+                    for _st, _lc in sorted(
+                        state_distribution.items(), key=lambda x: -x[1]
+                    ):
+                        _per = min(max(int(_lc) * 3, 5), 10000)
+                        try:
+                            _sp = await _pj.generate_unique_proxies(
+                                db, user["id"],
+                                count=_per,
+                                country=params.get("proxyjet_country", "US"),
+                                state=_st,
+                                job_id=job_id,
+                            )
+                            proxy_lines.extend(_sp)
+                            _per_state_summary.append(f"{_st}={len(_sp)}")
+                        except Exception as _e:
+                            logger.warning(f"ProxyJet gen failed for state {_st}: {_e}")
+                    if not proxy_lines:
+                        return await _mark_failed(
+                            "ProxyJet returned zero proxies for any of your lead-states. "
+                            "Check credentials or selected-state list."
+                        )
+                    _summ_short = ", ".join(_per_state_summary[:6])
+                    if len(_per_state_summary) > 6:
+                        _summ_short += f", +{len(_per_state_summary) - 6} more"
+                    await _set_step(
+                        f"✓ Generated {len(proxy_lines)} state-matched ProxyJet proxies "
+                        f"({len(state_distribution)} states: {_summ_short})"
+                    )
+                else:
+                    proxy_lines = await _pj.generate_unique_proxies(
+                        db,
+                        user["id"],
+                        count=gen_count,
+                        country=params.get("proxyjet_country", "US"),
+                        state=params.get("proxyjet_state") or None,
+                        job_id=job_id,
+                    )
+                    if not proxy_lines:
+                        return await _mark_failed("ProxyJet returned zero proxies — check credentials.")
+                    _pj_st = params.get("proxyjet_state")
+                    await _set_step(
+                        f"✓ Generated {len(proxy_lines)} unique ProxyJet proxies "
+                        f"(auto-mode · {params.get('proxyjet_country','US')}"
+                        f"{('-'+_pj_st) if _pj_st else ''})"
+                    )
             except RuntimeError as e:
                 return await _mark_failed(str(e))
-            if not proxy_lines:
-                return await _mark_failed("ProxyJet returned zero proxies — check credentials.")
-            _pj_st = params.get("proxyjet_state")
-            await _set_step(f"✓ Generated {len(proxy_lines)} unique ProxyJet proxies (auto-mode · {params.get('proxyjet_country','US')}{('-'+_pj_st) if _pj_st else ''})")
         elif upload_proxy_id:
             uploaded_proxy_lines = await _load_upload_items(user["id"], upload_proxy_id, "proxies")
             if not uploaded_proxy_lines:
