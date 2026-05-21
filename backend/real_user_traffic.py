@@ -307,13 +307,28 @@ def _get_referer_from_ua(ua: str) -> str:
 # ──────────────────────────────────────────────────────────────────────
 import re as _re
 
-_CHROME_VERSION_RE = _re.compile(r"Chrome/(\d+)(?:\.(\d+))?", _re.IGNORECASE)
+_CHROME_VERSION_RE = _re.compile(r"(?:Chrome|CriOS|Edg|EdgA|EdgiOS|Chromium)/(\d+)(?:\.(\d+))?", _re.IGNORECASE)
 _SAFARI_VERSION_RE = _re.compile(r"Version/(\d+)(?:\.(\d+))?", _re.IGNORECASE)
 
 
 def _extract_chrome_version(ua: str) -> Tuple[int, int]:
-    """Return (major, minor) of the Chrome/Chromium version in the UA, or
-    (142, 0) as a safe fallback for non-Chromium UAs."""
+    """Return (major, minor) of the Chrome/Chromium version in the UA.
+
+    Handles all Chromium-family browsers including:
+      · Chrome desktop:  ".../Chrome/147.0.7727.102 ..."
+      · Chrome iOS:      ".../CriOS/147.0.7727.102 ..."
+      · Edge desktop:    ".../Edg/147.0.7727.102 ..."
+      · Edge Android:    ".../EdgA/147.0.7727.102 ..."
+      · Edge iOS:        ".../EdgiOS/147.0.7727.102 ..."
+      · Chromium:        ".../Chromium/147.0.7727.102 ..."
+      · Any in-app webview that embeds "Chrome/X" (Instagram, Facebook,
+        TikTok Android, etc. — extracts the underlying Chrome version)
+
+    Returns (142, 0) as a safe fallback for non-Chromium UAs (pure
+    Safari / Firefox / WhatsApp Darwin) so Sec-CH-UA generation never
+    crashes; callers also gate Sec-CH-UA emission on is_chromium so
+    a Safari UA never gets bogus Chrome hints.
+    """
     if ua:
         m = _CHROME_VERSION_RE.search(ua)
         if m:
@@ -419,7 +434,9 @@ def _build_client_hint_headers(fp: Dict[str, Any], ua: str) -> Dict[str, str]:
 
     headers["Sec-CH-UA-Mobile"] = "?1" if fp.get("is_mobile") else "?0"
 
-    is_chromium = any(tok in ua_l for tok in ("chrome/", "crios/", "edg/", "edga/", "chromium/"))
+    is_chromium = any(tok in ua_l for tok in (
+        "chrome/", "crios/", "edg/", "edga/", "edgios/", "chromium/"
+    ))
     if is_chromium:
         chrome_major, _ = _extract_chrome_version(ua)
         not_brand_variants = [
