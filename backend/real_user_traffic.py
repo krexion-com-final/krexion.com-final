@@ -1044,6 +1044,146 @@ def _fingerprint_from_ua(ua_str: str) -> Dict[str, Any]:
 _UNFILLED_MACRO_URL_RX = __import__("re").compile(r"\{\{[^}]+\}\}|%7[bB]%7[bB]")
 
 
+# Telemetry queue (job_id → list of macro-leak records) consumed at
+# job-finalise time and flushed into MongoDB `rut_diagnostics`. We keep
+# it in-memory during the run so the route handler stays non-blocking
+# and we don't need to pass the Mongo handle through Playwright closures.
+_MACRO_LEAK_BUFFER: Dict[str, List[Dict[str, Any]]] = {}
+# Stuck-visit buffer (job_id → list of stuck-event records). Same flush
+# semantics as the macro-leak buffer.
+_STUCK_EVENT_BUFFER: Dict[str, List[Dict[str, Any]]] = {}
+
+
+def _record_macro_leak(job_id: str, visit_index: int, url: str, resource_type: str) -> None:
+    """Append a macro-leak event to the in-memory buffer. Called from the
+    route handler — must stay sync + non-throwing so a Playwright handler
+    error never crashes the visit."""
+    try:
+        buf = _MACRO_LEAK_BUFFER.setdefault(job_id, [])
+        if len(buf) >= 200:  # cap per-job to avoid runaway memory
+            return
+        buf.append({
+            "job_id": job_id,
+            "visit_index": int(visit_index or 0),
+            "blocked_url": (url or "")[:1024],
+            "resource_type": (resource_type or "")[:32],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception:
+        pass
+
+
+def _record_stuck_event(job_id: str, visit_index: int, url: str, seconds_stuck: float,
+                       last_step: int = -1) -> None:
+    """Append a stuck-visit event. Called by the per-visit watchdog when
+    the page URL hasn't changed for the configured threshold."""
+    try:
+        buf = _STUCK_EVENT_BUFFER.setdefault(job_id, [])
+        if len(buf) >= 200:
+            return
+        buf.append({
+            "job_id": job_id,
+            "visit_index": int(visit_index or 0),
+            "stuck_url": (url or "")[:1024],
+            "seconds_stuck": round(float(seconds_stuck or 0), 1),
+            "last_step_index": int(last_step) if last_step is not None else -1,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception:
+        pass
+
+
+async def _stuck_watchdog(page, job_id: str, visit_index: int,
+                          threshold_s: float = 25.0, poll_s: float = 5.0) -> None:
+    """Watch the page's main-frame URL while a visit's automation steps
+    are running. If the URL hasn't changed for `threshold_s` seconds we
+    consider the visit stuck (waiting for a selector that never appears,
+    waiting for a navigation that never happens, etc.) and emit a
+    `_record_stuck_event` so the operator can see WHICH page the job
+    dies on. We only record ONCE per stuck-period so a 5-minute hang
+    doesn't generate 12 identical rows."""
+    last_url = ""
+    try:
+        last_url = page.url or ""
+    except Exception:
+        pass
+    last_changed_at = __import__("time").monotonic()
+    recorded_this_period = False
+    while True:
+        try:
+            await asyncio.sleep(poll_s)
+        except asyncio.CancelledError:
+            return
+        try:
+            cur = page.url or ""
+        except Exception:
+            return
+        now = __import__("time").monotonic()
+        if cur != last_url:
+            last_url = cur
+            last_changed_at = now
+            recorded_this_period = False
+            continue
+        elapsed = now - last_changed_at
+        if elapsed >= threshold_s and not recorded_this_period:
+            _record_stuck_event(job_id, visit_index, cur, elapsed)
+            recorded_this_period = True
+            try:
+                push_live_step(
+                    job_id, visit_index, "stuck", "warn",
+                    f"Visit stuck on {cur[:120]} for ~{int(elapsed)}s — see diagnostics",
+                )
+            except Exception:
+                pass
+
+
+
+
+def _make_macro_guard(job_id: str, visit_index: int):
+    """Return a Playwright route handler closure bound to this visit's
+    `(job_id, visit_index)` so the macro-leak telemetry record contains
+    the right context. Returned handler is `async def`."""
+    async def _handler(route, request):
+        try:
+            url = request.url or ""
+            if _UNFILLED_MACRO_URL_RX.search(url):
+                try:
+                    rtype = (request.resource_type or "").lower()
+                except Exception:
+                    rtype = ""
+                _record_macro_leak(job_id, visit_index, url, rtype)
+                if rtype == "document":
+                    try:
+                        await route.fulfill(
+                            status=200,
+                            content_type="text/html",
+                            body=(
+                                "<!doctype html><html><head><meta charset='utf-8'>"
+                                "<title>blocked</title></head><body>"
+                                "<script>try{history.back();}catch(e){}</script>"
+                                "</body></html>"
+                            ),
+                        )
+                    except Exception:
+                        try:
+                            await route.abort()
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        await route.abort()
+                    except Exception:
+                        pass
+                return
+            await route.continue_()
+        except Exception:
+            try:
+                await route.continue_()
+            except Exception:
+                pass
+    return _handler
+
+
 async def _block_unfilled_macro_request(route, request) -> None:
     """Abort any request whose URL still contains an unfilled tracker
     macro like `{{ccpa}}`, `{{sub_id}}`, etc.
@@ -1062,6 +1202,10 @@ async def _block_unfilled_macro_request(route, request) -> None:
     instead fulfill the request with a tiny HTML that calls
     `history.back()` so the browser returns to the legitimate offer
     page and the automation can resume from there.
+
+    NOTE: This generic handler does NOT record telemetry — used by demo
+    scripts only. Production visits use `_make_macro_guard(job_id, idx)`
+    so each blocked request is logged against the originating job.
     """
     try:
         url = request.url or ""
@@ -3077,9 +3221,7 @@ async def run_real_user_traffic_job(
             # legitimate flow page so the form-fill steps can run.
             await context.route(
                 "**/*",
-                lambda route, request: asyncio.ensure_future(
-                    _block_unfilled_macro_request(route, request)
-                ),
+                _make_macro_guard(job_id, i + 1),
             )
 
             if True:
@@ -3161,9 +3303,7 @@ async def run_real_user_traffic_job(
                             await context.add_init_script(_build_stealth_script(fp, geo))
                             await context.route(
                                 "**/*",
-                                lambda route, request: asyncio.ensure_future(
-                                    _block_unfilled_macro_request(route, request)
-                                ),
+                                _make_macro_guard(job_id, i + 1),
                             )
                             page = await context.new_page()
                         except Exception as _rebuild_e:
@@ -3498,11 +3638,26 @@ async def run_real_user_traffic_job(
                                 # the visit because of a capture.
                                 pass
 
-                        step_res = await _execute_automation_steps(
-                            page, row or {}, automation_steps, skip_captcha=skip_captcha,
-                            self_heal=self_heal,
-                            on_screenshot=_on_user_capture,
+                        # Start a watchdog task that records a "stuck"
+                        # event if the page URL hasn't changed for >25s
+                        # while the automation script is running. Lets
+                        # the operator pinpoint exactly which page kills
+                        # which offer.
+                        _watchdog = asyncio.create_task(
+                            _stuck_watchdog(page, job_id, i + 1)
                         )
+                        try:
+                            step_res = await _execute_automation_steps(
+                                page, row or {}, automation_steps, skip_captcha=skip_captcha,
+                                self_heal=self_heal,
+                                on_screenshot=_on_user_capture,
+                            )
+                        finally:
+                            _watchdog.cancel()
+                            try:
+                                await _watchdog
+                            except (asyncio.CancelledError, Exception):
+                                pass
                     else:
                         # Click through any CTA ("UNLOCK NOW", "Get Started", etc.)
                         # — up to 3 tries because some offers have a 2-step warm-up.
@@ -4355,7 +4510,63 @@ async def run_real_user_traffic_job(
 
     zip_path = job_dir / "results.zip"
     try:
+        # Categorise every completed visit so the operator can audit each
+        # bucket separately inside the downloaded ZIP:
+        #   Processed/   → every visit (raw, unfiltered)
+        #   Succeeded/   → status == "ok" (form submitted cleanly)
+        #   Conversions/ → conversion_page_reached == True (hit final/thank-you page)
+        #   Leads_Left/  → rows NOT consumed (pending_leads.xlsx + full leads_with_status.xlsx)
+        # Each bucket gets its own `report.xlsx` + matching `screenshots/`
+        # subfolder (only the screenshots that belong to the visits in
+        # that bucket), so the user doesn't have to manually sift through
+        # one giant flat list.
+        def _bucket_visits(predicate) -> List[Dict[str, Any]]:
+            return [e for e in report if predicate(e)]
+
+        succeeded_visits = _bucket_visits(lambda e: str(e.get("status", "")) == "ok")
+        conversion_visits = _bucket_visits(lambda e: bool(e.get("conversion_page_reached")))
+
+        def _shots_for_visits(visits: List[Dict[str, Any]]) -> List[Path]:
+            idxs = {int(v.get("visit_index") or 0) for v in visits if v.get("visit_index") is not None}
+            if not idxs:
+                return []
+            out: List[Path] = []
+            for p in shots_dir.glob("*.png"):
+                # filenames look like visit_00001.png / visit_00001_thankyou.png /
+                # visit_00001_capture02_xyz.png — extract the leading numeric id.
+                try:
+                    name = p.name
+                    if not name.startswith("visit_"):
+                        continue
+                    num = int(name[6:11])  # 5-digit zero-padded
+                    if num in idxs:
+                        out.append(p)
+                except Exception:
+                    continue
+            return out
+
+        # Build per-bucket Excel reports (filtered subset of `report`).
+        processed_report_path = job_dir / "_bucket_processed_report.xlsx"
+        succeeded_report_path = job_dir / "_bucket_succeeded_report.xlsx"
+        conversions_report_path = job_dir / "_bucket_conversions_report.xlsx"
+        try:
+            _write_excel_report(processed_report_path, report)
+        except Exception as _be:
+            logger.debug(f"processed bucket report failed: {_be}")
+            processed_report_path = None
+        try:
+            _write_excel_report(succeeded_report_path, succeeded_visits)
+        except Exception as _be:
+            logger.debug(f"succeeded bucket report failed: {_be}")
+            succeeded_report_path = None
+        try:
+            _write_excel_report(conversions_report_path, conversion_visits)
+        except Exception as _be:
+            logger.debug(f"conversions bucket report failed: {_be}")
+            conversions_report_path = None
+
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            # ── 1. Top-level legacy artefacts (kept for backward compat) ──
             for p in shots_dir.glob("*.png"):
                 zf.write(p, arcname=f"screenshots/{p.name}")
             if (job_dir / "report.xlsx").exists():
@@ -4364,8 +4575,45 @@ async def run_real_user_traffic_job(
                 zf.write(status_path, arcname="leads_with_status.xlsx")
             if pending_path and pending_path.exists():
                 zf.write(pending_path, arcname="pending_leads.xlsx")
+
+            # ── 2. Processed/ (every visit) ──
+            if processed_report_path and processed_report_path.exists():
+                zf.write(processed_report_path, arcname="Processed/report.xlsx")
+            for p in shots_dir.glob("*.png"):
+                zf.write(p, arcname=f"Processed/screenshots/{p.name}")
+
+            # ── 3. Succeeded/ (status == ok) ──
+            if succeeded_report_path and succeeded_report_path.exists():
+                zf.write(succeeded_report_path, arcname="Succeeded/report.xlsx")
+            for p in _shots_for_visits(succeeded_visits):
+                zf.write(p, arcname=f"Succeeded/screenshots/{p.name}")
+
+            # ── 4. Conversions/ (conversion_page_reached == True) ──
+            if conversions_report_path and conversions_report_path.exists():
+                zf.write(conversions_report_path, arcname="Conversions/report.xlsx")
+            for p in _shots_for_visits(conversion_visits):
+                zf.write(p, arcname=f"Conversions/screenshots/{p.name}")
+
+            # ── 5. Leads_Left/ (rows still pending + full status xlsx) ──
+            if pending_path and pending_path.exists():
+                zf.write(pending_path, arcname="Leads_Left/pending_leads.xlsx")
+            if status_path and status_path.exists():
+                zf.write(status_path, arcname="Leads_Left/leads_with_status.xlsx")
     except Exception as e:
         logger.warning(f"zip build failed: {e}")
+    finally:
+        # Clean up the temporary per-bucket Excel files (they're already
+        # inside the zip; no need to leave them in the job dir).
+        for _tmp in (
+            job_dir / "_bucket_processed_report.xlsx",
+            job_dir / "_bucket_succeeded_report.xlsx",
+            job_dir / "_bucket_conversions_report.xlsx",
+        ):
+            try:
+                if _tmp.exists():
+                    _tmp.unlink()
+            except Exception:
+                pass
 
     # ── Await all pending live-remove tasks BEFORE finalising ────────
     # The fire-and-forget _spawn_live() calls scheduled per-visit $pull /
@@ -5655,6 +5903,34 @@ async def _persist(db, job_id: str):
         )
     except Exception as e:
         logger.debug(f"persist real_user_traffic_jobs failed: {e}")
+    # ── Flush macro-leak + stuck-event diagnostics into MongoDB ──
+    # We accumulate these in-memory during the run (cheap, non-blocking
+    # for Playwright handlers) and flush at job-finalise so the admin
+    # "Diagnostics" view can show exactly which URLs leaked unfilled
+    # macros and where each visit got stuck. Bounded to 200 records per
+    # bucket per job to keep MongoDB writes small.
+    try:
+        leaks = _MACRO_LEAK_BUFFER.pop(job_id, []) or []
+        if leaks:
+            try:
+                await db.rut_diagnostics.insert_many([
+                    {**ev, "kind": "macro_leak"} for ev in leaks
+                ])
+            except Exception as _ie:
+                logger.debug(f"macro-leak flush failed: {_ie}")
+    except Exception:
+        pass
+    try:
+        stucks = _STUCK_EVENT_BUFFER.pop(job_id, []) or []
+        if stucks:
+            try:
+                await db.rut_diagnostics.insert_many([
+                    {**ev, "kind": "stuck"} for ev in stucks
+                ])
+            except Exception as _ie:
+                logger.debug(f"stuck-event flush failed: {_ie}")
+    except Exception:
+        pass
 
 
 def request_job_cancel(job_id: str) -> bool:

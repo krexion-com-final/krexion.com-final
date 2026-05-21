@@ -360,6 +360,32 @@ export default function RealUserTrafficPage() {
   const liveCursorRef = useRef(0);
   const liveTimerRef = useRef(null);
 
+  // Diagnostics modal — shows macro-leak + stuck-visit events recorded
+  // during the run. Powers the "Why didn't this offer convert?" workflow.
+  const [diagModalOpen, setDiagModalOpen] = useState(false);
+  const [diagData, setDiagData] = useState(null);
+  const [diagLoading, setDiagLoading] = useState(false);
+
+  const openDiagnostics = async () => {
+    if (!activeJob?.job_id) return;
+    setDiagModalOpen(true);
+    setDiagLoading(true);
+    setDiagData(null);
+    try {
+      const r = await fetch(
+        `${API_URL}/api/real-user-traffic/jobs/${activeJob.job_id}/diagnostics`,
+        { headers: authH() },
+      );
+      if (r.ok) {
+        setDiagData(await r.json());
+      }
+    } catch (e) {
+      // silent — UI shows "no data" state
+    } finally {
+      setDiagLoading(false);
+    }
+  };
+
   // Engine readiness — polled every 5s. Coloured badge at top of page.
   const [engineStatus, setEngineStatus] = useState({
     status: "ready",
@@ -2573,6 +2599,15 @@ export default function RealUserTrafficPage() {
                   >
                     <Activity size={16} className="mr-2" /> Show Live Activity
                   </Button>
+                  <Button
+                    data-testid="rut-show-diagnostics-btn"
+                    onClick={openDiagnostics}
+                    variant="outline"
+                    className="bg-zinc-800 border-amber-700 text-amber-200 hover:bg-amber-950"
+                    title="Show macro-leak blocks + stuck-visit events for this job"
+                  >
+                    <AlertTriangle size={16} className="mr-2" /> Diagnostics
+                  </Button>
                 </>
               )}
               {(activeJob.status === "completed" || activeJob.status === "stopped") && (
@@ -2596,6 +2631,15 @@ export default function RealUserTrafficPage() {
                       {typeof activeJob.leftover_leads_count === "number" ? ` (${activeJob.leftover_leads_count})` : ""}
                     </Button>
                   )}
+                  <Button
+                    data-testid="rut-show-diagnostics-completed-btn"
+                    onClick={openDiagnostics}
+                    variant="outline"
+                    className="bg-zinc-800 border-amber-700 text-amber-200 hover:bg-amber-950"
+                    title="Show macro-leak blocks + stuck-visit events for this job"
+                  >
+                    <AlertTriangle size={16} className="mr-2" /> Diagnostics
+                  </Button>
                 </>
               )}
             </div>
@@ -2811,6 +2855,166 @@ export default function RealUserTrafficPage() {
                     </div>
                   );
                 })
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══ Diagnostics Modal ═══ */}
+      {diagModalOpen && (
+        <div
+          className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          data-testid="rut-diag-modal"
+        >
+          <div className="bg-zinc-950 border border-amber-900/50 rounded-xl w-full max-w-3xl max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between px-5 py-3 border-b border-zinc-800">
+              <div className="flex items-center gap-2">
+                <AlertTriangle size={18} className="text-amber-400" />
+                <h3 className="text-white font-semibold">
+                  Diagnostics — macro leaks & stuck visits
+                </h3>
+              </div>
+              <button
+                onClick={() => setDiagModalOpen(false)}
+                className="text-zinc-400 hover:text-white p-1 rounded"
+                data-testid="rut-diag-modal-close"
+                aria-label="Close diagnostics"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 text-xs space-y-4">
+              {diagLoading && (
+                <div className="text-center text-zinc-500 py-10">Loading diagnostics…</div>
+              )}
+              {!diagLoading && diagData && (
+                <>
+                  {/* ── Macro leaks ── */}
+                  <section>
+                    <h4 className="text-amber-300 font-semibold mb-2 flex items-center gap-2">
+                      <AlertTriangle size={14} /> Macro-leak blocks
+                      <span className="text-zinc-500 font-mono text-[11px]">
+                        ({diagData.macro_leak_count || 0})
+                      </span>
+                    </h4>
+                    <p className="text-zinc-500 mb-2">
+                      Each row = a navigation that was blocked because the URL
+                      still contained an unfilled tracker macro
+                      (<code className="text-amber-300">{`{{ccpa}}`}</code>,
+                      <code className="text-amber-300">{`{{sub}}`}</code>, etc.).
+                      Frequent leaks on the same host mean that offer's tracker
+                      URL is missing a required parameter — fix it on the
+                      affiliate-network side.
+                    </p>
+                    {(diagData.top_macro_leak_hosts || []).length > 0 && (
+                      <div className="mb-2 flex flex-wrap gap-1">
+                        {diagData.top_macro_leak_hosts.map((h, i) => (
+                          <span
+                            key={i}
+                            className="px-2 py-0.5 rounded bg-amber-900/40 border border-amber-800 text-amber-200 font-mono"
+                            data-testid={`rut-diag-top-host-${i}`}
+                          >
+                            {h.host} × {h.count}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {(diagData.macro_leaks || []).length === 0 ? (
+                      <p className="text-zinc-600 italic">No macro leaks recorded for this job.</p>
+                    ) : (
+                      <div className="max-h-48 overflow-y-auto border border-zinc-800 rounded">
+                        <table className="w-full font-mono">
+                          <thead className="bg-zinc-900 text-zinc-400 sticky top-0">
+                            <tr>
+                              <th className="text-left px-2 py-1">Visit</th>
+                              <th className="text-left px-2 py-1">Type</th>
+                              <th className="text-left px-2 py-1">Blocked URL</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {diagData.macro_leaks.map((ev, i) => (
+                              <tr
+                                key={i}
+                                className="border-t border-zinc-900 text-zinc-300"
+                                data-testid={`rut-diag-macro-row-${i}`}
+                              >
+                                <td className="px-2 py-1">#{ev.visit_index}</td>
+                                <td className="px-2 py-1 text-zinc-500">{ev.resource_type || "?"}</td>
+                                <td className="px-2 py-1 break-all">{ev.blocked_url}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </section>
+
+                  {/* ── Stuck events ── */}
+                  <section>
+                    <h4 className="text-rose-300 font-semibold mb-2 flex items-center gap-2">
+                      <AlertTriangle size={14} /> Stuck visits
+                      <span className="text-zinc-500 font-mono text-[11px]">
+                        ({diagData.stuck_event_count || 0})
+                      </span>
+                    </h4>
+                    <p className="text-zinc-500 mb-2">
+                      Each row = a visit whose page URL didn't change for
+                      &gt;25 seconds while automation steps were running.
+                      Clusters around the same URL mean the bot is dying on
+                      that specific offer page — usually because the JSON
+                      script's selectors don't match.
+                    </p>
+                    {(diagData.top_stuck_hosts || []).length > 0 && (
+                      <div className="mb-2 flex flex-wrap gap-1">
+                        {diagData.top_stuck_hosts.map((h, i) => (
+                          <span
+                            key={i}
+                            className="px-2 py-0.5 rounded bg-rose-900/40 border border-rose-800 text-rose-200 font-mono"
+                            data-testid={`rut-diag-stuck-host-${i}`}
+                          >
+                            {h.host} × {h.count}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {(diagData.stuck_events || []).length === 0 ? (
+                      <p className="text-zinc-600 italic">No stuck visits recorded for this job.</p>
+                    ) : (
+                      <div className="max-h-48 overflow-y-auto border border-zinc-800 rounded">
+                        <table className="w-full font-mono">
+                          <thead className="bg-zinc-900 text-zinc-400 sticky top-0">
+                            <tr>
+                              <th className="text-left px-2 py-1">Visit</th>
+                              <th className="text-left px-2 py-1">Stuck (s)</th>
+                              <th className="text-left px-2 py-1">URL</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {diagData.stuck_events.map((ev, i) => (
+                              <tr
+                                key={i}
+                                className="border-t border-zinc-900 text-zinc-300"
+                                data-testid={`rut-diag-stuck-row-${i}`}
+                              >
+                                <td className="px-2 py-1">#{ev.visit_index}</td>
+                                <td className="px-2 py-1 text-rose-300">
+                                  {ev.seconds_stuck}
+                                </td>
+                                <td className="px-2 py-1 break-all">{ev.stuck_url}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </section>
+                </>
+              )}
+              {!diagLoading && !diagData && (
+                <div className="text-center text-zinc-500 py-10">
+                  No diagnostics data available for this job.
+                </div>
               )}
             </div>
           </div>

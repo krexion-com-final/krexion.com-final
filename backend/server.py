@@ -4990,6 +4990,78 @@ async def rut_get_job(job_id: str, user: dict = Depends(get_current_user)):
     return cleaned
 
 
+@api_router.get("/real-user-traffic/jobs/{job_id}/diagnostics")
+async def rut_job_diagnostics(
+    job_id: str,
+    user: dict = Depends(get_current_user),
+):
+    """Return per-job diagnostics: which URLs leaked unfilled tracker
+    macros (`{{ccpa}}` etc.) and where individual visits got stuck.
+    Powers the "Diagnostics" tab on the Real-User-Traffic job-detail
+    page so the operator can see WHY an offer isn't reaching its final
+    page without scraping log files."""
+    check_user_feature(user, "real_user_traffic")
+    # Ownership check
+    db_job = await db.real_user_traffic_jobs.find_one(
+        {"job_id": job_id, "user_id": user["id"]}, {"_id": 0, "user_id": 1}
+    )
+    if not db_job:
+        # Allow in-flight jobs too (not yet persisted)
+        from real_user_traffic import RUT_JOBS as _RJ
+        live = _RJ.get(job_id) or {}
+        if live.get("user_id") != user["id"]:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+    macro_cursor = db.rut_diagnostics.find(
+        {"job_id": job_id, "kind": "macro_leak"},
+        {"_id": 0},
+    ).sort("timestamp", 1).limit(500)
+    stuck_cursor = db.rut_diagnostics.find(
+        {"job_id": job_id, "kind": "stuck"},
+        {"_id": 0},
+    ).sort("timestamp", 1).limit(500)
+
+    macro_events: List[dict] = []
+    async for e in macro_cursor:
+        macro_events.append(e)
+    stuck_events: List[dict] = []
+    async for e in stuck_cursor:
+        stuck_events.append(e)
+
+    # Aggregate top blocked hosts so the UI can show a "Most common
+    # macro-leak hosts" panel without re-doing the work client-side.
+    from collections import Counter
+    from urllib.parse import urlparse
+    host_counter: Counter = Counter()
+    for ev in macro_events:
+        try:
+            host_counter[urlparse(ev.get("blocked_url", "")).netloc or "(unknown)"] += 1
+        except Exception:
+            host_counter["(unknown)"] += 1
+    top_hosts = [{"host": h, "count": c} for h, c in host_counter.most_common(10)]
+
+    stuck_host_counter: Counter = Counter()
+    for ev in stuck_events:
+        try:
+            stuck_host_counter[urlparse(ev.get("stuck_url", "")).netloc or "(unknown)"] += 1
+        except Exception:
+            stuck_host_counter["(unknown)"] += 1
+    top_stuck_hosts = [{"host": h, "count": c} for h, c in stuck_host_counter.most_common(10)]
+
+    return {
+        "job_id": job_id,
+        "macro_leaks": macro_events,
+        "macro_leak_count": len(macro_events),
+        "top_macro_leak_hosts": top_hosts,
+        "stuck_events": stuck_events,
+        "stuck_event_count": len(stuck_events),
+        "top_stuck_hosts": top_stuck_hosts,
+    }
+
+
+
+
+
 @api_router.get("/real-user-traffic/jobs/{job_id}/live-log")
 async def rut_live_log(
     job_id: str,
