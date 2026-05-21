@@ -4990,6 +4990,27 @@ async def rut_get_job(job_id: str, user: dict = Depends(get_current_user)):
     return cleaned
 
 
+@api_router.get("/rut-tools/patched-script")
+async def rut_download_patched_script():
+    """Public download of the `{{ccpa}}`-safe patched JSON automation
+    script (the Target $750 offer flow with macro/CCPA anchors excluded
+    from the force-nav evaluate step). Returned as an attachment so the
+    browser saves it directly. No auth required — file is a utility
+    artefact, contains no secrets."""
+    from pathlib import Path as _P
+    p = _P("/app/backend/tests/demo_results/rut_script_patched.json")
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="patched script not generated yet")
+    return FileResponse(
+        path=str(p),
+        media_type="application/json",
+        filename="rut_script_patched.json",
+    )
+
+
+
+
+
 @api_router.get("/real-user-traffic/jobs/{job_id}/diagnostics")
 async def rut_job_diagnostics(
     job_id: str,
