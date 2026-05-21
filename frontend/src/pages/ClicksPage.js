@@ -284,8 +284,8 @@ export default function ClicksPage() {
     }
     
     const confirmMsg = dateFilter === "all" 
-      ? `Delete ALL ${clicks.length} clicks?` 
-      : `Delete ${clicks.length} clicks from ${dateFilter === "custom" ? `${customStartDate} to ${customEndDate}` : dateFilter}?`;
+      ? `Delete ALL ${totalClicks} clicks?` 
+      : `Delete ${totalClicks} clicks from ${dateFilter === "custom" ? `${customStartDate} to ${customEndDate}` : dateFilter}?`;
     
     if (!window.confirm(confirmMsg)) return;
     
@@ -725,18 +725,18 @@ export default function ClicksPage() {
             <Button 
               variant="destructive"
               onClick={handleDeleteByFilter}
-              disabled={deleting || clicks.length === 0}
+              disabled={deleting || totalClicks === 0}
               className="h-9"
             >
               {deleting ? <Loader2 className="animate-spin mr-1" size={14} /> : <Trash2 size={14} className="mr-1" />}
-              Delete {getFilterLabel()} ({clicks.length})
+              Delete {getFilterLabel()} ({totalClicks})
             </Button>
           </div>
           
           {/* Current Filter Display */}
           {dateFilter !== "all" && (
             <div className="text-sm text-muted-foreground bg-[var(--brand-card)] p-2 rounded">
-              Showing: <span className="text-white font-medium">{getFilterLabel()}</span> - {clicks.length} clicks
+              Showing: <span className="text-white font-medium">{getFilterLabel()}</span> - {totalClicks} clicks
             </div>
           )}
         </CardContent>
