@@ -2981,27 +2981,44 @@ export default function RealUserTrafficPage() {
                     {(diagData.stuck_events || []).length === 0 ? (
                       <p className="text-zinc-600 italic">No stuck visits recorded for this job.</p>
                     ) : (
-                      <div className="max-h-48 overflow-y-auto border border-zinc-800 rounded">
+                      <div className="max-h-96 overflow-y-auto border border-zinc-800 rounded">
                         <table className="w-full font-mono">
                           <thead className="bg-zinc-900 text-zinc-400 sticky top-0">
                             <tr>
                               <th className="text-left px-2 py-1">Visit</th>
                               <th className="text-left px-2 py-1">Stuck (s)</th>
-                              <th className="text-left px-2 py-1">URL</th>
+                              <th className="text-left px-2 py-1">URL · what the page was showing</th>
                             </tr>
                           </thead>
                           <tbody>
                             {diagData.stuck_events.map((ev, i) => (
                               <tr
                                 key={i}
-                                className="border-t border-zinc-900 text-zinc-300"
+                                className="border-t border-zinc-900 text-zinc-300 align-top"
                                 data-testid={`rut-diag-stuck-row-${i}`}
                               >
                                 <td className="px-2 py-1">#{ev.visit_index}</td>
                                 <td className="px-2 py-1 text-rose-300">
                                   {ev.seconds_stuck}
                                 </td>
-                                <td className="px-2 py-1 break-all">{ev.stuck_url}</td>
+                                <td className="px-2 py-1 space-y-1">
+                                  <div className="break-all">{ev.stuck_url}</div>
+                                  {ev.body_snippet && (
+                                    <details className="text-[11px] text-zinc-400">
+                                      <summary className="cursor-pointer hover:text-zinc-200">
+                                        Show page text snippet
+                                      </summary>
+                                      <pre className="whitespace-pre-wrap mt-1 p-2 bg-zinc-900 border border-zinc-800 rounded text-zinc-300 max-h-32 overflow-y-auto">
+                                        {ev.body_snippet}
+                                      </pre>
+                                    </details>
+                                  )}
+                                  {ev.snapshot_name && (
+                                    <div className="text-[11px] text-zinc-500">
+                                      📷 Screenshot in ZIP: <code className="text-zinc-300">{ev.snapshot_name}</code>
+                                    </div>
+                                  )}
+                                </td>
                               </tr>
                             ))}
                           </tbody>

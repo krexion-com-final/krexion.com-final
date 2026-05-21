@@ -113,10 +113,10 @@ Last-resort `keyboard.type(delay=30)` (flat 30ms = 200 WPM, bot-detectable) repl
 - `backend/real_user_traffic.py` (Feb 2026) — +296/-10 lines:
   - `_block_unfilled_macro_request()` + `_make_macro_guard(job_id, visit_index)` — per-visit `context.route` closure for macro-leak defense + telemetry binding.
   - `_record_macro_leak()` / `_record_stuck_event()` — in-memory diagnostic buffers, flushed to MongoDB `rut_diagnostics` collection during `_persist()`.
-  - `_stuck_watchdog()` — per-visit URL-change watchdog (25s threshold) that wraps `_execute_automation_steps()`.
+  - `_stuck_watchdog()` — per-visit URL-change watchdog (25s threshold) with **auto-abort callback** + **chrome-error fast-path** + **screenshot + body-text snapshot** captured before aborting. Stuck visits no longer waste the full automation budget.
   - Categorised `results.zip` — now contains four folders (`Processed/`, `Succeeded/`, `Conversions/`, `Leads_Left/`) each with their own `report.xlsx` + matching `screenshots/` subset. Legacy flat artefacts preserved at the zip root for backward compat.
-- `backend/server.py` (Feb 2026) — +72 lines: `GET /api/real-user-traffic/jobs/{job_id}/diagnostics` admin endpoint returning macro_leaks, stuck_events, and top-host aggregates.
-- `frontend/src/pages/RealUserTrafficPage.js` (Feb 2026) — +204 lines: Diagnostics button (both running + completed states) + modal with macro-leak table + stuck-visit table + per-host frequency badges.
+- `backend/server.py` (Feb 2026) — +72 lines: `GET /api/real-user-traffic/jobs/{job_id}/diagnostics` admin endpoint returning macro_leaks, stuck_events (with body_snippet + snapshot_name), and top-host aggregates. Also `GET /api/rut-tools/patched-script` for the `{{ccpa}}`-safe JSON download.
+- `frontend/src/pages/RealUserTrafficPage.js` (Feb 2026) — +204 lines: Diagnostics button (both running + completed states) + modal with macro-leak table + stuck-visit table with collapsible body-text snippet + screenshot filename reference + per-host frequency badges.
 - `backend/tests/demo_rut_test.py` (Feb 2026) — Standalone demo runner for the Target $750 offer flow; reproduces and verifies the `{{ccpa}}` fix.
 - `backend/tests/demo_results/rut_script_patched.json` (Feb 2026) — Patched user JSON: step 2 evaluate filter now skips anchors whose href matches `{{`, `%7B%7B`, `ccpa`, `optout`, `opt-out`, `do-not-sell`, `unsubscribe`, `privacy`.
 

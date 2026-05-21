@@ -1074,7 +1074,8 @@ def _record_macro_leak(job_id: str, visit_index: int, url: str, resource_type: s
 
 
 def _record_stuck_event(job_id: str, visit_index: int, url: str, seconds_stuck: float,
-                       last_step: int = -1) -> None:
+                       last_step: int = -1, snapshot_name: str = "",
+                       body_snippet: str = "") -> None:
     """Append a stuck-visit event. Called by the per-visit watchdog when
     the page URL hasn't changed for the configured threshold."""
     try:
@@ -1087,6 +1088,8 @@ def _record_stuck_event(job_id: str, visit_index: int, url: str, seconds_stuck: 
             "stuck_url": (url or "")[:1024],
             "seconds_stuck": round(float(seconds_stuck or 0), 1),
             "last_step_index": int(last_step) if last_step is not None else -1,
+            "snapshot_name": (snapshot_name or "")[:128],
+            "body_snippet": (body_snippet or "")[:2000],
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
     except Exception:
@@ -1094,14 +1097,20 @@ def _record_stuck_event(job_id: str, visit_index: int, url: str, seconds_stuck: 
 
 
 async def _stuck_watchdog(page, job_id: str, visit_index: int,
-                          threshold_s: float = 25.0, poll_s: float = 5.0) -> None:
+                          threshold_s: float = 25.0, poll_s: float = 5.0,
+                          shots_dir=None, on_stuck=None) -> None:
     """Watch the page's main-frame URL while a visit's automation steps
     are running. If the URL hasn't changed for `threshold_s` seconds we
     consider the visit stuck (waiting for a selector that never appears,
-    waiting for a navigation that never happens, etc.) and emit a
-    `_record_stuck_event` so the operator can see WHICH page the job
-    dies on. We only record ONCE per stuck-period so a 5-minute hang
-    doesn't generate 12 identical rows."""
+    waiting for a navigation that never happens, etc.) and:
+        1. Capture a screenshot + first 2 KB of body text (debug aid).
+        2. Emit `_record_stuck_event` so the operator can see WHICH page
+           the job dies on.
+        3. Invoke the `on_stuck` callback (if provided) — typically the
+           visit loop's `steps_task.cancel()` so the run doesn't waste
+           the rest of its automation budget on a dead page.
+    We only record ONCE per stuck-period so a 5-minute hang doesn't
+    generate 12 identical rows."""
     last_url = ""
     try:
         last_url = page.url or ""
@@ -1119,6 +1128,32 @@ async def _stuck_watchdog(page, job_id: str, visit_index: int,
         except Exception:
             return
         now = __import__("time").monotonic()
+        # ── Fast path: chrome-error:// means the tab died mid-flight
+        #    (proxy tunnel dropped, DNS lookup failed, SSL error, etc.).
+        #    Don't wait for the full 25s threshold — fire the stuck
+        #    record + abort callback immediately so the run can move on.
+        if cur.startswith("chrome-error://") or cur.startswith("chrome://network-error"):
+            if not recorded_this_period:
+                _record_stuck_event(
+                    job_id, visit_index, cur,
+                    max(0.0, now - last_changed_at),
+                    snapshot_name="",
+                    body_snippet="(chrome-error fast-path — no DOM to capture)",
+                )
+                recorded_this_period = True
+                try:
+                    push_live_step(
+                        job_id, visit_index, "stuck", "warn",
+                        f"Chrome error page detected ({cur[:60]}) — aborting visit",
+                    )
+                except Exception:
+                    pass
+                if on_stuck is not None:
+                    try:
+                        on_stuck()
+                    except Exception:
+                        pass
+                return
         if cur != last_url:
             last_url = cur
             last_changed_at = now
@@ -1126,15 +1161,52 @@ async def _stuck_watchdog(page, job_id: str, visit_index: int,
             continue
         elapsed = now - last_changed_at
         if elapsed >= threshold_s and not recorded_this_period:
-            _record_stuck_event(job_id, visit_index, cur, elapsed)
+            # ── Capture debug artefacts BEFORE aborting ────────────────
+            snapshot_name = ""
+            body_snippet = ""
+            try:
+                if shots_dir is not None:
+                    sp = Path(str(shots_dir)) / f"visit_{int(visit_index):05d}_stuck.png"
+                    await asyncio.wait_for(
+                        page.screenshot(path=str(sp), full_page=True),
+                        timeout=5.0,
+                    )
+                    snapshot_name = sp.name
+            except Exception:
+                pass
+            try:
+                body_snippet = await asyncio.wait_for(
+                    page.evaluate(
+                        "() => (document.body && document.body.innerText) "
+                        "? document.body.innerText.slice(0, 2000) : ''"
+                    ),
+                    timeout=4.0,
+                ) or ""
+            except Exception:
+                body_snippet = ""
+
+            _record_stuck_event(
+                job_id, visit_index, cur, elapsed,
+                snapshot_name=snapshot_name,
+                body_snippet=body_snippet,
+            )
             recorded_this_period = True
             try:
                 push_live_step(
                     job_id, visit_index, "stuck", "warn",
-                    f"Visit stuck on {cur[:120]} for ~{int(elapsed)}s — see diagnostics",
+                    f"Visit stuck on {cur[:120]} for ~{int(elapsed)}s — aborting + see diagnostics",
                 )
             except Exception:
                 pass
+            # ── Fire the abort callback so the visit loop can cancel
+            #    the automation steps task and move on to the next visit.
+            #    Then exit the watchdog (parent will await us).
+            if on_stuck is not None:
+                try:
+                    on_stuck()
+                except Exception:
+                    pass
+            return
 
 
 
@@ -3640,18 +3712,48 @@ async def run_real_user_traffic_job(
 
                         # Start a watchdog task that records a "stuck"
                         # event if the page URL hasn't changed for >25s
-                        # while the automation script is running. Lets
-                        # the operator pinpoint exactly which page kills
-                        # which offer.
-                        _watchdog = asyncio.create_task(
-                            _stuck_watchdog(page, job_id, i + 1)
-                        )
-                        try:
-                            step_res = await _execute_automation_steps(
+                        # while the automation script is running. The
+                        # watchdog also captures a screenshot + body
+                        # text snapshot for offline debugging, then
+                        # cancels the steps task so the job moves on
+                        # to the next visit instead of wasting the full
+                        # automation budget on a dead page.
+                        _steps_task = asyncio.create_task(
+                            _execute_automation_steps(
                                 page, row or {}, automation_steps, skip_captcha=skip_captcha,
                                 self_heal=self_heal,
                                 on_screenshot=_on_user_capture,
                             )
+                        )
+
+                        def _trigger_abort_steps():
+                            if not _steps_task.done():
+                                _steps_task.cancel()
+
+                        _watchdog = asyncio.create_task(
+                            _stuck_watchdog(
+                                page, job_id, i + 1,
+                                shots_dir=shots_dir,
+                                on_stuck=_trigger_abort_steps,
+                            )
+                        )
+                        try:
+                            try:
+                                step_res = await _steps_task
+                            except asyncio.CancelledError:
+                                # Watchdog aborted us — surface as a
+                                # distinct "stuck" status so the report
+                                # row + diagnostics agree.
+                                _stuck_url_for_err = ""
+                                try:
+                                    _stuck_url_for_err = page.url or ""
+                                except Exception:
+                                    pass
+                                step_res = {
+                                    "status": "stuck",
+                                    "error": f"Visit aborted by watchdog (page stuck >25s on {_stuck_url_for_err[:200]})",
+                                    "executed_steps": 0,
+                                }
                         finally:
                             _watchdog.cancel()
                             try:
