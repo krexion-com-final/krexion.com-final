@@ -78,12 +78,27 @@ def get_engine_status() -> Dict[str, Any]:
         }
 
     binary_path = Path(browsers_root) / f"chromium_headless_shell-{expected}" / "chrome-linux" / "headless_shell"
-    if binary_path.exists():
+    # 2026-01: Detect which engine is actually being used at runtime so
+    # the admin engine-status badge can show "Full Chromium (--headless=new)"
+    # vs "Headless Shell (legacy)". Helps confirm the anti-detect upgrade
+    # took effect on a deployed instance.
+    engine_mode = "full-chromium-headless-new" if _use_full_chromium() else "chromium-headless-shell"
+    full_chromium_path = _full_chromium_binary_path()
+    extra = {
+        "engine_mode": engine_mode,
+        "full_chromium_installed": full_chromium_path is not None,
+        "full_chromium_path": str(full_chromium_path) if full_chromium_path else None,
+    }
+    # If either binary is present we're ready. Prefer full chromium for
+    # anti-detect, but the legacy headless_shell remains a valid fallback.
+    if binary_path.exists() or full_chromium_path is not None:
+        ready_via = "full chromium (--headless=new)" if full_chromium_path is not None else f"headless_shell rev {expected}"
         return {
             "status": "ready",
-            "message": f"Chromium rev {expected} ready",
+            "message": f"Chromium ready · using {ready_via}",
             "expected_revision": expected,
-            "browser_path": str(binary_path),
+            "browser_path": str(full_chromium_path or binary_path),
+            **extra,
         }
     if _CHROMIUM_INSTALL_IN_PROGRESS:
         return {
@@ -91,12 +106,14 @@ def get_engine_status() -> Dict[str, Any]:
             "message": f"Downloading Chromium rev {expected}…",
             "expected_revision": expected,
             "browser_path": str(binary_path),
+            **extra,
         }
     return {
         "status": "missing",
         "message": f"Chromium rev {expected} not installed yet",
         "expected_revision": expected,
         "browser_path": str(binary_path),
+        **extra,
     }
 
 
@@ -161,6 +178,21 @@ async def _ensure_chromium_available() -> bool:
         return False
 
     if _exists():
+        # ── 2026-01 Anti-detect: kick off background install of FULL
+        # chromium (no-op if already present). Lets existing deploys
+        # automatically upgrade to --headless=new mode on next job.
+        try:
+            if _full_chromium_binary_path() is None:
+                asyncio.create_task(_install_full_chromium_background())
+        except Exception:
+            pass
+        return True
+
+    # ── 2026-01 Anti-detect: if the FULL chromium binary is already
+    # installed, we don't need chromium-headless-shell at all — the
+    # launcher will use full chromium with --headless=new. Treat the
+    # engine as ready and skip the (sometimes-failing) shell install.
+    if _full_chromium_binary_path() is not None:
         return True
 
     # Missing — install with a lock to prevent duplicate installs when
@@ -204,15 +236,182 @@ async def _ensure_chromium_available() -> bool:
                 logger.error(f"Playwright install failed: {e}")
                 return False
             # Final strict check — must satisfy the EXACT revision Playwright wants
-            return _exists()
+            ok = _exists()
         finally:
             _CHROMIUM_INSTALL_IN_PROGRESS = False
+
+    # ── 2026-01 Anti-detect: also ensure FULL chromium is installed ──
+    # Fires in the background — never blocks job execution. On the first
+    # run after upgrade, the next job (or two) still uses chromium-
+    # headless-shell, then once full chromium finishes downloading
+    # (~165MB), `_use_full_chromium()` flips to True and subsequent jobs
+    # automatically launch with `--headless=new` for maximum stealth.
+    try:
+        if ok and _full_chromium_binary_path() is None:
+            asyncio.create_task(_install_full_chromium_background())
+    except Exception:
+        pass
+    return ok
 
 
 import httpx
 import pandas as pd
 from user_agents import parse as ua_parse
 from playwright.async_api import async_playwright, Page, BrowserContext, Browser
+
+
+# ─── Full Chromium detection (2026-01: anti-detect upgrade) ────────
+# When the FULL chromium binary is installed alongside the lightweight
+# chromium-headless-shell, we prefer it because:
+#   1. Identical code paths to headed Chrome → bypasses headless-shell
+#      detection heuristics (Anura Premium, IPQS Deep, PerimeterX).
+#   2. Full font set, real GPU pipeline (SwiftShader), full audio
+#      subsystem — canvas / WebGL / audio fingerprints match real Chrome.
+#   3. With `--headless=new` flag, runs the SAME binary as headed Chrome
+#      just without a visible window. Detectors can't distinguish.
+#
+# Falls back to chromium-headless-shell automatically if full chromium
+# isn't installed (e.g. on customer VPS that hasn't run the upgrade).
+# This keeps the codebase backwards-compatible.
+
+def _full_chromium_binary_path() -> Optional[Path]:
+    """Return the path to the full chromium binary if installed, else None.
+    Reads the expected revision from Playwright's browsers.json (same one
+    used for headless-shell) so the rev always stays in sync."""
+    browsers_root = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/pw-browsers")
+    try:
+        import json as _json
+        import playwright as _pw
+        bj = Path(_pw.__file__).parent / "driver" / "package" / "browsers.json"
+        if not bj.exists():
+            return None
+        with open(bj, "r") as fh:
+            data = _json.load(fh)
+        rev = None
+        for entry in data.get("browsers", []):
+            if entry.get("name") == "chromium":
+                rev = str(entry.get("revision") or "").strip() or None
+                break
+        if not rev:
+            return None
+        bp = Path(browsers_root) / f"chromium-{rev}" / "chrome-linux" / "chrome"
+        return bp if bp.exists() else None
+    except Exception:
+        return None
+
+
+def _use_full_chromium() -> bool:
+    """Should we launch the full chromium (with --headless=new) instead of
+    the lightweight chromium-headless-shell? Yes when the binary is
+    installed AND the env override `KREXION_FORCE_HEADLESS_SHELL=1` is NOT
+    set (operators can flip this to revert if a new bug appears)."""
+    if os.environ.get("KREXION_FORCE_HEADLESS_SHELL", "").strip() in ("1", "true", "yes"):
+        return False
+    return _full_chromium_binary_path() is not None
+
+
+async def _install_full_chromium_background() -> None:
+    """Best-effort background install of the FULL chromium binary so that
+    later jobs can use --headless=new mode. Logs success/failure but
+    never raises — chromium-headless-shell remains the safety net."""
+    if _full_chromium_binary_path() is not None:
+        return
+    browsers_root = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/pw-browsers")
+    try:
+        logger.info("Installing full chromium binary for --headless=new mode…")
+        proc = await asyncio.create_subprocess_exec(
+            "playwright", "install", "chromium", "--no-shell",
+            env={**os.environ, "PLAYWRIGHT_BROWSERS_PATH": browsers_root},
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _out, err = await asyncio.wait_for(proc.communicate(), timeout=600)
+        except asyncio.TimeoutError:
+            try: proc.kill()
+            except Exception: pass
+            logger.warning("Full chromium install timed out — staying on headless-shell")
+            return
+        if proc.returncode == 0:
+            logger.info("Full chromium installed — --headless=new mode enabled for subsequent jobs")
+        else:
+            logger.warning(
+                f"Full chromium install returned {proc.returncode}: "
+                f"{(err or b'').decode(errors='ignore')[:200]} — staying on headless-shell"
+            )
+    except Exception as e:
+        logger.warning(f"Full chromium install failed: {e} — staying on headless-shell")
+
+
+# Shared launch-args list — kept here so both the primary launch and the
+# in-flight crash-recovery relaunch use the EXACT same flags. Order matters
+# for some flags (e.g. --headless=new must precede --disable-features when
+# they share keys), so we keep this as a single source of truth.
+_BROWSER_LAUNCH_ARGS_BASE = [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-features=WebRtcHideLocalIpsWithMdns,AutomationControlled",
+    "--disable-blink-features=AutomationControlled",
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-sync",
+    "--disable-translate",
+    "--disable-default-apps",
+    "--disable-component-update",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--metrics-recording-only",
+    # 2026-01 Anti-detect: removed `--mute-audio` — real Chrome doesn't
+    # launch with audio muted by default, and detectors comparing
+    # AudioContext.state can flag the discrepancy. Audio output stays
+    # silent anyway because no <audio>/<video> auto-plays on lead pages.
+]
+
+
+async def _launch_anti_detect_browser(pw) -> Browser:
+    """Launch Chromium for RUT jobs with the strongest anti-detect setup
+    available on this host:
+
+      1. If the FULL chromium binary is installed → launch it with
+         `--headless=new` flag. This is the SAME binary as headed Chrome,
+         just without a visible window. Detectors that compare
+         headless-specific signals (font rendering, audio subsystem,
+         GPU pipeline) cannot distinguish it from a real user's browser.
+
+      2. If only chromium-headless-shell is installed → launch it the
+         legacy way. Fully backwards-compatible — customer VPS instances
+         that haven't run the upgrade keep working exactly as before.
+
+    Returns the launched Browser. Caller is responsible for closing it.
+    """
+    if _use_full_chromium():
+        # Full chromium: pass --headless=new explicitly via args. We
+        # ALSO set headless=False so Playwright doesn't pass --headless
+        # (legacy mode) on top of our --headless=new. The two together
+        # would force old headless and defeat the whole point.
+        try:
+            return await pw.chromium.launch(
+                channel="chromium",
+                headless=False,
+                args=["--headless=new", *_BROWSER_LAUNCH_ARGS_BASE],
+            )
+        except Exception as e:
+            # Full chromium failed (missing system lib, GPU-init crash,
+            # etc.) — fall back transparently to headless-shell so the
+            # job still runs. Logged so operators can investigate.
+            logger.warning(
+                f"Full chromium launch failed ({e}) — falling back to "
+                f"chromium-headless-shell"
+            )
+    return await pw.chromium.launch(
+        headless=True,
+        args=list(_BROWSER_LAUNCH_ARGS_BASE),
+    )
+
 
 from form_filler import (
     load_rows_from_excel,
@@ -2567,33 +2766,7 @@ async def run_real_user_traffic_job(
                                "Chromium crashed — relaunching…")
             except Exception:
                 pass
-            new_b = await pw.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-features=WebRtcHideLocalIpsWithMdns,AutomationControlled",
-                    "--disable-blink-features=AutomationControlled",
-                    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-                    "--disable-extensions",
-                    "--disable-background-networking",
-                    "--disable-background-timer-throttling",
-                    "--disable-backgrounding-occluded-windows",
-                    "--disable-renderer-backgrounding",
-                    "--disable-sync",
-                    "--disable-translate",
-                    "--disable-default-apps",
-                    "--disable-component-update",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    "--metrics-recording-only",
-                    # 2026-01 Anti-detect: removed `--mute-audio` — real
-                    # Chrome doesn't launch with audio muted by default,
-                    # and detectors comparing AudioContext.state can flag
-                    # the discrepancy. Audio output stays silent anyway
-                    # because no <audio>/<video> auto-plays on lead pages.
-                ],
-            )
+            new_b = await _launch_anti_detect_browser(pw)
             _browser_holder["b"] = new_b
             try:
                 push_live_step(job_id, 0, "engine", "ok",
@@ -3793,32 +3966,7 @@ async def run_real_user_traffic_job(
     _browser_holder["pw_cm"] = pw_cm
     shared_browser: Optional[Browser] = None
     try:
-        shared_browser = await pw.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-features=WebRtcHideLocalIpsWithMdns,AutomationControlled",
-                "--disable-blink-features=AutomationControlled",
-                "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-                # ── Speed-focused flags (2026-02): cut startup ~30-40%
-                # while keeping conversion flow intact ─────────────────
-                "--disable-extensions",
-                "--disable-background-networking",
-                "--disable-background-timer-throttling",
-                "--disable-backgrounding-occluded-windows",
-                "--disable-renderer-backgrounding",
-                "--disable-sync",
-                "--disable-translate",
-                "--disable-default-apps",
-                "--disable-component-update",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--metrics-recording-only",
-                # 2026-01 Anti-detect: removed `--mute-audio` — see note
-                # on the matching arg list above for rationale.
-            ],
-        )
+        shared_browser = await _launch_anti_detect_browser(pw)
         _browser_holder["b"] = shared_browser
     except Exception as e:
         try:
