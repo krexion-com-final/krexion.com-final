@@ -1041,6 +1041,68 @@ def _fingerprint_from_ua(ua_str: str) -> Dict[str, Any]:
     }
 
 
+_UNFILLED_MACRO_URL_RX = __import__("re").compile(r"\{\{[^}]+\}\}|%7[bB]%7[bB]")
+
+
+async def _block_unfilled_macro_request(route, request) -> None:
+    """Abort any request whose URL still contains an unfilled tracker
+    macro like `{{ccpa}}`, `{{sub_id}}`, etc.
+
+    Affiliate landing pages frequently embed CCPA / opt-out / privacy
+    anchors with macro placeholders the tracker is expected to replace
+    server-side. When the inbound tracker URL is missing the macro, the
+    literal `{{...}}` leaks into the rendered HTML and any aggressive
+    "force-navigation" JS step in the user's automation script can end
+    up clicking it, dead-ending the visit on a 404. Killing those
+    navigations at the network layer keeps the page on the legitimate
+    flow URL so subsequent form-fill / answer-click steps still run.
+
+    For top-level document navigations we cannot just `route.abort()`
+    because that leaves Chrome on `chrome-error://chromewebdata/`. We
+    instead fulfill the request with a tiny HTML that calls
+    `history.back()` so the browser returns to the legitimate offer
+    page and the automation can resume from there.
+    """
+    try:
+        url = request.url or ""
+        if _UNFILLED_MACRO_URL_RX.search(url):
+            try:
+                rtype = (request.resource_type or "").lower()
+            except Exception:
+                rtype = ""
+            if rtype == "document":
+                # Fulfill with a back-nav stub so we don't blank the tab.
+                try:
+                    await route.fulfill(
+                        status=200,
+                        content_type="text/html",
+                        body=(
+                            "<!doctype html><html><head><meta charset='utf-8'>"
+                            "<title>blocked</title></head><body>"
+                            "<script>try{history.back();}catch(e){}</script>"
+                            "</body></html>"
+                        ),
+                    )
+                except Exception:
+                    try:
+                        await route.abort()
+                    except Exception:
+                        pass
+            else:
+                try:
+                    await route.abort()
+                except Exception:
+                    pass
+            return
+        await route.continue_()
+    except Exception:
+        try:
+            await route.continue_()
+        except Exception:
+            pass
+
+
+
 # ─── Proxy helpers ───────────────────────────────────────────────
 def _parse_proxy_line(line: str) -> Optional[Dict[str, Any]]:
     s = (line or "").strip()
@@ -3002,6 +3064,24 @@ async def run_real_user_traffic_job(
                     raise
             await context.add_init_script(_build_stealth_script(fp, geo))
 
+            # Defensive guard: block navigations to URLs that contain
+            # unfilled tracker macros like `{{ccpa}}`, `{{sub}}`, etc.
+            # Some affiliate offer pages render CCPA / opt-out anchors with
+            # a `href="https://.../{{ccpa}}"` placeholder which the tracker
+            # is supposed to replace at runtime. When the macro is missing
+            # from the inbound tracker URL, the literal `{{...}}` leaks
+            # through to the anchor and any aggressive "force-nav"
+            # JS-evaluate step in the user's automation script ends up
+            # clicking it, dead-ending the visit on a 404 path. Aborting
+            # those requests at the network layer keeps the SPA on the
+            # legitimate flow page so the form-fill steps can run.
+            await context.route(
+                "**/*",
+                lambda route, request: asyncio.ensure_future(
+                    _block_unfilled_macro_request(route, request)
+                ),
+            )
+
             if True:
 
                 page = await context.new_page()
@@ -3079,6 +3159,12 @@ async def run_real_user_traffic_job(
                                 extra_http_headers=_ctx_headers,
                             )
                             await context.add_init_script(_build_stealth_script(fp, geo))
+                            await context.route(
+                                "**/*",
+                                lambda route, request: asyncio.ensure_future(
+                                    _block_unfilled_macro_request(route, request)
+                                ),
+                            )
                             page = await context.new_page()
                         except Exception as _rebuild_e:
                             goto_exc = _rebuild_e

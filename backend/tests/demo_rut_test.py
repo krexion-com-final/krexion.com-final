@@ -26,7 +26,7 @@ import openpyxl
 
 # Make the backend package importable
 sys.path.insert(0, "/app/backend")
-from real_user_traffic import _execute_automation_steps  # noqa: E402
+from real_user_traffic import _execute_automation_steps, _block_unfilled_macro_request  # noqa: E402
 
 OFFER_URL = os.environ.get(
     "DEMO_OFFER_URL",
@@ -105,6 +105,13 @@ async def main():
             user_agent=DEMO_UA,
             viewport={"width": 1366, "height": 768},
             locale="en-US",
+        )
+        # Apply the same defensive guard the prod RUT runner uses
+        await ctx.route(
+            "**/*",
+            lambda route, request: asyncio.ensure_future(
+                _block_unfilled_macro_request(route, request)
+            ),
         )
         page = await ctx.new_page()
 

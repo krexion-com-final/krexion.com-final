@@ -110,8 +110,11 @@ Last-resort `keyboard.type(delay=30)` (flat 30ms = 200 WPM, bot-detectable) repl
 ## Files Modified
 - `backend/form_filler.py` — +233 lines, 3 new helpers + `_fill_form` updated + fallback typing improved
 - `backend/real_user_traffic.py` — +205/-57 lines, browser engine upgrade + step-replay humanisation + `--mute-audio` removed
+- `backend/real_user_traffic.py` (Feb 2026) — +86 lines, `_block_unfilled_macro_request()` + `context.route("**/*")` at both context-creation points → defends against `{{ccpa}}` / `%7B%7B...%7D%7D` unfilled-macro anchors (fulfils main-frame nav with `history.back()` stub, aborts sub-resources).
+- `backend/tests/demo_rut_test.py` (Feb 2026) — Standalone demo runner for the Target $750 offer flow; reproduces and verifies the `{{ccpa}}` fix.
+- `backend/tests/demo_results/rut_script_patched.json` (Feb 2026) — Patched user JSON: step 2 evaluate filter now skips anchors whose href matches `{{`, `%7B%7B`, `ccpa`, `optout`, `opt-out`, `do-not-sell`, `unsubscribe`, `privacy`.
 
-**Git status**: 3 commits ahead of `origin/main` — ready for "Save to Github" → auto-deploy to VPS.
+**Git status**: 4+ commits ahead of `origin/main` — ready for "Save to Github" → auto-deploy to VPS.
 
 ## Production Deploy Notes
 - Customer VPS uses `mcr.microsoft.com/playwright/python:v1.49.1-noble` Docker image which **already includes full chromium** — upgrade activates automatically on next image pull.
