@@ -326,6 +326,13 @@ export default function RealUserTrafficPage() {
   const [pendingCandidates, setPendingCandidates] = useState([]);
   const [importPendingJobId, setImportPendingJobId] = useState("");
   const [stateMatchEnabled, setStateMatchEnabled] = useState(false);
+  // ── Data-file preview / state-filter (auto-detected from uploaded data) ──
+  // When the user picks a file (or selects an uploaded data batch) we call
+  // /api/real-user-traffic/preview-data-file to get per-state row counts.
+  // The user then ticks which states to run on; only those rows are used.
+  const [dataPreview, setDataPreview] = useState(null);     // {total_rows, states:[{code,count}], quality, ...}
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [selectedStates, setSelectedStates] = useState([]); // [] = no filter (use all)
   const [invalidDetectionEnabled, setInvalidDetectionEnabled] = useState(false);
   const [skipCaptcha, setSkipCaptcha] = useState(true);
   const [postSubmitWait, setPostSubmitWait] = useState(6);
@@ -484,6 +491,36 @@ export default function RealUserTrafficPage() {
       toast.error(`UA generation failed: ${e.message || e}`);
     } finally {
       setUaGenBusy(false);
+    }
+  };
+
+  // ── Preview uploaded data file: detect states + quality stats ─────
+  // Called whenever the user changes file source so the State filter
+  // panel can show "AL: 124, AK: 105" before they submit the job.
+  const previewDataFile = async ({ fileObj, uploadDataFileId, gsheetUrl: gs }) => {
+    setPreviewLoading(true);
+    setDataPreview(null);
+    setSelectedStates([]);
+    try {
+      const fd = new FormData();
+      if (fileObj) fd.append("file", fileObj);
+      if (uploadDataFileId) fd.append("upload_data_file_id", uploadDataFileId);
+      if (gs) fd.append("gsheet_url", gs);
+      const r = await fetch(`${API_URL}/api/real-user-traffic/preview-data-file`, {
+        method: "POST",
+        headers: authH(),
+        body: fd,
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      setDataPreview(d);
+      // Default: pre-select all detected states so user can deselect
+      const codes = (d.states || []).map((s) => s.code);
+      setSelectedStates(codes);
+    } catch (e) {
+      toast.error(`Could not analyze data file: ${e.message || e}`);
+    } finally {
+      setPreviewLoading(false);
     }
   };
 
@@ -885,6 +922,18 @@ export default function RealUserTrafficPage() {
           fd.append("import_pending_from_job_id", importPendingJobId);
         }
         fd.append("state_match_enabled", String(stateMatchEnabled));
+        // Only send selected_states if user actually subset the file
+        // (i.e. preview was loaded AND user deselected something).
+        // Empty string = no filter (backend uses all rows).
+        if (
+          dataPreview &&
+          dataPreview.states &&
+          dataPreview.states.length > 0 &&
+          selectedStates.length > 0 &&
+          selectedStates.length < dataPreview.states.length
+        ) {
+          fd.append("selected_states", selectedStates.join(","));
+        }
         fd.append("invalid_detection_enabled", String(invalidDetectionEnabled));
         fd.append("skip_captcha", String(skipCaptcha));
         fd.append("post_submit_wait", String(postSubmitWait));
@@ -2086,7 +2135,16 @@ export default function RealUserTrafficPage() {
                       </Label>
                       <select
                         value={selectedUploadDataId}
-                        onChange={(e) => setSelectedUploadDataId(e.target.value)}
+                        onChange={(e) => {
+                          const id = e.target.value;
+                          setSelectedUploadDataId(id);
+                          if (id) {
+                            previewDataFile({ uploadDataFileId: id });
+                          } else {
+                            setDataPreview(null);
+                            setSelectedStates([]);
+                          }
+                        }}
                         className="w-full h-8 px-2 rounded bg-zinc-800 border border-zinc-700 text-zinc-100 text-xs"
                         data-testid="rut-upload-data-id"
                       >
@@ -2103,12 +2161,130 @@ export default function RealUserTrafficPage() {
                     data-testid="rut-file"
                     type="file"
                     accept=".xlsx,.xls,.csv"
-                    onChange={(e) => setFile(e.target.files?.[0] || null)}
+                    onChange={(e) => {
+                      const f = e.target.files?.[0] || null;
+                      setFile(f);
+                      if (f) {
+                        previewDataFile({ fileObj: f });
+                      } else {
+                        setDataPreview(null);
+                        setSelectedStates([]);
+                      }
+                    }}
                     disabled={!!selectedUploadDataId}
                     className="bg-zinc-800 border-zinc-700 text-zinc-100 file:text-zinc-100 file:bg-zinc-700 file:border-0 file:rounded disabled:opacity-50"
                   />
                   {selectedUploadDataId && (
                     <p className="text-xs text-zinc-500">Using uploaded batch (will auto-delete after job)</p>
+                  )}
+
+                  {/* ── Data file analysis: detected states + filter ────────── */}
+                  {previewLoading && (
+                    <div className="mt-2 p-2 bg-zinc-900 border border-zinc-700 rounded text-xs text-zinc-400" data-testid="rut-data-preview-loading">
+                      Analyzing file…
+                    </div>
+                  )}
+                  {dataPreview && dataPreview.total_rows > 0 && (
+                    <div
+                      className="mt-2 p-3 bg-emerald-950/30 border border-emerald-900/60 rounded space-y-2"
+                      data-testid="rut-data-preview-panel"
+                    >
+                      <div className="flex items-center justify-between flex-wrap gap-2">
+                        <div className="text-sm text-emerald-300 font-semibold">
+                          📊 File analysis: {dataPreview.total_rows} leads
+                          {dataPreview.states.length > 0 && (
+                            <span className="text-emerald-400/80 font-normal"> · {dataPreview.states.length} state{dataPreview.states.length !== 1 ? "s" : ""}</span>
+                          )}
+                        </div>
+                        {dataPreview.states.length > 0 && (
+                          <div className="flex gap-1 text-[11px]">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedStates(dataPreview.states.map((s) => s.code))}
+                              className="px-2 py-0.5 bg-emerald-700/40 hover:bg-emerald-700/70 text-emerald-100 rounded"
+                              data-testid="rut-state-select-all"
+                            >
+                              Select all
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedStates([])}
+                              className="px-2 py-0.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-100 rounded"
+                              data-testid="rut-state-clear-all"
+                            >
+                              Clear all
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {dataPreview.states.length > 0 ? (
+                        <div className="space-y-1.5">
+                          <div className="text-[11px] text-emerald-200/70">
+                            Tick which states this job should run on (only those rows are sent through traffic).
+                            Use with <span className="font-semibold">ProxyJet Auto Mode</span> = "Any" + <span className="font-semibold">Match lead-state to proxy IP</span> for perfect geo-match.
+                          </div>
+                          <div className="flex flex-wrap gap-1.5" data-testid="rut-state-list">
+                            {dataPreview.states.map((s) => {
+                              const checked = selectedStates.includes(s.code);
+                              return (
+                                <label
+                                  key={s.code}
+                                  className={`px-2 py-1 rounded text-xs flex items-center gap-1.5 cursor-pointer border transition ${
+                                    checked
+                                      ? "bg-emerald-600/30 border-emerald-500 text-emerald-100"
+                                      : "bg-zinc-900 border-zinc-700 text-zinc-400 hover:border-zinc-500"
+                                  }`}
+                                  data-testid={`rut-state-pill-${s.code}`}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    onChange={() =>
+                                      setSelectedStates((prev) =>
+                                        prev.includes(s.code)
+                                          ? prev.filter((c) => c !== s.code)
+                                          : [...prev, s.code]
+                                      )
+                                    }
+                                    className="h-3 w-3 accent-emerald-500"
+                                  />
+                                  <span className="font-semibold">{s.code}</span>
+                                  <span className="opacity-70">({s.count})</span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                          <div className="text-[11px] text-emerald-300">
+                            Selected: <b>{selectedStates.length}</b> / {dataPreview.states.length} states ·{" "}
+                            <b>
+                              {dataPreview.states
+                                .filter((s) => selectedStates.includes(s.code))
+                                .reduce((sum, s) => sum + s.count, 0)}
+                            </b>{" "}
+                            rows will be used
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="text-[11px] text-amber-300">
+                          ⚠ No state column detected — state filter unavailable. Job will use all {dataPreview.total_rows} rows.
+                        </div>
+                      )}
+
+                      {/* Quality warnings — only show fields that have empties */}
+                      {dataPreview.quality && Object.values(dataPreview.quality).some((v) => v > 0) && (
+                        <div className="text-[11px] text-amber-300/90 border-t border-emerald-900/40 pt-1.5">
+                          ⚠ <span className="font-semibold">Empty fields detected:</span>{" "}
+                          {Object.entries(dataPreview.quality)
+                            .filter(([, v]) => v > 0)
+                            .map(([k, v]) => `${k.replace("empty_", "")}: ${v}`)
+                            .join(" · ")}
+                          <div className="text-amber-300/70 mt-0.5">
+                            Empty values may cause form-fill failures for those rows.
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
               ) : dataSource === "gsheet" ? (
@@ -2116,7 +2292,15 @@ export default function RealUserTrafficPage() {
                   data-testid="rut-gsheet-url"
                   placeholder="https://docs.google.com/spreadsheets/d/…/edit — must be published as CSV"
                   value={gsheetUrl}
-                  onChange={(e) => setGsheetUrl(e.target.value)}
+                  onChange={(e) => {
+                    setGsheetUrl(e.target.value);
+                    setDataPreview(null);
+                    setSelectedStates([]);
+                  }}
+                  onBlur={(e) => {
+                    const v = e.target.value.trim();
+                    if (v) previewDataFile({ gsheetUrl: v });
+                  }}
                   className="mt-2 bg-zinc-800 border-zinc-700 text-zinc-100"
                 />
               ) : (

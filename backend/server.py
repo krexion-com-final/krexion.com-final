@@ -4281,6 +4281,39 @@ async def _rut_prepare_and_run(
                 return await _mark_failed("No rows in uploaded file")
             await _set_step(f"✓ Loaded {len(rows)} form-fill rows")
 
+            # ── State filter (user-selected subset) ────────────────────
+            # When the user picks specific states on the RUT page, only
+            # rows whose state column matches those codes are kept. Empty
+            # → no filter (use all rows). Saves bandwidth + ensures only
+            # matching-state leads flow through.
+            sel_states_raw = (params.get("selected_states") or "").strip()
+            if sel_states_raw:
+                try:
+                    from real_user_traffic import _find_state_column, _normalize_state
+                    sel_codes = {
+                        s.strip().upper() for s in sel_states_raw.split(",") if s.strip()
+                    }
+                    if sel_codes:
+                        scol = _find_state_column(rows)
+                        if scol:
+                            before = len(rows)
+                            rows = [
+                                r for r in rows
+                                if _normalize_state(r.get(scol)) in sel_codes
+                            ]
+                            await _set_step(
+                                f"✓ State filter applied: kept {len(rows)} / {before} rows "
+                                f"(states: {', '.join(sorted(sel_codes))})"
+                            )
+                            if not rows:
+                                return await _mark_failed(
+                                    "State filter removed all rows — no leads in selected states"
+                                )
+                        else:
+                            await _set_step("⚠ State filter ignored: no state column in data file")
+                except Exception as e:
+                    logger.warning(f"State filter failed (continuing without): {e}")
+
         # ── 4. Duplicate-IP blocklist (await the parallel fetch from step 0) ─
         dup_ip_set = None
         if params.get("skip_duplicate_ip"):
@@ -4459,6 +4492,115 @@ async def _rut_prepare_and_run(
         await _mark_failed(f"Prep/run crashed: {e}")
 
 
+# ── Data-file preview (auto-detect states, columns, quality) ─────────
+# Used by Real User Traffic page: when user uploads a data file, the
+# frontend calls this endpoint to get a per-state row count + column
+# list so a "State filter" UI can be shown. The user picks which states
+# to run on; the chosen list is then passed to job creation via the
+# `selected_states` form field. Read-only — no DB write, no side effect.
+@api_router.post("/real-user-traffic/preview-data-file")
+async def rut_preview_data_file(
+    file: Optional[UploadFile] = File(None),
+    upload_data_file_id: Optional[str] = Form(None),
+    gsheet_url: Optional[str] = Form(None),
+    user: dict = Depends(get_current_user),
+):
+    from real_user_traffic import _find_state_column, _normalize_state
+    rows: List[Dict[str, Any]] = []
+    src = ""
+    try:
+        if upload_data_file_id:
+            doc = await db.uploads.find_one(
+                {"id": upload_data_file_id, "user_id": user["id"], "type": "data_file"},
+                {"_id": 0}
+            )
+            if not doc:
+                raise HTTPException(status_code=404, detail="Uploaded data file not found")
+            file_path = doc.get("file_path")
+            if not file_path or not Path(file_path).exists():
+                raise HTTPException(status_code=404, detail="Uploaded data file no longer on disk")
+            content = Path(file_path).read_bytes()
+            rows = load_rows_from_excel(content, doc.get("filename", "data.xlsx"))
+            src = doc.get("filename") or "uploaded batch"
+        elif gsheet_url:
+            rows = await load_rows_from_google_sheet(gsheet_url)
+            src = "google sheet"
+        elif file:
+            content = await file.read()
+            rows = load_rows_from_excel(content, file.filename or "data.xlsx")
+            src = file.filename or "uploaded file"
+        else:
+            raise HTTPException(status_code=400, detail="Provide a file, upload_data_file_id, or gsheet_url")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not parse data file: {e}")
+
+    if not rows:
+        return {
+            "source": src, "total_rows": 0, "columns": [],
+            "state_column": None, "states": [], "quality": {},
+        }
+
+    # Detect columns (preserve original order)
+    columns: List[str] = []
+    for r in rows[:50]:
+        for k in r.keys():
+            if k not in columns:
+                columns.append(k)
+
+    # Detect state column + per-state row counts
+    state_col = _find_state_column(rows)
+    state_counts: Dict[str, int] = {}
+    unknown_state_rows = 0
+    if state_col:
+        for r in rows:
+            code = _normalize_state(r.get(state_col))
+            if code:
+                state_counts[code] = state_counts.get(code, 0) + 1
+            else:
+                unknown_state_rows += 1
+
+    # Quality stats — count empty values for common required fields
+    def _empty_count(keys: List[str]) -> int:
+        n = 0
+        for r in rows:
+            v = None
+            for k in keys:
+                if k in r and str(r[k]).strip():
+                    v = r[k]
+                    break
+            if v is None or str(v).strip() == "":
+                n += 1
+        return n
+
+    quality = {
+        "empty_first_name": _empty_count(["first", "fname", "firstname", "first_name", "FirstName"]),
+        "empty_last_name": _empty_count(["last", "lname", "lastname", "last_name", "LastName"]),
+        "empty_email": _empty_count(["email", "Email", "e_mail", "e-mail"]),
+        "empty_phone": _empty_count(["phone", "cellphone", "phone1", "mobile", "cell", "PhoneNumber"]),
+        "empty_zip": _empty_count(["zip", "zipcode", "postal", "postal_code", "Zip"]),
+        "empty_gender": _empty_count(["gender", "Gender", "sex"]),
+        "empty_dob": _empty_count(["day", "Day", "DayOfBirth"]),
+    }
+
+    # Sort states by count desc
+    states_sorted = [
+        {"code": code, "count": cnt}
+        for code, cnt in sorted(state_counts.items(), key=lambda x: -x[1])
+    ]
+
+    return {
+        "source": src,
+        "total_rows": len(rows),
+        "columns": columns,
+        "state_column": state_col,
+        "states": states_sorted,
+        "unknown_state_rows": unknown_state_rows,
+        "quality": quality,
+    }
+
+
 @api_router.post("/real-user-traffic/jobs")
 async def rut_create_job(
     background: BackgroundTasks,
@@ -4491,6 +4633,11 @@ async def rut_create_job(
     gsheet_url: Optional[str] = Form(None),
     import_pending_from_job_id: Optional[str] = Form(None),
     state_match_enabled: bool = Form(False),
+    selected_states: Optional[str] = Form(None),     # CSV of 2-letter state codes
+                                                      # (e.g. "FL,CA,TX"). When set,
+                                                      # only data rows whose state
+                                                      # matches are used; others are
+                                                      # filtered OUT before the job runs.
     invalid_detection_enabled: bool = Form(False),    # OFF by default — landing
                                                       # pages with consent banners
                                                       # trigger false positives
@@ -4681,6 +4828,7 @@ async def rut_create_job(
         "import_pending_from_job_id": import_pending_from_job_id,
         "form_fill_enabled": form_fill_enabled,
         "state_match_enabled": state_match_enabled,
+        "selected_states": (selected_states or "").strip(),
         "automation_json": automation_json,
         "self_heal": self_heal,
         "auto_resume_enabled": bool(auto_resume_enabled),
