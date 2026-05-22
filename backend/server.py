@@ -4124,13 +4124,42 @@ async def _rut_prepare_and_run(
         use_stored_proxies = params.get("use_stored_proxies")
         paste_proxy_lines = params.get("paste_proxy_lines") or []
         use_proxyjet_auto = bool(params.get("use_proxyjet_auto"))
-        if use_proxyjet_auto:
-            # Auto Mode — generate unique-per-user residential proxies on
-            # the fly. We ask for 3× the visit count so the engine has
-            # plenty of spare sessions if some get rate-limited / fail
-            # captcha / are skipped by the duplicate-IP filter, while
-            # still respecting the per-user "no exit-IP ever reused"
-            # promise. Session IDs are recorded in the dedup ledger.
+        # 2026-01 — ProxyJet now defaults to ROW-FIRST on-demand mode.
+        # The legacy pre-generation flow is preserved below and can be
+        # re-activated by passing `proxyjet_legacy_pregen=true` in the
+        # submit params. Both paths produce a valid `proxy_lines` list.
+        proxyjet_legacy_pregen = bool(params.get("proxyjet_legacy_pregen"))
+        if use_proxyjet_auto and not proxyjet_legacy_pregen:
+            # ── 2026-01 ROW-FIRST ON-DEMAND MODE ─────────────────────
+            # The engine now fetches a fresh state-matched ProxyJet IP
+            # for EACH visit (after picking the row), retrying until
+            # the exit-IP is unique vs. the user's prior clicks. We
+            # therefore skip the upfront pre-generation that the legacy
+            # path used — it wasted ProxyJet sessions when a state had
+            # no leads / when the IP turned out to be a duplicate.
+            #
+            # We still validate credentials here so the user gets an
+            # immediate error instead of failing 50 attempts in.
+            try:
+                _creds_check = await _pj.get_credentials(db, user["id"])
+            except Exception as _e:
+                return await _mark_failed(f"ProxyJet credentials check failed: {_e}")
+            if not _creds_check:
+                return await _mark_failed(
+                    "ProxyJet credentials not configured. Add them in "
+                    "Proxies → Auto Mode (one-time setup)."
+                )
+            proxy_lines = []
+            await _set_step(
+                "✓ ProxyJet ROW-FIRST mode active — IPs will be fetched on-demand "
+                f"per visit (country: {params.get('proxyjet_country','US')}, "
+                f"state from each data row)."
+            )
+        elif use_proxyjet_auto and proxyjet_legacy_pregen:
+            # ── LEGACY ProxyJet pre-generation (fallback) ────────────
+            # Kept for backward-compatibility & easy rollback. The
+            # engine consumes these proxies the same way as a manual
+            # upload list.
             total_clicks_val = int(params.get("total_clicks") or 10)
             target_mode_val = (params.get("target_mode") or "clicks").lower()
             if target_mode_val == "conversions":
@@ -4283,7 +4312,11 @@ async def _rut_prepare_and_run(
             proxy_lines = paste_proxy_lines
             if not proxy_lines:
                 return await _mark_failed("At least one proxy required")
-        await _set_step(f"✓ Loaded {len(proxy_lines)} proxies")
+        if use_proxyjet_auto and not proxyjet_legacy_pregen:
+            # On-demand mode: proxies fetched per-visit; nothing to log here.
+            pass
+        else:
+            await _set_step(f"✓ Loaded {len(proxy_lines)} proxies")
 
         # ── 2. User agents (multi-batch) ─────────────────────────────
         await _set_step("Loading user-agents…")
@@ -4596,6 +4629,12 @@ async def _rut_prepare_and_run(
             upload_data_file_id=(params.get("upload_data_file_id") or None),
             target_screenshot_phash=target_screenshot_phash or "",
             target_screenshot_threshold=target_screenshot_threshold,
+            # 2026-01 ROW-FIRST on-demand ProxyJet mode (skipped when the
+            # caller explicitly requested the legacy pre-gen flow)
+            proxyjet_on_demand=bool(use_proxyjet_auto and not proxyjet_legacy_pregen),
+            proxyjet_country=params.get("proxyjet_country", "US"),
+            proxyjet_default_state=(params.get("proxyjet_state") or None),
+            proxyjet_unique_retry_cap=int(params.get("proxyjet_unique_retry_cap") or 50),
         )
     except Exception as e:  # noqa: BLE001
         logger.exception(f"_rut_prepare_and_run crashed for job {job_id}: {e}")

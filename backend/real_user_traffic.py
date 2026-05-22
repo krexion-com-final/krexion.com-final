@@ -2454,6 +2454,17 @@ async def run_real_user_traffic_job(
     # longer treated as conversion when target_screenshot_phash is set.
     target_screenshot_phash: str = "",
     target_screenshot_threshold: int = 12,
+    # ── 2026-01: ProxyJet ROW-FIRST on-demand mode ─────────────────
+    # When True, the engine ignores the pre-loaded proxies list and
+    # instead fetches a fresh state-matched ProxyJet IP per visit
+    # (pick row → get state → fetch IP for that state → retry until
+    # exit-IP is unique → use). Pre-flight check: every row MUST have
+    # a non-empty state value; otherwise the whole job fails with a
+    # clear error per the user's spec.
+    proxyjet_on_demand: bool = False,
+    proxyjet_country: str = "US",
+    proxyjet_default_state: Optional[str] = None,
+    proxyjet_unique_retry_cap: int = 50,
 ):
     """
     Main orchestrator. Emits progress into RUT_JOBS[job_id].
@@ -2479,7 +2490,12 @@ async def run_real_user_traffic_job(
         p = _parse_proxy_line(ln)
         if p:
             parsed_proxies.append(p)
-    if not parsed_proxies:
+    # ── 2026-01 ROW-FIRST mode ─────────────────────────────────────
+    # In ProxyJet on-demand mode the engine fetches a fresh IP per
+    # visit, so the pre-supplied proxies list is allowed to be empty
+    # (server.py passes [] in this mode). For every other mode we
+    # still require at least one valid proxy line up-front.
+    if not parsed_proxies and not proxyjet_on_demand:
         await _finalise_and_persist(db, job_id, "failed", "No valid proxies after parsing")
         return
 
@@ -2523,6 +2539,7 @@ async def run_real_user_traffic_job(
         "skipped_duplicate_ip": 0,
         "skipped_vpn": 0,
         "skipped_state_mismatch": 0,
+        "skipped_no_unique_ip": 0,
         "invalid_data": 0,
         "failed": 0,
         "started_at": datetime.now(timezone.utc).isoformat(),
@@ -2558,6 +2575,78 @@ async def run_real_user_traffic_job(
             RUT_JOBS[job_id]["state_match_enabled"] = False
             state_match_enabled = False
     RUT_JOBS[job_id]["state_match_column"] = state_col or ""
+
+    # ── 2026-01 ROW-FIRST pre-flight state validation ──────────────
+    # In ProxyJet on-demand mode every visit picks a row FIRST and
+    # then asks ProxyJet for an IP in that row's state. Per the user's
+    # spec the data file MUST have a state column AND every row must
+    # have a non-empty state; otherwise the whole job fails with a
+    # clear error so the operator can fix the data before any visits
+    # consume credits.
+    if proxyjet_on_demand:
+        if not rows:
+            await _finalise_and_persist(
+                db, job_id, "failed",
+                "ProxyJet on-demand mode requires a data file with rows. "
+                "Upload a data file (Excel/CSV/Google Sheet) and try again."
+            )
+            return
+        # Re-detect state column even if state_match_enabled wasn't ticked —
+        # this mode mandates state-based IPs.
+        if not state_col:
+            state_col = _find_state_column(rows)
+        if not state_col:
+            await _finalise_and_persist(
+                db, job_id, "failed",
+                "ProxyJet on-demand mode requires a STATE column in your data "
+                "file (column named 'state', 'State', 'STATE', 'region', 'st', "
+                "or 'state_code'). None was detected. Add a state column and try again."
+            )
+            return
+        # Validate every single row has a non-empty, valid US state.
+        empty_state_rows: List[int] = []
+        invalid_state_rows: List[Tuple[int, Any]] = []
+        for idx, r in enumerate(rows):
+            raw_val = r.get(state_col)
+            if raw_val is None or str(raw_val).strip() == "":
+                empty_state_rows.append(idx + 1)
+                continue
+            code = _normalize_state(raw_val)
+            if not code:
+                invalid_state_rows.append((idx + 1, raw_val))
+        if empty_state_rows or invalid_state_rows:
+            bits: List[str] = []
+            if empty_state_rows:
+                sample = ", ".join(str(x) for x in empty_state_rows[:10])
+                more = f" (+{len(empty_state_rows) - 10} more)" if len(empty_state_rows) > 10 else ""
+                bits.append(f"{len(empty_state_rows)} row(s) have an EMPTY state — rows: {sample}{more}")
+            if invalid_state_rows:
+                sample = ", ".join(f"row {n}=\"{v}\"" for n, v in invalid_state_rows[:5])
+                more = f" (+{len(invalid_state_rows) - 5} more)" if len(invalid_state_rows) > 5 else ""
+                bits.append(f"{len(invalid_state_rows)} row(s) have an UNRECOGNISED state value — {sample}{more}")
+            await _finalise_and_persist(
+                db, job_id, "failed",
+                "ProxyJet on-demand mode: every row must have a valid US state. "
+                + " · ".join(bits)
+                + ". Fix the data file (state column: '" + str(state_col) + "') and resubmit."
+            )
+            return
+        # Re-index by state so the per-state row picker works.
+        state_index = {}
+        for idx, r in enumerate(rows):
+            code = _normalize_state(r.get(state_col))
+            if code:
+                state_index.setdefault(code, []).append(idx)
+        RUT_JOBS[job_id]["state_match_column"] = state_col
+        RUT_JOBS[job_id]["proxyjet_on_demand"] = True
+        try:
+            push_live_step(
+                job_id, 0, "preflight", "ok",
+                f"ProxyJet ROW-FIRST mode: {len(rows)} rows across {len(state_index)} states verified. "
+                f"IPs will be fetched on-demand (≤{int(proxyjet_unique_retry_cap)} retries for uniqueness)."
+            )
+        except Exception:
+            pass
 
     # State-match round-robin pointer per state code
     state_rr: Dict[str, int] = {code: 0 for code in state_index}
@@ -3082,14 +3171,154 @@ async def run_real_user_traffic_job(
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
-        proxy = pick_next_proxy()
+        # ── 2026-01 ROW-FIRST on-demand sequence ──────────────────────
+        # When ProxyJet on-demand mode is on we INVERT the order:
+        #   1) pick a fresh row,
+        #   2) read its state,
+        #   3) generate one state-matched ProxyJet IP,
+        #   4) probe geo,
+        #   5) if exit-IP is a duplicate of this user's prior clicks →
+        #      throw it away and retry (up to `proxyjet_unique_retry_cap`),
+        #   6) use the first unique IP for the visit.
+        # Everything below this block (the legacy proxy/UA/geo pipeline)
+        # is bypassed via the `_pj_on_demand_done` short-circuit so the
+        # existing flow stays bit-identical for non-ProxyJet jobs.
+        on_demand_row_pick: Optional[Tuple[int, Dict[str, Any]]] = None
+        on_demand_proxy: Optional[Dict[str, Any]] = None
+        on_demand_geo: Optional[Dict[str, Any]] = None
+        if proxyjet_on_demand:
+            # Step 1: pick row first — try sequential, then state-rotate
+            # so we don't deadlock on a single state running out of leads.
+            on_demand_row_pick = pick_next_row()
+            if not on_demand_row_pick:
+                entry["status"] = "failed"
+                entry["error"] = "No remaining unconsumed rows in data file"
+                push_live_step(job_id, i + 1, "row", "failed", "No rows left")
+                await _record(job_id, entry, report, report_lock, db)
+                return
+            _row_idx, _row = on_demand_row_pick
+            row_state_code = _normalize_state(_row.get(state_col)) if state_col else ""
+            if not row_state_code:
+                # Should be impossible — pre-flight rejected such rows.
+                entry["status"] = "failed"
+                entry["error"] = f"Row {_row_idx + 1} has an invalid state value (post-preflight)."
+                push_live_step(job_id, i + 1, "row", "failed", entry["error"])
+                await _record(job_id, entry, report, report_lock, db)
+                return
+            entry["row_index"] = _row_idx + 1
+            entry["lead_state"] = row_state_code
+            push_live_step(
+                job_id, i + 1, "row", "ok",
+                f"Row {_row_idx + 1} picked first · state={row_state_code} · fetching unique IP…",
+            )
+
+            # Step 2-5: loop until we get a non-duplicate exit IP.
+            try:
+                from proxyjet_module import generate_unique_proxies as _pj_gen  # noqa: WPS433
+            except Exception as _imp_e:
+                entry["status"] = "failed"
+                entry["error"] = f"proxyjet_module unavailable: {_imp_e}"
+                push_live_step(job_id, i + 1, "proxy", "failed", entry["error"])
+                await _record(job_id, entry, report, report_lock, db)
+                return
+
+            attempt = 0
+            cap = max(1, int(proxyjet_unique_retry_cap or 50))
+            chosen_proxy: Optional[Dict[str, Any]] = None
+            chosen_geo: Optional[Dict[str, Any]] = None
+            last_reason = ""
+            while attempt < cap:
+                attempt += 1
+                if cancel_event.is_set():
+                    return
+                try:
+                    pj_lines = await _pj_gen(
+                        db,
+                        engine_user_id or "",
+                        count=1,
+                        country=proxyjet_country or "US",
+                        state=row_state_code,
+                        job_id=job_id,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    last_reason = f"ProxyJet generate failed: {type(e).__name__}: {e}"
+                    push_live_step(job_id, i + 1, "proxy", "failed",
+                                   f"Attempt {attempt}/{cap}: {last_reason}")
+                    await asyncio.sleep(0.5)
+                    continue
+                if not pj_lines:
+                    last_reason = "ProxyJet returned zero proxies"
+                    push_live_step(job_id, i + 1, "proxy", "failed",
+                                   f"Attempt {attempt}/{cap}: {last_reason}")
+                    await asyncio.sleep(0.3)
+                    continue
+                parsed = _parse_proxy_line(pj_lines[0])
+                if not parsed:
+                    last_reason = "ProxyJet line failed to parse"
+                    continue
+                # Probe geo to learn the actual exit-IP — the only way to
+                # check uniqueness against the duplicate_ip_set.
+                _probe_ua = pick_next_ua()
+                # Don't consume the UA pointer for probes — rewind
+                state["ua_idx"] = max(0, state["ua_idx"] - 1)
+                _geo = await _probe_proxy_geo(parsed, _probe_ua)
+                if not _geo["ok"] or not _geo.get("exit_ip"):
+                    last_reason = "exit-IP probe failed"
+                    push_live_step(job_id, i + 1, "proxy", "failed",
+                                   f"Attempt {attempt}/{cap}: probe failed, retrying")
+                    continue
+                exit_ip = _geo["exit_ip"]
+                if skip_duplicate_ip and duplicate_ip_set and exit_ip in duplicate_ip_set:
+                    last_reason = f"duplicate IP {exit_ip}"
+                    # Don't log every single duplicate — too chatty. Log
+                    # every 5th attempt so the user sees progress.
+                    if attempt % 5 == 0 or attempt == 1:
+                        push_live_step(job_id, i + 1, "proxy", "info",
+                                       f"Attempt {attempt}/{cap}: duplicate {exit_ip}, retrying for {row_state_code}")
+                    continue
+                # Unique! Reserve it immediately so two parallel visits
+                # don't both pick the same IP from concurrent probes.
+                if duplicate_ip_set is not None:
+                    duplicate_ip_set.add(exit_ip)
+                chosen_proxy = parsed
+                chosen_geo = _geo
+                break
+
+            if not chosen_proxy or not chosen_geo:
+                entry["status"] = "skipped_no_unique_ip"
+                entry["error"] = (
+                    f"No unique ProxyJet IP found for state {row_state_code} "
+                    f"after {cap} attempts (last: {last_reason or 'unknown'})."
+                )
+                push_live_step(job_id, i + 1, "proxy", "failed", entry["error"])
+                # Don't mark the row as consumed — give it back to the
+                # picker so the next visit can try again with a fresh IP.
+                try:
+                    consumed_row_indices.discard(_row_idx)
+                except Exception:
+                    pass
+                await _record(job_id, entry, report, report_lock, db)
+                return
+
+            on_demand_proxy = chosen_proxy
+            on_demand_geo = chosen_geo
+            push_live_step(
+                job_id, i + 1, "proxy", "ok",
+                f"Unique IP found on attempt {attempt}: {chosen_geo.get('exit_ip')} "
+                f"· state {row_state_code}",
+            )
+
+        # ── Legacy proxy picker (skipped in on-demand mode) ──────────
+        if proxyjet_on_demand:
+            proxy = on_demand_proxy
+        else:
+            proxy = pick_next_proxy()
         if not proxy:
             entry["status"] = "failed"
             entry["error"] = "No more proxies available (no_repeated_proxy = on)"
             push_live_step(job_id, i + 1, "setup", "failed", "No proxies available")
             await _record(job_id, entry, report, report_lock, db)
             return
-
         # Mark this proxy raw as USED (attempted in a visit). Used by the
         # post-job upload-consume hook so only proxies actually consumed
         # in this run get removed from the saved batch — unused proxies
@@ -3128,8 +3357,13 @@ async def run_real_user_traffic_job(
         push_live_step(job_id, i + 1, "setup", "info",
                        f"Proxy {entry['proxy']} · {entry['device_name']} · {entry['viewport']}")
 
-        # Probe geo (also gives VPN flag)
-        geo = await _probe_proxy_geo(proxy, ua)
+        # Probe geo (also gives VPN flag) — REUSE the probe already
+        # done during the on-demand row-first loop so we don't pay the
+        # ip-api round-trip twice per visit (huge speed win).
+        if proxyjet_on_demand and on_demand_geo is not None:
+            geo = on_demand_geo
+        else:
+            geo = await _probe_proxy_geo(proxy, ua)
         entry["exit_ip"] = geo["exit_ip"] or ""
         entry["country"] = geo["country_name"]
         entry["city"] = geo["city"]
@@ -3157,16 +3391,22 @@ async def run_real_user_traffic_job(
             push_live_step(job_id, i + 1, "filter", "skipped", "Exit IP flagged as VPN/hosting")
             return await _record(job_id, entry, report, report_lock, db)
 
-        # Pre-filter: duplicate IP
-        if skip_duplicate_ip and duplicate_ip_set and geo["exit_ip"] and geo["exit_ip"] in duplicate_ip_set:
+        # Pre-filter: duplicate IP — already enforced inside the
+        # on-demand loop above, so skip the redundant check.
+        if not proxyjet_on_demand and skip_duplicate_ip and duplicate_ip_set and geo["exit_ip"] and geo["exit_ip"] in duplicate_ip_set:
             entry["status"] = "skipped_duplicate_ip"
             entry["error"] = "Exit IP already clicked this link before"
             push_live_step(job_id, i + 1, "filter", "skipped", f"Duplicate IP {geo['exit_ip']}")
             return await _record(job_id, entry, report, report_lock, db)
 
         # Pick form-fill row — state-matched OR sequential
+        # ── 2026-01 ROW-FIRST mode: row was already picked at the
+        # top of process_one (we needed its state to fetch a matching
+        # ProxyJet IP). Reuse that pick here.
         row_pick = None
-        if form_fill_enabled:
+        if proxyjet_on_demand and on_demand_row_pick is not None:
+            row_pick = on_demand_row_pick
+        elif form_fill_enabled:
             if state_match_enabled and state_col:
                 # Match lead state to this proxy's exit-IP state.
                 proxy_state_code = _normalize_state(geo.get("region")) or _normalize_state(geo.get("region_name"))
@@ -5727,6 +5967,7 @@ async def _record(
             "skipped_duplicate_ip": "skipped_duplicate_ip",
             "skipped_vpn": "skipped_vpn",
             "skipped_state_mismatch": "skipped_state_mismatch",
+            "skipped_no_unique_ip": "skipped_no_unique_ip",
             "invalid_data": "invalid_data",
         }
         counter_key = key_map.get(s, "failed")
@@ -6073,6 +6314,8 @@ def create_rut_job(
         "skipped_os": 0,
         "skipped_duplicate_ip": 0,
         "skipped_vpn": 0,
+        "skipped_state_mismatch": 0,
+        "skipped_no_unique_ip": 0,
         "failed": 0,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
