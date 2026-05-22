@@ -257,6 +257,11 @@ export default function RealUserTrafficPage() {
   // proxies per job (using ProxyJet credentials saved on the Proxies
   // page). Every exit-IP is guaranteed unused for this user.
   const [useProxyJetAuto, setUseProxyJetAuto] = useState(false);
+  // 2026-01: per-job stuck-watchdog inactivity threshold (seconds).
+  // Pages where the URL doesn't change for longer than this are
+  // force-aborted. Default raised from old hardcoded 25 → 60 so
+  // long form-submit sequences don't get killed mid-wait.
+  const [stuckWatchdogSeconds, setStuckWatchdogSeconds] = useState(60);
   const [proxyJetCountry, setProxyJetCountry] = useState("US");
   const [proxyJetState, setProxyJetState] = useState("");
   const [pjConfigured, setPjConfigured] = useState(null); // null=unknown, true/false
@@ -910,6 +915,11 @@ export default function RealUserTrafficPage() {
       fd.append("use_proxyjet_auto", String(useProxyJetAuto));
       fd.append("proxyjet_country", (proxyJetCountry || "US").toUpperCase());
       fd.append("proxyjet_state", (proxyJetState || "").toUpperCase());
+      // 2026-01: Per-job watchdog inactivity timeout. Pages stuck for
+      // longer than this (URL not changing) are force-aborted. Default
+      // 60 — raised from old hardcoded 25 to handle slow form-submit
+      // sequences.
+      fd.append("stuck_watchdog_seconds", String(stuckWatchdogSeconds || 60));
 
       fd.append("form_fill_enabled", String(formFillEnabled));
       if (formFillEnabled) {
@@ -1932,6 +1942,21 @@ export default function RealUserTrafficPage() {
               />
               <p className="text-xs text-gray-500 mt-1">
                 Recommended: 20-30 (safe) | 40-50 (ultra speed)
+              </p>
+            </div>
+            <div>
+              <Label className="text-zinc-300 text-sm">Stuck-Page Watchdog (sec) ⏱️</Label>
+              <Input
+                data-testid="rut-stuck-watchdog-seconds"
+                type="number"
+                min={10}
+                max={300}
+                value={stuckWatchdogSeconds}
+                onChange={(e) => setStuckWatchdogSeconds(Math.max(10, Math.min(300, Number(e.target.value) || 60)))}
+                className="mt-1 bg-zinc-800 border-zinc-700 text-zinc-100"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                If page URL doesn't change for this many seconds the visit is aborted. Default 60 — raise for offers with slow form submissions, lower for fast fail-on-stuck.
               </p>
             </div>
           </div>

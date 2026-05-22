@@ -4635,6 +4635,10 @@ async def _rut_prepare_and_run(
             proxyjet_country=params.get("proxyjet_country", "US"),
             proxyjet_default_state=(params.get("proxyjet_state") or None),
             proxyjet_unique_retry_cap=int(params.get("proxyjet_unique_retry_cap") or 50),
+            # 2026-01 — per-job watchdog inactivity threshold (seconds).
+            # Default 60 (was hardcoded 25). UI exposes a number input
+            # so operators can tune per offer.
+            stuck_watchdog_seconds=float(params.get("stuck_watchdog_seconds") or 60.0),
         )
     except Exception as e:  # noqa: BLE001
         logger.exception(f"_rut_prepare_and_run crashed for job {job_id}: {e}")

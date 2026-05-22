@@ -1097,7 +1097,7 @@ def _record_stuck_event(job_id: str, visit_index: int, url: str, seconds_stuck: 
 
 
 async def _stuck_watchdog(page, job_id: str, visit_index: int,
-                          threshold_s: float = 25.0, poll_s: float = 5.0,
+                          threshold_s: float = 60.0, poll_s: float = 5.0,
                           shots_dir=None, on_stuck=None) -> None:
     """Watch the page's main-frame URL while a visit's automation steps
     are running. If the URL hasn't changed for `threshold_s` seconds we
@@ -1110,7 +1110,13 @@ async def _stuck_watchdog(page, job_id: str, visit_index: int,
            visit loop's `steps_task.cancel()` so the run doesn't waste
            the rest of its automation budget on a dead page.
     We only record ONCE per stuck-period so a 5-minute hang doesn't
-    generate 12 identical rows."""
+    generate 12 identical rows.
+
+    2026-01: default threshold raised from 25s → 60s so that legitimate
+    long form-submit sequences (form fill + Continue + cascading
+    wait_for_load steps that can total 25-30s of intentional waiting)
+    don't get killed prematurely. Caller may override via the
+    `stuck_watchdog_seconds` engine param."""
     last_url = ""
     try:
         last_url = page.url or ""
@@ -2465,6 +2471,13 @@ async def run_real_user_traffic_job(
     proxyjet_country: str = "US",
     proxyjet_default_state: Optional[str] = None,
     proxyjet_unique_retry_cap: int = 50,
+    # 2026-01: per-job override for the stuck-watchdog inactivity
+    # threshold (seconds the page's main-frame URL is allowed to stay
+    # unchanged before the visit is force-aborted). Default 60 — raised
+    # from the old 25 so long form-submit sequences don't get killed
+    # mid-wait. Operators can lower it (faster fail-fast) or raise it
+    # for offers with extreme slow loads.
+    stuck_watchdog_seconds: float = 60.0,
 ):
     """
     Main orchestrator. Emits progress into RUT_JOBS[job_id].
@@ -3973,6 +3986,7 @@ async def run_real_user_traffic_job(
                         _watchdog = asyncio.create_task(
                             _stuck_watchdog(
                                 page, job_id, i + 1,
+                                threshold_s=float(stuck_watchdog_seconds or 60.0),
                                 shots_dir=shots_dir,
                                 on_stuck=_trigger_abort_steps,
                             )
@@ -3991,7 +4005,7 @@ async def run_real_user_traffic_job(
                                     pass
                                 step_res = {
                                     "status": "stuck",
-                                    "error": f"Visit aborted by watchdog (page stuck >25s on {_stuck_url_for_err[:200]})",
+                                    "error": f"Visit aborted by watchdog (page stuck >{int(stuck_watchdog_seconds or 60)}s on {_stuck_url_for_err[:200]})",
                                     "executed_steps": 0,
                                 }
                         finally:
