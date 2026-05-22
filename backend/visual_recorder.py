@@ -718,10 +718,17 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
             return {"recorded": False, "warning": "No element at that point — clicked anyway, no step recorded"}
 
         # Perform the click
-        try:
-            await sess.page.mouse.click(info["x"], info["y"])
-        except Exception:
-            pass
+        # ── 2026-01 fix ──
+        # Skip the live click for `random` mode: in random mode the user
+        # is just collecting candidate texts (or, in the new checklist
+        # flow, even this path is bypassed by /detect-clickables). If we
+        # click here the page navigates away before the user can add more
+        # options to the random pool. Pure capture only — no side-effect.
+        if mode != "random":
+            try:
+                await sess.page.mouse.click(info["x"], info["y"])
+            except Exception:
+                pass
 
         # For dropdown mode we also need to pull the option list out of
         # the element (or its nearest <select> ancestor) BEFORE leaving
@@ -1184,18 +1191,37 @@ async def mark_final(sess: RecorderSession) -> Dict[str, Any]:
     }
 
 
-async def group_last_as_random(sess: RecorderSession, count: int) -> Dict[str, Any]:
-    """Replace the last `count` element-click steps with one random-pick
-    step. (Use this AFTER clicking N candidate buttons in `mode=random`.)
-    NOTE: in `mode=random` we DO NOT append individual steps — the texts
-    are stored in a pending list. This call just builds & appends the
-    random_pick step from those texts.
+async def group_last_as_random(
+    sess: RecorderSession,
+    count: int,
+    texts: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Build & append one random-pick step.
+
+    Two input modes:
+      1. Legacy (click-to-pool): caller has clicked N candidate buttons
+         in mode=random and they're sitting in ``sess._pending_random``.
+         Pass ``texts=None`` and we'll use the last ``count`` of them.
+      2. NEW (checklist flow, 2026-01): caller passes ``texts`` directly
+         (selected from /detect-clickables) — we skip the pending list
+         entirely. This avoids the user having to click each button
+         on the live page (which would navigate it forward and break
+         the recording).
+
+    Either way, the resulting JSON step is identical and the playback
+    behaviour (``_build_random_pick_evaluate``) is unchanged.
     """
     sess.touch()
-    pending = getattr(sess, "_pending_random", None) or []
-    if not pending:
-        return {"recorded": False, "error": "No pending random elements — use mode=random click first"}
-    take = pending[-int(count):]
+    # ── 2026-01 checklist path ─────────────────────────────────────
+    if texts:
+        take = [str(t).strip() for t in texts if str(t).strip()]
+        if not take:
+            return {"recorded": False, "error": "No non-empty texts supplied"}
+    else:
+        pending = getattr(sess, "_pending_random", None) or []
+        if not pending:
+            return {"recorded": False, "error": "No pending random elements — use mode=random click first OR pass texts directly"}
+        take = pending[-int(count):]
     step = _build_random_pick_evaluate(take)
     sess.steps.append(step)
     sess.steps.append(_build_wait(2000))
@@ -1203,6 +1229,81 @@ async def group_last_as_random(sess: RecorderSession, count: int) -> Dict[str, A
     sess.steps.append(_build_wait(2500))
     sess._pending_random = []
     return {"recorded": True, "step": step, "items": take}
+
+
+async def detect_clickables(sess: RecorderSession) -> Dict[str, Any]:
+    """Detect every visible clickable element on the current page and
+    return their visible text + bounding box. Used by the new "Random
+    Pick" checklist UI so the user doesn't have to click each candidate
+    button on the live page (which would navigate it away).
+
+    Selectors covered: <a>, <button>, <input type=submit/button/reset>,
+    elements with role=button / role=link / role=checkbox / role=radio,
+    <label> elements, and any element with onclick / cursor:pointer.
+
+    De-duped by trimmed text + tag (so the same "Continue" button isn't
+    listed twice). Hidden (display:none / visibility:hidden / zero-size)
+    elements are skipped.
+    """
+    sess.touch()
+    async with sess.lock:
+        try:
+            items = await sess.page.evaluate(
+                r"""
+                () => {
+                    const SEL = 'a, button, input[type=submit], input[type=button], input[type=reset], [role=button], [role=link], [role=checkbox], [role=radio], label, [onclick]';
+                    const candidates = Array.from(document.querySelectorAll(SEL));
+                    // Add elements with cursor:pointer that haven't already
+                    // been picked up by the selector above.
+                    const all = Array.from(document.body ? document.body.querySelectorAll('*') : []);
+                    for (const el of all) {
+                        if (candidates.indexOf(el) !== -1) continue;
+                        try {
+                            const cs = window.getComputedStyle(el);
+                            if (cs && cs.cursor === 'pointer' && el.children.length === 0) {
+                                candidates.push(el);
+                            }
+                        } catch (e) {}
+                    }
+                    const seen = new Set();
+                    const out = [];
+                    for (const el of candidates) {
+                        try {
+                            const cs = window.getComputedStyle(el);
+                            if (!cs || cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity || '1') < 0.05) continue;
+                            const r = el.getBoundingClientRect();
+                            if (r.width < 4 || r.height < 4) continue;
+                            // Off-screen (above viewport top by more than its own height)? Still include — user may scroll.
+                            const rawText = (el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+                            if (!rawText) continue;
+                            const text = rawText.slice(0, 200);
+                            const tag = el.tagName;
+                            const key = tag + '||' + text.toLowerCase();
+                            if (seen.has(key)) continue;
+                            seen.add(key);
+                            out.push({
+                                text: text,
+                                tag: tag,
+                                role: el.getAttribute('role') || '',
+                                type: el.type || '',
+                                href: (el.getAttribute && el.getAttribute('href')) || '',
+                                x: Math.round(r.left + r.width / 2),
+                                y: Math.round(r.top + r.height / 2),
+                                width: Math.round(r.width),
+                                height: Math.round(r.height),
+                                top: Math.round(r.top),
+                            });
+                        } catch (e) {}
+                    }
+                    // Sort by visual order (top → bottom, left → right)
+                    out.sort((a, b) => (a.top - b.top) || (a.x - b.x));
+                    return out;
+                }
+                """
+            )
+        except Exception as e:  # noqa: BLE001
+            return {"items": [], "error": f"detect failed: {type(e).__name__}: {e}"}
+    return {"items": items or [], "count": len(items or [])}
 
 
 def remove_step(sess: RecorderSession, index: int) -> Dict[str, Any]:

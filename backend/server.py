@@ -13566,6 +13566,11 @@ async def vr_navigate(session_id: str, req: VRNavReq, user: dict = Depends(get_c
 
 class VRGroupRandomReq(BaseModel):
     count: int = 2
+    # 2026-01: Optional list of selected texts from the new
+    # /detect-clickables checklist UI. If supplied, the backend
+    # skips the pending-list flow and builds the random step
+    # directly from these texts.
+    texts: Optional[List[str]] = None
 
 
 @api_router.post("/visual-recorder/{session_id}/group-random")
@@ -13577,7 +13582,25 @@ async def vr_group_random(session_id: str, req: VRGroupRandomReq, user: dict = D
     except KeyError:
         raise HTTPException(status_code=404, detail="Session not found")
     _vr_require_ready(sess)
-    return await vr.group_last_as_random(sess, req.count)
+    return await vr.group_last_as_random(sess, req.count, texts=req.texts)
+
+
+@api_router.get("/visual-recorder/{session_id}/detect-clickables")
+async def vr_detect_clickables(session_id: str, user: dict = Depends(get_current_user)):
+    """Return all visible clickable elements on the current page.
+
+    Used by the Random Pick checklist UI so the user can pick which
+    buttons to include in the random pool WITHOUT having to click
+    each one on the live page (which would navigate it forward).
+    """
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.detect_clickables(sess)
 
 
 @api_router.post("/visual-recorder/{session_id}/mark-final")

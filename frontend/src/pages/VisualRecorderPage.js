@@ -50,7 +50,7 @@ const TOOLS = [
   { id: "default",   icon: Hand,        label: "Click",       key: "1", help: "Normal click — captures button/link text" },
   { id: "form_fill", icon: Type,        label: "Form Fill",   key: "2", help: "Click an input, then bind to Excel column" },
   { id: "dropdown",  icon: ChevronDown, label: "Dropdown",    key: "3", help: "Click a <select> dropdown to bind option / Excel column" },
-  { id: "random",    icon: Shuffle,     label: "Random Pick", key: "4", help: "Click 2+ buttons → random one each run" },
+  { id: "random",    icon: Shuffle,     label: "Random Pick", key: "4", help: "Auto-detect buttons on page → tick the ones to randomise each run" },
   { id: "capture",   icon: ImageIcon,   label: "Capture",     key: "5", help: "Insert a screenshot marker — shown in Live Activity" },
   { id: "final",     icon: Flag,        label: "Mark Final",  key: "6", help: "Capture this page as conversion target" },
 ];
@@ -115,7 +115,14 @@ export default function VisualRecorderPage() {
   const [tool, setTool] = useState("default");
   const [pendingFormFill, setPendingFormFill] = useState(null); // {selector, header_name?}
   const [pendingDropdown, setPendingDropdown] = useState(null); // {selector, options:[{value,label,...}], element}
-  const [pendingRandom, setPendingRandom] = useState([]); // texts collected so far
+  const [pendingRandom, setPendingRandom] = useState([]); // texts collected so far (legacy click-to-pool flow)
+  // 2026-01: NEW Random Pick checklist flow
+  //   detectedClickables: full list returned by /detect-clickables (one per page)
+  //   selectedRandomKeys: Set of indices the user has ticked from that list
+  //   detectingClickables: spinner flag while the call is in flight
+  const [detectedClickables, setDetectedClickables] = useState([]);
+  const [selectedRandomKeys, setSelectedRandomKeys] = useState(() => new Set());
+  const [detectingClickables, setDetectingClickables] = useState(false);
   const [navUrl, setNavUrl] = useState("");
   const [waitMs, setWaitMs] = useState(2000);
   const [busy, setBusy] = useState(false);
@@ -370,13 +377,26 @@ export default function VisualRecorderPage() {
         if (pendingFormFill) { setPendingFormFill(null); e.preventDefault(); return; }
         if (pendingDropdown) { setPendingDropdown(null); e.preventDefault(); return; }
         if (pendingRandom.length) { setPendingRandom([]); e.preventDefault(); return; }
+        if (detectedClickables.length || selectedRandomKeys.size) {
+          setDetectedClickables([]);
+          setSelectedRandomKeys(new Set());
+          e.preventDefault();
+          return;
+        }
       }
       // 1-6 — switch tool (only when nothing has focus)
       if (!editable && !ctrl && /^[1-6]$/.test(e.key)) {
         const t = TOOLS[Number(e.key) - 1];
         if (t) {
           setTool(t.id);
-          if (t.id !== "random") setPendingRandom([]);
+          if (t.id !== "random") {
+            setPendingRandom([]);
+            setDetectedClickables([]);
+            setSelectedRandomKeys(new Set());
+          } else {
+            // Re-trigger auto-detect when switching via keyboard
+            detectClickables();
+          }
           e.preventDefault();
         }
       }
@@ -579,22 +599,69 @@ export default function VisualRecorderPage() {
     }
   };
 
+  // ── 2026-01 NEW: Detect all clickable elements on the current page ─
+  // Called automatically when user selects the "Random Pick" tool.
+  // The user then ticks which ones go in the random pool (no need to
+  // click each one on the live page → no premature navigation).
+  const detectClickables = async () => {
+    if (!sessionId) return;
+    setDetectingClickables(true);
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/detect-clickables`, {
+        method: "GET",
+        headers: authH(),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      const items = Array.isArray(d.items) ? d.items : [];
+      setDetectedClickables(items);
+      setSelectedRandomKeys(new Set());
+      if (items.length === 0) {
+        toast.error("No clickable elements detected on this page.");
+      } else {
+        toast.success(`Detected ${items.length} clickable element${items.length === 1 ? "" : "s"} — tick the ones for the random pool.`);
+      }
+    } catch (err) {
+      toast.error(`Detect failed: ${err.message || err}`);
+    } finally {
+      setDetectingClickables(false);
+    }
+  };
+
   const buildRandomStep = async () => {
-    if (pendingRandom.length < 2 || !sessionId) {
-      toast.error("Need at least 2 elements in pool");
+    // Two paths: NEW checklist flow (selectedRandomKeys) or legacy
+    // click-to-pool flow (pendingRandom). Prefer checklist if any
+    // boxes are ticked.
+    const checklistTexts = Array.from(selectedRandomKeys)
+      .map((idx) => detectedClickables[idx])
+      .filter(Boolean)
+      .map((el) => (el.text || "").trim())
+      .filter(Boolean);
+
+    const useChecklist = checklistTexts.length >= 2;
+    const useLegacy = !useChecklist && pendingRandom.length >= 2;
+
+    if (!useChecklist && !useLegacy) {
+      toast.error("Need at least 2 items in the random pool");
       return;
     }
+    if (!sessionId) return;
     setBusy(true);
     try {
+      const body = useChecklist
+        ? { count: checklistTexts.length, texts: checklistTexts }
+        : { count: pendingRandom.length };
       const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/group-random`, {
         method: "POST",
         headers: authH(),
-        body: JSON.stringify({ count: pendingRandom.length }),
+        body: JSON.stringify(body),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
       toast.success(`Random step built: pick from ${d.items?.length || 0}`);
       setPendingRandom([]);
+      setSelectedRandomKeys(new Set());
+      setDetectedClickables([]);
       refreshState();
     } catch (err) {
       toast.error(err.message || String(err));
@@ -1309,7 +1376,17 @@ export default function VisualRecorderPage() {
                       key={t.id}
                       onClick={() => {
                         setTool(t.id);
-                        if (t.id !== "random") setPendingRandom([]);
+                        if (t.id !== "random") {
+                          setPendingRandom([]);
+                          setDetectedClickables([]);
+                          setSelectedRandomKeys(new Set());
+                        } else {
+                          // 2026-01: auto-detect all clickables on the
+                          // current page the moment the user picks
+                          // the Random Pick tool. No need to click each
+                          // button manually anymore.
+                          detectClickables();
+                        }
                       }}
                       title={`${t.help} (key: ${t.key})`}
                       className={`relative flex flex-col items-center justify-center gap-1 py-2 px-1.5 rounded-lg text-xs font-medium transition-all ${
@@ -1334,7 +1411,111 @@ export default function VisualRecorderPage() {
               </div>
 
               {/* Sub-controls per mode */}
-              {tool === "random" && pendingRandom.length > 0 && (
+              {/* 2026-01 NEW: Random Pick checklist panel — auto-populated
+                  by /detect-clickables when the user selects the "Random
+                  Pick" tool. User ticks the candidates they want in the
+                  random pool, then clicks "Build Random Step". */}
+              {tool === "random" && (detectingClickables || detectedClickables.length > 0) && (
+                <div
+                  className="mt-3 p-3 rounded-lg bg-amber-950/40 border border-amber-700/40"
+                  data-testid="vr-random-checklist-panel"
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-xs text-amber-300 font-medium">
+                      {detectingClickables ? (
+                        <span className="flex items-center gap-1.5">
+                          <Loader2 className="w-3 h-3 animate-spin" /> Detecting clickable elements on the page…
+                        </span>
+                      ) : (
+                        <>Random Pick — tick the buttons for the random pool ({selectedRandomKeys.size}/{detectedClickables.length} selected)</>
+                      )}
+                    </div>
+                    <button
+                      onClick={detectClickables}
+                      disabled={detectingClickables}
+                      title="Re-scan the current page"
+                      className="text-[10px] px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-amber-200 border border-amber-800/40"
+                      data-testid="vr-rescan-clickables-btn"
+                    >
+                      <RefreshCw className="w-3 h-3 inline-block mr-1" />
+                      Re-scan
+                    </button>
+                  </div>
+                  {!detectingClickables && detectedClickables.length > 0 && (
+                    <>
+                      <div className="max-h-56 overflow-y-auto pr-1 mb-2 space-y-1 rounded border border-amber-900/40 bg-zinc-950/40 p-1.5">
+                        {detectedClickables.map((el, i) => {
+                          const checked = selectedRandomKeys.has(i);
+                          return (
+                            <label
+                              key={i}
+                              className={`flex items-start gap-2 px-2 py-1 rounded cursor-pointer text-xs transition-colors ${
+                                checked
+                                  ? "bg-amber-900/40 text-amber-100"
+                                  : "hover:bg-zinc-900 text-zinc-300"
+                              }`}
+                              data-testid={`vr-clickable-row-${i}`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => {
+                                  setSelectedRandomKeys((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(i)) next.delete(i);
+                                    else next.add(i);
+                                    return next;
+                                  });
+                                }}
+                                className="mt-0.5 accent-amber-500"
+                                data-testid={`vr-clickable-check-${i}`}
+                              />
+                              <span className="flex-1 leading-snug">
+                                <span className="font-medium">{el.text}</span>
+                                <span className="ml-1.5 text-[9px] uppercase tracking-wide text-zinc-500">
+                                  {el.tag}{el.role ? ` · role=${el.role}` : ""}
+                                </span>
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          onClick={() => {
+                            // Toggle all
+                            if (selectedRandomKeys.size === detectedClickables.length) {
+                              setSelectedRandomKeys(new Set());
+                            } else {
+                              setSelectedRandomKeys(new Set(detectedClickables.map((_, i) => i)));
+                            }
+                          }}
+                          className="text-[10px] px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300"
+                          data-testid="vr-toggle-all-btn"
+                        >
+                          {selectedRandomKeys.size === detectedClickables.length ? "Clear all" : "Select all"}
+                        </button>
+                        <button
+                          onClick={buildRandomStep}
+                          disabled={selectedRandomKeys.size < 2 || busy}
+                          className="px-3 py-1.5 rounded bg-amber-600 hover:bg-amber-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white text-xs font-medium"
+                          data-testid="vr-build-random-checklist-btn"
+                        >
+                          Build Random Step ({selectedRandomKeys.size})
+                        </button>
+                        <span className="text-[10px] text-amber-200/70">
+                          Tip: After building, switch to <b>Click</b> and pick any answer to move to the next page.
+                        </span>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* Legacy click-to-pool flow — still works for users who
+                  prefer clicking each candidate on the live page. Only
+                  shown when the new checklist isn't being used. */}
+              {tool === "random" && detectedClickables.length === 0 && !detectingClickables && pendingRandom.length > 0 && (
                 <div className="mt-3 p-3 rounded-lg bg-amber-950/40 border border-amber-700/40">
                   <div className="text-xs text-amber-300 mb-2 font-medium">
                     Random pool ({pendingRandom.length}): click more to add, then "Build Random Step"
