@@ -1231,6 +1231,26 @@ async def group_last_as_random(
     return {"recorded": True, "step": step, "items": take}
 
 
+async def navigate_only_click(sess: RecorderSession, x: int, y: int) -> Dict[str, Any]:
+    """Perform a real click at (x, y) on the live page WITHOUT
+    appending any step to the recording.
+
+    Use case (2026-01): the Random Pick step contains its own random-
+    button-click JavaScript; at recording time the user still needs
+    to advance the live browser to the next page so they can record
+    subsequent steps. Clicking with the normal "Click" tool would
+    add an extra (unwanted) step. This endpoint performs the click
+    purely for navigation purposes.
+    """
+    sess.touch()
+    async with sess.lock:
+        try:
+            await sess.page.mouse.click(int(x), int(y))
+        except Exception as e:  # noqa: BLE001
+            return {"clicked": False, "error": f"{type(e).__name__}: {e}"}
+    return {"clicked": True, "recorded": False}
+
+
 async def detect_clickables(sess: RecorderSession) -> Dict[str, Any]:
     """Detect every visible clickable element on the current page and
     return their visible text + bounding box. Used by the new "Random

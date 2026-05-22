@@ -13642,6 +13642,30 @@ async def vr_detect_clickables(session_id: str, user: dict = Depends(get_current
     return await vr.detect_clickables(sess)
 
 
+class VRNavClickReq(BaseModel):
+    x: int
+    y: int
+
+
+@api_router.post("/visual-recorder/{session_id}/nav-click")
+async def vr_nav_click(session_id: str, req: VRNavClickReq, user: dict = Depends(get_current_user)):
+    """Click at (x, y) on the live page WITHOUT recording a step.
+
+    Used after a Random Pick step is built: the user still needs to
+    advance the browser to the next page to keep recording, but the
+    actual click should NOT be appended to the step list (the random
+    step already encodes "pick one of these N at run time").
+    """
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.navigate_only_click(sess, req.x, req.y)
+
+
 @api_router.post("/visual-recorder/{session_id}/mark-final")
 async def vr_mark_final(session_id: str, user: dict = Depends(get_current_user)):
     if vr is None:

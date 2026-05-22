@@ -14,6 +14,7 @@ import {
   Clock,
   ScrollText,
   ArrowLeft,
+  ArrowRight,
   Loader2,
   CheckCircle2,
   Sparkles,
@@ -53,6 +54,7 @@ const TOOLS = [
   { id: "random",    icon: Shuffle,     label: "Random Pick", key: "4", help: "Auto-detect buttons on page → tick the ones to randomise each run" },
   { id: "capture",   icon: ImageIcon,   label: "Capture",     key: "5", help: "Insert a screenshot marker — shown in Live Activity" },
   { id: "final",     icon: Flag,        label: "Mark Final",  key: "6", help: "Capture this page as conversion target" },
+  { id: "nav_only",  icon: ArrowRight,  label: "Move",        key: "7", help: "Click without recording — use to navigate past a Random Pick step" },
 ];
 
 // Device-viewport presets — applied at session start so the recording
@@ -384,8 +386,8 @@ export default function VisualRecorderPage() {
           return;
         }
       }
-      // 1-6 — switch tool (only when nothing has focus)
-      if (!editable && !ctrl && /^[1-6]$/.test(e.key)) {
+      // 1-7 — switch tool (only when nothing has focus)
+      if (!editable && !ctrl && /^[1-7]$/.test(e.key)) {
         const t = TOOLS[Number(e.key) - 1];
         if (t) {
           setTool(t.id);
@@ -446,6 +448,31 @@ export default function VisualRecorderPage() {
         setTool("default");
       } catch (err) {
         toast.error(`Mark final failed: ${err.message || err}`);
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
+    // 2026-01: "nav_only" tool — click happens on the live page but
+    // NO step is recorded. Used to advance the browser past a Random
+    // Pick step (the random step already contains its own click JS;
+    // we just need the live preview to move to the next page so the
+    // user can record subsequent steps).
+    if (tool === "nav_only") {
+      setBusy(true);
+      try {
+        const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/nav-click`, {
+          method: "POST",
+          headers: authH(),
+          body: JSON.stringify({ x, y }),
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+        toast.success("Navigated — no step recorded ✓");
+        refreshScreenshot();
+      } catch (err) {
+        toast.error(`Nav click failed: ${err.message || err}`);
       } finally {
         setBusy(false);
       }
@@ -1350,7 +1377,7 @@ export default function VisualRecorderPage() {
                     onClick={handleImgClick}
                     onLoad={() => setShotErrorCount(0)}
                     onError={() => setShotErrorCount((c) => c + 1)}
-                    className={`max-w-full h-auto cursor-${tool === "form_fill" ? "text" : tool === "final" ? "crosshair" : "pointer"} select-none`}
+                    className={`max-w-full h-auto cursor-${tool === "form_fill" ? "text" : tool === "final" ? "crosshair" : tool === "nav_only" ? "grab" : "pointer"} select-none`}
                     style={{ aspectRatio: `${viewport.width}/${viewport.height}` }}
                     data-testid="vr-preview-img"
                   />
@@ -1366,8 +1393,8 @@ export default function VisualRecorderPage() {
                 )}
               </div>
 
-              {/* Toolbar — 6-col grid with kbd hints */}
-              <div className="mt-3 grid grid-cols-3 sm:grid-cols-6 gap-2">
+              {/* Toolbar — 7-col grid with kbd hints */}
+              <div className="mt-3 grid grid-cols-4 sm:grid-cols-7 gap-2">
                 {TOOLS.map((t) => {
                   const Ic = t.icon;
                   const active = tool === t.id;
