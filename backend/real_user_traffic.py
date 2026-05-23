@@ -3067,6 +3067,18 @@ async def run_real_user_traffic_job(
         "link_id": link_id,
         "link_owner_id": link_owner_id,
         "link_short_code": link_short_code,
+        # 2026-05: When ProxyJet Auto Mode is on, silently absorb
+        # offer/tracker-side Duplicate-IP and VPN block pages —
+        # they don't count toward `processed`, don't show in
+        # Recent Visits, and their early-logged click_doc is
+        # deleted on detection. Diagnostics counter
+        # `silent_skip_count` tracks them. The dispatcher uses a
+        # HARD_CAP-bounded while-loop so the user gets exactly
+        # `total_clicks` VISIBLE visits even if 90 % of ProxyJet
+        # IPs hit the tracker's duplicate filter.
+        "silent_skip_burnt_ip": bool(proxyjet_on_demand),
+        "silent_skip_count": 0,
+        "silent_skip_breakdown": {},
     })
     if db is not None:
         await _persist(db, job_id)
@@ -5540,11 +5552,15 @@ async def run_real_user_traffic_job(
                     break
                 # Compute effective attempts — tunnel failures are excluded
                 # from the budget by default (see _tunnel_counts_in_budget).
+                # 2026-05: also exclude silent-skipped burnt-IP visits so
+                # ProxyJet Auto users don't burn through max_attempts on
+                # offer/tracker duplicate-IP blocks.
                 _tunnel_fails_so_far = int(RUT_JOBS[job_id].get("tunnel_fail_count", 0) or 0)
+                _silent_skips_so_far = int(RUT_JOBS[job_id].get("silent_skip_count", 0) or 0)
                 _effective_attempts = (
                     attempt_counter
                     if _tunnel_counts_in_budget
-                    else max(attempt_counter - _tunnel_fails_so_far, 0)
+                    else max(attempt_counter - _tunnel_fails_so_far - _silent_skips_so_far, 0)
                 )
                 if _effective_attempts >= max_att:
                     push_live_step(
@@ -5578,10 +5594,11 @@ async def run_real_user_traffic_job(
                     # too — otherwise we'd over-spawn when a burst of
                     # tunnel-fail entries lands between iterations.
                     _tunnel_fails_so_far = int(RUT_JOBS[job_id].get("tunnel_fail_count", 0) or 0)
+                    _silent_skips_so_far = int(RUT_JOBS[job_id].get("silent_skip_count", 0) or 0)
                     _effective_attempts = (
                         attempt_counter
                         if _tunnel_counts_in_budget
-                        else max(attempt_counter - _tunnel_fails_so_far, 0)
+                        else max(attempt_counter - _tunnel_fails_so_far - _silent_skips_so_far, 0)
                     )
 
                 if not in_flight:
@@ -5608,11 +5625,84 @@ async def run_real_user_traffic_job(
         # Update total to reflect actual attempts launched
         RUT_JOBS[job_id]["total"] = attempt_counter
     else:
-        tasks = [asyncio.create_task(worker(i, shared_browser)) for i in range(total)]
-        try:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        except Exception as e:
-            logger.warning(f"RUT gather error: {e}")
+        # ── 2026-05: Budget-based clicks-mode dispatcher ──────────────
+        # Legacy behaviour was a flat `gather([process_one(i) for i in
+        # range(total)])` — exactly `total` spawns, no retries. That
+        # broke when ProxyJet Auto kept handing us IPs that the
+        # offer/tracker rejected as duplicate or VPN: the user asked
+        # for 5 clean clicks and got 5 attempts (44 silent skips +
+        # 5 visible).
+        #
+        # New behaviour (only when `silent_skip_burnt_ip` is on, which
+        # is auto-set by ProxyJet Auto Mode):
+        # spawn visits in a while-loop, evaluate after each completion
+        # whether VISIBLE `processed` (which now EXCLUDES silent skips)
+        # has reached `total`, and keep going up to a HARD_CAP. This
+        # guarantees the user gets exactly `total` UI-visible visits,
+        # however many burnt IPs ProxyJet returns under the hood.
+        _silent_mode = bool(RUT_JOBS[job_id].get("silent_skip_burnt_ip"))
+        if not _silent_mode:
+            # Legacy fixed-size gather — unchanged behaviour for jobs
+            # that don't use ProxyJet Auto (uploaded-proxy mode etc.).
+            tasks = [asyncio.create_task(worker(i, shared_browser)) for i in range(total)]
+            try:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            except Exception as e:
+                logger.warning(f"RUT gather error: {e}")
+        else:
+            # Budget-based dispatcher: keep spawning until VISIBLE
+            # `processed` >= `total` (or HARD_CAP / cancel hit).
+            _hard_cap_mult = max(int(os.environ.get("RUT_HARD_CAP_MULTIPLIER", "20")), 1)
+            HARD_CAP = max(total * _hard_cap_mult, 1000)
+            RUT_JOBS[job_id]["hard_cap"] = HARD_CAP
+            attempt_counter = 0
+            in_flight: set = set()
+            try:
+                while True:
+                    if cancel_event.is_set() or target_drain_event.is_set():
+                        break
+                    visible_processed = int(RUT_JOBS[job_id].get("processed") or 0)
+                    if visible_processed >= total:
+                        # Target reached — let in-flight finish via the
+                        # gather below.
+                        break
+                    if attempt_counter >= HARD_CAP:
+                        _silent = int(RUT_JOBS[job_id].get("silent_skip_count") or 0)
+                        push_live_step(
+                            job_id, 0, "done", "info",
+                            f"Hard cap {HARD_CAP} attempts reached — stopping "
+                            f"(visible: {visible_processed}/{total}, silently skipped: {_silent}). "
+                            "Most ProxyJet IPs were rejected by the tracker — try a different state or refresh the ProxyJet pool.",
+                        )
+                        break
+                    # Spawn up to concurrency
+                    while (
+                        len(in_flight) < conc
+                        and attempt_counter < HARD_CAP
+                        and not cancel_event.is_set()
+                        and not target_drain_event.is_set()
+                    ):
+                        t = asyncio.create_task(process_one(attempt_counter, shared_browser))
+                        in_flight.add(t)
+                        t.add_done_callback(in_flight.discard)
+                        attempt_counter += 1
+                    if not in_flight:
+                        await asyncio.sleep(0.2)
+                        continue
+                    # Wait for any visit to finish before re-evaluating
+                    await asyncio.wait(
+                        in_flight,
+                        return_when=asyncio.FIRST_COMPLETED,
+                        timeout=1.5,
+                    )
+            except Exception as e:
+                logger.warning(f"RUT clicks-mode silent dispatcher error: {e}")
+            # Graceful drain — let in-flight visits finish naturally.
+            if in_flight:
+                await asyncio.gather(*in_flight, return_exceptions=True)
+            # Reflect actual spawn count for diagnostics (does NOT
+            # change the UI's TOTAL field, which stays at `total`).
+            RUT_JOBS[job_id]["attempts_spawned"] = attempt_counter
 
     # ── Close the shared browser & playwright runtime ────────────────
     # Prefer the holder's current browser (may have been relaunched mid-job)
@@ -7127,8 +7217,62 @@ async def _record(
 ):
     async with lock:
         j = RUT_JOBS.setdefault(job_id, {})
-        j["processed"] = int(j.get("processed") or 0) + 1
         s = entry.get("status", "failed")
+
+        # ── 2026-05: Silent-skip for burnt-IP visits ────────────────────
+        # When `silent_skip_burnt_ip` is true (auto-enabled by ProxyJet
+        # Auto Mode), visits that detected a duplicate-IP or VPN block
+        # page from the offer/tracker are TREATED AS IF THEY NEVER
+        # HAPPENED from the UI's perspective:
+        #   • DO NOT bump `processed` — dashboard count stays clean
+        #   • DO NOT bump `skipped_duplicate_ip` / `skipped_vpn` counters
+        #   • DO NOT add to `report` (ZIP export stays clean)
+        #   • DO NOT add to `events` (Recent Visits in UI stays clean)
+        #   • DO bump a separate `silent_skip_count` for diagnostics
+        #   • DO delete the early-logged click_doc + decrement the
+        #     link.clicks counter (so dashboard Clicks page doesn't
+        #     fill up with "pending → skipped" rows)
+        #   • The IP is ALREADY in rut_burnt_ips (persisted by the
+        #     detection block in process_one), so future jobs avoid it
+        #     even though this visit's click_doc was deleted.
+        # The dispatcher then keeps spawning more visits up to a
+        # HARD_CAP, so the user gets exactly `total_clicks` VISIBLE
+        # successful/failed clicks (no clutter from offer-side blocks).
+        silent_skip = (
+            s in ("skipped_duplicate_ip", "skipped_vpn")
+            and bool(j.get("silent_skip_burnt_ip"))
+        )
+        if silent_skip:
+            # Tear down the early-logged click_doc + counter bump.
+            _early_id = entry.get("_early_click_id")
+            _link_id = j.get("link_id")
+            _owner_id = j.get("link_owner_id")
+            if _early_id and _link_id and _owner_id and db is not None:
+                try:
+                    client = db.client
+                    db_name = f"krexion_user_{_owner_id.replace('-', '_')[:20]}"
+                    user_db = client[db_name]
+                    await user_db.clicks.delete_one({"id": _early_id})
+                except Exception as _de:
+                    logger.debug(f"silent-skip click delete failed: {_de}")
+                try:
+                    await db.links.update_one(
+                        {"id": _link_id}, {"$inc": {"clicks": -1}}
+                    )
+                except Exception as _de2:
+                    logger.debug(f"silent-skip link counter decrement failed: {_de2}")
+            # Bump diagnostics counter only.
+            j["silent_skip_count"] = int(j.get("silent_skip_count") or 0) + 1
+            # Also keep a breakdown (helpful in Diagnostics panel).
+            _bd = j.setdefault("silent_skip_breakdown", {})
+            _bd[s] = int(_bd.get(s) or 0) + 1
+            # NOTE: We intentionally skip processed++, counter_key++,
+            # report.append, events.append. The visit is invisible
+            # from the UI but its IP burn IS persistent.
+            return
+
+        # ── Visible visit accounting (original logic, unchanged) ─────────
+        j["processed"] = int(j.get("processed") or 0) + 1
         key_map = {
             "ok": "succeeded",
             "skipped_captcha": "skipped_captcha",
