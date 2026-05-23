@@ -277,6 +277,20 @@ api_router = APIRouter(prefix=api_prefix)
 KREXION_MODE = os.environ.get("KREXION_MODE", "local").lower().strip()
 IS_CLOUD = KREXION_MODE == "cloud"
 
+# 2026-05 — opt-in strict mode. When true on the cloud edge, heavy
+# endpoints (RUT, Form Filler, Visual Recorder, bulk proxy tests, bulk
+# click imports) refuse to execute on the VPS and force the customer to
+# either let their local install pull the job via bridge OR install the
+# desktop app. This prevents the cloud server from being overloaded by
+# 45+ Chromium browsers when many customers are active. Default false
+# preserves legacy cloud-fallback behaviour so this is a safe rollout
+# switch — flip it to "true" in the VPS .env once all paying customers
+# have the desktop app installed.
+STRICT_CLOUD_HEAVY_BLOCK = (
+    os.environ.get("STRICT_CLOUD_HEAVY_BLOCK", "false").lower().strip()
+    in ("true", "1", "yes", "on")
+)
+
 CLOUD_HEAVY_FEATURE_MSG = (
     "This feature runs on your own PC for full speed and unlimited scale. "
     "Download the Krexion desktop app (free with your license) at "
@@ -285,18 +299,55 @@ CLOUD_HEAVY_FEATURE_MSG = (
     "without any cloud limits."
 )
 
-def require_local_mode():
-    """FastAPI dependency.
+CLOUD_HEAVY_BLOCKED_MSG = (
+    "Heavy features (Real User Traffic, Form Filler, Visual Recorder, bulk "
+    "proxy tests) must run on your own PC. Open the Krexion desktop app on "
+    "your PC and try again — the cloud UI will automatically bridge the job "
+    "to your machine. If you don't have it yet, install it from "
+    "https://krexion.com/download (free with your license)."
+)
 
-    Historically this blocked heavy operations on the cloud edge to force
-    customers to run them locally. With the bridge + heartbeat pairing
-    flow now live, paid customers can run them on krexion.com directly
-    (cloud transparently bridges to their local PC when available, or
-    falls back to cloud execution). Returning True unconditionally keeps
-    the original DI signature so existing endpoints don't need rewiring,
-    while removing the 423 lockout that was a poor customer experience.
+
+async def require_local_mode(request: Request):
+    """FastAPI dependency for heavy operations (RUT, Form Filler, etc).
+
+    Decision matrix:
+
+      • Bridge worker call (X-Krexion-Bridge-Job header set)
+            → ALWAYS allow. This is the customer's own desktop app
+              fulfilling a queued job — it MUST execute or the bridge
+              loop breaks.
+
+      • KREXION_MODE != "cloud" (i.e. a local install)
+            → ALWAYS allow. The whole point of the local install is to
+              run heavy work locally.
+
+      • Cloud edge + STRICT_CLOUD_HEAVY_BLOCK NOT set (legacy default)
+            → allow (the endpoint may still try to bridge first; if the
+              bridge fails it falls back to cloud execution as before).
+
+      • Cloud edge + STRICT_CLOUD_HEAVY_BLOCK=true (the new safe mode)
+            → REFUSE. Returns 503 with a clear "install/open your desktop
+              app" message. Endpoints that already bridge (proxies bulk-
+              test, install-update) will route to the local PC BEFORE
+              this dependency runs and return the bridged result; only
+              direct unbridged calls reach this block.
     """
-    return True
+    if request.headers.get("X-Krexion-Bridge-Job"):
+        return True
+    if not IS_CLOUD:
+        return True
+    if not STRICT_CLOUD_HEAVY_BLOCK:
+        return True
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "code": "local_pc_offline",
+            "error": "local_pc_required",
+            "message": CLOUD_HEAVY_BLOCKED_MSG,
+            "download_url": "https://krexion.com/download",
+        },
+    )
 
 
 
@@ -318,6 +369,7 @@ async def get_mode():
     return {
         "mode": KREXION_MODE,           # "cloud" or "local"
         "is_cloud": IS_CLOUD,
+        "strict_heavy_block": STRICT_CLOUD_HEAVY_BLOCK,
         "download_url": "https://krexion.com/download" if IS_CLOUD else None,
     }
 
@@ -3115,10 +3167,17 @@ async def admin_host_stats(admin: dict = Depends(get_current_admin)):
     written every minute by the host watcher. Falls back to container
     psutil if the host watcher isn't configured yet."""
     import json as _json
+    strict_block = STRICT_CLOUD_HEAVY_BLOCK
+    deployment = {
+        "mode": KREXION_MODE,
+        "is_cloud": IS_CLOUD,
+        "strict_heavy_block": strict_block,
+        "strict_help_url": "https://krexion.com/admin/system-maintenance",
+    }
     try:
         if HOST_STATS_FILE.exists():
             stats = _json.loads(HOST_STATS_FILE.read_text(encoding="utf-8"))
-            return {"ok": True, "source": "host-watcher", "stats": stats}
+            return {"ok": True, "source": "host-watcher", "stats": stats, "deployment": deployment}
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[cleanup] could not read host stats: {e}")
     # Fallback — still useful, but reports container limits (not host).
@@ -3136,6 +3195,7 @@ async def admin_host_stats(admin: dict = Depends(get_current_admin)):
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "note": "Host watcher not configured — showing container view.",
             },
+            "deployment": deployment,
         }
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"Could not read system stats: {e}")
@@ -10713,7 +10773,20 @@ async def bulk_test_proxies(
             except Exception as br_err:  # noqa: BLE001
                 logger.warning(f"[bridge] proxies bulk-test bridge failed: {br_err}")
         # Fallback: execute on cloud (works for all customers regardless
-        # of local bridge worker state)
+        # of local bridge worker state) — UNLESS the admin has flipped
+        # STRICT_CLOUD_HEAVY_BLOCK=true to force all heavy work onto the
+        # customer's PC.
+        if STRICT_CLOUD_HEAVY_BLOCK:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "local_pc_offline",
+                    "error": "local_pc_required",
+                    "message": CLOUD_HEAVY_BLOCKED_MSG,
+                    "download_url": "https://krexion.com/download",
+                    "local_pc_online": False,
+                },
+            )
 
     check_user_feature(user, "proxies")
     

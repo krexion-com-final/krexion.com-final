@@ -37,6 +37,7 @@ export default function SystemMaintenancePage() {
   const navigate = useNavigate();
   const [stats, setStats] = useState(null);
   const [source, setSource] = useState("");
+  const [deployment, setDeployment] = useState(null);
   const [status, setStatus] = useState({ pending: false, last_result: null, host_watcher_configured: false });
   const [loading, setLoading] = useState(true);
   const [cleaning, setCleaning] = useState(false);
@@ -50,6 +51,7 @@ export default function SystemMaintenancePage() {
       ]);
       setStats(s.data?.stats || null);
       setSource(s.data?.source || "");
+      setDeployment(s.data?.deployment || null);
       setStatus(st.data || {});
     } catch (e) {
       const msg = e.response?.data?.detail || e.message;
@@ -121,6 +123,52 @@ export default function SystemMaintenancePage() {
         <p className="text-sm text-[#A1A1AA] mb-6">
           Free disk space and clear server caches with one click. Click data, uploads, and RUT results are never touched.
         </p>
+
+        {/* Heavy-Block Mode Banner */}
+        {deployment?.is_cloud && (
+          <div
+            className={`mb-5 rounded-xl border p-4 ${
+              deployment.strict_heavy_block
+                ? "border-emerald-500/40 bg-emerald-500/5"
+                : "border-yellow-500/40 bg-yellow-500/5"
+            }`}
+            data-testid="strict-mode-banner"
+          >
+            <div className="flex items-start gap-3">
+              {deployment.strict_heavy_block ? (
+                <CheckCircle2 size={20} className="text-emerald-400 shrink-0 mt-0.5" />
+              ) : (
+                <AlertTriangle size={20} className="text-yellow-400 shrink-0 mt-0.5" />
+              )}
+              <div className="flex-1">
+                <div className="font-semibold mb-1">
+                  Heavy Ops on VPS:{" "}
+                  {deployment.strict_heavy_block ? (
+                    <span className="text-emerald-300">BLOCKED (recommended)</span>
+                  ) : (
+                    <span className="text-yellow-300">ALLOWED (legacy)</span>
+                  )}
+                </div>
+                {deployment.strict_heavy_block ? (
+                  <p className="text-xs text-[#A1A1AA]">
+                    Real User Traffic, Form Filler, Visual Recorder and bulk proxy tests are forced to run on the customer's own PC via the bridge. The VPS will never spin up Playwright Chromium itself — keeping load low even with many customers.
+                  </p>
+                ) : (
+                  <div className="text-xs text-[#A1A1AA] space-y-2">
+                    <p>
+                      Heavy features fall back to running on this VPS if the customer's PC is offline. This is why you may see 40+ Chromium browsers eating RAM. To force all heavy work onto customer PCs and protect the VPS, enable strict mode:
+                    </p>
+                    <div className="bg-black/40 border border-[var(--brand-border)] rounded-md p-2 font-mono text-[11px]">
+                      <div># Add to /opt/krexion/backend/.env on the VPS:</div>
+                      <div className="text-emerald-300">STRICT_CLOUD_HEAVY_BLOCK=true</div>
+                      <div className="text-[#A1A1AA] mt-1"># Then: docker compose restart backend</div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Stats Grid */}
         {loading ? (
