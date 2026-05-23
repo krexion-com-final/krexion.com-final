@@ -3493,30 +3493,66 @@ async def run_real_user_traffic_job(
         # exit nodes that pass geo but get blackholed / SSL-blocked /
         # 403'd by the actual offer's CDN. Catching those here saves
         # a full Chromium spawn + UA/lead consumption per dead proxy.
-        # Disabled when target_url is the local-pod tracker (`/api/t/...`
-        # on this preview pod) since that's reached without the proxy
-        # via the tracker-bypass path anyway.
+        #
+        # 2026-01 (revised): If `target_url` is one of the user's own
+        # tracker domains (api.krexion.com etc.), checking reachability
+        # against the tracker itself is misleading — the tracker is
+        # ALWAYS reachable server-side via the bypass path, but the
+        # tracker just 302-redirects to the *real* offer URL
+        # (e.g. trksy.org/aff_c?...), and THAT URL is where the
+        # proxy actually has to land. So for tracker URLs we
+        # pre-resolve the redirect server-side first (using the same
+        # _resolve_tracker_via_localhost helper the bypass uses
+        # after a failed goto) and then run the reachability check
+        # on the resolved offer URL. This catches dead-to-offer
+        # proxies BEFORE the browser is launched, saving the UA/lead
+        # that would otherwise be burned on a timed-out goto.
         try:
             from urllib.parse import urlparse as _t_up
             _t_host = (_t_up(target_url).hostname or "").lower()
         except Exception:
             _t_host = ""
-        _skip_reachability = _t_host in _bypass_hosts()
-        if not _skip_reachability:
+        _is_tracker_target = _t_host in _bypass_hosts()
+        _url_to_probe = target_url
+        if _is_tracker_target and geo.get("exit_ip"):
+            # Resolve the tracker server-side to find where it would
+            # send a real click from this exit IP. The resolver
+            # returns the Location header from a 3xx response, or
+            # None on failure (in which case we silently fall back
+            # to skipping the reachability check, same as before).
+            try:
+                _resolved_offer = await _resolve_tracker_via_localhost(
+                    target_url, geo["exit_ip"], ua, timeout=8.0,
+                )
+            except Exception:
+                _resolved_offer = None
+            if _resolved_offer:
+                _url_to_probe = _resolved_offer
+                push_live_step(
+                    job_id, i + 1, "filter", "info",
+                    f"Tracker resolves to offer → probing {_url_to_probe[:80]}",
+                )
+        # Run the reachability check unless we're falling back to a
+        # tracker URL with no resolution (in which case there's
+        # nothing useful to test — the bypass will handle it later).
+        _should_probe = (not _is_tracker_target) or (_url_to_probe != target_url)
+        if _should_probe:
             _reach_ok, _reach_diag = await _probe_proxy_target_reachable(
-                proxy, target_url, ua, timeout_s=12.0,
+                proxy, _url_to_probe, ua, timeout_s=12.0,
             )
             if not _reach_ok:
                 entry["status"] = "failed"
-                entry["error"] = f"Proxy can't reach target ({_reach_diag}) — skipped before browser launch"
+                entry["error"] = (
+                    f"Proxy can't reach offer ({_reach_diag}) — skipped before browser launch"
+                )
                 push_live_step(
                     job_id, i + 1, "filter", "skipped",
-                    f"Dead proxy for target: {_reach_diag}",
+                    f"Dead proxy for offer: {_reach_diag}",
                 )
                 return await _record(job_id, entry, report, report_lock, db)
             push_live_step(
                 job_id, i + 1, "filter", "ok",
-                f"Target reachable via proxy ({_reach_diag})",
+                f"Offer reachable via proxy ({_reach_diag})",
             )
 
         # Pick form-fill row — state-matched OR sequential
@@ -4061,9 +4097,18 @@ async def run_real_user_traffic_job(
                                     "step_index": step_idx,
                                     "path": str(shot_path),
                                 })
+                                # 2026-01 — Pass the saved screenshot filename
+                                # along with the live step so the Live Activity
+                                # panel can render the thumbnail at the exact
+                                # point in the automation where the user placed
+                                # the capture marker. Without this the panel
+                                # only showed the text "📷 <name> (step N)" —
+                                # which is why capture screenshots weren't
+                                # surfacing in the live view.
                                 push_live_step(
                                     job_id, i + 1, "capture", "ok",
                                     f"📷 {name} (step {step_idx})",
+                                    screenshot=shot_path.name,
                                 )
                             except Exception:
                                 # Surface the failure but never crash
