@@ -3973,6 +3973,21 @@ async def run_real_user_traffic_job(
                 # ERR_TUNNEL_CONNECTION_FAILED / proxy-CONNECT errors and
                 # transparently rotate to a fresh proxy up to 2 times so
                 # the visit doesn't false-fail on a one-off bad tunnel.
+                # 2026-01 — Tokens / patterns that indicate a proxy-side
+                # transport problem (vs an offer-side problem). When we see
+                # one of these AND we have proxies left in the pool, the
+                # next "while" iteration transparently rotates to a fresh
+                # proxy and re-tries the navigation — up to 2 times — so
+                # the visit doesn't false-fail on a one-off bad tunnel /
+                # slow-as-molasses residential exit.
+                #
+                # 2026-01 (revised): added timeout-style errors. Many
+                # residential pools have exits that ACCEPT the TCP
+                # tunnel cleanly (so the strict tunnel errors below
+                # never fire) but then drop / throttle the actual
+                # request, causing the goto to hit its 90s ceiling
+                # without progressing. Rotating off these exits saves
+                # the visit too.
                 _TUNNEL_ERR_TOKENS = (
                     "ERR_TUNNEL_CONNECTION_FAILED",
                     "ERR_PROXY_CONNECTION_FAILED",
@@ -3982,14 +3997,28 @@ async def run_real_user_traffic_job(
                     "ERR_CONNECTION_REFUSED",
                     "ERR_EMPTY_RESPONSE",
                     "ERR_SOCKET_NOT_CONNECTED",
+                    "ERR_TIMED_OUT",
+                    "Timeout 35000ms exceeded",
+                    "Timeout 90000ms exceeded",
+                    "net::ERR_NAME_NOT_RESOLVED",
+                    "ERR_ADDRESS_UNREACHABLE",
+                    "TLSV1_ALERT_INTERNAL_ERROR",
+                    "WRONG_VERSION_NUMBER",
+                    "ERR_SSL_PROTOCOL_ERROR",
                 )
-                MAX_TUNNEL_RETRIES = 2
+                MAX_TUNNEL_RETRIES = 3
                 tunnel_attempt = 0
                 resp = None
                 goto_exc = None
                 while True:
                     try:
-                        resp = await page.goto(target_url, timeout=90000, wait_until="domcontentloaded")
+                        # 2026-01 — lowered from 90s → 35s. Residential
+                        # proxies that haven't started serving traffic
+                        # within 35s are effectively dead; waiting the
+                        # full 90s just wastes wall-clock + lead/UA
+                        # budget per visit. The tunnel-retry loop above
+                        # will rotate to a fresh proxy if this fails.
+                        resp = await page.goto(target_url, timeout=35000, wait_until="domcontentloaded")
                         goto_exc = None
                         break
                     except Exception as _ge:
