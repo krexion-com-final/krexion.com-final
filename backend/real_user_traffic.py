@@ -2693,6 +2693,7 @@ async def run_real_user_traffic_job(
         "skipped_vpn": 0,
         "skipped_state_mismatch": 0,
         "skipped_no_unique_ip": 0,
+        "skipped_dead_proxy": 0,
         "invalid_data": 0,
         "failed": 0,
         "started_at": datetime.now(timezone.utc).isoformat(),
@@ -3570,9 +3571,19 @@ async def run_real_user_traffic_job(
         # pre-resolve the redirect server-side first (using the same
         # _resolve_tracker_via_localhost helper the bypass uses
         # after a failed goto) and then run the reachability check
-        # on the resolved offer URL. This catches dead-to-offer
-        # proxies BEFORE the browser is launched, saving the UA/lead
-        # that would otherwise be burned on a timed-out goto.
+        # on the resolved offer URL.
+        #
+        # 2026-01 (further revised): When server-side resolution
+        # FAILS (e.g. Emergent preview pod can't resolve the user's
+        # private tracker subdomain like api.krexion.com), instead
+        # of silently skipping the precheck we now also probe the
+        # target URL itself via the proxy. This catches "proxy
+        # provider refuses this domain" 502 errors, "proxy can't
+        # reach tracker" timeouts, and SSL/TLS handshake errors —
+        # all of which would otherwise burn a UA + lead at the
+        # browser-launch stage. On the user's actual VPS this branch
+        # is rarely hit (local resolution works there), but it gives
+        # the preview environment a useful filter too.
         try:
             from urllib.parse import urlparse as _t_up
             _t_host = (_t_up(target_url).hostname or "").lower()
@@ -3582,10 +3593,7 @@ async def run_real_user_traffic_job(
         _url_to_probe = target_url
         if _is_tracker_target and geo.get("exit_ip"):
             # Resolve the tracker server-side to find where it would
-            # send a real click from this exit IP. The resolver
-            # returns the Location header from a 3xx response, or
-            # None on failure (in which case we silently fall back
-            # to skipping the reachability check, same as before).
+            # send a real click from this exit IP.
             try:
                 _resolved_offer = await _resolve_tracker_via_localhost(
                     target_url, geo["exit_ip"], ua, timeout=8.0,
@@ -3598,28 +3606,32 @@ async def run_real_user_traffic_job(
                     job_id, i + 1, "filter", "info",
                     f"Tracker resolves to offer → probing {_url_to_probe[:80]}",
                 )
-        # Run the reachability check unless we're falling back to a
-        # tracker URL with no resolution (in which case there's
-        # nothing useful to test — the bypass will handle it later).
-        _should_probe = (not _is_tracker_target) or (_url_to_probe != target_url)
-        if _should_probe:
-            _reach_ok, _reach_diag = await _probe_proxy_target_reachable(
-                proxy, _url_to_probe, ua, timeout_s=12.0,
-            )
-            if not _reach_ok:
-                entry["status"] = "failed"
-                entry["error"] = (
-                    f"Proxy can't reach offer ({_reach_diag}) — skipped before browser launch"
-                )
+            else:
+                # Local resolution failed — fall back to probing the
+                # tracker URL itself via the proxy.
                 push_live_step(
-                    job_id, i + 1, "filter", "skipped",
-                    f"Dead proxy for offer: {_reach_diag}",
+                    job_id, i + 1, "filter", "info",
+                    f"Tracker not resolvable server-side — probing target {_t_host} via proxy",
                 )
-                return await _record(job_id, entry, report, report_lock, db)
-            push_live_step(
-                job_id, i + 1, "filter", "ok",
-                f"Offer reachable via proxy ({_reach_diag})",
+        # Always run the reachability probe (target_url or resolved
+        # offer URL), even for tracker targets. Failure → skip.
+        _reach_ok, _reach_diag = await _probe_proxy_target_reachable(
+            proxy, _url_to_probe, ua, timeout_s=12.0,
+        )
+        if not _reach_ok:
+            entry["status"] = "skipped_dead_proxy"
+            entry["error"] = (
+                f"Proxy can't reach offer ({_reach_diag}) — skipped before browser launch"
             )
+            push_live_step(
+                job_id, i + 1, "filter", "skipped",
+                f"Dead proxy: {_reach_diag}",
+            )
+            return await _record(job_id, entry, report, report_lock, db)
+        push_live_step(
+            job_id, i + 1, "filter", "ok",
+            f"Offer reachable via proxy ({_reach_diag})",
+        )
 
         # Pick form-fill row — state-matched OR sequential
         # ── 2026-01 ROW-FIRST mode: row was already picked at the
@@ -6576,9 +6588,17 @@ async def _record(
             "skipped_vpn": "skipped_vpn",
             "skipped_state_mismatch": "skipped_state_mismatch",
             "skipped_no_unique_ip": "skipped_no_unique_ip",
+            "skipped_dead_proxy": "skipped_dead_proxy",
             "invalid_data": "invalid_data",
         }
-        counter_key = key_map.get(s, "failed")
+        counter_key = key_map.get(s, None)
+        # 2026-01 — Catch-all for any future "skipped_*" status so a
+        # proxy/quality skip never gets miscounted as a hard failure.
+        if counter_key is None and isinstance(s, str) and s.startswith("skipped"):
+            counter_key = s
+            j.setdefault(s, 0)
+        if counter_key is None:
+            counter_key = "failed"
         j[counter_key] = int(j.get(counter_key) or 0) + 1
         # Conversion counter: visits where final URL redirected OFF the form page
         if entry.get("conversion_page_reached"):
@@ -6924,6 +6944,7 @@ def create_rut_job(
         "skipped_vpn": 0,
         "skipped_state_mismatch": 0,
         "skipped_no_unique_ip": 0,
+        "skipped_dead_proxy": 0,
         "failed": 0,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
