@@ -52,11 +52,13 @@ client = AsyncIOMotorClient(
 main_db = client[db_name]  # Main database for users/admin
 db = main_db  # Alias for backward compatibility - will be refactored for per-user DBs
 
-# Cache for click IPs - refreshes every 5 minutes
+# Cache for click IPs - refreshes every 60 seconds (2026-05 — lowered
+# from 5 min so newly-burnt IPs from rut_burnt_ips get picked up by
+# the next RUT job within ~1 minute instead of up to 5 minutes).
 _click_ips_cache = {
     "ips": set(),
     "last_updated": 0,
-    "ttl": 300  # 5 minutes cache
+    "ttl": 60  # 60 seconds cache
 }
 
 # Link cache for high traffic - refreshes every 60 seconds
@@ -241,7 +243,27 @@ async def get_all_click_ips_from_entire_database(force_refresh=False):
                 logger.warning(f"Error fetching IPs from {db_name}: {e}")
     except Exception as e:
         logger.warning(f"Could not list user databases: {e}")
-    
+
+    # 3. 2026-05 — Also load persistent RUT "burnt IP" block-list.
+    # `rut_burnt_ips` is written by real_user_traffic.py whenever an
+    # offer landing page rejects an exit-IP as duplicate or VPN. Those
+    # IPs may never have entered the `clicks` collection (the visit
+    # failed before a click could be recorded), so without this extra
+    # load every NEW job would keep pulling the same dirty IPs from
+    # ProxyJet. Loading them here means future jobs skip them at the
+    # on-demand probe stage.
+    try:
+        burnt_count = 0
+        async for doc in db.rut_burnt_ips.find({}, {"ip": 1, "_id": 0}):
+            ip = doc.get("ip")
+            if ip and isinstance(ip, str):
+                all_click_ips.add(ip.strip())
+                burnt_count += 1
+        if burnt_count:
+            logger.info(f"Loaded {burnt_count} burnt IPs from rut_burnt_ips block-list")
+    except Exception as e:
+        logger.warning(f"Could not load rut_burnt_ips: {e}")
+
     # Update cache
     _click_ips_cache["ips"] = all_click_ips
     _click_ips_cache["last_updated"] = current_time
@@ -3997,12 +4019,19 @@ def _rut_build_target_url(request: Request, link: dict, explicit_target: Optiona
 _DUP_IP_CACHE_LOCK = asyncio.Lock()
 
 
-async def _get_dup_ip_set_safe() -> set:
+async def _get_dup_ip_set_safe(force_refresh: bool = False) -> set:
     """Concurrent-safe wrapper around get_all_click_ips_from_entire_database().
-    Returns an empty set on any failure so the BG task never crashes here."""
+    Returns an empty set on any failure so the BG task never crashes here.
+
+    2026-05: When `force_refresh=True` the cache is bypassed and a fresh
+    scan of all `clicks` collections + the persistent `rut_burnt_ips`
+    block-list is performed. RUT prep passes True so each job starts
+    with the absolute latest burnt-IP set (critical when the user runs
+    many jobs back-to-back and the same dirty ProxyJet IPs keep coming
+    back from the pool)."""
     try:
         async with _DUP_IP_CACHE_LOCK:
-            return await get_all_click_ips_from_entire_database()
+            return await get_all_click_ips_from_entire_database(force_refresh=force_refresh)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Could not load duplicate IP set: {e}")
         return set()
@@ -4292,7 +4321,13 @@ async def _rut_prepare_and_run(
         # Result is awaited at step 4.
         dup_ip_task: Optional[asyncio.Task] = None
         if params.get("skip_duplicate_ip"):
-            dup_ip_task = asyncio.create_task(_get_dup_ip_set_safe())
+            # 2026-05: force_refresh=True so each RUT job loads the
+            # absolute latest burnt-IP block-list (clicks DB + the
+            # persistent rut_burnt_ips collection). Without this, two
+            # jobs started within the 60s cache window would share the
+            # same stale set and re-use dirty IPs the FIRST job just
+            # burned.
+            dup_ip_task = asyncio.create_task(_get_dup_ip_set_safe(force_refresh=True))
 
         # ── 1. Proxies ────────────────────────────────────────────────
         upload_proxy_id = params.get("upload_proxy_id")
