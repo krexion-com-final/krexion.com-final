@@ -3079,6 +3079,121 @@ async def get_user(user_id: str, admin: dict = Depends(get_current_admin)):
         "features": user.get("features", DEFAULT_FEATURES)
     })
 
+
+# ==================== VPS SYSTEM MAINTENANCE (Admin Only) ====================
+# Follows the same flag-file pattern as /api/system/install-update:
+# 1. Admin clicks "Clean VPS" in panel.
+# 2. Backend writes /data/cleanup_requested.flag (mounted from
+#    /opt/krexion/data/ on host).
+# 3. Host watcher script (cron: vps-cleanup-watcher.sh) picks it up and
+#    runs SAFE cleanup actions ON THE HOST:
+#      - docker builder prune -af   (build cache only — no images, no volumes)
+#      - docker container prune -f  (stopped containers only)
+#      - docker image prune -f      (DANGLING images only)
+#      - journalctl --vacuum-time=7d
+#      - apt-get clean
+#      - rotate large caddy access logs
+#      - remove stale /tmp/playwright_* (>24h old)
+# 4. Watcher writes /data/cleanup_result.json + clears the flag.
+# 5. Watcher also writes /data/host_stats.json every minute (disk/mem/load)
+#    so the admin panel can show live HOST stats (not container-only stats).
+#
+# IMPORTANT — what the watcher NEVER touches:
+#   - Any docker volume (mongo data, uploaded resources, RUT results, etc.)
+#   - Active containers / images in use
+#   - Any file under /opt/krexion/
+#   - User data of any kind.
+
+CLEANUP_FLAG_FILE = Path("/data/cleanup_requested.flag")
+CLEANUP_RESULT_FILE = Path("/data/cleanup_result.json")
+HOST_STATS_FILE = Path("/data/host_stats.json")
+
+
+@api_router.get("/admin/system/host-stats")
+async def admin_host_stats(admin: dict = Depends(get_current_admin)):
+    """Return host-level resource stats. Reads /data/host_stats.json
+    written every minute by the host watcher. Falls back to container
+    psutil if the host watcher isn't configured yet."""
+    import json as _json
+    try:
+        if HOST_STATS_FILE.exists():
+            stats = _json.loads(HOST_STATS_FILE.read_text(encoding="utf-8"))
+            return {"ok": True, "source": "host-watcher", "stats": stats}
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[cleanup] could not read host stats: {e}")
+    # Fallback — still useful, but reports container limits (not host).
+    try:
+        import psutil as _ps
+        return {
+            "ok": True,
+            "source": "container-fallback",
+            "stats": {
+                "disk_used_pct": _ps.disk_usage("/").percent,
+                "disk_free_gb": round(_ps.disk_usage("/").free / 1024 ** 3, 1),
+                "memory_used_pct": _ps.virtual_memory().percent,
+                "swap_used_pct": _ps.swap_memory().percent,
+                "load_avg_1m": _ps.getloadavg()[0] if hasattr(_ps, "getloadavg") else 0,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "note": "Host watcher not configured — showing container view.",
+            },
+        }
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"Could not read system stats: {e}")
+
+
+@api_router.post("/admin/system/cleanup")
+async def admin_request_cleanup(admin: dict = Depends(get_current_admin)):
+    """Queue a VPS cleanup job by writing a flag file. The host watcher
+    will run within ~60 seconds and free disk space safely. User data
+    is never touched."""
+    import json as _json
+    try:
+        CLEANUP_FLAG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+            "requested_by": admin.get("email"),
+        }
+        CLEANUP_FLAG_FILE.write_text(_json.dumps(payload), encoding="utf-8")
+        logger.info(f"[cleanup] flag written by {admin.get('email')}")
+        return {
+            "ok": True,
+            "message": (
+                "Cleanup requested. The host watcher will pick this up "
+                "within ~60 seconds. Refresh stats to see results."
+            ),
+            "flag_path": str(CLEANUP_FLAG_FILE),
+            "requested_at": payload["requested_at"],
+        }
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"Could not write cleanup flag: {e}")
+
+
+@api_router.get("/admin/system/cleanup-status")
+async def admin_cleanup_status(admin: dict = Depends(get_current_admin)):
+    """Returns whether a cleanup is pending + the most recent result."""
+    import json as _json
+    pending = CLEANUP_FLAG_FILE.exists()
+    pending_payload = None
+    if pending:
+        try:
+            pending_payload = _json.loads(CLEANUP_FLAG_FILE.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            pending_payload = {"note": "flag exists but unreadable"}
+    last_result = None
+    try:
+        if CLEANUP_RESULT_FILE.exists():
+            last_result = _json.loads(CLEANUP_RESULT_FILE.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "ok": True,
+        "pending": pending,
+        "pending_payload": pending_payload,
+        "last_result": last_result,
+        "host_watcher_configured": HOST_STATS_FILE.exists(),
+    }
+
+
 # ──────────── Admin-managed email settings (SMTP / Resend) ─────────────
 
 class EmailSettingsUpdate(BaseModel):

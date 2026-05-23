@@ -46,6 +46,7 @@ import DownloadPage from "./pages/DownloadPage";
 import GuidePage from "./pages/GuidePage";
 import SyncHeartbeatsPage from "./pages/SyncHeartbeatsPage";
 import ReleasesAdminPage from "./pages/ReleasesAdminPage";
+import SystemMaintenancePage from "./pages/SystemMaintenancePage";
 import { Toaster } from "./components/ui/sonner";
 import { BrandingProvider } from "./context/BrandingContext";
 import { ThemeProvider } from "./context/ThemeContext";
@@ -142,6 +143,11 @@ function App() {
             <Route path="/admin/releases" element={
               <AdminRoute>
                 <ReleasesAdminPage />
+              </AdminRoute>
+            } />
+            <Route path="/admin/system-maintenance" element={
+              <AdminRoute>
+                <SystemMaintenancePage />
               </AdminRoute>
             } />
             <Route path="/admin/dashboard" element={

@@ -738,6 +738,16 @@ export default function AdminDashboard() {
             <Button
               variant="outline"
               size="sm"
+              onClick={() => window.location.href = "/admin/system-maintenance"}
+              data-testid="goto-system-maintenance-btn"
+              className="border-yellow-500/40 text-yellow-400 hover:bg-yellow-500/10"
+            >
+              <Trash2 size={16} className="mr-2" />
+              VPS Cleanup
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
               onClick={() => window.location.href = "/admin/licenses"}
               data-testid="goto-licenses-btn"
               className="border-[var(--brand-border)]"
@@ -778,6 +788,10 @@ export default function AdminDashboard() {
                 <DropdownMenuItem onClick={() => window.location.href = "/admin/sync-heartbeats"} data-testid="mobile-goto-sync-heartbeats">
                   <RefreshCw size={16} className="mr-2" />
                   Customer Installs
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => window.location.href = "/admin/system-maintenance"} data-testid="mobile-goto-system-maintenance">
+                  <Trash2 size={16} className="mr-2 text-yellow-400" />
+                  VPS Cleanup
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => window.location.href = "/admin/licenses"} data-testid="mobile-goto-licenses">
                   <Settings size={16} className="mr-2" />
