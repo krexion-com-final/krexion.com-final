@@ -2413,6 +2413,157 @@ async def _get_exit_ip_via_proxy(
     return None
 
 
+def _normalize_unresolvable_tracker_host(url: str) -> str:
+    """2026-01 — DNS auto-fallback for misconfigured tracker subdomains.
+
+    If `url`'s host is a `<sub>.<domain>` form (typically `api.krexion.com`)
+    that is NOT publicly resolvable AND the bare parent domain
+    (e.g. `krexion.com`) IS publicly resolvable, return `url` with the
+    host rewritten to the parent domain. Otherwise return `url` as-is.
+
+    Why this exists: many Krexion deployments use `api.<domain>` as the
+    tracker host but only ever configure DNS for the bare apex/www
+    domain (the `api.` subdomain is set up internally via nginx
+    `server_name` or a local hosts file). When the RUT browser tries
+    to navigate to `https://api.<domain>/api/t/...` THROUGH a
+    residential proxy, the proxy itself can't resolve `api.<domain>`
+    (no public DNS record) and returns 502 Bad Gateway — making EVERY
+    visit fail regardless of how clean the proxy pool is.
+
+    Rewriting to the bare domain side-steps this entirely, because the
+    Krexion tracker route (`/api/t/<short_code>`) is served by the
+    same backend regardless of which host the request comes in on
+    (FastAPI doesn't filter by Host header by default).
+
+    Implementation note: we explicitly resolve via PUBLIC DNS
+    (Cloudflare 1.1.1.1, with a Google 8.8.8.8 fallback) rather than
+    the local resolver. This is critical on the user's production VPS
+    where `api.<domain>` IS resolvable locally (via /etc/hosts or
+    nginx server_name) but still has no public A record — so a
+    system-default `socket.gethostbyname()` would falsely report it as
+    "resolvable" and skip the rewrite, leaving every residential
+    proxy unable to reach it.
+
+    Safe to call repeatedly: per-host results are LRU-cached in
+    process memory after the first DNS round-trip (~50-150ms).
+    """
+    try:
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return url
+        # Must look like a subdomain (at least 3 dot-separated labels)
+        parts = host.split(".")
+        if len(parts) < 3:
+            return url
+
+        cache_key = host
+        try:
+            cached = _NORMALIZE_TRACKER_CACHE.get(cache_key)
+        except NameError:
+            cached = None
+
+        def _resolves_public(h: str) -> bool:
+            """Query a public DNS server directly so we ignore any
+            local /etc/hosts entry or nginx server_name shortcut that
+            only exists on the deployment server."""
+            # Try low-cost stdlib path first using a couple of well-known
+            # public resolvers — avoids the dnspython dependency.
+            import socket
+            try:
+                # IMPORTANT: socket.getaddrinfo uses the SYSTEM resolver,
+                # which on the user's VPS is /etc/nsswitch.conf → files →
+                # dns, so /etc/hosts entries WILL satisfy it. We want
+                # PUBLIC resolution only, so we do a manual UDP DNS query.
+                import struct, random
+                def _udp_query(server_ip: str, hostname: str, timeout: float = 3.0) -> bool:
+                    try:
+                        tid = random.randint(0, 65535)
+                        # Build a minimal DNS A-record query packet
+                        header = struct.pack(">HHHHHH", tid, 0x0100, 1, 0, 0, 0)
+                        qname = b""
+                        for label in hostname.split("."):
+                            qname += bytes([len(label)]) + label.encode("ascii", errors="ignore")
+                        qname += b"\x00"
+                        qbody = qname + struct.pack(">HH", 1, 1)  # A IN
+                        pkt = header + qbody
+                        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        s.settimeout(timeout)
+                        try:
+                            s.sendto(pkt, (server_ip, 53))
+                            data, _ = s.recvfrom(2048)
+                        finally:
+                            try:
+                                s.close()
+                            except Exception:
+                                pass
+                        if len(data) < 12:
+                            return False
+                        ancount = struct.unpack(">H", data[6:8])[0]
+                        # rcode in flags low nibble: 0 = NOERROR, 3 = NXDOMAIN
+                        flags = struct.unpack(">H", data[2:4])[0]
+                        rcode = flags & 0x0F
+                        if rcode == 3:  # NXDOMAIN
+                            return False
+                        if rcode != 0:
+                            return False
+                        return ancount > 0
+                    except Exception:
+                        return False
+                # Try Cloudflare first, then Google as fallback.
+                for resolver_ip in ("1.1.1.1", "8.8.8.8", "9.9.9.9"):
+                    try:
+                        if _udp_query(resolver_ip, h):
+                            return True
+                    except Exception:
+                        continue
+                return False
+            except Exception:
+                # Last-resort fallback to system resolver. Worst case
+                # this keeps existing behaviour (no rewrite) instead of
+                # crashing the engine over a DNS quirk.
+                try:
+                    socket.gethostbyname(h)
+                    return True
+                except Exception:
+                    return False
+
+        if cached is not None:
+            new_host = cached
+        else:
+            if _resolves_public(host):
+                new_host = host
+            else:
+                # Try parent domain (strip leftmost label)
+                parent = ".".join(parts[1:])
+                if _resolves_public(parent):
+                    new_host = parent
+                else:
+                    new_host = host  # Neither resolves — leave as-is
+            try:
+                _NORMALIZE_TRACKER_CACHE[cache_key] = new_host
+            except NameError:
+                pass
+
+        if new_host == host:
+            return url
+        port = parsed.port
+        netloc = f"{new_host}:{port}" if port else new_host
+        return urlunparse((
+            parsed.scheme, netloc, parsed.path,
+            parsed.params, parsed.query, parsed.fragment,
+        ))
+    except Exception:
+        return url
+
+
+# Process-wide cache to avoid repeating DNS lookups for the same host
+# across thousands of RUT visits. Populated lazily by
+# _normalize_unresolvable_tracker_host.
+_NORMALIZE_TRACKER_CACHE: Dict[str, str] = {}
+
+
 async def _resolve_tracker_via_localhost(
     target_url: str,
     exit_ip: str,
@@ -2637,6 +2788,32 @@ async def run_real_user_traffic_job(
                   "Playwright chromium-headless-shell could not be installed. "
                   "Please contact support or retry — the install will be attempted again on the next job.")
         return
+
+    # ── 2026-01: Auto-fix unresolvable tracker subdomains ───────────
+    # If the target URL's host is e.g. `api.krexion.com` and that
+    # subdomain isn't publicly resolvable (residential proxies can't
+    # reach it → 502 Bad Gateway for every visit), automatically fall
+    # back to the bare parent domain (`krexion.com`). The Krexion
+    # tracker route lives on the same backend regardless of which
+    # host header the request comes in on, so this fix is transparent.
+    _orig_target_url = target_url
+    try:
+        target_url = await asyncio.to_thread(
+            _normalize_unresolvable_tracker_host, target_url,
+        )
+    except Exception:
+        target_url = _orig_target_url
+    if target_url != _orig_target_url:
+        try:
+            from urllib.parse import urlparse as _np
+            _old_h = (_np(_orig_target_url).hostname or "")
+            _new_h = (_np(target_url).hostname or "")
+            push_live_step(
+                job_id, 0, "preflight", "info",
+                f"Tracker host '{_old_h}' isn't publicly resolvable — auto-falling back to '{_new_h}' so residential proxies can reach it.",
+            )
+        except Exception:
+            pass
 
     parsed_proxies: List[Dict[str, Any]] = []
     for ln in proxies_raw:
