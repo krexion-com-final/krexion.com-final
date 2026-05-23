@@ -4304,6 +4304,23 @@ async def run_real_user_traffic_job(
                 except Exception:
                     entry["thank_you_reached"] = False
 
+                # ── 2026-01 status upgrade ─────────────────────────────
+                # If the visit reached the thank-you / conversion page
+                # but was later aborted by the stuck-watchdog (the page
+                # was already on the success URL, nothing more to do, so
+                # the URL stopped changing and the watchdog killed the
+                # tab), this is actually a SUCCESS — the postback /
+                # conversion fired before the abort. Upgrade the status
+                # so the counters show 'succeeded' instead of 'stuck'
+                # for these wins. We only upgrade `stuck` (watchdog
+                # outcome) — other failures (network, captcha, invalid
+                # data, etc.) keep their original status even if the
+                # offer's tracking pixel happened to fire.
+                if entry.get("thank_you_reached") and entry.get("status") == "stuck":
+                    entry["status"] = "ok"
+                    entry["error"] = ""
+                    entry["_upgraded_from_stuck"] = True
+
                 entry["page_title"] = (page_title_str or "")[:200]
                 # Conversion count is now driven STRICTLY by thank-you-reached
                 # (not just any host-change). Matches the user's explicit ask:
