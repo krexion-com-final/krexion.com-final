@@ -2150,6 +2150,60 @@ _VALIDATION_ERROR_PHRASES = [
 ]
 
 
+# ─── 2026-05: Offer-site "Duplicate IP" landing-page detection ─────
+# Some offers (e.g. getmyoffer.app) have their OWN anti-fraud layer
+# that shows a hard-block "Duplicate IP" page BEFORE the form even
+# renders, whenever the visiting exit-IP has been seen by the offer
+# before. Our `duplicate_ip_set` only covers OUR clicks DB — it can't
+# know what the offer site already saw. So we must scan the landing
+# page body for these phrases and, on hit, burn the IP from THIS
+# job's in-memory dup-set so the on-demand ProxyJet probe will reject
+# it on the next visit (and any subsequent visit in the same job).
+#
+# Phrases are kept VERY specific — generic "access denied" alone is
+# avoided because it false-positives on geo-blocks and Cloudflare
+# challenges that are NOT IP-duplicate situations.
+_DUPLICATE_IP_PAGE_PHRASES = [
+    "duplicate ip",
+    "this ip address has already been used",
+    "this ip has already been used",
+    "ip address has already been used",
+    "ip already used",
+    "ip has been used before",
+    "your ip is blocked",
+    "this ip is blocked",
+    "ip address is blocked",
+    "ip blocked",
+    "duplicate visit",
+    "duplicate entry detected",
+    "duplicate click",
+]
+
+
+async def _detect_offer_duplicate_ip_block(page: "Page") -> Tuple[bool, str]:
+    """Detect offer-site IP-duplicate hard-block landing page.
+
+    Returns (is_duplicate_ip_block, snippet).
+    Safe — any exception → (False, '').
+    """
+    try:
+        body_text = await page.evaluate(
+            "() => (document.body ? document.body.innerText : '').toLowerCase().slice(0, 8000)"
+        )
+    except Exception:
+        return False, ""
+    if not body_text:
+        return False, ""
+    for phrase in _DUPLICATE_IP_PAGE_PHRASES:
+        if phrase in body_text:
+            idx = body_text.find(phrase)
+            start = max(0, idx - 30)
+            end = min(len(body_text), idx + 140)
+            snippet = body_text[start:end].strip().replace("\n", " ")
+            return True, snippet[:240]
+    return False, ""
+
+
 # ─── US state matching — map + normaliser ──────────────────────────
 # Used by the "match lead state to proxy IP state" feature so a row from
 # California only gets submitted via a CA-exit proxy, etc. We accept both
@@ -4337,6 +4391,53 @@ async def run_real_user_traffic_job(
                         await page.wait_for_load_state("networkidle", timeout=4000)
                     except Exception:
                         pass
+
+                # ── 2026-05: Offer-site Duplicate-IP hard-block detection ──
+                # Some offers serve a "Duplicate IP / Access denied" page
+                # before the form ever renders. Burn this exit-IP from the
+                # in-job dup-set so the on-demand ProxyJet probe will skip
+                # it on every subsequent visit in this job (and any later
+                # job after the cache refresh). Skip the visit cleanly so
+                # the automation_steps timeout doesn't waste 15-90s on a
+                # button that doesn't exist on this block page.
+                try:
+                    _is_dup_block, _dup_snippet = await _detect_offer_duplicate_ip_block(page)
+                except Exception:
+                    _is_dup_block, _dup_snippet = (False, "")
+                if _is_dup_block:
+                    _burned_ip = (entry.get("exit_ip") or "").strip()
+                    if _burned_ip and duplicate_ip_set is not None:
+                        try:
+                            duplicate_ip_set.add(_burned_ip)
+                        except Exception:
+                            pass
+                    # Snap a screenshot for evidence (same naming pattern
+                    # used elsewhere so the ZIP report includes it).
+                    try:
+                        shot_path = shots_dir / f"visit_{i+1:05d}_dup_ip.png"
+                        await page.screenshot(path=str(shot_path), full_page=False)
+                        entry["screenshot"] = shot_path.name
+                    except Exception:
+                        pass
+                    try:
+                        entry["final_url"] = page.url
+                    except Exception:
+                        pass
+                    entry["status"] = "skipped_duplicate_ip"
+                    entry["error"] = (
+                        f"Offer-site rejected exit-IP {_burned_ip or '?'} as duplicate "
+                        f"({(_dup_snippet or 'duplicate IP block page')[:120]})"
+                    )
+                    push_live_step(
+                        job_id, i + 1, "filter", "skipped",
+                        f"Offer-side duplicate IP block · burning {_burned_ip or '?'} · retrying with fresh IP next visit",
+                        screenshot=entry.get("screenshot", ""),
+                    )
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
+                    return await _record(job_id, entry, report, report_lock, db)
 
                 # No form fill → plain real click, just screenshot
                 if not form_fill_enabled:

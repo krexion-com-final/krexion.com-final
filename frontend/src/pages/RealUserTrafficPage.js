@@ -1021,8 +1021,20 @@ export default function RealUserTrafficPage() {
       let data = null;
       try { data = await r.json(); } catch (_) { data = null; }
       if (!r.ok) {
-        const msg = (data && (data.detail || data.error)) || `HTTP ${r.status}`;
-        throw new Error(msg);
+        // FastAPI can return detail/error as string, object, or array of validation errors.
+        // Normalise so toast never shows "[object Object]".
+        const raw = data && (data.detail !== undefined ? data.detail : data.error);
+        let msg = "";
+        if (typeof raw === "string") {
+          msg = raw;
+        } else if (Array.isArray(raw)) {
+          msg = raw
+            .map((it) => (it && (it.msg || it.message)) ? `${it.msg || it.message}${it.loc ? ` (${it.loc.join('.')})` : ''}` : JSON.stringify(it))
+            .join("; ");
+        } else if (raw && typeof raw === "object") {
+          msg = raw.msg || raw.message || JSON.stringify(raw);
+        }
+        throw new Error(msg || `HTTP ${r.status}`);
       }
       toast.success(`Job started: ${data.total} visit(s) queued`);
       // Clear selected uploaded batches — they'll be deleted server-side

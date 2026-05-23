@@ -285,7 +285,21 @@ export default function VisualRecorderPage() {
         }),
       });
       const d = await r.json();
-      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      if (!r.ok) {
+        // FastAPI can return detail as string, object, or array of validation errors.
+        // Normalise so the toast never shows "[object Object]".
+        let detailMsg = "";
+        if (typeof d.detail === "string") {
+          detailMsg = d.detail;
+        } else if (Array.isArray(d.detail)) {
+          detailMsg = d.detail
+            .map((it) => (it && (it.msg || it.message)) ? `${it.msg || it.message}${it.loc ? ` (${it.loc.join('.')})` : ''}` : JSON.stringify(it))
+            .join("; ");
+        } else if (d.detail && typeof d.detail === "object") {
+          detailMsg = d.detail.msg || d.detail.message || JSON.stringify(d.detail);
+        }
+        throw new Error(detailMsg || `HTTP ${r.status}`);
+      }
       setSessionId(d.session_id);
       setViewport(d.viewport);
       setSessionState(d.state || "starting");
@@ -302,7 +316,11 @@ export default function VisualRecorderPage() {
         ts: Date.now(),
       });
     } catch (e) {
-      toast.error(`Start failed: ${e.message || e}`);
+      let msg = e && e.message ? e.message : "";
+      if (!msg || msg === "[object Object]") {
+        try { msg = typeof e === "string" ? e : JSON.stringify(e); } catch { msg = String(e); }
+      }
+      toast.error(`Start failed: ${msg}`);
     } finally {
       setBusy(false);
     }
