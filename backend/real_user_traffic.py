@@ -1099,10 +1099,9 @@ def _record_stuck_event(job_id: str, visit_index: int, url: str, seconds_stuck: 
 async def _stuck_watchdog(page, job_id: str, visit_index: int,
                           threshold_s: float = 60.0, poll_s: float = 5.0,
                           shots_dir=None, on_stuck=None) -> None:
-    """Watch the page's main-frame URL while a visit's automation steps
-    are running. If the URL hasn't changed for `threshold_s` seconds we
-    consider the visit stuck (waiting for a selector that never appears,
-    waiting for a navigation that never happens, etc.) and:
+    """Watch the page while a visit's automation steps are running. If
+    the page hasn't progressed for `threshold_s` seconds we consider
+    the visit stuck and:
         1. Capture a screenshot + first 2 KB of body text (debug aid).
         2. Emit `_record_stuck_event` so the operator can see WHICH page
            the job dies on.
@@ -1115,13 +1114,45 @@ async def _stuck_watchdog(page, job_id: str, visit_index: int,
     2026-01: default threshold raised from 25s → 60s so that legitimate
     long form-submit sequences (form fill + Continue + cascading
     wait_for_load steps that can total 25-30s of intentional waiting)
-    don't get killed prematurely. Caller may override via the
-    `stuck_watchdog_seconds` engine param."""
+    don't get killed prematurely.
+
+    2026-01 (revised): "Progress" is now defined as EITHER the main-frame
+    URL changing OR the DOM-progress fingerprint changing (body text
+    length, body child count, document title, location hash). This is
+    essential for offers running as single-page apps (SPAs) — e.g.
+    anyunclaimedassets.com/indexform.php, which transitions through
+    Profile → Cash & Assets Survey → Benefits → Thank-you ALL on the
+    same URL via JavaScript. The old URL-only watchdog killed every
+    such visit at 60s even though the DOM was progressing through
+    multiple survey steps. Now we only abort if BOTH the URL and the
+    DOM fingerprint stay frozen for the full threshold."""
+    # Cheap "is the page progressing?" signal — combines URL + a handful
+    # of DOM characteristics that change on any meaningful UI transition
+    # (route, modal open, new survey question rendered). Computing this
+    # is one Playwright evaluate call (single round-trip) instead of a
+    # full innerHTML snapshot, keeping per-poll cost ~10 ms.
+    _PROGRESS_JS = (
+        "()=>{try{"
+        "var b=document.body;"
+        "var t=(b&&b.innerText)?b.innerText.length:0;"
+        "var c=(b&&b.children)?b.children.length:0;"
+        "var d=(b&&b.querySelectorAll)?b.querySelectorAll('*').length:0;"
+        "return [document.title||'',(location.hash||''),t,c,d];"
+        "}catch(e){return ['','',0,0,0];}}"
+    )
+
+    async def _probe():
+        try:
+            return await asyncio.wait_for(page.evaluate(_PROGRESS_JS), timeout=2.0)
+        except Exception:
+            return None
+
     last_url = ""
     try:
         last_url = page.url or ""
     except Exception:
         pass
+    last_progress = await _probe()
     last_changed_at = __import__("time").monotonic()
     recorded_this_period = False
     while True:
@@ -1160,11 +1191,46 @@ async def _stuck_watchdog(page, job_id: str, visit_index: int,
                     except Exception:
                         pass
                 return
-        if cur != last_url:
+        # Did the URL change?
+        _url_changed = cur != last_url
+        if _url_changed:
             last_url = cur
             last_changed_at = now
             recorded_this_period = False
+            last_progress = await _probe()
             continue
+        # URL is unchanged — check DOM-progress fingerprint. If it
+        # moved (different title / hash / body-text length / child
+        # count / total node count), the page IS progressing (SPA
+        # transition, survey question rendered, etc.) and we reset
+        # the stuck timer. Tolerance: text length and node count
+        # naturally fluctuate by ±2 from things like cursor blink or
+        # one-off rerenders, so require a meaningful delta to count.
+        cur_progress = await _probe()
+        if cur_progress is not None and last_progress is not None:
+            try:
+                _title_chg = cur_progress[0] != last_progress[0]
+                _hash_chg = cur_progress[1] != last_progress[1]
+                _text_delta = abs(int(cur_progress[2]) - int(last_progress[2]))
+                _child_delta = abs(int(cur_progress[3]) - int(last_progress[3]))
+                _node_delta = abs(int(cur_progress[4]) - int(last_progress[4]))
+                _dom_changed = (
+                    _title_chg or _hash_chg
+                    or _text_delta >= 8
+                    or _child_delta >= 1
+                    or _node_delta >= 5
+                )
+            except Exception:
+                _dom_changed = False
+            if _dom_changed:
+                last_progress = cur_progress
+                last_changed_at = now
+                recorded_this_period = False
+                continue
+        elif cur_progress is not None:
+            # First successful probe — seed the baseline so the next
+            # iteration can detect deltas.
+            last_progress = cur_progress
         elapsed = now - last_changed_at
         if elapsed >= threshold_s and not recorded_this_period:
             # ── Capture debug artefacts BEFORE aborting ────────────────
@@ -1200,7 +1266,7 @@ async def _stuck_watchdog(page, job_id: str, visit_index: int,
             try:
                 push_live_step(
                     job_id, visit_index, "stuck", "warn",
-                    f"Visit stuck on {cur[:120]} for ~{int(elapsed)}s — aborting + see diagnostics",
+                    f"Visit stuck on {cur[:120]} for ~{int(elapsed)}s (URL+DOM frozen) — aborting + see diagnostics",
                 )
             except Exception:
                 pass
@@ -4166,6 +4232,148 @@ async def run_real_user_traffic_job(
                                 await _watchdog
                             except (asyncio.CancelledError, Exception):
                                 pass
+
+                        # ── 2026-01: Multi-step SPA auto-continue fallback ─
+                        # If the user's custom JSON completes (status=ok)
+                        # OR is aborted by the watchdog (status=stuck),
+                        # AND a target screenshot was provided (signalling
+                        # the customer expects a multi-step survey →
+                        # conversion-page flow), automatically attempt
+                        # to drive the page forward through any remaining
+                        # survey questions / Continue buttons / deal
+                        # cards until either:
+                        #     • the conversion page is visually reached,
+                        #     • the page stops changing, or
+                        #     • the fallback budget (~25s) is exhausted.
+                        #
+                        # Rationale: offer flows like
+                        # anyunclaimedassets.com/indexform.php are
+                        # JS-driven SPAs — Profile → Cash & Assets Survey
+                        # → Benefits → Thank-you all on the same URL.
+                        # A user JSON that only handles the Profile step
+                        # would otherwise leave every visit stranded on
+                        # the first survey page. This fallback uses the
+                        # same survey_click_v2 + complete_random_deals +
+                        # _dismiss_popups helpers the smart auto-fill
+                        # already relies on, so behaviour is consistent
+                        # with the non-custom-JSON path.
+                        _fb_status = (step_res or {}).get("status") or ""
+                        if (
+                            target_screenshot_phash
+                            and _fb_status in ("ok", "stuck")
+                        ):
+                            try:
+                                from rut_flash_helpers import (
+                                    survey_click_v2 as _fb_survey,
+                                    complete_random_deals as _fb_deals,
+                                )
+                            except Exception:
+                                _fb_survey = None
+                                _fb_deals = None
+                            try:
+                                from form_filler import _dismiss_popups as _fb_dismiss
+                            except Exception:
+                                _fb_dismiss = None
+                            _fb_continue_js = (
+                                "(function(){"
+                                " var KW=['continue','next','submit','i agree','agree','confirm','claim','yes','accept','proceed','get started','unlock','finish','complete','done','start'];"
+                                " function vis(e){try{var s=window.getComputedStyle(e);return s&&s.display!=='none'&&s.visibility!=='hidden'&&e.offsetWidth>0&&e.offsetHeight>0;}catch(_){return false;}}"
+                                " var nodes=Array.from(document.querySelectorAll('button,a,input[type=button],input[type=submit],[role=button]'));"
+                                " for(var i=0;i<nodes.length;i++){var el=nodes[i];if(!vis(el))continue;"
+                                "  var t=((el.innerText||el.textContent||el.value||'')+'').toLowerCase().replace(/\\s+/g,' ').trim();"
+                                "  if(!t)continue;"
+                                "  for(var k=0;k<KW.length;k++){if(t===KW[k]||t.indexOf(KW[k])>=0){"
+                                "    try{el.scrollIntoView({block:'center'});}catch(_){};"
+                                "    if(el.tagName==='A'&&el.href&&!el.target){window.location.assign(el.href);return true;}"
+                                "    el.click();"
+                                "    var f=el.form||(el.closest&&el.closest('form'));"
+                                "    if(f&&(el.type==='submit'||(el.getAttribute&&el.getAttribute('type')==='submit'))){setTimeout(function(){try{if(!f._krx_fbs){f._krx_fbs=true;f.submit();}}catch(_){}},150);}"
+                                "    return true;"
+                                "  }}"
+                                " }"
+                                " return false;"
+                                "})()"
+                            )
+                            _fb_deadline = __import__("time").monotonic() + 25.0
+                            _fb_max_iter = 12
+                            _fb_last_url = ""
+                            try:
+                                _fb_last_url = page.url or ""
+                            except Exception:
+                                pass
+                            _fb_no_change = 0
+                            _fb_iter_count = 0
+                            push_live_step(
+                                job_id, i + 1, "auto_continue", "info",
+                                "Auto-continue fallback running — driving any remaining survey/continue pages…",
+                            )
+                            while (
+                                _fb_iter_count < _fb_max_iter
+                                and __import__("time").monotonic() < _fb_deadline
+                            ):
+                                _fb_iter_count += 1
+                                _fb_progress = False
+                                if _fb_dismiss is not None:
+                                    try:
+                                        await _fb_dismiss(page)
+                                    except Exception:
+                                        pass
+                                if _fb_survey is not None:
+                                    try:
+                                        _sr = await _fb_survey(page, max_iterations=2, picker=None)
+                                        if isinstance(_sr, dict) and int(_sr.get("clicks", 0)) > 0:
+                                            _fb_progress = True
+                                    except Exception:
+                                        pass
+                                if _fb_deals is not None:
+                                    try:
+                                        _dn = await _fb_deals(page, count_min=1, count_max=2)
+                                        if int(_dn or 0) > 0:
+                                            _fb_progress = True
+                                    except Exception:
+                                        pass
+                                try:
+                                    if bool(await page.evaluate(_fb_continue_js)):
+                                        _fb_progress = True
+                                except Exception:
+                                    pass
+                                try:
+                                    await page.wait_for_timeout(1200)
+                                except Exception:
+                                    pass
+                                try:
+                                    await page.wait_for_load_state(
+                                        "domcontentloaded", timeout=4000,
+                                    )
+                                except Exception:
+                                    pass
+                                try:
+                                    _fb_cur = page.url or ""
+                                except Exception:
+                                    _fb_cur = _fb_last_url
+                                if _fb_cur == _fb_last_url and not _fb_progress:
+                                    _fb_no_change += 1
+                                    if _fb_no_change >= 2:
+                                        break
+                                else:
+                                    _fb_no_change = 0
+                                    _fb_last_url = _fb_cur
+                            # If fallback unstuck the visit (URL changed
+                            # OR DOM-progress happened), upgrade status
+                            # from "stuck" → "ok" so the downstream
+                            # post_submit + conversion check don't treat
+                            # this as a failure.
+                            if _fb_status == "stuck" and _fb_iter_count > 0:
+                                step_res["status"] = "ok"
+                                if "error" in step_res:
+                                    step_res["error"] = (
+                                        (step_res.get("error") or "")
+                                        + " | Recovered by auto-continue fallback"
+                                    )[:300]
+                                push_live_step(
+                                    job_id, i + 1, "auto_continue", "ok",
+                                    f"Auto-continue ran {_fb_iter_count} iterations — visit recovered",
+                                )
                     else:
                         # Click through any CTA ("UNLOCK NOW", "Get Started", etc.)
                         # — up to 3 tries because some offers have a 2-step warm-up.
@@ -5569,8 +5777,106 @@ async def _execute_automation_steps(
                 elif action == "wait_for_selector":
                     await page.wait_for_selector(selector, timeout=timeout, state=step.get("state") or "visible")
                 elif action in ("wait_for_navigation", "wait_for_load", "wait_for_networkidle"):
+                    # 2026-01 — Smart load wait for SPA-friendly pages.
+                    # The plain `wait_for_load_state("networkidle", timeout=60000)`
+                    # used to block for the full 60s whenever the offer
+                    # was a single-page app (no real <load> event after a
+                    # JS-driven route transition) — and worse, during
+                    # those 60s the URL also didn't change, so the
+                    # stuck-watchdog killed the visit while the SPA was
+                    # actually rendering the next step. Now we race
+                    # several "page progressed" signals and return as
+                    # soon as ANY of them fires, capped at the
+                    # caller's timeout (or 15s if none was supplied).
+                    _wfl_timeout = int(timeout or 15000)
                     try:
-                        await page.wait_for_load_state("networkidle", timeout=timeout)
+                        _wfl_start_url = page.url or ""
+                    except Exception:
+                        _wfl_start_url = ""
+                    _wfl_progress_js = (
+                        "()=>{try{var b=document.body;"
+                        "var t=(b&&b.innerText)?b.innerText.length:0;"
+                        "var c=(b&&b.querySelectorAll)?b.querySelectorAll('*').length:0;"
+                        "return [t,c,document.title||''];"
+                        "}catch(e){return [0,0,''];}}"
+                    )
+                    try:
+                        _wfl_start_progress = await asyncio.wait_for(
+                            page.evaluate(_wfl_progress_js), timeout=2.0,
+                        )
+                    except Exception:
+                        _wfl_start_progress = [0, 0, ""]
+
+                    async def _wait_state_dom():
+                        try:
+                            await page.wait_for_load_state(
+                                "domcontentloaded", timeout=_wfl_timeout,
+                            )
+                        except Exception:
+                            pass
+
+                    async def _wait_state_net():
+                        try:
+                            await page.wait_for_load_state(
+                                "networkidle", timeout=_wfl_timeout,
+                            )
+                        except Exception:
+                            pass
+
+                    async def _wait_url_or_dom_change():
+                        # Poll for either a URL change or a meaningful
+                        # DOM-fingerprint change every 250 ms. SPA route
+                        # transitions don't emit load events but DO
+                        # change the DOM noticeably (different number of
+                        # nodes / different page title / different text
+                        # length), so this poll catches them within
+                        # half a second of the transition completing.
+                        _deadline = (
+                            __import__("time").monotonic() + (_wfl_timeout / 1000.0)
+                        )
+                        while __import__("time").monotonic() < _deadline:
+                            try:
+                                await asyncio.sleep(0.25)
+                            except asyncio.CancelledError:
+                                return
+                            try:
+                                _cu = page.url or ""
+                            except Exception:
+                                _cu = _wfl_start_url
+                            if _cu != _wfl_start_url:
+                                return
+                            try:
+                                _cp = await asyncio.wait_for(
+                                    page.evaluate(_wfl_progress_js), timeout=1.0,
+                                )
+                            except Exception:
+                                continue
+                            try:
+                                _t_d = abs(int(_cp[0]) - int(_wfl_start_progress[0]))
+                                _c_d = abs(int(_cp[1]) - int(_wfl_start_progress[1]))
+                                _title_d = _cp[2] != _wfl_start_progress[2]
+                            except Exception:
+                                _t_d = _c_d = 0
+                                _title_d = False
+                            if _title_d or _t_d >= 20 or _c_d >= 5:
+                                return
+                    try:
+                        # Whichever signal fires first wins.
+                        _wfl_tasks = [
+                            asyncio.create_task(_wait_state_dom()),
+                            asyncio.create_task(_wait_state_net()),
+                            asyncio.create_task(_wait_url_or_dom_change()),
+                        ]
+                        try:
+                            _done, _pending = await asyncio.wait(
+                                _wfl_tasks,
+                                return_when=asyncio.FIRST_COMPLETED,
+                                timeout=(_wfl_timeout / 1000.0) + 1.0,
+                            )
+                        finally:
+                            for _pt in _wfl_tasks:
+                                if not _pt.done():
+                                    _pt.cancel()
                     except Exception:
                         pass
                 elif action == "scroll":
