@@ -357,15 +357,38 @@ async def _human_type_field(page: Page, el, value: str) -> bool:
         # hammering keys instantly.
         await page.wait_for_timeout(random.randint(80, 260))
 
-        # Clear existing content (Ctrl+A → Delete). Done via keyboard so
-        # the field sees keyboard events, not a silent .fill('').
+        # ── 2026-01 BUG FIX ────────────────────────────────────────────
+        # Clear existing content (Ctrl+A → Delete). PREVIOUSLY this fired
+        # unconditionally, but if the click/focus above silently failed
+        # (e.g. the element is a hidden div, an overlay covers it, or
+        # the selector matched something that isn't actually focusable)
+        # the Ctrl+A would land on `document.body` and select the ENTIRE
+        # PAGE'S TEXT — producing the "everything is blue" screenshots
+        # users reported. Verify the active element really is our text
+        # input before pressing the shortcut.
         try:
-            await page.keyboard.press("Control+a")
-            await page.wait_for_timeout(random.randint(20, 60))
-            await page.keyboard.press("Delete")
-            await page.wait_for_timeout(random.randint(30, 90))
+            is_focused = await page.evaluate(
+                """(el) => {
+                    const a = document.activeElement;
+                    if (!a) return false;
+                    if (el && a !== el) return false;
+                    const tag = (a.tagName || '').toUpperCase();
+                    if (tag === 'INPUT' || tag === 'TEXTAREA') return true;
+                    if (a.isContentEditable) return true;
+                    return false;
+                }""",
+                el,
+            )
         except Exception:
-            pass
+            is_focused = False
+        if is_focused:
+            try:
+                await page.keyboard.press("Control+a")
+                await page.wait_for_timeout(random.randint(20, 60))
+                await page.keyboard.press("Delete")
+                await page.wait_for_timeout(random.randint(30, 90))
+            except Exception:
+                pass
 
         # Type char-by-char with realistic variance
         chars = list(s)
@@ -812,10 +835,31 @@ async def _fill_form(page: Page, row: Dict[str, Any]) -> Dict[str, Any]:
                             await _human_mouse_move_to(page, el)
                             await el.click()
                             await page.wait_for_timeout(random.randint(80, 200))
-                            await page.keyboard.press("Control+a")
-                            await page.wait_for_timeout(random.randint(30, 90))
-                            await page.keyboard.press("Delete")
-                            await page.wait_for_timeout(random.randint(40, 110))
+                            # ── 2026-01 BUG FIX (same rationale as the
+                            # primary _human_type_field path) ──────────
+                            # Verify focus landed on a real text input
+                            # before Ctrl+A — otherwise the shortcut
+                            # selects the ENTIRE page text.
+                            try:
+                                _is_focused = await page.evaluate(
+                                    """(el) => {
+                                        const a = document.activeElement;
+                                        if (!a) return false;
+                                        if (el && a !== el) return false;
+                                        const tag = (a.tagName || '').toUpperCase();
+                                        if (tag === 'INPUT' || tag === 'TEXTAREA') return true;
+                                        if (a.isContentEditable) return true;
+                                        return false;
+                                    }""",
+                                    el,
+                                )
+                            except Exception:
+                                _is_focused = False
+                            if _is_focused:
+                                await page.keyboard.press("Control+a")
+                                await page.wait_for_timeout(random.randint(30, 90))
+                                await page.keyboard.press("Delete")
+                                await page.wait_for_timeout(random.randint(40, 110))
                             # Variable delay (was flat delay=30 — bot signature
                             # at ~200 WPM). Each char goes through individually
                             # so we can vary delay per char.
