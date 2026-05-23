@@ -2414,35 +2414,47 @@ async def _get_exit_ip_via_proxy(
 
 
 def _normalize_unresolvable_tracker_host(url: str) -> str:
-    """2026-01 — DNS auto-fallback for misconfigured tracker subdomains.
+    """2026-01 — DNS / SSL auto-fallback for misconfigured tracker subdomains.
 
     If `url`'s host is a `<sub>.<domain>` form (typically `api.krexion.com`)
-    that is NOT publicly resolvable AND the bare parent domain
-    (e.g. `krexion.com`) IS publicly resolvable, return `url` with the
-    host rewritten to the parent domain. Otherwise return `url` as-is.
+    AND
+       (a) it isn't publicly resolvable, OR
+       (b) the path starts with `/api/t/` (Krexion's tracker route, which
+           the same backend serves on the bare apex regardless of which
+           host header is used)
+    THEN we rewrite the host to the bare parent domain
+    (e.g. `krexion.com`). Otherwise the URL is returned as-is.
 
     Why this exists: many Krexion deployments use `api.<domain>` as the
-    tracker host but only ever configure DNS for the bare apex/www
-    domain (the `api.` subdomain is set up internally via nginx
-    `server_name` or a local hosts file). When the RUT browser tries
-    to navigate to `https://api.<domain>/api/t/...` THROUGH a
-    residential proxy, the proxy itself can't resolve `api.<domain>`
-    (no public DNS record) and returns 502 Bad Gateway — making EVERY
-    visit fail regardless of how clean the proxy pool is.
+    tracker host but:
+      • only configure a public DNS A record (or SSL certificate) for
+        the bare apex/www domain, not the `api.` subdomain
+      • OR configure DNS but never extend the apex SSL certificate to
+        cover the subdomain — so connecting to `api.<domain>:443` via
+        any residential proxy fails with `TLSV1_ALERT_INTERNAL_ERROR`
+      • OR the `api.` subdomain is set up internally via nginx
+        `server_name` or a local hosts file and is invisible to public
+        DNS / proxies
 
-    Rewriting to the bare domain side-steps this entirely, because the
-    Krexion tracker route (`/api/t/<short_code>`) is served by the
-    same backend regardless of which host the request comes in on
-    (FastAPI doesn't filter by Host header by default).
+    In every one of these failure modes, the proxy → 502 / SSL alert is
+    fatal for the visit. Rewriting to the bare domain side-steps all of
+    it, because the Krexion tracker route (`/api/t/<short_code>`) is
+    served by the same FastAPI backend regardless of which host the
+    request comes in on — and the apex domain ALWAYS has a working
+    SSL certificate (it's where the rest of the user-facing site lives).
 
     Implementation note: we explicitly resolve via PUBLIC DNS
-    (Cloudflare 1.1.1.1, with a Google 8.8.8.8 fallback) rather than
-    the local resolver. This is critical on the user's production VPS
-    where `api.<domain>` IS resolvable locally (via /etc/hosts or
-    nginx server_name) but still has no public A record — so a
-    system-default `socket.gethostbyname()` would falsely report it as
-    "resolvable" and skip the rewrite, leaving every residential
-    proxy unable to reach it.
+    (Cloudflare 1.1.1.1, with Google 8.8.8.8 + Quad9 fallback) rather
+    than the local resolver. This is critical on the user's production
+    VPS where `api.<domain>` IS resolvable locally (via /etc/hosts or
+    nginx server_name) but may still have no PUBLIC A record / SSL —
+    so a system-default `socket.gethostbyname()` would falsely report
+    it as "resolvable" and skip the rewrite.
+
+    Path-based rewrite kicks in even when DNS DOES resolve, because
+    the more common failure mode in production is SSL cert mismatch
+    (cheaper to detect by path pattern than by attempting a real TLS
+    handshake on every job start).
 
     Safe to call repeatedly: per-host results are LRU-cached in
     process memory after the first DNS round-trip (~50-150ms).
@@ -2451,12 +2463,29 @@ def _normalize_unresolvable_tracker_host(url: str) -> str:
         from urllib.parse import urlparse, urlunparse
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower()
+        path = parsed.path or ""
         if not host:
             return url
         # Must look like a subdomain (at least 3 dot-separated labels)
         parts = host.split(".")
         if len(parts) < 3:
             return url
+
+        # ── Path-based rewrite (always applied for Krexion tracker URLs) ─
+        # Krexion's tracker route is `/api/t/<short_code>` and the
+        # FastAPI backend serves it on every Host header the apex/www
+        # accepts. If we spot this path on a subdomain'd host, prefer
+        # the apex straight away — saves a DNS round-trip AND avoids
+        # the apex-only-SSL-cert failure mode entirely.
+        if path.startswith("/api/t/"):
+            parent = ".".join(parts[1:])
+            if parent and parent.count(".") >= 1:
+                port = parsed.port
+                netloc = f"{parent}:{port}" if port else parent
+                return urlunparse((
+                    parsed.scheme, netloc, parsed.path,
+                    parsed.params, parsed.query, parsed.fragment,
+                ))
 
         cache_key = host
         try:
@@ -2468,19 +2497,12 @@ def _normalize_unresolvable_tracker_host(url: str) -> str:
             """Query a public DNS server directly so we ignore any
             local /etc/hosts entry or nginx server_name shortcut that
             only exists on the deployment server."""
-            # Try low-cost stdlib path first using a couple of well-known
-            # public resolvers — avoids the dnspython dependency.
             import socket
             try:
-                # IMPORTANT: socket.getaddrinfo uses the SYSTEM resolver,
-                # which on the user's VPS is /etc/nsswitch.conf → files →
-                # dns, so /etc/hosts entries WILL satisfy it. We want
-                # PUBLIC resolution only, so we do a manual UDP DNS query.
                 import struct, random
                 def _udp_query(server_ip: str, hostname: str, timeout: float = 3.0) -> bool:
                     try:
                         tid = random.randint(0, 65535)
-                        # Build a minimal DNS A-record query packet
                         header = struct.pack(">HHHHHH", tid, 0x0100, 1, 0, 0, 0)
                         qname = b""
                         for label in hostname.split("."):
@@ -2501,7 +2523,6 @@ def _normalize_unresolvable_tracker_host(url: str) -> str:
                         if len(data) < 12:
                             return False
                         ancount = struct.unpack(">H", data[6:8])[0]
-                        # rcode in flags low nibble: 0 = NOERROR, 3 = NXDOMAIN
                         flags = struct.unpack(">H", data[2:4])[0]
                         rcode = flags & 0x0F
                         if rcode == 3:  # NXDOMAIN
@@ -2511,7 +2532,6 @@ def _normalize_unresolvable_tracker_host(url: str) -> str:
                         return ancount > 0
                     except Exception:
                         return False
-                # Try Cloudflare first, then Google as fallback.
                 for resolver_ip in ("1.1.1.1", "8.8.8.8", "9.9.9.9"):
                     try:
                         if _udp_query(resolver_ip, h):
@@ -2520,9 +2540,6 @@ def _normalize_unresolvable_tracker_host(url: str) -> str:
                         continue
                 return False
             except Exception:
-                # Last-resort fallback to system resolver. Worst case
-                # this keeps existing behaviour (no rewrite) instead of
-                # crashing the engine over a DNS quirk.
                 try:
                     socket.gethostbyname(h)
                     return True
@@ -2535,12 +2552,11 @@ def _normalize_unresolvable_tracker_host(url: str) -> str:
             if _resolves_public(host):
                 new_host = host
             else:
-                # Try parent domain (strip leftmost label)
                 parent = ".".join(parts[1:])
                 if _resolves_public(parent):
                     new_host = parent
                 else:
-                    new_host = host  # Neither resolves — leave as-is
+                    new_host = host
             try:
                 _NORMALIZE_TRACKER_CACHE[cache_key] = new_host
             except NameError:
