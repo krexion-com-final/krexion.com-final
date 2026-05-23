@@ -514,9 +514,13 @@ async def _init_browser_inner(sess: RecorderSession) -> None:
         });
     """)
 
-    # First steps in the recorded JSON
-    sess.steps.append(_build_wait_load(60000))
-    sess.steps.append(_build_wait(2000))
+    # 2026-01 — initial auto wait_for_load(60000) + wait(2000) removed
+    # per user request. The runtime engine's own page.goto(target_url,
+    # wait_until="domcontentloaded") already ensures the page is loaded
+    # before playback begins; pre-pending these two steps to the recorded
+    # JSON only burned watchdog seconds without adding reliability.
+    # Users who want an explicit settle delay can insert a wait step
+    # from the recorder UI right after starting.
 
     # Navigate — proxy-friendly strategy:
     # 1. First try `domcontentloaded` with a SHORT timeout so the user
@@ -881,10 +885,16 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
 
     if step is not None:
         sess.steps.append(step)
-        # Auto wait+wait_for_load after clicks (real-world feels more reliable)
-        sess.steps.append(_build_wait(1500))
-        sess.steps.append(_build_wait_load(60000))
-        sess.steps.append(_build_wait(2000))
+        # 2026-01 — auto waits removed per user request. Earlier this added
+        # wait(1500) + wait_for_load(60000) + wait(2000) after every click,
+        # which combined with the stuck-watchdog (60s URL-change threshold)
+        # caused legitimate visits to be aborted while waiting for the
+        # page-load event that never fires between clicks on the same form.
+        # If a click triggers a real navigation, the next action in the
+        # recorded sequence will naturally wait via its own selector
+        # resolution / fill timeout. For deliberate post-click pauses the
+        # user can manually add a wait step from the recorder UI
+        # (Insert → Wait / Wait for page load).
 
     return {"recorded": step is not None, "step": step, "element": info, "mode": mode, **{k: v for k, v in extra.items() if k != "element"}}
 
@@ -950,8 +960,9 @@ async def bind_dropdown(
         "match_by": match_by_norm,
     }
     sess.steps.append(step)
-    # Brief settle wait so subsequent steps see the post-change DOM.
-    sess.steps.append(_build_wait(500))
+    # 2026-01 — auto wait(500) removed per user request.
+    # Brief settle wait so subsequent steps see the post-change DOM
+    # is no longer auto-appended. User can insert a wait manually if needed.
 
     # Live-browser select using literal value OR sample-row lookup
     # OR fallback faker (2026-01) so the dropdown always gets a value
@@ -1120,7 +1131,7 @@ async def type_text(sess: RecorderSession, selector: str, value: str, header_nam
     template = f"{{{{{header_name}}}}}" if header_name else value
     step = _build_fill_step(selector, template)
     sess.steps.append(step)
-    sess.steps.append(_build_wait(800))
+    # 2026-01 — auto wait removed per user request (was wait(800) here).
     return {"recorded": True, "step": step, "header_name": header_name, **extra}
 
 
@@ -1147,20 +1158,25 @@ async def add_scroll_step(sess: RecorderSession, y: int) -> Dict[str, Any]:
             pass
     step = _build_scroll(y)
     sess.steps.append(step)
-    sess.steps.append(_build_wait(500))
+    # 2026-01 — auto wait(500) after scroll removed per user request.
     return {"recorded": True, "step": step}
 
 
 async def navigate_to(sess: RecorderSession, url: str) -> Dict[str, Any]:
-    """Navigate the page to a new URL. Records a wait_for_load step."""
+    """Navigate the page to a new URL. Records a `goto` step ONLY — auto
+    wait_for_load / wait steps are no longer appended (2026-01 — per user
+    request). The runtime engine's own goto already waits for
+    domcontentloaded; add an explicit wait step from the recorder UI if a
+    specific page needs a longer settle delay."""
     sess.touch()
     async with sess.lock:
         try:
             await sess.page.goto(url, wait_until="load", timeout=45000)
         except Exception as e:
             logger.warning(f"navigate failed: {e}")
-    sess.steps.append(_build_wait_load(60000))
-    sess.steps.append(_build_wait(2000))
+    # NOTE: previously auto-appended _build_wait_load(60000) + _build_wait(2000)
+    # here — removed per user request to prevent over-padded playback that
+    # blew past the stuck-watchdog window.
     return {"recorded": True, "url": url}
 
 
@@ -1224,9 +1240,10 @@ async def group_last_as_random(
         take = pending[-int(count):]
     step = _build_random_pick_evaluate(take)
     sess.steps.append(step)
-    sess.steps.append(_build_wait(2000))
-    sess.steps.append(_build_wait_load(60000))
-    sess.steps.append(_build_wait(2500))
+    # 2026-01 — auto wait(2000) + wait_for_load(60000) + wait(2500) after
+    # random-pick removed per user request. The random-pick JS itself
+    # navigates the page when it clicks an <a> with href; subsequent
+    # steps' selector timeouts will naturally wait for the new DOM.
     sess._pending_random = []
     return {"recorded": True, "step": step, "items": take}
 

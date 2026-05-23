@@ -1486,6 +1486,80 @@ async def _probe_proxy_geo(proxy: Dict[str, Any], ua: str) -> Dict[str, Any]:
     return result
 
 
+async def _probe_proxy_target_reachable(
+    proxy: Dict[str, Any], target_url: str, ua: str,
+    timeout_s: float = 12.0,
+) -> Tuple[bool, str]:
+    """2026-01 — Pre-flight reachability check: verify the proxy can
+    actually reach the *target* URL (not just the internet) BEFORE we
+    spawn a browser context for the visit.
+
+    Why: residential pools (proxy-jet, brightdata, etc.) regularly serve
+    exit nodes that pass ipwho.is / ip-api.com geo probes (because those
+    endpoints are extremely permissive) but get refused / firewalled /
+    blackholed by the actual offer landing page. Without this pre-check
+    those visits used to spawn a full Chromium context, attempt a
+    `page.goto()`, time out after 30-60s with "Proxy tunnel failed",
+    and waste a UA/lead from the user's batches.
+
+    Returns (ok, diagnostic). On `ok=False` the caller should skip this
+    visit (no browser launch, no UA/lead consumption) and move on to
+    the next proxy in the pool.
+
+    Uses a cheap HEAD request first; falls back to a GET with tiny
+    Range header if HEAD is rejected by the target (some Cloudflare
+    setups do this). Anything that returns HTTP 2xx/3xx/4xx counts as
+    "reachable" — we only fail on transport errors (connect refused,
+    SSL handshake fail, timeout, tunnel error). 4xx responses (403,
+    404, etc.) mean the proxy DID reach the target — the offer's own
+    rules will then handle access; that's the existing engine's job.
+    """
+    server = proxy.get("server", "")
+    if proxy.get("username"):
+        try:
+            prefix, rest = server.split("://", 1)
+            server = f"{prefix}://{proxy['username']}:{proxy.get('password','')}@{rest}"
+        except ValueError:
+            return False, "Malformed proxy server string"
+
+    headers = {
+        "User-Agent": ua or "Mozilla/5.0",
+        # Tiny range so even servers that don't support HEAD return cheaply
+        "Range": "bytes=0-0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    timeout_cfg = httpx.Timeout(timeout_s, connect=min(8.0, timeout_s))
+    try:
+        async with httpx.AsyncClient(
+            proxy=server, timeout=timeout_cfg, headers=headers,
+            verify=False, http2=False, follow_redirects=False,
+        ) as cli:
+            # HEAD first (cheapest)
+            try:
+                r = await cli.head(target_url)
+                # Any HTTP response — even 4xx/5xx — proves the proxy
+                # reached the target. Only transport failures count.
+                return True, f"HEAD {r.status_code}"
+            except httpx.HTTPError:
+                pass
+            # Fallback: tiny GET (HEAD blocked at edge / not implemented)
+            r = await cli.get(target_url)
+            return True, f"GET {r.status_code}"
+    except httpx.ProxyError as e:
+        return False, f"Proxy tunnel: {str(e)[:80]}"
+    except httpx.ConnectError as e:
+        return False, f"Connect: {str(e)[:80]}"
+    except httpx.ReadTimeout:
+        return False, "Read timeout"
+    except httpx.ConnectTimeout:
+        return False, "Connect timeout"
+    except Exception as e:
+        # Any other transport-level error → consider unreachable so the
+        # engine moves on. (Browser would have failed similarly later
+        # but at a much higher cost.)
+        return False, f"{type(e).__name__}: {str(e)[:80]}"
+
+
 # ─── Stealth init script ────────────────────────────────────────
 # 2026-01: comprehensive anti-detect coverage. Spoofs every JS API that
 # MaxMind minFraud / IPQualityScore / Anura / ArkoseLabs / FingerprintJS
@@ -3411,6 +3485,39 @@ async def run_real_user_traffic_job(
             entry["error"] = "Exit IP already clicked this link before"
             push_live_step(job_id, i + 1, "filter", "skipped", f"Duplicate IP {geo['exit_ip']}")
             return await _record(job_id, entry, report, report_lock, db)
+
+        # ── 2026-01: Target-URL reachability pre-check ──────────────
+        # The geo probe (ipwho.is / ip-api.com) only confirms the
+        # proxy can reach the internet, NOT that it can reach the
+        # specific target URL. Residential pools regularly serve
+        # exit nodes that pass geo but get blackholed / SSL-blocked /
+        # 403'd by the actual offer's CDN. Catching those here saves
+        # a full Chromium spawn + UA/lead consumption per dead proxy.
+        # Disabled when target_url is the local-pod tracker (`/api/t/...`
+        # on this preview pod) since that's reached without the proxy
+        # via the tracker-bypass path anyway.
+        try:
+            from urllib.parse import urlparse as _t_up
+            _t_host = (_t_up(target_url).hostname or "").lower()
+        except Exception:
+            _t_host = ""
+        _skip_reachability = _t_host in _bypass_hosts()
+        if not _skip_reachability:
+            _reach_ok, _reach_diag = await _probe_proxy_target_reachable(
+                proxy, target_url, ua, timeout_s=12.0,
+            )
+            if not _reach_ok:
+                entry["status"] = "failed"
+                entry["error"] = f"Proxy can't reach target ({_reach_diag}) — skipped before browser launch"
+                push_live_step(
+                    job_id, i + 1, "filter", "skipped",
+                    f"Dead proxy for target: {_reach_diag}",
+                )
+                return await _record(job_id, entry, report, report_lock, db)
+            push_live_step(
+                job_id, i + 1, "filter", "ok",
+                f"Target reachable via proxy ({_reach_diag})",
+            )
 
         # Pick form-fill row — state-matched OR sequential
         # ── 2026-01 ROW-FIRST mode: row was already picked at the
@@ -5503,6 +5610,125 @@ async def _execute_automation_steps(
                             await on_screenshot(idx + 1, shot_name, png_bytes)
                         except Exception:
                             pass
+                elif action in ("auto_continue", "auto_continue_survey"):
+                    # 2026-01 — Smart multi-page survey continuation.
+                    # After the user's custom JSON has filled the initial
+                    # form & submitted, append this step at the end of
+                    # the automation to let the engine drive the bot
+                    # through any post-submit survey pages (Yes/No
+                    # questions, "Continue", "Claim", deal cards, etc.)
+                    # until either the conversion page is reached, the
+                    # page stops changing, or max_iterations is hit.
+                    # Re-uses the same helpers that the auto-fill heuristic
+                    # already relies on (survey_click_v2 + complete_random_deals
+                    # + _dismiss_popups + a generic "click any continue-like
+                    # button" loop), so behaviour is consistent with the
+                    # non-custom-JSON path.
+                    try:
+                        from rut_flash_helpers import (
+                            survey_click_v2 as _ac_survey,
+                            complete_random_deals as _ac_deals,
+                        )
+                    except Exception:
+                        _ac_survey = None
+                        _ac_deals = None
+                    try:
+                        from form_filler import _dismiss_popups as _ac_dismiss
+                    except Exception:
+                        _ac_dismiss = None
+                    max_iter = int(step.get("max_iterations") or 15)
+                    per_iter_wait_ms = int(step.get("iteration_wait_ms") or 1500)
+                    stop_on_host = (step.get("stop_on_host") or "").strip().lower()
+                    _ac_continue_js = (
+                        "(function(){"
+                        " var KW=['continue','next','submit','i agree','agree','confirm','claim','yes','accept','proceed','get started','unlock','finish','complete'];"
+                        " function vis(e){try{var s=window.getComputedStyle(e);return s&&s.display!=='none'&&s.visibility!=='hidden'&&e.offsetWidth>0&&e.offsetHeight>0;}catch(_){return false;}}"
+                        " var nodes=Array.from(document.querySelectorAll('button,a,input[type=button],input[type=submit],[role=button]'));"
+                        " for(var i=0;i<nodes.length;i++){var el=nodes[i];if(!vis(el))continue;"
+                        "  var t=((el.innerText||el.textContent||el.value||'')+'').toLowerCase().replace(/\\s+/g,' ').trim();"
+                        "  if(!t)continue;"
+                        "  for(var k=0;k<KW.length;k++){if(t===KW[k]||t.indexOf(KW[k])>=0){"
+                        "    try{el.scrollIntoView({block:'center'});}catch(_){};"
+                        "    if(el.tagName==='A'&&el.href&&!el.target){window.location.assign(el.href);return true;}"
+                        "    el.click();"
+                        "    var f=el.form||(el.closest&&el.closest('form'));"
+                        "    if(f&&(el.type==='submit'||(el.getAttribute&&el.getAttribute('type')==='submit'))){setTimeout(function(){try{if(!f._krx_acs){f._krx_acs=true;f.submit();}}catch(_){}},150);}"
+                        "    return true;"
+                        "  }}"
+                        " }"
+                        " return false;"
+                        "})()"
+                    )
+                    _last_url = ""
+                    _no_change_count = 0
+                    try:
+                        _last_url = page.url or ""
+                    except Exception:
+                        pass
+                    for _ai in range(max_iter):
+                        progress = False
+                        # Dismiss popups first so they don't block clicks
+                        if _ac_dismiss is not None:
+                            try:
+                                await _ac_dismiss(page)
+                            except Exception:
+                                pass
+                        # Stage 1: survey answer clicks (Yes/No chips, etc)
+                        if _ac_survey is not None:
+                            try:
+                                _sres = await _ac_survey(page, max_iterations=3, picker=None)
+                                if isinstance(_sres, dict) and int(_sres.get("clicks", 0)) > 0:
+                                    progress = True
+                            except Exception:
+                                pass
+                        # Stage 2: deal cards (FlashRewards/RetailProductsUSA)
+                        if _ac_deals is not None:
+                            try:
+                                _dn = await _ac_deals(page, count_min=1, count_max=2)
+                                if int(_dn or 0) > 0:
+                                    progress = True
+                            except Exception:
+                                pass
+                        # Stage 3: generic continue-button click
+                        try:
+                            _clicked = bool(await page.evaluate(_ac_continue_js))
+                            if _clicked:
+                                progress = True
+                        except Exception:
+                            pass
+                        # Settle wait — let any nav / async render finish
+                        try:
+                            await page.wait_for_timeout(per_iter_wait_ms)
+                        except Exception:
+                            pass
+                        try:
+                            await page.wait_for_load_state("domcontentloaded", timeout=8000)
+                        except Exception:
+                            pass
+                        # URL-change detection — stop early if nothing's
+                        # changing for two consecutive iterations AND nothing
+                        # was clicked this round.
+                        try:
+                            _cur = page.url or ""
+                        except Exception:
+                            _cur = _last_url
+                        # Optional explicit stop signal: caller can pass
+                        # stop_on_host="thank-you.example.com" to break the
+                        # loop as soon as a conversion-style host is reached.
+                        if stop_on_host:
+                            try:
+                                from urllib.parse import urlparse as _up
+                                if stop_on_host in (_up(_cur).hostname or "").lower():
+                                    break
+                            except Exception:
+                                pass
+                        if _cur == _last_url and not progress:
+                            _no_change_count += 1
+                            if _no_change_count >= 2:
+                                break
+                        else:
+                            _no_change_count = 0
+                            _last_url = _cur
                 else:
                     if not optional:
                         return {"status": "failed", "error": f"Unknown action '{action}' at step {idx+1}", "executed_steps": executed}
