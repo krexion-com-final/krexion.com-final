@@ -4416,6 +4416,29 @@ async def run_real_user_traffic_job(
                     except Exception:
                         push_live_step(job_id, i + 1, "browser", "ok",
                                        f"Page loaded (HTTP {entry['http_status'] or '?'})")
+
+                    # ── 2026-05: EARLY click logging ─────────────────────
+                    # Insert this visit's click row into user_db.clicks RIGHT
+                    # AWAY (with visit_status='pending') so the exit-IP is
+                    # detectable as a duplicate by EVERY subsequent visit
+                    # (this job AND any other job/tab/worker) within
+                    # seconds — not minutes after the full automation
+                    # finishes. The end-of-visit _log_click_for_link call
+                    # in _record() will UPDATE this same row with final
+                    # fields (visit_status, final_url, conversion). No
+                    # double-counting, no double-insert.
+                    try:
+                        _j_for_log = RUT_JOBS.get(job_id, {})
+                        await _log_click_for_link(entry, _j_for_log, db, early=True)
+                    except Exception as _ele:
+                        # Best-effort — duplicate-detection without this
+                        # still works via in-memory duplicate_ip_set and
+                        # the tracker's own click recording, so we just
+                        # log and move on.
+                        try:
+                            logger.warning(f"RUT early click log failed: {_ele}")
+                        except Exception:
+                            pass
                 except Exception as e:
                     entry["status"] = "failed"
                     err_text = str(e)
@@ -6979,12 +7002,25 @@ async def _multi_step_fill(
     }
 
 
-async def _log_click_for_link(entry: Dict[str, Any], job_info: Dict[str, Any], main_db):
+async def _log_click_for_link(
+    entry: Dict[str, Any],
+    job_info: Dict[str, Any],
+    main_db,
+    early: bool = False,
+) -> None:
     """Mirror the /api/t/ tracker: create a click document in the link
-    owner's per-user DB and bump the link's click counter. Called after
-    every RUT visit so the dashboard Clicks page + duplicate-IP detection
-    work even when the browser hits the offer URL directly (auto-swapped
-    from a localhost tracker URL)."""
+    owner's per-user DB and bump the link's click counter.
+
+    2026-05: now supports an EARLY logging mode. When `early=True` this
+    is called RIGHT AFTER `page.goto(offer_url)` succeeds (before any
+    automation runs) so the exit-IP enters the user's clicks collection
+    immediately. The click_doc is stamped with `entry['_early_click_id']`
+    and a `visit_status='pending'` so the final call (with `early=False`,
+    from `_record()`) updates the SAME document with the visit's final
+    state (final_url, conversion_page_reached, real status) rather than
+    inserting a second row. Result: 1 click row per visit (no double
+    counting) AND the IP is duplicate-checkable seconds after goto
+    instead of seconds after the entire 30-90s visit completes."""
     import uuid as _uuid
     link_id = job_info.get("link_id")
     owner_id = job_info.get("link_owner_id")
@@ -7009,8 +7045,32 @@ async def _log_click_for_link(entry: Dict[str, Any], job_info: Dict[str, Any], m
         ua = entry.get("ua") or ""
         device_display = entry.get("device_name") or entry.get("os") or "Unknown"
 
+        # ── Branch A: end-of-visit UPDATE for early-logged clicks ─────
+        early_id = entry.get("_early_click_id")
+        if (not early) and early_id:
+            try:
+                await user_db.clicks.update_one(
+                    {"id": early_id},
+                    {"$set": {
+                        "visit_status": entry.get("status") or "",
+                        "final_url": entry.get("final_url") or "",
+                        "conversion_page_reached": bool(entry.get("conversion_page_reached")),
+                        "is_vpn": is_vpn,
+                        # If we somehow learned a better/canonical exit
+                        # IP between early-insert and now, refresh those
+                        # fields too. exit_ip is usually unchanged.
+                        **({"ip_address": exit_ip} if exit_ip else {}),
+                        **({"ipv4": exit_ip} if exit_ip and ":" not in exit_ip else {}),
+                    }},
+                )
+            except Exception as _ue:
+                logger.warning(f"RUT click UPDATE failed: {_ue}")
+            return
+
+        # ── Branch B: regular INSERT (early=True OR no early row) ─────
+        new_id = str(_uuid.uuid4())
         click_doc = {
-            "id": str(_uuid.uuid4()),
+            "id": new_id,
             "click_id": str(_uuid.uuid4()),
             "link_id": link_id,
             "user_id": owner_id,
@@ -7038,17 +7098,24 @@ async def _log_click_for_link(entry: Dict[str, Any], job_info: Dict[str, Any], m
             "referrer_source": "rut",
             "referrer_source_name": "Real User Traffic",
             "source": "real_user_traffic",
-            "visit_status": entry.get("status") or "",
+            "visit_status": ("pending" if early else (entry.get("status") or "")),
             "final_url": entry.get("final_url") or "",
             "conversion_page_reached": bool(entry.get("conversion_page_reached")),
             "created_at": entry.get("timestamp") or datetime.now(timezone.utc).isoformat(),
         }
         await user_db.clicks.insert_one(click_doc)
-        # Bump link-level click counter on the main DB
+        if early:
+            # Stash the id so the end-of-visit call updates this row
+            # instead of inserting a duplicate.
+            entry["_early_click_id"] = new_id
+        # Bump link-level click counter on the main DB (only once per
+        # visit — on the EARLY insert if that path runs, else on the
+        # late insert. The branch-A update path returns above without
+        # bumping, so this is safe).
         await main_db.links.update_one({"id": link_id}, {"$inc": {"clicks": 1}})
     except Exception as e:
         # Best-effort — never crash the visit because click logging failed
-        logger.warning(f"RUT click log failed (job_id-unknown): {e}")
+        logger.warning(f"RUT click log failed (job_id-unknown, early={early}): {e}")
 
 
 async def _record(
