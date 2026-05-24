@@ -1098,7 +1098,8 @@ def _record_stuck_event(job_id: str, visit_index: int, url: str, seconds_stuck: 
 
 async def _stuck_watchdog(page, job_id: str, visit_index: int,
                           threshold_s: float = 240.0, poll_s: float = 5.0,
-                          shots_dir=None, on_stuck=None) -> None:
+                          shots_dir=None, on_stuck=None,
+                          state: Optional[Dict[str, Any]] = None) -> None:
     """Watch the page while a visit's automation steps are running. If
     the page hasn't progressed for `threshold_s` seconds we consider
     the visit stuck and:
@@ -1194,6 +1195,14 @@ async def _stuck_watchdog(page, job_id: str, visit_index: int,
     last_progress = await _probe()
     last_changed_at = __import__("time").monotonic()
     recorded_this_period = False
+    # 2026-05: track progression so the caller can distinguish between
+    # "page never moved" (truly dead) vs "page progressed then went idle"
+    # (submit succeeded, just no more user-driven steps). state is a
+    # shared dict the caller can read AFTER the watchdog fires.
+    progression_count = 0
+    if state is not None:
+        state.setdefault("progressed", False)
+        state.setdefault("progression_count", 0)
     while True:
         try:
             await asyncio.sleep(poll_s)
@@ -1237,6 +1246,10 @@ async def _stuck_watchdog(page, job_id: str, visit_index: int,
             last_changed_at = now
             recorded_this_period = False
             last_progress = await _probe()
+            progression_count += 1
+            if state is not None:
+                state["progressed"] = True
+                state["progression_count"] = progression_count
             continue
         # URL is unchanged — check DOM-progress fingerprint. If it
         # moved (different title / hash / search / text-content-hash /
@@ -1283,6 +1296,10 @@ async def _stuck_watchdog(page, job_id: str, visit_index: int,
                 last_progress = cur_progress
                 last_changed_at = now
                 recorded_this_period = False
+                progression_count += 1
+                if state is not None:
+                    state["progressed"] = True
+                    state["progression_count"] = progression_count
                 continue
         elif cur_progress is not None:
             # First successful probe — seed the baseline so the next
@@ -4893,31 +4910,69 @@ async def run_real_user_traffic_job(
                             if not _steps_task.done():
                                 _steps_task.cancel()
 
+                        # 2026-05: shared state dict so the watchdog can
+                        # report whether the page ever progressed before
+                        # going idle. If it did, the visit is treated as
+                        # a successful submit (status="ok") rather than
+                        # a dead-page abort (status="stuck").
+                        _wd_state: Dict[str, Any] = {"progressed": False, "progression_count": 0}
                         _watchdog = asyncio.create_task(
                             _stuck_watchdog(
                                 page, job_id, i + 1,
                                 threshold_s=float(stuck_watchdog_seconds or 240.0),
                                 shots_dir=shots_dir,
                                 on_stuck=_trigger_abort_steps,
+                                state=_wd_state,
                             )
                         )
                         try:
                             try:
                                 step_res = await _steps_task
                             except asyncio.CancelledError:
-                                # Watchdog aborted us — surface as a
-                                # distinct "stuck" status so the report
-                                # row + diagnostics agree.
+                                # Watchdog aborted us. Two outcomes:
+                                #   A) Page never progressed → genuinely
+                                #      dead (proxy died, captcha wall,
+                                #      blank screen). Status = "stuck".
+                                #   B) Page progressed at least once then
+                                #      went idle (submit succeeded, just
+                                #      no more user-driven survey steps
+                                #      in the JSON). Status = "ok" — the
+                                #      submit DID happen, the visit
+                                #      counts as successful.
                                 _stuck_url_for_err = ""
                                 try:
                                     _stuck_url_for_err = page.url or ""
                                 except Exception:
                                     pass
-                                step_res = {
-                                    "status": "stuck",
-                                    "error": f"Visit aborted by watchdog (page stuck >{int(stuck_watchdog_seconds or 240)}s on {_stuck_url_for_err[:200]})",
-                                    "executed_steps": 0,
-                                }
+                                _progressed = bool(_wd_state.get("progressed"))
+                                _pcount = int(_wd_state.get("progression_count") or 0)
+                                if _progressed:
+                                    # Treat as successful submit — page
+                                    # is alive, just idle on a post-
+                                    # submit/survey screen the JSON
+                                    # didn't continue past.
+                                    step_res = {
+                                        "status": "ok",
+                                        "error": (
+                                            f"Visit submitted; page progressed {_pcount}× then idled "
+                                            f"on {_stuck_url_for_err[:160]} (auto-marked ok by watchdog — "
+                                            f"not a dead page)"
+                                        ),
+                                        "executed_steps": 0,
+                                    }
+                                    try:
+                                        push_live_step(
+                                            job_id, i + 1, "wd_ok_idle", "ok",
+                                            f"Watchdog: page progressed {_pcount}× — marking visit as OK",
+                                        )
+                                    except Exception:
+                                        pass
+                                else:
+                                    step_res = {
+                                        "status": "stuck",
+                                        "error": f"Visit aborted by watchdog (page stuck >{int(stuck_watchdog_seconds or 240)}s on {_stuck_url_for_err[:200]})",
+                                        "executed_steps": 0,
+                                    }
                         finally:
                             _watchdog.cancel()
                             try:
@@ -6528,15 +6583,110 @@ async def _smart_select_with_fallback(page, selector: str, value: Any,
     if not uniq_selectors:
         raise ValueError(f"select: empty selector (value={val!r})")
 
-    # Per-selector timeout — split the total budget so a bad selector
-    # doesn't eat the whole 25s. Minimum 3s per try to give Playwright
-    # room to actually wait for a slowly-rendered dropdown.
+    last_err: Optional[Exception] = None
+
+    # ── PHASE 1 (instant, ~10 ms): JS-driven set ─────────────────────
+    # Why we try this FIRST instead of last:
+    #   1. It's a single page.evaluate round-trip — no actionability wait,
+    #      no visibility wait, no 25s-timeout per selector.
+    #   2. It handles Bootstrap-Select (`class="selectpicker"`), Select2,
+    #      Chosen, and ANY plugin that hides the native <select> and
+    #      replaces it with a custom UI. The native element still drives
+    #      form submission, so setting .value + dispatching change events
+    #      is the correct fix — and Playwright's select_option would
+    #      otherwise wait forever for the hidden element to become visible.
+    #   3. It tries label → value → numeric-index → label-substring
+    #      matching ALL inside a single JS pass.
+    #   4. It dispatches native `input`+`change` events AND jQuery
+    #      `.trigger('change')` + selectpicker.refresh / chosen:updated,
+    #      so the visible plugin UI and any form validators stay in sync.
+    # If JS fails (e.g. element in cross-origin iframe), we fall through
+    # to Playwright's select_option in PHASE 2.
+    _js_set_select = """
+    (function(args) {
+        var selectors = args.selectors;
+        var raw = args.raw;
+        var byLabel = args.byLabel;
+        function findOpt(el, raw, byLabel) {
+            const want = String(raw);
+            const wantTrim = want.trim().toLowerCase();
+            for (let i = 0; i < el.options.length; i++) {
+                const o = el.options[i];
+                if (byLabel) {
+                    const t = (o.text || '').trim().toLowerCase();
+                    const l = (o.label || '').trim().toLowerCase();
+                    if (t === wantTrim || l === wantTrim) return o;
+                } else {
+                    if (String(o.value) === want) return o;
+                }
+            }
+            // Try the OTHER strategy if the primary didn't match
+            for (let i = 0; i < el.options.length; i++) {
+                const o = el.options[i];
+                if (byLabel) {
+                    if (String(o.value) === want) return o;
+                } else {
+                    const t = (o.text || '').trim().toLowerCase();
+                    if (t === wantTrim) return o;
+                }
+            }
+            // Substring on label (handles "May 2024" vs "May")
+            for (let i = 0; i < el.options.length; i++) {
+                const o = el.options[i];
+                const t = (o.text || '').trim().toLowerCase();
+                if (t && wantTrim && (t === wantTrim || t.indexOf(wantTrim) === 0)) return o;
+            }
+            // Index fallback for numeric raw
+            if (/^\\d+$/.test(want)) {
+                const idx = parseInt(want, 10);
+                if (idx >= 0 && idx < el.options.length) return el.options[idx];
+            }
+            return null;
+        }
+        for (let s = 0; s < selectors.length; s++) {
+            let el = null;
+            try { el = document.querySelector(selectors[s]); } catch (e) { continue; }
+            if (!el || el.tagName !== 'SELECT') continue;
+            let opt = findOpt(el, raw, byLabel);
+            if (!opt) continue;
+            el.value = opt.value;
+            try { el.dispatchEvent(new Event('input',  {bubbles: true})); } catch (e) {}
+            try { el.dispatchEvent(new Event('change', {bubbles: true})); } catch (e) {}
+            try {
+                if (window.jQuery && window.jQuery(el).length) {
+                    window.jQuery(el).val(opt.value).trigger('change');
+                    try { window.jQuery(el).selectpicker('refresh'); } catch (e) {}
+                    try { window.jQuery(el).trigger('chosen:updated'); } catch (e) {}
+                }
+            } catch (e) {}
+            return {ok: true, selector: selectors[s], value: opt.value, label: opt.text};
+        }
+        return {ok: false};
+    })
+    """
+    try:
+        js_result = await asyncio.wait_for(
+            page.evaluate(
+                _js_set_select,
+                {"selectors": uniq_selectors, "raw": val, "byLabel": (match_by == "label")},
+            ),
+            timeout=4.0,
+        )
+        if isinstance(js_result, dict) and js_result.get("ok"):
+            return  # SUCCESS via JS — works for native AND hidden plugin selects
+    except Exception as e:
+        last_err = e
+
+    # ── PHASE 2 (slower, ~3 s per selector): Playwright select_option ──
+    # Fallback for cases JS couldn't reach (cross-origin iframes) or
+    # forms that ONLY respond to fully-simulated user events. Per-selector
+    # timeout is the original `timeout` divided across remaining selectors
+    # so a bad pattern can't eat the entire 25s budget.
     per_sel_timeout = (
         timeout if len(uniq_selectors) == 1
         else max(3000, int(timeout / max(2, len(uniq_selectors))))
     )
 
-    last_err: Optional[Exception] = None
     for sel in uniq_selectors:
         for strategy, payload in strategies:
             try:
@@ -6550,6 +6700,7 @@ async def _smart_select_with_fallback(page, selector: str, value: Any,
             except Exception as e:
                 last_err = e
                 continue
+
     if last_err is not None:
         raise last_err
 
