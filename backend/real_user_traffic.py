@@ -1097,7 +1097,7 @@ def _record_stuck_event(job_id: str, visit_index: int, url: str, seconds_stuck: 
 
 
 async def _stuck_watchdog(page, job_id: str, visit_index: int,
-                          threshold_s: float = 60.0, poll_s: float = 5.0,
+                          threshold_s: float = 240.0, poll_s: float = 5.0,
                           shots_dir=None, on_stuck=None) -> None:
     """Watch the page while a visit's automation steps are running. If
     the page hasn't progressed for `threshold_s` seconds we consider
@@ -1115,6 +1115,15 @@ async def _stuck_watchdog(page, job_id: str, visit_index: int,
     long form-submit sequences (form fill + Continue + cascading
     wait_for_load steps that can total 25-30s of intentional waiting)
     don't get killed prematurely.
+
+    2026-05: default raised again from 60s → 240s (4 min) for slow
+    survey-style offer pages (e.g. anyunclaimedassets.com/indexform.php)
+    where multi-step SPA transitions + form-fill + submit + thank-you
+    redirect can legitimately take 90-180s end-to-end. The
+    chrome-error:// fast-path below still fires INSTANTLY (no wait) so
+    dead proxies / DNS failures / SSL errors are still caught
+    immediately — only the "page is alive but slow" case gets the
+    extended budget.
 
     2026-01 (revised): "Progress" is now defined as EITHER the main-frame
     URL changing OR the DOM-progress fingerprint changing (body text
@@ -1264,9 +1273,9 @@ async def _stuck_watchdog(page, job_id: str, visit_index: int,
                     _title_chg or _hash_chg or _search_chg
                     or _text_hash_chg                  # ANY content change (even same length)
                     or _ctrls_chg                      # form controls added/removed
-                    or _text_delta >= 4                # lowered from 8 — small survey deltas
+                    or _text_delta >= 1                # 2026-05: lowered from 4 — even single-char delta resets
                     or _child_delta >= 1
-                    or _node_delta >= 3                # lowered from 5
+                    or _node_delta >= 1                # 2026-05: lowered from 3 — any DOM node add/remove resets
                 )
             except Exception:
                 _dom_changed = False
@@ -2992,11 +3001,13 @@ async def run_real_user_traffic_job(
     proxyjet_unique_retry_cap: int = 50,
     # 2026-01: per-job override for the stuck-watchdog inactivity
     # threshold (seconds the page's main-frame URL is allowed to stay
-    # unchanged before the visit is force-aborted). Default 60 — raised
-    # from the old 25 so long form-submit sequences don't get killed
-    # mid-wait. Operators can lower it (faster fail-fast) or raise it
-    # for offers with extreme slow loads.
-    stuck_watchdog_seconds: float = 60.0,
+    # unchanged before the visit is force-aborted). Default raised from
+    # 60 → 240 (2026-05) so slow survey-style offer pages get enough
+    # time to complete multi-step SPA + form-submit + thank-you flows.
+    # chrome-error:// fast-path still fires INSTANTLY so dead proxies
+    # are still aborted immediately. Operators can lower it (faster
+    # fail-fast) or raise it via UI for extreme cases.
+    stuck_watchdog_seconds: float = 240.0,
     # ── 2026-05: Pure JSON Mode ─────────────────────────────────────
     # When True, the engine STRICTLY follows the recorded automation
     # JSON without any AI involvement:
@@ -4885,7 +4896,7 @@ async def run_real_user_traffic_job(
                         _watchdog = asyncio.create_task(
                             _stuck_watchdog(
                                 page, job_id, i + 1,
-                                threshold_s=float(stuck_watchdog_seconds or 60.0),
+                                threshold_s=float(stuck_watchdog_seconds or 240.0),
                                 shots_dir=shots_dir,
                                 on_stuck=_trigger_abort_steps,
                             )
@@ -4904,7 +4915,7 @@ async def run_real_user_traffic_job(
                                     pass
                                 step_res = {
                                     "status": "stuck",
-                                    "error": f"Visit aborted by watchdog (page stuck >{int(stuck_watchdog_seconds or 60)}s on {_stuck_url_for_err[:200]})",
+                                    "error": f"Visit aborted by watchdog (page stuck >{int(stuck_watchdog_seconds or 240)}s on {_stuck_url_for_err[:200]})",
                                     "executed_steps": 0,
                                 }
                         finally:

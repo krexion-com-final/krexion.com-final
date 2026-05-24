@@ -259,9 +259,11 @@ export default function RealUserTrafficPage() {
   const [useProxyJetAuto, setUseProxyJetAuto] = useState(false);
   // 2026-01: per-job stuck-watchdog inactivity threshold (seconds).
   // Pages where the URL doesn't change for longer than this are
-  // force-aborted. Default raised from old hardcoded 25 → 60 so
-  // long form-submit sequences don't get killed mid-wait.
-  const [stuckWatchdogSeconds, setStuckWatchdogSeconds] = useState(60);
+  // force-aborted. Default raised from old hardcoded 25 → 60 → 240
+  // (2026-05) so slow survey-style offer pages don't get killed
+  // mid-flow. chrome-error:// fast-path still fires instantly for
+  // dead proxies / DNS failures (handled in backend watchdog).
+  const [stuckWatchdogSeconds, setStuckWatchdogSeconds] = useState(240);
   const [proxyJetCountry, setProxyJetCountry] = useState("US");
   const [proxyJetState, setProxyJetState] = useState("");
   const [pjConfigured, setPjConfigured] = useState(null); // null=unknown, true/false
@@ -924,7 +926,7 @@ export default function RealUserTrafficPage() {
       // longer than this (URL not changing) are force-aborted. Default
       // 60 — raised from old hardcoded 25 to handle slow form-submit
       // sequences.
-      fd.append("stuck_watchdog_seconds", String(stuckWatchdogSeconds || 60));
+      fd.append("stuck_watchdog_seconds", String(stuckWatchdogSeconds || 240));
 
       fd.append("form_fill_enabled", String(formFillEnabled));
       if (formFillEnabled) {
@@ -1968,13 +1970,13 @@ export default function RealUserTrafficPage() {
                 data-testid="rut-stuck-watchdog-seconds"
                 type="number"
                 min={10}
-                max={300}
+                max={600}
                 value={stuckWatchdogSeconds}
-                onChange={(e) => setStuckWatchdogSeconds(Math.max(10, Math.min(300, Number(e.target.value) || 60)))}
+                onChange={(e) => setStuckWatchdogSeconds(Math.max(10, Math.min(600, Number(e.target.value) || 240)))}
                 className="mt-1 bg-zinc-800 border-zinc-700 text-zinc-100"
               />
               <p className="text-xs text-gray-500 mt-1">
-                If page URL doesn't change for this many seconds the visit is aborted. Default 60 — raise for offers with slow form submissions, lower for fast fail-on-stuck.
+                If page URL & DOM both stay frozen for this many seconds the visit is aborted. Default 240 (4 min) — raise for very slow offers, lower for fast fail-on-stuck. Dead proxies / chrome-errors are aborted instantly regardless.
               </p>
             </div>
           </div>
