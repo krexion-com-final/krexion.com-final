@@ -1131,14 +1131,44 @@ async def _stuck_watchdog(page, job_id: str, visit_index: int,
     # (route, modal open, new survey question rendered). Computing this
     # is one Playwright evaluate call (single round-trip) instead of a
     # full innerHTML snapshot, keeping per-poll cost ~10 ms.
+    #
+    # ── 2026-05 (improved sensitivity) ──
+    # Issue: survey-style SPAs (e.g. anyunclaimedassets indexform.php)
+    # swap question text WITHOUT changing length / node count appreciably,
+    # so the bot's automation was progressing but the watchdog couldn't
+    # see it and killed the visit at 60s. Fixes:
+    #   1. Add a fast 32-bit FNV-1a hash of body.innerText — detects ANY
+    #      content change even if length stays constant.
+    #   2. Add `location.search` (query string) — many SPAs encode step
+    #      in `?step=3` etc.
+    #   3. Add visible button/input count — survey transitions usually
+    #      add/remove form controls.
+    #   4. Add the FIRST 80 chars of trimmed innerText so a quick eyeball
+    #      shows the actual screen content the watchdog sees.
+    # Any change in any of these signals resets the stuck timer.
     _PROGRESS_JS = (
         "()=>{try{"
         "var b=document.body;"
-        "var t=(b&&b.innerText)?b.innerText.length:0;"
+        "var raw=(b&&b.innerText)?b.innerText:'';"
+        "var t=raw.length;"
         "var c=(b&&b.children)?b.children.length:0;"
         "var d=(b&&b.querySelectorAll)?b.querySelectorAll('*').length:0;"
-        "return [document.title||'',(location.hash||''),t,c,d];"
-        "}catch(e){return ['','',0,0,0];}}"
+        # FNV-1a 32-bit hash — fast, deterministic, no deps
+        "var h=2166136261;"
+        "for(var i=0;i<raw.length;i++){h^=raw.charCodeAt(i);h=(h*16777619)>>>0;}"
+        # Visible interactive control count
+        "var ctrls=0;"
+        "try{"
+        " var sel=b?b.querySelectorAll('button,a[href],input,select,textarea,[role=button]'):[];"
+        " for(var k=0;k<sel.length;k++){"
+        "  var el=sel[k];"
+        "  var s=window.getComputedStyle(el);"
+        "  if(s&&s.display!=='none'&&s.visibility!=='hidden'&&el.offsetWidth>0&&el.offsetHeight>0)ctrls++;"
+        " }"
+        "}catch(_e){}"
+        "var snip=(raw||'').replace(/\\s+/g,' ').trim().slice(0,80);"
+        "return [document.title||'',(location.hash||''),(location.search||''),t,c,d,h>>>0,ctrls,snip];"
+        "}catch(e){return ['','','',0,0,0,0,0,''];}}"
     )
 
     async def _probe():
@@ -1200,25 +1230,43 @@ async def _stuck_watchdog(page, job_id: str, visit_index: int,
             last_progress = await _probe()
             continue
         # URL is unchanged — check DOM-progress fingerprint. If it
-        # moved (different title / hash / body-text length / child
-        # count / total node count), the page IS progressing (SPA
-        # transition, survey question rendered, etc.) and we reset
-        # the stuck timer. Tolerance: text length and node count
-        # naturally fluctuate by ±2 from things like cursor blink or
-        # one-off rerenders, so require a meaningful delta to count.
+        # moved (different title / hash / search / text-content-hash /
+        # body-text length / child count / total node count / visible
+        # controls count), the page IS progressing (SPA transition,
+        # survey question rendered, etc.) and we reset the stuck timer.
+        # ── 2026-05 ──
+        # New tuple layout: [title, hash, search, text_len, child, node,
+        # text_hash, ctrls, snip]
         cur_progress = await _probe()
         if cur_progress is not None and last_progress is not None:
             try:
                 _title_chg = cur_progress[0] != last_progress[0]
                 _hash_chg = cur_progress[1] != last_progress[1]
-                _text_delta = abs(int(cur_progress[2]) - int(last_progress[2]))
-                _child_delta = abs(int(cur_progress[3]) - int(last_progress[3]))
-                _node_delta = abs(int(cur_progress[4]) - int(last_progress[4]))
+                _search_chg = (
+                    cur_progress[2] != last_progress[2]
+                    if len(cur_progress) > 2 and len(last_progress) > 2
+                    else False
+                )
+                _text_delta = abs(int(cur_progress[3]) - int(last_progress[3])) if len(cur_progress) > 3 else 0
+                _child_delta = abs(int(cur_progress[4]) - int(last_progress[4])) if len(cur_progress) > 4 else 0
+                _node_delta = abs(int(cur_progress[5]) - int(last_progress[5])) if len(cur_progress) > 5 else 0
+                _text_hash_chg = (
+                    int(cur_progress[6]) != int(last_progress[6])
+                    if len(cur_progress) > 6 and len(last_progress) > 6
+                    else False
+                )
+                _ctrls_chg = (
+                    int(cur_progress[7]) != int(last_progress[7])
+                    if len(cur_progress) > 7 and len(last_progress) > 7
+                    else False
+                )
                 _dom_changed = (
-                    _title_chg or _hash_chg
-                    or _text_delta >= 8
+                    _title_chg or _hash_chg or _search_chg
+                    or _text_hash_chg                  # ANY content change (even same length)
+                    or _ctrls_chg                      # form controls added/removed
+                    or _text_delta >= 4                # lowered from 8 — small survey deltas
                     or _child_delta >= 1
-                    or _node_delta >= 5
+                    or _node_delta >= 3                # lowered from 5
                 )
             except Exception:
                 _dom_changed = False
