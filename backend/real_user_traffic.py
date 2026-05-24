@@ -4450,17 +4450,42 @@ async def run_real_user_traffic_job(
                         return await _record(job_id, entry, report, report_lock, db)
                     # Grab a lightweight landing thumbnail so the Live Activity
                     # modal can prove the browser really loaded the page.
-                    # NOTE: Wait for full networkidle BEFORE the screenshot
-                    # so we capture the page in its truly-loaded state
-                    # (one of the user's 4 explicit checkpoints).
-                    # Reduced timeout from 15s to 6s for speed optimization
+                    # ── 2026-05 (improved) ──
+                    # User complaint: live activity ke thumbnails blank/teal
+                    # aate the kyunki screenshot page fully render hone se
+                    # PEHLE liya jaata tha. Ab proper sequence:
+                    #   1. wait for "load" (DOM + main resources)
+                    #   2. wait for "networkidle" (no in-flight requests)
+                    #   3. wait for visible body content (height > 0)
+                    #   4. small settle delay (250ms) for paint
+                    #   5. take the screenshot
+                    # Each step is best-effort with its own timeout —
+                    # transient SPAs that never reach networkidle still
+                    # produce a useful screenshot via the fallback paths.
                     try:
                         try:
-                            await page.wait_for_load_state("networkidle", timeout=6000)
+                            await page.wait_for_load_state("load", timeout=8000)
                         except Exception:
                             pass
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=8000)
+                        except Exception:
+                            pass
+                        # Ensure something has actually painted — wait until
+                        # body has non-zero height (covers SPAs that finish
+                        # network early but still render JS shortly after).
+                        try:
+                            await page.wait_for_function(
+                                "() => document.body && document.body.scrollHeight > 100 && (document.body.innerText||'').trim().length > 0",
+                                timeout=4000,
+                            )
+                        except Exception:
+                            pass
+                        # Final paint settle so first-contentful-paint frame
+                        # isn't captured mid-animation.
+                        await asyncio.sleep(0.25)
                         landing_shot = shots_dir / f"visit_{i+1:05d}_landing.png"
-                        await page.screenshot(path=str(landing_shot), full_page=False, timeout=8000)
+                        await page.screenshot(path=str(landing_shot), full_page=False, timeout=10000)
                         push_live_step(job_id, i + 1, "landing", "ok",
                                        f"📷 1/4 URL fully loaded (HTTP {entry['http_status'] or '?'})",
                                        screenshot=landing_shot.name)
@@ -6629,20 +6654,64 @@ async def _execute_automation_steps(
                     # User-defined intermediate capture — take a real
                     # PNG and forward it to the on_screenshot callback
                     # so the live-activity panel can surface it as
-                    # visible visit progress. Always optional under the
-                    # hood: a transient screenshot failure must NOT
-                    # fail the visit.
-                    if on_screenshot is not None:
+                    # visible visit progress.
+                    #
+                    # ── 2026-05 (mandatory capture) ──
+                    # User requirement: "jahan capture lagaya hai json
+                    # mein wo lazmi ss ay" — screenshot steps MUST
+                    # execute and MUST appear in Live Activity.
+                    # Sequence:
+                    #   1. wait for "load" + "networkidle" so the
+                    #      capture reflects the truly-loaded state
+                    #   2. wait for body to have visible content
+                    #   3. small paint settle delay (250ms)
+                    #   4. take screenshot with generous timeout (15s)
+                    #   5. forward to live-activity callback if present
+                    # Failures are NEVER fatal to the visit but they
+                    # ARE surfaced as a warning in live activity so the
+                    # operator knows the step didn't capture.
+                    shot_name = str(
+                        step.get("name") or f"Step {idx + 1}"
+                    ).strip() or f"Step {idx + 1}"
+                    try:
                         try:
-                            png_bytes = await page.screenshot(
-                                type="png", timeout=10000, full_page=False
-                            )
-                            shot_name = str(
-                                step.get("name") or f"Step {idx + 1}"
-                            ).strip() or f"Step {idx + 1}"
-                            await on_screenshot(idx + 1, shot_name, png_bytes)
+                            await page.wait_for_load_state("load", timeout=8000)
                         except Exception:
                             pass
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=8000)
+                        except Exception:
+                            pass
+                        try:
+                            await page.wait_for_function(
+                                "() => document.body && document.body.scrollHeight > 100 && (document.body.innerText||'').trim().length > 0",
+                                timeout=4000,
+                            )
+                        except Exception:
+                            pass
+                        await asyncio.sleep(0.25)
+                        png_bytes = await page.screenshot(
+                            type="png", timeout=15000, full_page=False
+                        )
+                        if on_screenshot is not None:
+                            try:
+                                await on_screenshot(idx + 1, shot_name, png_bytes)
+                            except Exception as cb_err:  # noqa: BLE001
+                                logger.debug(f"on_screenshot callback failed for '{shot_name}': {cb_err}")
+                    except Exception as ss_err:  # noqa: BLE001
+                        logger.warning(f"screenshot step '{shot_name}' failed: {ss_err}")
+                        # Surface failure to live activity so the operator
+                        # can see WHICH capture didn't fire.
+                        if on_screenshot is not None:
+                            try:
+                                # Best-effort retry without the load-state
+                                # waits in case the page is mid-navigation.
+                                png_bytes = await page.screenshot(
+                                    type="png", timeout=10000, full_page=False
+                                )
+                                await on_screenshot(idx + 1, shot_name, png_bytes)
+                            except Exception:
+                                pass
                 elif action in ("auto_continue", "auto_continue_survey"):
                     # 2026-01 — Smart multi-page survey continuation.
                     # After the user's custom JSON has filled the initial
