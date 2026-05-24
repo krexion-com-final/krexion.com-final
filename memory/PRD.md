@@ -138,3 +138,62 @@ Last-resort `keyboard.type(delay=30)` (flat 30ms = 200 WPM, bot-detectable) repl
 - VPS auto-deploys
 - User publishes quick release via admin panel `Releases` page if customer-side update needed
 - Monitor 2-4 weeks of production data; adjust if any specific detector starts flagging
+
+---
+
+## May 2026 Session — Watchdog / Dropdown / Checkbox / Visual Recorder / VPS Load Fixes
+
+### Original Problem Statement
+> "mein rut job chalata hun pr error a rahe hein ye watch dog wala masla permanent hal kro ye ab dobara ni ana chahye … json mein drop down set kia hoa hai … abi b aik job chal rahi hai … VPS pr load para or site hang ho gi"
+
+### Fixes Implemented
+1. **Watchdog Permanent Fix** (`backend/real_user_traffic.py`)
+   - Default `stuck_watchdog_seconds`: 60s → **240s** (4 min)
+   - DOM sensitivity tightened: 1 char / 1 node change resets timer (was 4 char / 3 node)
+   - Watchdog tracks `progression_count` via shared state dict — if page progressed ≥1 time before going idle, visit marked **OK** (not stuck)
+   - Chrome-error fast-path unchanged (dead proxies still aborted instantly)
+
+2. **Smart Select Helper** (`backend/real_user_traffic.py`)
+   - New `_smart_select_with_fallback()` — JS-first approach
+   - Sets native `<select>.value` + dispatches `input`+`change` events + jQuery `selectpicker.refresh` / `chosen:updated`
+   - Handles Bootstrap-Select, Select2, hidden `selectpicker` plugins (the production `#birth_month` blocker)
+   - Selector fallback chain: `#X` → `[name="X"]` → token-based `select[name*="birth" i][name*="month" i]`
+
+3. **Smart Check Helper** (`backend/real_user_traffic.py`)
+   - New `_smart_check_with_fallback()` — handles CSS-styled hidden checkboxes
+   - 5 strategies: native check → wrapping `<label>` click → `label[for="X"]` click → visible sibling click → JS set+dispatch
+   - Solves the consent-modal stuck pattern (`<input id="form-optin" style="display:none">` + visible styled `<span>`)
+
+4. **Visual Recorder "Check Box" Tool** (`frontend/src/pages/VisualRecorderPage.js`, `backend/visual_recorder.py`)
+   - New tool button (CheckSquare icon, key `4`) between Dropdown and Random Pick — total 8 tools now
+   - Backend resolves checkbox via 4-strategy DOM walk (direct hit / `label[for]` / closest label / parent search up to 4 levels)
+   - Toggles via wrapping-label click so live preview shows checked state during recording
+   - Records `{"action": "check", "selector": "#X", "optional": true}` step — replays through `_smart_check_with_fallback`
+
+5. **VPS Load Protection** (`backend/server.py`, `backend/sync_client.py`, `frontend/src/utils/cloudGateInterceptor.js`)
+   - `STRICT_CLOUD_HEAVY_BLOCK` default flipped: `"false"` → **`"true"`**
+   - Cloud edge now REFUSES RUT / Form Filler / Visual Recorder / bulk-proxy by default
+   - Enriched 503 response: includes `local_status` (PC online + hostname + RAM + CPU + version) + `actionable_hint` (`open_desktop_app` / `turn_on_pc` / `install_desktop_app`)
+   - `sync_client.py` route mappings corrected: `rut/start` → `/api/real-user-traffic/jobs` (was `/api/rut/start` which never existed)
+   - Frontend interceptor now shows different Hindi toast based on PC status
+   - Admin opt-out: `STRICT_CLOUD_HEAVY_BLOCK=false` in VPS `.env`
+
+### Files Modified (May 2026 session)
+- `backend/real_user_traffic.py` — watchdog + select helper + check helper (+~340 lines)
+- `backend/server.py` — strict default + enriched 503 (+50/-10 lines)
+- `backend/sync_client.py` — corrected feature route mappings (+15/-3 lines)
+- `backend/visual_recorder.py` — `mode == "check"` handling (+115 lines)
+- `frontend/src/pages/VisualRecorderPage.js` — new Check Box tool (+33/-10 lines)
+- `frontend/src/utils/cloudGateInterceptor.js` — PC-status-aware toast (+45/-15 lines)
+
+### Verified
+- All 3 helpers unit-tested (mock + live offer page)
+- Live offer page (`24.anyunclaimedassets.com/indexform.php`) full E2E: form fills → consent checks → Continue → URL navigates to `offers-flow.php?pageid=337` ✅
+- `require_local_mode` simulated for all 3 cases (PC online / PC offline / bridge worker) — correct 503 + pass-through
+- Backend imports clean (`Module OK`), frontend lint clean (`✅ No issues`)
+
+### Production Deploy Notes (May 2026)
+- No `.env` changes required (strict mode is now default)
+- Existing desktop installs need self-update to get corrected `sync_client.py` route mappings (auto-rolls via Releases page)
+- Admins can opt-OUT of strict mode via `STRICT_CLOUD_HEAVY_BLOCK=false` if rollout window needs cloud-fallback temporarily
+

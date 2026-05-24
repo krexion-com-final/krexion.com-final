@@ -175,13 +175,24 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
 
     # Map feature name to local backend route
     # Format: METHOD /api/<route>
+    #
+    # 2026-05: corrected RUT/Form-Filler routes. The old "rut/start" and
+    # "form-filler/start" paths pointed to endpoints that don't exist
+    # in any release of the backend (legacy planning artefact). The
+    # ACTUAL routes have always been:
+    #   POST /api/real-user-traffic/jobs   (multipart form)
+    #   POST /api/form-filler/jobs         (multipart form)
+    # which is why RUT bridge jobs previously failed with 404 every time
+    # the cloud edge enqueued one. Old desktop installs running the
+    # pre-2026-05 sync_client will still 404, but self-update rolls
+    # them forward automatically.
     feature_routes = {
         "proxies/bulk-test": ("POST", "/api/proxies/bulk-test"),
         "proxies/test-single": ("POST", "/api/proxies/test-single"),
-        "rut/start": ("POST", "/api/rut/start"),
-        "rut/status": ("GET", "/api/rut/status"),
-        "form-filler/start": ("POST", "/api/form-filler/start"),
-        "form-filler/status": ("GET", "/api/form-filler/status"),
+        "rut/start": ("POST", "/api/real-user-traffic/jobs"),
+        "rut/status": ("GET", "/api/real-user-traffic/jobs"),
+        "form-filler/start": ("POST", "/api/form-filler/jobs"),
+        "form-filler/status": ("GET", "/api/form-filler/jobs"),
         # Self-update — cloud UpdateBanner click ends up here so customer
         # never has to open localhost.
         "system/self-update": ("POST", "/api/system/install-update"),

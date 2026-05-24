@@ -299,17 +299,22 @@ api_router = APIRouter(prefix=api_prefix)
 KREXION_MODE = os.environ.get("KREXION_MODE", "local").lower().strip()
 IS_CLOUD = KREXION_MODE == "cloud"
 
-# 2026-05 — opt-in strict mode. When true on the cloud edge, heavy
-# endpoints (RUT, Form Filler, Visual Recorder, bulk proxy tests, bulk
-# click imports) refuse to execute on the VPS and force the customer to
-# either let their local install pull the job via bridge OR install the
+# 2026-05 — strict mode for cloud edge. When true (the NEW DEFAULT as
+# of 2026-05 after VPS overload incidents), heavy endpoints (RUT, Form
+# Filler, Visual Recorder, bulk proxy tests, bulk click imports) refuse
+# to execute on the VPS and force the customer to run them via the
 # desktop app. This prevents the cloud server from being overloaded by
-# 45+ Chromium browsers when many customers are active. Default false
-# preserves legacy cloud-fallback behaviour so this is a safe rollout
-# switch — flip it to "true" in the VPS .env once all paying customers
-# have the desktop app installed.
+# 45+ Chromium browsers when many customers run RUT simultaneously.
+#
+# Admin opt-OUT path: set STRICT_CLOUD_HEAVY_BLOCK=false in the VPS
+# .env (e.g. during a customer rollout window when not everyone has
+# the desktop app yet). When false, heavy endpoints fall back to legacy
+# cloud-fallback execution (same as pre-2026-05 behaviour).
+#
+# Pure cloud-edge concern: this flag is ignored entirely on local
+# installs (KREXION_MODE != "cloud").
 STRICT_CLOUD_HEAVY_BLOCK = (
-    os.environ.get("STRICT_CLOUD_HEAVY_BLOCK", "false").lower().strip()
+    os.environ.get("STRICT_CLOUD_HEAVY_BLOCK", "true").lower().strip()
     in ("true", "1", "yes", "on")
 )
 
@@ -322,11 +327,13 @@ CLOUD_HEAVY_FEATURE_MSG = (
 )
 
 CLOUD_HEAVY_BLOCKED_MSG = (
-    "Heavy features (Real User Traffic, Form Filler, Visual Recorder, bulk "
-    "proxy tests) must run on your own PC. Open the Krexion desktop app on "
-    "your PC and try again — the cloud UI will automatically bridge the job "
-    "to your machine. If you don't have it yet, install it from "
-    "https://krexion.com/download (free with your license)."
+    "This heavy feature (Real User Traffic / Form Filler / Visual Recorder / "
+    "bulk proxy tests) must run on your own PC for speed and to prevent the "
+    "cloud server from getting overloaded. "
+    "→ Open the Krexion desktop app on your computer and submit the job there "
+    "(same email/password — your data syncs automatically). "
+    "Don't have it yet? Download free with your license: "
+    "https://krexion.com/download"
 )
 
 
@@ -344,16 +351,21 @@ async def require_local_mode(request: Request):
             → ALWAYS allow. The whole point of the local install is to
               run heavy work locally.
 
-      • Cloud edge + STRICT_CLOUD_HEAVY_BLOCK NOT set (legacy default)
+      • Cloud edge + STRICT_CLOUD_HEAVY_BLOCK=false (legacy opt-out)
             → allow (the endpoint may still try to bridge first; if the
               bridge fails it falls back to cloud execution as before).
+              Admins flip this on when not all customers have the
+              desktop app yet.
 
-      • Cloud edge + STRICT_CLOUD_HEAVY_BLOCK=true (the new safe mode)
-            → REFUSE. Returns 503 with a clear "install/open your desktop
-              app" message. Endpoints that already bridge (proxies bulk-
-              test, install-update) will route to the local PC BEFORE
-              this dependency runs and return the bridged result; only
-              direct unbridged calls reach this block.
+      • Cloud edge + STRICT_CLOUD_HEAVY_BLOCK=true (NEW DEFAULT, 2026-05)
+            → REFUSE. Returns 503 with a clear "open desktop app"
+              message + the user's actual local-PC heartbeat status so
+              the frontend can tailor the dialog (PC online → "open it"
+              vs PC offline → "turn it on / install"). Endpoints that
+              already bridge (proxies bulk-test, install-update) route
+              to the local PC BEFORE this dependency runs and return
+              the bridged result; only direct unbridged calls reach
+              this block.
     """
     if request.headers.get("X-Krexion-Bridge-Job"):
         return True
@@ -361,13 +373,44 @@ async def require_local_mode(request: Request):
         return True
     if not STRICT_CLOUD_HEAVY_BLOCK:
         return True
+
+    # ── 2026-05: enrich the 503 with the user's actual local-PC status ──
+    # The frontend (cloudGateInterceptor) can then choose between
+    # "open your desktop app" (PC online) vs "turn on your PC / install"
+    # (PC offline) instead of always showing the offline copy.
+    local_status: Dict[str, Any] = {"online": False, "reason": "status_unknown"}
+    try:
+        from bridge_module import is_user_local_online as _is_online
+        # Resolve user from Authorization header without re-running the
+        # full JWT dependency (avoids HTTPException side-effects inside
+        # this dependency). If anything fails, we degrade gracefully to
+        # the generic "offline" copy.
+        auth = request.headers.get("Authorization") or ""
+        token = auth[7:] if auth.lower().startswith("bearer ") else ""
+        if token:
+            try:
+                _payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+                _uid = _payload.get("user_id") or _payload.get("sub")
+                if _uid:
+                    local_status = await _is_online(_uid)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     raise HTTPException(
         status_code=503,
         detail={
-            "code": "local_pc_offline",
+            "code": "local_pc_offline",  # kept for frontend interceptor compat
             "error": "local_pc_required",
             "message": CLOUD_HEAVY_BLOCKED_MSG,
             "download_url": "https://krexion.com/download",
+            "local_status": local_status,
+            "actionable_hint": (
+                "open_desktop_app" if local_status.get("online")
+                else ("turn_on_pc" if local_status.get("reason") == "stale_heartbeat"
+                      else "install_desktop_app")
+            ),
         },
     )
 

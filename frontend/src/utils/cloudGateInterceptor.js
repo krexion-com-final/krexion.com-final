@@ -34,23 +34,47 @@ axios.interceptors.response.use(
     const status = err?.response?.status;
     const detail = err?.response?.data?.detail;
 
-    // Bridge: local PC is offline
+    // Bridge: cloud edge refused a heavy feature.
+    // The backend tells us via detail.local_status whether the user's
+    // desktop PC is actually online — show different copy + action for
+    // each case so the user knows exactly what to do.
     if (
       status === 503 &&
       detail &&
       typeof detail === "object" &&
       detail.code === "local_pc_offline"
     ) {
-      maybeToast(
-        detail.message ||
-          "Aap ka Krexion PC offline hai. Heavy features tab kaam karte hain jab PC on ho.",
-        {
-          action: {
-            label: "Guide",
-            onClick: () => window.open("/guide", "_blank"),
-          },
-        }
-      );
+      const localOnline = !!(detail.local_status && detail.local_status.online);
+      const hint = detail.actionable_hint || (localOnline ? "open_desktop_app" : "install_desktop_app");
+      let msg;
+      let actionLabel = "Download";
+      let actionHref = detail.download_url || "/download";
+      if (hint === "open_desktop_app" || localOnline) {
+        msg =
+          "Yeh heavy feature aap ke desktop app pe chalti hai (cloud nahi). " +
+          "Apne computer pe Krexion kholein aur wahaan se job submit karein — " +
+          "data automatically sync ho jata hai.";
+        actionLabel = "How to";
+        actionHref = "/guide";
+      } else if (hint === "turn_on_pc") {
+        msg =
+          "Aap ka Krexion desktop app offline lag raha hai. Apne computer pe " +
+          "Krexion start karein — kuch seconds mein cloud reconnect ho jayega, " +
+          "phir job submit karein.";
+        actionLabel = "Guide";
+        actionHref = "/guide";
+      } else {
+        msg =
+          detail.message ||
+          "Heavy features sirf desktop app pe chalti hain. Install karein " +
+          "(license ke sath free).";
+      }
+      maybeToast(msg, {
+        action: {
+          label: actionLabel,
+          onClick: () => window.open(actionHref, "_blank"),
+        },
+      });
       return Promise.reject(err);
     }
 
