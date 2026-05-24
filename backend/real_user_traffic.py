@@ -6462,13 +6462,69 @@ async def _execute_automation_steps(
             action = (step.get("action") or "").strip().lower()
             selector = step.get("selector") or ""
             value = _substitute(step.get("value", ""), row)
-            timeout = int(step.get("timeout") or 10000)
+            # ── 2026-05: longer default per-step timeout ──
+            # Bumped from 10s → 25s. Visual Recorder doesn't emit a
+            # per-step `timeout` so the default IS what every fill /
+            # click / select uses. Real residential-proxy pages can
+            # easily take 12-18s to render the next form field after
+            # a click; the old 10s default caused steps to time out
+            # silently (with optional=true), the bot did nothing,
+            # the page stayed frozen, and the 60s watchdog killed
+            # the visit. 25s aligns with realistic human patience
+            # while still bailing out on truly dead pages — and the
+            # actionable-pre-wait helper added below makes most
+            # steps return as SOON as the selector is ready, so
+            # this larger ceiling only kicks in on slow pages.
+            timeout = int(step.get("timeout") or 25000)
             optional = bool(step.get("optional") or False)
             wait_nav = bool(step.get("wait_nav") or False)
 
             if skip_captcha and action not in ("wait", "screenshot", "evaluate"):
                 if await _page_has_captcha(page):
                     return {"status": "skipped_captcha", "error": f"Captcha at step {idx+1}", "executed_steps": executed}
+
+            # ── 2026-05: smart pre-wait for actionable elements ──
+            # For every action that needs a real DOM element (fill,
+            # click, select, check/uncheck, type, press, hover,
+            # scroll-into-view), ACTIVELY wait up to the step's
+            # timeout for that selector to appear & be visible BEFORE
+            # we even try to interact. This single addition solves
+            # the long-standing "watchdog kills visit at 60s because
+            # the bot did nothing" failure mode: previously every
+            # `fill` with optional=true would silently skip when the
+            # field wasn't in DOM yet, the bot would do nothing on a
+            # half-loaded form, and 60s later watchdog reaped the
+            # visit. Now we wait for the field to actually render
+            # before filling — exactly as a human would.
+            #
+            # Wait is skipped for:
+            #   • selectorless actions (wait, screenshot, evaluate,
+            #     wait_for_load, scroll without selector, goto)
+            #   • wait_for_selector itself (handled by Playwright)
+            #
+            # If the wait times out and the step is `optional`, the
+            # outer try/except still swallows it as before.
+            _PRE_WAIT_ACTIONS = {
+                "fill", "click", "type", "select",
+                "check", "uncheck", "press", "hover",
+            }
+            if action in _PRE_WAIT_ACTIONS and selector:
+                try:
+                    await _wait_for_actionable_selector(
+                        page, selector, timeout, visible=True,
+                    )
+                except Exception as _wfa:
+                    # Selector never became actionable within the
+                    # per-step budget. If the step is optional, fall
+                    # through to the action call — Playwright's own
+                    # auto-wait will catch it again and the outer
+                    # except handles optional skip. If not optional,
+                    # re-raise via the action call itself (skipping
+                    # the pre-wait to avoid waiting twice).
+                    if not optional:
+                        # Surface the "step never reached" cause more
+                        # clearly than a generic timeout.
+                        raise
 
             try:
                 if action == "goto":
@@ -6957,6 +7013,48 @@ async def _execute_automation_steps(
         return {"status": "ok", "executed_steps": executed}
     except Exception as e:
         return {"status": "failed", "error": f"Automation crashed: {str(e)[:200]}", "executed_steps": executed}
+
+
+async def _wait_for_actionable_selector(
+    page: Page,
+    selector: str,
+    timeout: int,
+    visible: bool = True,
+) -> bool:
+    """
+    ── 2026-05: smart pre-wait for the actionable selector ──
+
+    Before any fill / click / select / type, ACTIVELY wait for the
+    element to appear in the DOM (and optionally become visible). This
+    is the customer's most-requested fix: "agr first name input kr le
+    to next agr last name hai to last name put hone tak auto wait phr
+    next step hone tak auto wait".
+
+    Why this is the permanent fix:
+      • Old behaviour: page.fill() / page.click() auto-waited up to
+        `timeout` (default 10s in old code). If the element wasn't
+        present within 10s, it failed. With `optional: true` on the
+        step (Visual Recorder default), it skipped silently — bot
+        did nothing, page froze, watchdog killed at 60s.
+      • New behaviour: we wait for the selector to be PRESENT (or
+        visible) for the full step timeout — polling internally at
+        ~100ms. As soon as the element is ready we return; if it
+        truly never appears we raise so the caller can handle as
+        optional (skip) or non-optional (fail/self-heal).
+      • Page-load lag is handled implicitly: while we wait for the
+        selector, the page is still rendering. The watchdog's DOM-
+        progress detector sees these renders as activity and won't
+        kill the visit.
+
+    Returns True if the selector became actionable; raises the
+    underlying Playwright exception otherwise. (Caller's
+    try/except + `optional` flag decides whether to swallow.)
+    """
+    if not selector:
+        return True
+    state = "visible" if visible else "attached"
+    await page.wait_for_selector(selector, timeout=timeout, state=state)
+    return True
 
 
 async def _dispatch_single_action(page: Page, action: str, selector: str,
