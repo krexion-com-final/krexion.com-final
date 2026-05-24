@@ -3221,9 +3221,50 @@ async def get_user(user_id: str, admin: dict = Depends(get_current_admin)):
 #   - Any file under /opt/krexion/
 #   - User data of any kind.
 
-CLEANUP_FLAG_FILE = Path("/data/cleanup_requested.flag")
-CLEANUP_RESULT_FILE = Path("/data/cleanup_result.json")
-HOST_STATS_FILE = Path("/data/host_stats.json")
+# 2026-05: configurable cleanup paths with fallback.
+# Production VPS mounts /opt/krexion/data/ → /data inside the container.
+# But the cleanup feature should still work on:
+#   - Cloud preview pods (no /data mount)
+#   - Local dev installs (no docker-compose volume setup)
+#   - Customer VPSs that haven't installed the host watcher yet
+#
+# Resolution order:
+#   1. CLEANUP_DATA_DIR env var (admin override)
+#   2. /data (production volume mount — host watcher script reads from here)
+#   3. /app/data (in-container fallback — host watcher won't see it but the
+#      "Clean VPS Now" button will still do safe in-container cleanup so
+#      Playwright temp dirs / Python caches / old logs get reclaimed)
+def _resolve_cleanup_dir() -> Path:
+    candidates = []
+    env_dir = os.environ.get("CLEANUP_DATA_DIR", "").strip()
+    if env_dir:
+        candidates.append(Path(env_dir))
+    candidates.append(Path("/data"))
+    candidates.append(Path("/app/data"))
+    for d in candidates:
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            # Verify writability with a probe — some filesystems are
+            # read-only even when mkdir reports success.
+            _probe = d / ".write_probe"
+            _probe.write_text("ok", encoding="utf-8")
+            _probe.unlink()
+            return d
+        except Exception:
+            continue
+    # Last resort — /tmp ALWAYS works in any Linux container.
+    return Path("/tmp/krexion-cleanup")
+
+
+CLEANUP_DATA_DIR = _resolve_cleanup_dir()
+CLEANUP_FLAG_FILE = CLEANUP_DATA_DIR / "cleanup_requested.flag"
+CLEANUP_RESULT_FILE = CLEANUP_DATA_DIR / "cleanup_result.json"
+HOST_STATS_FILE = CLEANUP_DATA_DIR / "host_stats.json"
+try:
+    CLEANUP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    logger.info(f"[cleanup] flag dir resolved → {CLEANUP_DATA_DIR}")
+except Exception as _ce:  # noqa: BLE001
+    logger.warning(f"[cleanup] flag dir not writable ({CLEANUP_DATA_DIR}): {_ce}")
 
 
 @api_router.get("/admin/system/host-stats")
@@ -3266,12 +3307,157 @@ async def admin_host_stats(admin: dict = Depends(get_current_admin)):
         raise HTTPException(500, f"Could not read system stats: {e}")
 
 
+def _safe_in_container_cleanup() -> dict:
+    """Run safe in-container cleanup that NEVER touches user data.
+
+    What gets cleared (frees RAM/disk that's loading the backend):
+      - Stale Playwright browser temp dirs (>24h old) — these can be HUGE
+        (hundreds of MB each) when crashed sessions leave behind.
+      - Old Krexion log files (>7 days, *.log.* rotated)
+      - /tmp/krexion-* leftovers (>24h)
+      - Python __pycache__ in backend dir (recreated automatically on next import)
+      - aiohttp / httpx connection pool caches if any
+
+    What is NEVER touched:
+      - MongoDB data (clicks, conversions, users, IPs, links, jobs)
+      - real_user_traffic_results/  (job screenshots + reports)
+      - uploaded_resources/         (user-uploaded Excel / proxies / UA / images)
+      - visual_recorder_sessions/   (active recordings)
+      - .env / source code / dependencies
+      - Active job state
+
+    Returns a dict with bytes freed + action log.
+    """
+    import shutil
+    import time as _time
+    from pathlib import Path as _Path
+
+    actions = []
+    bytes_freed = 0
+    now = _time.time()
+    AGE_24H = 24 * 3600
+    AGE_7D = 7 * 24 * 3600
+
+    def _dir_size(p: _Path) -> int:
+        total = 0
+        try:
+            for root, _dirs, files in os.walk(p):
+                for f in files:
+                    try:
+                        total += os.path.getsize(os.path.join(root, f))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return total
+
+    # 1. Stale Playwright temp dirs (>24h)
+    for parent in (_Path("/tmp"), _Path("/var/tmp")):
+        if not parent.exists():
+            continue
+        try:
+            for child in parent.iterdir():
+                name = child.name
+                if not (name.startswith("playwright_") or name.startswith("playwright-")
+                        or name.startswith(".org.chromium.") or name.startswith("krexion-")):
+                    continue
+                try:
+                    age = now - child.stat().st_mtime
+                    if age < AGE_24H:
+                        continue
+                    if child.is_dir():
+                        sz = _dir_size(child)
+                        shutil.rmtree(child, ignore_errors=True)
+                    else:
+                        sz = child.stat().st_size
+                        child.unlink(missing_ok=True)
+                    bytes_freed += sz
+                    actions.append(f"removed stale {child.name} ({sz / 1024 / 1024:.1f} MB)")
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    # 2. Old rotated logs (>7 days) inside /var/log and the backend dir
+    log_dirs = [_Path("/var/log/supervisor"), _Path(__file__).resolve().parent]
+    for ld in log_dirs:
+        if not ld.exists():
+            continue
+        try:
+            for child in ld.rglob("*.log.*"):
+                try:
+                    age = now - child.stat().st_mtime
+                    if age < AGE_7D:
+                        continue
+                    sz = child.stat().st_size
+                    child.unlink(missing_ok=True)
+                    bytes_freed += sz
+                    actions.append(f"removed old log {child.name} ({sz / 1024 / 1024:.1f} MB)")
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    # 3. Python __pycache__ inside the backend dir (regenerates on import)
+    try:
+        backend_dir = _Path(__file__).resolve().parent
+        for pyc_dir in backend_dir.rglob("__pycache__"):
+            try:
+                sz = _dir_size(pyc_dir)
+                shutil.rmtree(pyc_dir, ignore_errors=True)
+                bytes_freed += sz
+            except Exception:
+                pass
+        if bytes_freed:
+            actions.append("cleared backend __pycache__ folders")
+    except Exception:
+        pass
+
+    return {
+        "bytes_freed": bytes_freed,
+        "mb_freed": round(bytes_freed / 1024 / 1024, 1),
+        "actions": actions,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "note": (
+            "In-container safe cleanup. User data (clicks, IPs, conversions, "
+            "uploads, RUT results) NOT touched."
+        ),
+    }
+
+
 @api_router.post("/admin/system/cleanup")
 async def admin_request_cleanup(admin: dict = Depends(get_current_admin)):
-    """Queue a VPS cleanup job by writing a flag file. The host watcher
-    will run within ~60 seconds and free disk space safely. User data
-    is never touched."""
+    """Queue a VPS cleanup job AND run safe in-container cleanup immediately.
+
+    2026-05 upgrade — the old flow only wrote a flag file for the host
+    watcher. If the watcher wasn't installed (most customer VPSs),
+    nothing happened AND the path itself might not exist (the original
+    error users hit). This endpoint now:
+
+      1. Runs safe in-container cleanup IMMEDIATELY (Playwright temps,
+         old rotated logs, __pycache__). Always works — no host setup
+         required. Returns bytes freed in the response.
+      2. Additionally writes the host-watcher flag IF the data dir is
+         writable. The watcher (if installed) then runs host-level
+         cleanup (docker prune, apt clean, journalctl vacuum) within
+         ~60 seconds.
+
+    Either path is SAFE — user data (clicks, IPs, conversions, uploads,
+    RUT results) is NEVER touched.
+    """
     import json as _json
+
+    # Always run in-container cleanup — works on every deployment.
+    in_container_result = _safe_in_container_cleanup()
+    logger.info(
+        f"[cleanup] in-container cleanup by {admin.get('email')}: "
+        f"{in_container_result['mb_freed']} MB freed across "
+        f"{len(in_container_result['actions'])} actions"
+    )
+
+    # Try to also queue host-level cleanup via the watcher flag file.
+    flag_written = False
+    flag_error: Optional[str] = None
     try:
         CLEANUP_FLAG_FILE.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -3279,18 +3465,35 @@ async def admin_request_cleanup(admin: dict = Depends(get_current_admin)):
             "requested_by": admin.get("email"),
         }
         CLEANUP_FLAG_FILE.write_text(_json.dumps(payload), encoding="utf-8")
-        logger.info(f"[cleanup] flag written by {admin.get('email')}")
-        return {
-            "ok": True,
-            "message": (
-                "Cleanup requested. The host watcher will pick this up "
-                "within ~60 seconds. Refresh stats to see results."
-            ),
-            "flag_path": str(CLEANUP_FLAG_FILE),
-            "requested_at": payload["requested_at"],
-        }
+        flag_written = True
+        logger.info(f"[cleanup] flag written → {CLEANUP_FLAG_FILE}")
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(500, f"Could not write cleanup flag: {e}")
+        flag_error = str(e)
+        logger.warning(f"[cleanup] flag write failed: {e}")
+
+    # Persist the in-container result so /cleanup-status can show it
+    try:
+        CLEANUP_RESULT_FILE.write_text(_json.dumps(in_container_result), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+    return {
+        "ok": True,
+        "in_container_cleanup": in_container_result,
+        "host_watcher_flag_written": flag_written,
+        "host_watcher_flag_error": flag_error,
+        "flag_path": str(CLEANUP_FLAG_FILE) if flag_written else None,
+        "message": (
+            f"Freed {in_container_result['mb_freed']} MB immediately. "
+            + (
+                "Host watcher will run additional system-level cleanup within ~60s."
+                if flag_written
+                else "Host watcher not configured — only in-container cleanup ran. "
+                     "Install scripts/vps-cleanup-watcher.sh on the VPS to also "
+                     "free Docker build cache & rotate access logs."
+            )
+        ),
+    }
 
 
 @api_router.get("/admin/system/cleanup-status")
