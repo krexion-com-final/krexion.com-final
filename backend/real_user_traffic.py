@@ -6437,6 +6437,123 @@ def _substitute(template: str, row: Dict[str, Any]) -> str:
     return re.sub(r"\{\{\s*([^}]+?)\s*\}\}", repl, template)
 
 
+# ── 2026-05: Robust select-option with selector + match-strategy fallbacks ──
+# Why this exists:
+#   The original automation steps tried `page.select_option(selector, value=X)`
+#   once with the EXACT selector the user recorded. Real-world breakage:
+#     1. Page changes the element's `id` (e.g. `#birth_month` becomes `#dob_month`)
+#        — selector times out at 25s.
+#     2. The customer's data file has human-readable labels ("May") but the
+#        underlying <option value="5"> — value-only match fails.
+#     3. The dropdown is rendered later than the surrounding fields, so 25s
+#        isn't enough for the locator.
+#   This helper makes select robust to ALL three cases without changing the
+#   user's recorded JSON:
+#     • Tries the user's exact selector first (fast path — no penalty when it works).
+#     • If that fails, derives 4-6 fallback selectors from the original
+#       (e.g. `#birth_month` → `[name="birth_month"]` → `select[name*="birth" i][name*="month" i]`).
+#     • For each selector, tries label → value → index strategies (covers
+#       Excel-style "May" data AND raw "5" data).
+#   Total budget is the original `timeout` — divided across attempts so a
+#   bad selector doesn't burn 25s while the right one is one fallback away.
+async def _smart_select_with_fallback(page, selector: str, value: Any,
+                                       match_by: str = "label",
+                                       timeout: int = 25000) -> None:
+    """Robust select_option: tries multiple match strategies AND fallback
+    selectors. Raises the last underlying exception on total failure."""
+    import re as _re_local
+    val = "" if value is None else str(value)
+    match_by = (match_by or "label").lower().strip()
+
+    # ── Build match-strategy attempts (label / value / index) ──
+    if match_by == "value":
+        strategies: List[Tuple[str, Any]] = [
+            ("value", val), ("label", val), ("label", val.strip()),
+        ]
+    else:
+        strategies = [
+            ("label", val), ("label", val.strip()), ("value", val),
+        ]
+    # Also try numeric index as last resort (e.g. value "0", "1", "2")
+    if val.isdigit():
+        strategies.append(("index", int(val)))
+
+    # ── Build selector candidates ──
+    selectors_to_try: List[str] = [selector] if selector else []
+    key = ""
+    if selector:
+        # CSS ID selector: #birth_month → birth_month
+        m = _re_local.match(r"^#([\w\-]+)$", selector.strip())
+        if m:
+            key = m.group(1)
+        else:
+            # [name="X"] or [id="X"] (single or double quotes)
+            m = _re_local.search(
+                r"\[(?:name|id)\s*=\s*[\"']([^\"']+)[\"']\]", selector
+            )
+            if m:
+                key = m.group(1)
+            else:
+                # Bare [name=X]
+                m = _re_local.search(r"\[name\s*=\s*([^\]\s]+)\]", selector)
+                if m:
+                    key = m.group(1).strip("\"'")
+    if key:
+        # Direct attribute matches
+        selectors_to_try.extend([
+            f'select#{key}',
+            f'select[name="{key}"]',
+            f'[name="{key}"]',
+            f'select[id="{key}"]',
+            f'select[name*="{key}" i]',
+            f'select[id*="{key}" i]',
+        ])
+        # Token-based match: birth_month → both "birth" AND "month" required
+        tokens = [t for t in _re_local.split(r"[_\-\s]+", key) if t and len(t) >= 2]
+        if len(tokens) >= 2:
+            selectors_to_try.append(
+                "select" + "".join(f'[name*="{t}" i]' for t in tokens)
+            )
+            selectors_to_try.append(
+                "select" + "".join(f'[id*="{t}" i]' for t in tokens)
+            )
+
+    # Deduplicate while preserving order
+    _seen: set = set()
+    uniq_selectors: List[str] = []
+    for s in selectors_to_try:
+        if s and s not in _seen:
+            _seen.add(s)
+            uniq_selectors.append(s)
+    if not uniq_selectors:
+        raise ValueError(f"select: empty selector (value={val!r})")
+
+    # Per-selector timeout — split the total budget so a bad selector
+    # doesn't eat the whole 25s. Minimum 3s per try to give Playwright
+    # room to actually wait for a slowly-rendered dropdown.
+    per_sel_timeout = (
+        timeout if len(uniq_selectors) == 1
+        else max(3000, int(timeout / max(2, len(uniq_selectors))))
+    )
+
+    last_err: Optional[Exception] = None
+    for sel in uniq_selectors:
+        for strategy, payload in strategies:
+            try:
+                if strategy == "label":
+                    await page.select_option(sel, label=str(payload), timeout=per_sel_timeout)
+                elif strategy == "value":
+                    await page.select_option(sel, value=str(payload), timeout=per_sel_timeout)
+                elif strategy == "index":
+                    await page.select_option(sel, index=int(payload), timeout=per_sel_timeout)
+                return  # SUCCESS
+            except Exception as e:
+                last_err = e
+                continue
+    if last_err is not None:
+        raise last_err
+
+
 async def _execute_automation_steps(
     page: Page,
     row: Dict[str, Any],
@@ -6625,7 +6742,13 @@ async def _execute_automation_steps(
                     except Exception:
                         await page.type(selector, str(value), delay=int(step.get("delay") or 50), timeout=timeout)
                 elif action == "select":
-                    await page.select_option(selector, value=str(value), timeout=timeout)
+                    # 2026-05: robust select with match-strategy + selector
+                    # fallbacks (see _smart_select_with_fallback docstring).
+                    await _smart_select_with_fallback(
+                        page, selector, value,
+                        match_by=str(step.get("match_by") or "label"),
+                        timeout=timeout,
+                    )
                 elif action == "check":
                     await page.check(selector, timeout=timeout)
                 elif action == "uncheck":
@@ -7120,38 +7243,16 @@ async def _dispatch_single_action(page: Page, action: str, selector: str,
         except Exception:
             await page.type(selector, str(value), delay=int(step.get("delay") or 50), timeout=timeout)
     elif action == "select":
-        # The Visual Recorder's dropdown tool defaults to match_by='label'
-        # (visible option text) because customer Excel sheets typically
-        # contain human-readable values like "Male"/"California" rather
-        # than the underlying option `value` attributes. We try the
-        # match_by the step asks for first, then transparently fall back
-        # so an unknown mismatch doesn't fail an otherwise-good visit.
-        val = "" if value is None else str(value)
-        match_by = str(step.get("match_by") or "label").lower()
-        attempts: List[Tuple[str, Any]] = []
-        if match_by == "value":
-            attempts = [("value", val), ("label", val), ("label", val.strip())]
-        else:
-            attempts = [("label", val), ("label", val.strip()), ("value", val)]
-        # Also try numeric index as a last resort (e.g. "0", "1", "2").
-        if val.isdigit():
-            attempts.append(("index", int(val)))
-        last_err: Optional[Exception] = None
-        for strategy, payload in attempts:
-            try:
-                if strategy == "label":
-                    await page.select_option(selector, label=payload, timeout=timeout)
-                elif strategy == "value":
-                    await page.select_option(selector, value=str(payload), timeout=timeout)
-                elif strategy == "index":
-                    await page.select_option(selector, index=int(payload), timeout=timeout)
-                last_err = None
-                break
-            except Exception as e:
-                last_err = e
-                continue
-        if last_err is not None:
-            raise last_err
+        # 2026-05: routed through _smart_select_with_fallback so this
+        # path benefits from selector fallbacks too (e.g. #birth_month
+        # → [name="birth_month"] → select[name*="birth" i][name*="month" i]).
+        # Match-strategy fallback (label → value → index) preserved from
+        # the original Visual Recorder behaviour.
+        await _smart_select_with_fallback(
+            page, selector, value,
+            match_by=str(step.get("match_by") or "label"),
+            timeout=timeout,
+        )
     elif action == "check":
         await page.check(selector, timeout=timeout)
     elif action == "uncheck":
