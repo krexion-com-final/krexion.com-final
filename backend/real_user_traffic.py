@@ -4271,6 +4271,18 @@ async def run_real_user_traffic_job(
                     "ERR_SSL_PROTOCOL_ERROR",
                 )
                 MAX_TUNNEL_RETRIES = 3
+                # ── 2026-05: same-proxy retry budget ──
+                # When no fresh proxy is available (common when
+                # no_repeated_proxy=True and all proxies are already
+                # allocated to other visits), give the SAME proxy a few
+                # more chances with a short backoff + a lighter
+                # wait_until="commit" fallback. Many tunnel errors are
+                # transient (TCP reset, brief network glitch, residential
+                # exit ISP hiccup) and succeed on a second try seconds
+                # later. This dramatically reduces the "after 1 attempts"
+                # failure when proxy pool is exhausted.
+                MAX_SAME_PROXY_RETRIES = 2
+                same_proxy_retry = 0
                 tunnel_attempt = 0
                 resp = None
                 goto_exc = None
@@ -4282,7 +4294,12 @@ async def run_real_user_traffic_job(
                         # full 90s just wastes wall-clock + lead/UA
                         # budget per visit. The tunnel-retry loop above
                         # will rotate to a fresh proxy if this fails.
-                        resp = await page.goto(target_url, timeout=35000, wait_until="domcontentloaded")
+                        # 2026-05: on same-proxy retry, use "commit" so
+                        # we just wait for the navigation to start (HTTP
+                        # response received) instead of full DOM — many
+                        # transient tunnel hiccups resolve mid-flight.
+                        _wait_until = "commit" if same_proxy_retry > 0 else "domcontentloaded"
+                        resp = await page.goto(target_url, timeout=35000, wait_until=_wait_until)
                         goto_exc = None
                         break
                     except Exception as _ge:
@@ -4294,8 +4311,23 @@ async def run_real_user_traffic_job(
                         # Pick a fresh proxy and rebuild context+page
                         new_proxy = pick_next_proxy()
                         if not new_proxy:
+                            # ── 2026-05 same-proxy retry fallback ──
+                            # No spare proxy available — give the current
+                            # proxy ANOTHER chance after a short backoff.
+                            # This handles transient tunnel errors when
+                            # the proxy pool is otherwise exhausted.
+                            if same_proxy_retry < MAX_SAME_PROXY_RETRIES:
+                                same_proxy_retry += 1
+                                backoff_s = 1.5 * same_proxy_retry  # 1.5s, 3.0s
+                                push_live_step(
+                                    job_id, i + 1, "browser", "info",
+                                    f"No fresh proxy left · retrying same proxy ({same_proxy_retry}/{MAX_SAME_PROXY_RETRIES}) in {backoff_s:.1f}s",
+                                )
+                                await asyncio.sleep(backoff_s)
+                                continue
                             break
                         tunnel_attempt += 1
+                        same_proxy_retry = 0  # fresh proxy → reset same-proxy counter
                         push_live_step(
                             job_id, i + 1, "browser", "info",
                             f"Tunnel failed · rotating proxy ({tunnel_attempt}/{MAX_TUNNEL_RETRIES}): {new_proxy.get('server','')}",
@@ -4589,10 +4621,16 @@ async def run_real_user_traffic_job(
                             "Ask your proxy support to whitelist the domain, or use a different proxy provider."
                         )
                     elif is_tunnel_fail:
+                        # ── 2026-05: combined attempts message ──
+                        # Total goto attempts = proxy rotations + same-proxy retries.
+                        # Surfaces both numbers so the user sees the system
+                        # didn't just give up after 1 try.
+                        total_attempts = (tunnel_attempt + 1) + same_proxy_retry
                         friendly = (
-                            f"Proxy tunnel failed after {tunnel_attempt + 1} attempts — "
+                            f"Proxy tunnel failed after {total_attempts} attempt(s) "
+                            f"({tunnel_attempt} proxy rotations + {same_proxy_retry} same-proxy retries) — "
                             "your proxy provider couldn't reach the target. Try a different "
-                            "US state, smaller batch, or reload proxies."
+                            "US state, smaller batch, slower pacing, or reload proxies."
                         )
                     entry["error"] = f"goto failed: {friendly}"
                     # Tag tunnel/proxy-block failures so the dispatcher can
