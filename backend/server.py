@@ -4822,6 +4822,7 @@ async def _rut_prepare_and_run(
             post_submit_wait=post_submit_wait,
             automation_steps=automation_steps,
             self_heal=bool(params.get("self_heal")),
+            pure_json_mode=bool(params.get("pure_json_mode")),
             state_match_enabled=bool(params.get("state_match_enabled")),
             target_mode=params.get("target_mode") or "clicks",
             target_conversions=int(params.get("target_conversions") or 0),
@@ -5008,6 +5009,12 @@ async def rut_create_job(
     post_submit_wait: int = Form(6),                  # seconds 3..600
     automation_json: Optional[str] = Form(None),      # custom step-list JSON
     self_heal: bool = Form(True),                     # AI fallback for unexpected popups
+    # ── 2026-05: Pure JSON Mode ──
+    # When True, the runner strictly follows the recorded automation JSON
+    # with NO AI involvement — self_heal is forced OFF and AI answer-
+    # learning (Thompson sampling for survey picks) is bypassed. Default
+    # OFF preserves current behaviour exactly.
+    pure_json_mode: bool = Form(False),
     # Auto-resume opt-IN (default OFF per 2026-01 user feedback). When
     # False, a backend restart marks the job `failed` and the user
     # clicks "Retry" manually — predictable, no surprise resumes mid-run.
@@ -5194,6 +5201,7 @@ async def rut_create_job(
         "selected_states": (selected_states or "").strip(),
         "automation_json": automation_json,
         "self_heal": self_heal,
+        "pure_json_mode": bool(pure_json_mode),
         "auto_resume_enabled": bool(auto_resume_enabled),
         "skip_duplicate_ip": skip_duplicate_ip,
         "skip_vpn": skip_vpn,
@@ -5277,6 +5285,7 @@ async def rut_create_job(
             "link_owner_id": link.get("user_id") or user["id"],
             "post_submit_wait": max(3, min(600, int(post_submit_wait))),
             "self_heal": self_heal,
+            "pure_json_mode": bool(pure_json_mode),
             "state_match_enabled": state_match_enabled,
             "skip_duplicate_ip": skip_duplicate_ip,
             "skip_vpn": skip_vpn,

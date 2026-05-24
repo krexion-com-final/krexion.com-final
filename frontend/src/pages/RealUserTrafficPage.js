@@ -345,6 +345,11 @@ export default function RealUserTrafficPage() {
   const [useCustomJson, setUseCustomJson] = useState(false);
   const [selectedUploadAjId, setSelectedUploadAjId] = useState("");
   const [selfHeal, setSelfHeal] = useState(true);
+  // ── 2026-05: Pure JSON Mode ──
+  // When ON, the runner strictly follows the recorded automation JSON
+  // with NO AI involvement (self-heal forced off + AI answer-learning
+  // bypassed). Default OFF — current behaviour unchanged.
+  const [pureJsonMode, setPureJsonMode] = useState(false);
   // Default OFF — per user's explicit request: "job ek sequence mein
   // chale, resume na ho". When OFF, a backend restart marks the job
   // failed and the user clicks Retry manually. Predictable lifecycle.
@@ -956,6 +961,7 @@ export default function RealUserTrafficPage() {
           }
         }
         fd.append("self_heal", String(selfHeal));
+        fd.append("pure_json_mode", String(pureJsonMode));
         fd.append("auto_resume_enabled", String(autoResumeEnabled));
       }
 
@@ -2606,11 +2612,26 @@ export default function RealUserTrafficPage() {
                 💡 Aap koi bhi naya offer site bhejen (URL + brief kya karna hai) — main aapke liye exact JSON bana dunga, bas yahan paste karen.
               </p>
 
-              {/* Self-heal toggle */}
+              {/* ── 2026-05: Pure JSON Mode toggle ── */}
               <label className="flex items-start gap-2 cursor-pointer mt-3 ml-6">
                 <input
                   type="checkbox"
-                  checked={selfHeal}
+                  checked={pureJsonMode}
+                  onChange={(e) => setPureJsonMode(e.target.checked)}
+                  className="w-4 h-4 accent-sky-500 mt-0.5"
+                  data-testid="rut-pure-json-mode"
+                />
+                <span className="text-xs text-zinc-300">
+                  🎯 <b>Pure JSON Mode</b> (default <span className="text-sky-400">OFF</span>) — ON karenge to job <b>sirf recorded JSON</b> follow karegi, <span className="text-rose-400">koi AI involvement nahi</span> (self-heal force OFF + AI answer-learning bypass — survey picks purely random, koi outcome record nahi hoga). OFF rakhain to by-default behaviour: self-heal aur answer-learning aapke toggles ke hisab se chalenge.
+                </span>
+              </label>
+
+              {/* Self-heal toggle */}
+              <label className={`flex items-start gap-2 mt-3 ml-6 ${pureJsonMode ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}>
+                <input
+                  type="checkbox"
+                  checked={selfHeal && !pureJsonMode}
+                  disabled={pureJsonMode}
                   onChange={(e) => setSelfHeal(e.target.checked)}
                   className="w-4 h-4 accent-emerald-500 mt-0.5"
                   data-testid="rut-self-heal"
@@ -2618,6 +2639,7 @@ export default function RealUserTrafficPage() {
                 <span className="text-xs text-zinc-300">
                   🤖 <b>Smart self-heal</b> — agar runtime par koi unexpected popup / modal / cookie banner aa jaye,
                   Gemini 2.5 Pro screenshot dekh ke khud close/skip kar dega aur automation continue karega (up to 3 recoveries per lead).
+                  {pureJsonMode && <span className="block text-sky-400 mt-1">⛔ Pure JSON Mode ON hone ki vajah se disabled.</span>}
                 </span>
               </label>
 

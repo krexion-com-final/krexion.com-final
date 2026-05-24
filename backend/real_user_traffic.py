@@ -2949,6 +2949,17 @@ async def run_real_user_traffic_job(
     # mid-wait. Operators can lower it (faster fail-fast) or raise it
     # for offers with extreme slow loads.
     stuck_watchdog_seconds: float = 60.0,
+    # ── 2026-05: Pure JSON Mode ─────────────────────────────────────
+    # When True, the engine STRICTLY follows the recorded automation
+    # JSON without any AI involvement:
+    #   • self_heal is forced OFF (no Gemini vision rescue on failed
+    #     steps — if a step fails, the visit fails)
+    #   • AI answer-learning (Thompson sampling for survey picks) is
+    #     bypassed — survey/random-pick steps stay purely random and
+    #     no outcomes are recorded to bias future picks
+    # When False (default), behaves exactly as before (AI features ON
+    # subject to the existing self_heal flag).
+    pure_json_mode: bool = False,
 ):
     """
     Main orchestrator. Emits progress into RUT_JOBS[job_id].
@@ -3183,6 +3194,22 @@ async def run_real_user_traffic_job(
     report: List[Dict[str, Any]] = []
     report_lock = asyncio.Lock()
 
+    # ── 2026-05: Pure JSON Mode — disable all AI features ────────────
+    # When the user has explicitly turned ON Pure JSON Mode, we force
+    # self_heal OFF here so the engine NEVER falls back to Gemini
+    # vision rescue when a recorded step fails. The visit either
+    # succeeds purely on the JSON or it fails — predictable lifecycle.
+    if pure_json_mode:
+        if self_heal:
+            try:
+                push_live_step(
+                    job_id, 0, "preflight", "info",
+                    "🎯 Pure JSON Mode ON — self-heal forced OFF (no Gemini rescue).",
+                )
+            except Exception:
+                pass
+        self_heal = False
+
     # ── AI answer-learning ─────────────────────────────────────────
     # Load historical (q, a) → conversion stats for this offer host once,
     # at job start, and build a Thompson-sampling picker. Each visit
@@ -3190,26 +3217,39 @@ async def run_real_user_traffic_job(
     # historically high-converting answers. After thank_you detection we
     # call record_outcomes to update stats — so the picker improves with
     # every job run.
+    #
+    # When pure_json_mode is ON we SKIP building the picker entirely so
+    # survey/random-pick steps stay purely random and no outcomes are
+    # recorded back into the learning collection.
     ai_picker = None
-    try:
-        from rut_answer_learning import load_stats, make_picker  # noqa: WPS433
-        if db is not None:
-            ai_stats = await load_stats(db, target_url)
-            ai_picker = make_picker(ai_stats, explore_prob=0.15)
-            try:
-                from rut_answer_learning import summarize_stats
-                summary = summarize_stats(ai_stats, min_clicks=3)
-                if summary:
-                    push_live_step(
-                        job_id, 0, "ai_learning", "info",
-                        f"Loaded {len(summary)} learned questions for "
-                        f"{target_url[:60]} — biasing answers toward best.",
-                    )
-            except Exception:  # noqa: BLE001
-                pass
-    except Exception as e:  # noqa: BLE001
-        logger.debug(f"AI learning init failed: {e}")
-        ai_picker = None
+    if pure_json_mode:
+        try:
+            push_live_step(
+                job_id, 0, "ai_learning", "info",
+                "🎯 Pure JSON Mode ON — AI answer-learning disabled (random picks only, no outcome recording).",
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            from rut_answer_learning import load_stats, make_picker  # noqa: WPS433
+            if db is not None:
+                ai_stats = await load_stats(db, target_url)
+                ai_picker = make_picker(ai_stats, explore_prob=0.15)
+                try:
+                    from rut_answer_learning import summarize_stats
+                    summary = summarize_stats(ai_stats, min_clicks=3)
+                    if summary:
+                        push_live_step(
+                            job_id, 0, "ai_learning", "info",
+                            f"Loaded {len(summary)} learned questions for "
+                            f"{target_url[:60]} — biasing answers toward best.",
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"AI learning init failed: {e}")
+            ai_picker = None
 
     # ── Cancellation / stop support ─────────────────────────────────
     # Any code path (worker loop, stop endpoint) can set this flag;
@@ -5220,9 +5260,10 @@ async def run_real_user_traffic_job(
                 # AI answer-learning: record outcomes for survey picks now
                 # that we know whether this visit converted. Fire-and-forget
                 # so it never blocks the visit lifecycle.
+                # ── 2026-05: skip when pure_json_mode is ON ──
                 try:
                     picks = entry.get("_survey_picks") or []
-                    if picks and db is not None:
+                    if picks and db is not None and not pure_json_mode:
                         from rut_answer_learning import record_outcomes
                         asyncio.create_task(
                             record_outcomes(
