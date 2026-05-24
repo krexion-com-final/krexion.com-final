@@ -23,6 +23,7 @@ import {
   RefreshCw,
   Image as ImageIcon,
   ChevronDown,
+  CheckSquare,
   Undo2,
   Keyboard,
   History,
@@ -46,15 +47,16 @@ const authH = () => ({
 });
 
 // Keyboard-shortcut hint shown inside the tool buttons. Each tool gets
-// a number key 1-6 matching its position in TOOLS.
+// a number key 1-8 matching its position in TOOLS.
 const TOOLS = [
   { id: "default",   icon: Hand,        label: "Click",       key: "1", help: "Normal click — captures button/link text" },
   { id: "form_fill", icon: Type,        label: "Form Fill",   key: "2", help: "Click an input, then bind to Excel column" },
   { id: "dropdown",  icon: ChevronDown, label: "Dropdown",    key: "3", help: "Click a <select> dropdown to bind option / Excel column" },
-  { id: "random",    icon: Shuffle,     label: "Random Pick", key: "4", help: "Auto-detect buttons on page → tick the ones to randomise each run" },
-  { id: "capture",   icon: ImageIcon,   label: "Capture",     key: "5", help: "Insert a screenshot marker — shown in Live Activity" },
-  { id: "final",     icon: Flag,        label: "Mark Final",  key: "6", help: "Capture this page as conversion target" },
-  { id: "nav_only",  icon: ArrowRight,  label: "Move",        key: "7", help: "Click without recording — use to navigate past a Random Pick step" },
+  { id: "check",     icon: CheckSquare, label: "Check Box",   key: "4", help: "Click a checkbox (consent / agree / opt-in) — works on hidden CSS-styled boxes too" },
+  { id: "random",    icon: Shuffle,     label: "Random Pick", key: "5", help: "Auto-detect buttons on page → tick the ones to randomise each run" },
+  { id: "capture",   icon: ImageIcon,   label: "Capture",     key: "6", help: "Insert a screenshot marker — shown in Live Activity" },
+  { id: "final",     icon: Flag,        label: "Mark Final",  key: "7", help: "Capture this page as conversion target" },
+  { id: "nav_only",  icon: ArrowRight,  label: "Move",        key: "8", help: "Click without recording — use to navigate past a Random Pick step" },
 ];
 
 // Device-viewport presets — applied at session start so the recording
@@ -365,7 +367,7 @@ export default function VisualRecorderPage() {
   }, [setupStage, sessionId, sessionState]);
 
   // ── Keyboard shortcuts ─────────────────────────────────────────────
-  // 1-6  → switch tool
+  // 1-8  → switch tool
   // Esc  → cancel any pending binding (form-fill / dropdown / random)
   // Ctrl/Cmd+Z → undo last step
   // Ctrl/Cmd+Enter → finalize (if ≥ 2 steps)
@@ -404,8 +406,8 @@ export default function VisualRecorderPage() {
           return;
         }
       }
-      // 1-7 — switch tool (only when nothing has focus)
-      if (!editable && !ctrl && /^[1-7]$/.test(e.key)) {
+      // 1-8 — switch tool (only when nothing has focus)
+      if (!editable && !ctrl && /^[1-8]$/.test(e.key)) {
         const t = TOOLS[Number(e.key) - 1];
         if (t) {
           setTool(t.id);
@@ -558,6 +560,19 @@ export default function VisualRecorderPage() {
         if (txt) {
           setPendingRandom((prev) => [...prev, txt]);
           toast.success(`Random pool: ${pendingRandom.length + 1} items — click "Build Random Step" when ready`);
+        }
+      } else if (tool === "check" && d.element) {
+        // 2026-05: dedicated checkbox tool. Backend records a
+        // {"action":"check"} step that the RUT engine routes through
+        // _smart_check_with_fallback (handles CSS-styled hidden boxes).
+        const tag = (d.element.tag || "").toLowerCase();
+        const txt = (d.element.text || "").slice(0, 40);
+        if (d.warning) {
+          toast.error(d.warning);
+        } else if (tag !== "input" || (d.element.type || "").toLowerCase() !== "checkbox") {
+          toast.error("That isn't a checkbox — click directly on the box (or its label/border).");
+        } else {
+          toast.success(txt ? `☑ Checkbox recorded: "${txt}"` : "☑ Checkbox step recorded");
         }
       } else if (tool === "default") {
         const txt = (d.element?.text || "").slice(0, 30);
@@ -1141,7 +1156,7 @@ export default function VisualRecorderPage() {
             <ol className="list-decimal list-inside space-y-1 text-zinc-400">
               <li>Enter the offer URL (and optionally proxy + UA + Excel headers)</li>
               <li>Click <b>Start Recording</b> — a real Chromium opens server-side and shows you live</li>
-              <li>Use the toolbar: <b>Click</b> for normal buttons, <b>Form Fill</b> for inputs, <b>Random Pick</b> for surveys</li>
+              <li>Use the toolbar: <b>Click</b> for buttons, <b>Form Fill</b> for inputs, <b>Dropdown</b> for &lt;select&gt;, <b>Check Box</b> for consent/agree, <b>Random Pick</b> for surveys</li>
               <li>Need to scroll? Use scroll buttons. Need to wait? Use Wait shortcut.</li>
               <li>When you reach the conversion page, switch to <b>Mark Final</b> tool and click anywhere</li>
               <li>Hit <b>Finalize & Generate</b> — copy/download the JSON</li>

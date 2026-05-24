@@ -728,7 +728,11 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
         # flow, even this path is bypassed by /detect-clickables). If we
         # click here the page navigates away before the user can add more
         # options to the random pool. Pure capture only — no side-effect.
-        if mode != "random":
+        # 2026-05: `check` mode handles its OWN click via the resolution
+        # JS below (label→checkbox walk) so the live page reflects the
+        # actual toggled state — a blind mouse.click() at coords could
+        # land on a hidden input and do nothing.
+        if mode not in ("random", "check"):
             try:
                 await sess.page.mouse.click(info["x"], info["y"])
             except Exception:
@@ -780,6 +784,84 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
                         "name": opts.get("name") or "",
                         "id": opts.get("id") or "",
                     })
+            except Exception:
+                pass
+
+        # ── 2026-05: `check` mode — resolve actual checkbox + toggle it live ──
+        # The user clicks the VISIBLE checkbox UI (which may be the
+        # underlying <input type=checkbox>, OR a wrapping <label>, OR
+        # a CSS-styled sibling <span>/<div>). We resolve to the real
+        # <input type=checkbox> via three strategies:
+        #   1. Clicked element IS the checkbox.
+        #   2. Clicked element is a <label for="X"> — find element by id.
+        #   3. Clicked element is INSIDE a <label> that wraps a checkbox.
+        # Then we toggle it via the wrapping label.click() (proper user
+        # flow) so the live preview shows the checked state.
+        check_info: Dict[str, Any] = {}
+        if mode == "check":
+            try:
+                cbinfo = await sess.page.evaluate(
+                    """([x,y])=>{
+                        var el = document.elementFromPoint(x, y);
+                        if(!el) return null;
+                        var cb = null;
+                        // Strategy 1: direct hit
+                        if(el.tagName==='INPUT' && el.type==='checkbox') cb = el;
+                        // Strategy 2: <label for="X">
+                        if(!cb && el.tagName==='LABEL' && el.htmlFor) {
+                            cb = document.getElementById(el.htmlFor);
+                            if(cb && cb.type !== 'checkbox') cb = null;
+                        }
+                        // Strategy 3: walk up to nearest <label>, find inner checkbox
+                        if(!cb) {
+                            var lbl = el.closest && el.closest('label');
+                            if(lbl) {
+                                cb = lbl.querySelector('input[type=checkbox]');
+                                if(!cb && lbl.htmlFor) {
+                                    var found = document.getElementById(lbl.htmlFor);
+                                    if(found && found.type === 'checkbox') cb = found;
+                                }
+                            }
+                        }
+                        // Strategy 4: walk up looking for any checkbox child
+                        if(!cb) {
+                            var p = el;
+                            for(var i=0; i<4 && p; i++) {
+                                var found = p.querySelector && p.querySelector('input[type=checkbox]');
+                                if(found) { cb = found; break; }
+                                p = p.parentElement;
+                            }
+                        }
+                        if(!cb) return null;
+                        // Toggle via the proper user-flow: click wrapping label
+                        var lbl = cb.closest('label');
+                        var beforeChecked = cb.checked;
+                        try {
+                            if(lbl) lbl.click();
+                            if(cb.checked === beforeChecked) cb.click();
+                        } catch(e) {}
+                        return {
+                            id: cb.id || '',
+                            name: cb.getAttribute('name') || '',
+                            class: cb.className || '',
+                            checked: cb.checked,
+                            tag: 'INPUT',
+                            type: 'checkbox',
+                            text: (lbl ? (lbl.innerText || '').trim().slice(0, 80) : ''),
+                        };
+                    }""",
+                    [int(x), int(y)],
+                )
+                if cbinfo:
+                    check_info = cbinfo
+                    # Override `info` so build-step gets the resolved
+                    # checkbox attributes (not the wrapping label/span).
+                    info["id"] = cbinfo.get("id") or info.get("id") or ""
+                    info["name"] = cbinfo.get("name") or info.get("name") or ""
+                    info["tag"] = "INPUT"
+                    info["type"] = "checkbox"
+                    if cbinfo.get("text"):
+                        info["text"] = cbinfo["text"]
             except Exception:
                 pass
 
@@ -877,6 +959,39 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
                 "No <select> element found at that point — pick the dropdown "
                 "control itself (the one that opens the option list)."
             )
+    elif mode == "check":
+        # 2026-05: dedicated checkbox recording. The user clicked the
+        # visible UI (label / styled span / the input itself); we
+        # already resolved to the real <input type=checkbox> above and
+        # toggled it via wrapping-label click in the live page.
+        # Build a robust selector preferring #id → [name="X"] →
+        # input[type=checkbox][name="X"]. The RUT engine routes this
+        # through _smart_check_with_fallback at replay time, which
+        # additionally handles CSS-styled hidden checkboxes (display:none
+        # with sibling-span proxy) — so even if the page changes its
+        # ID after recording, the visit will still succeed.
+        sel: str = ""
+        if info.get("id"):
+            sel = f"#{info['id']}"
+        elif info.get("name"):
+            sel = f"input[name='{info['name']}']"
+        else:
+            sel = "input[type='checkbox']"  # last-resort
+        extra["selector"] = sel
+        extra["checked_after"] = bool(check_info.get("checked")) if check_info else None
+        if not check_info:
+            extra["warning"] = (
+                "No checkbox found at that point — click directly on the "
+                "checkbox (or the label / red box around it)."
+            )
+            step = None
+        else:
+            step = {
+                "action": "check",
+                "selector": sel,
+                "timeout": 8000,
+                "optional": True,
+            }
     elif mode == "final":
         # Captured separately by /mark-final endpoint
         step = None
