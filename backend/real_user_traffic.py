@@ -6705,6 +6705,110 @@ async def _smart_select_with_fallback(page, selector: str, value: Any,
         raise last_err
 
 
+# ── 2026-05: Robust check/uncheck with proxy-element + JS fallbacks ─────
+# Same family of problem as `_smart_select_with_fallback`:
+#   • Modern offer forms use CSS-styled checkboxes — the real <input
+#     type="checkbox"> is `display:none` and a wrapping <label> + visible
+#     <span>/<div> acts as the click proxy. Playwright's `page.check()`
+#     waits for the input to be visible → times out at 25s.
+#   • Form validation (jQuery / vanilla) only fires when the native
+#     `change` event bubbles up from a real click → just setting
+#     `.checked = true` via JS often gets reset by the page's own logic.
+# This helper tries 4 strategies in order:
+#   1. Native page.check/uncheck (works for plain visible checkboxes).
+#   2. Click the wrapping <label> (correct user-flow for CSS-styled
+#      checkboxes — triggers default label→input toggle).
+#   3. Click the visible sibling span/div inside the label (proxy click
+#      surface).
+#   4. JS set + dispatch `change`+`input`+jQuery('.trigger') as last
+#      resort.
+# Returns silently on success; raises last exception on total failure.
+async def _smart_check_with_fallback(page, selector: str, want_checked: bool = True,
+                                     timeout: int = 25000) -> None:
+    """Robust check/uncheck handling CSS-styled (hidden) checkboxes."""
+    last_err: Optional[Exception] = None
+
+    # ── Strategy 1: native Playwright check/uncheck (short timeout) ──
+    # Fast-path for plain visible checkboxes. We give it ~25% of the budget
+    # so a hidden checkbox doesn't burn the whole 25s before we fall back.
+    short_timeout = max(2000, int(timeout * 0.25))
+    try:
+        if want_checked:
+            await page.check(selector, timeout=short_timeout)
+        else:
+            await page.uncheck(selector, timeout=short_timeout)
+        return
+    except Exception as e:
+        last_err = e
+
+    # ── Strategy 2-4: JS-driven smart click (instant, handles hidden) ──
+    js_smart_check = """
+    (function(args) {
+        const selector = args.selector;
+        const wantChecked = args.wantChecked;
+        const cb = document.querySelector(selector);
+        if (!cb) return {ok: false, reason: 'not_found'};
+        if (cb.checked === wantChecked) return {ok: true, already: true};
+
+        // 2a: Click the wrapping <label> (proper user-flow for CSS checkboxes)
+        const wrapLabel = cb.closest('label');
+        if (wrapLabel) {
+            try { wrapLabel.click(); } catch (e) {}
+            if (cb.checked === wantChecked) return {ok: true, strategy: 'label_click'};
+        }
+        // 2b: Click a label[for="<id>"] outside the wrap
+        if (cb.id) {
+            const extLabel = document.querySelector('label[for="' + cb.id + '"]');
+            if (extLabel) {
+                try { extLabel.click(); } catch (e) {}
+                if (cb.checked === wantChecked) return {ok: true, strategy: 'for_label_click'};
+            }
+        }
+        // 2c: Click a visible sibling element inside the wrap label
+        //     (CSS pseudo-checkbox like <span class="custom-check">)
+        if (wrapLabel) {
+            const sibs = wrapLabel.querySelectorAll('span, div, i, em');
+            for (const s of sibs) {
+                if (s.offsetWidth > 0 && s.offsetHeight > 0) {
+                    try { s.click(); } catch (e) {}
+                    if (cb.checked === wantChecked) return {ok: true, strategy: 'sibling_click'};
+                }
+            }
+        }
+        // 2d: Click the checkbox itself — works even when display:none
+        //     because programmatic .click() doesn't require visibility.
+        try { cb.click(); } catch (e) {}
+        if (cb.checked === wantChecked) return {ok: true, strategy: 'cb_click'};
+        // 2e: LAST RESORT — set property + dispatch full event suite.
+        //     Only useful when the form's validators read .checked directly.
+        cb.checked = wantChecked;
+        try { cb.dispatchEvent(new Event('input', {bubbles: true})); } catch (e) {}
+        try { cb.dispatchEvent(new Event('change', {bubbles: true})); } catch (e) {}
+        try { cb.dispatchEvent(new Event('click', {bubbles: true})); } catch (e) {}
+        if (window.jQuery) {
+            try { window.jQuery(cb).prop('checked', wantChecked).trigger('change').trigger('click'); } catch (e) {}
+        }
+        return {ok: cb.checked === wantChecked, strategy: 'set_dispatch'};
+    })
+    """
+    try:
+        r = await asyncio.wait_for(
+            page.evaluate(js_smart_check,
+                          {"selector": selector, "wantChecked": bool(want_checked)}),
+            timeout=4.0,
+        )
+        if isinstance(r, dict) and r.get("ok"):
+            return  # SUCCESS
+        if isinstance(r, dict) and r.get("reason") == "not_found":
+            last_err = ValueError(f"check: element not found ({selector!r})")
+    except Exception as e:
+        if last_err is None:
+            last_err = e
+
+    if last_err is not None:
+        raise last_err
+
+
 async def _execute_automation_steps(
     page: Page,
     row: Dict[str, Any],
@@ -6901,9 +7005,15 @@ async def _execute_automation_steps(
                         timeout=timeout,
                     )
                 elif action == "check":
-                    await page.check(selector, timeout=timeout)
+                    # 2026-05: handles CSS-styled hidden checkboxes via
+                    # label-click / sibling-click / JS-set fallbacks.
+                    await _smart_check_with_fallback(
+                        page, selector, want_checked=True, timeout=timeout,
+                    )
                 elif action == "uncheck":
-                    await page.uncheck(selector, timeout=timeout)
+                    await _smart_check_with_fallback(
+                        page, selector, want_checked=False, timeout=timeout,
+                    )
                 elif action == "press":
                     await page.press(selector or "body", value or "Enter", timeout=timeout)
                 elif action == "wait":
@@ -7405,9 +7515,15 @@ async def _dispatch_single_action(page: Page, action: str, selector: str,
             timeout=timeout,
         )
     elif action == "check":
-        await page.check(selector, timeout=timeout)
+        # 2026-05: route through smart helper — handles CSS-styled hidden
+        # checkboxes (label-click / sibling-click / JS-set fallbacks).
+        await _smart_check_with_fallback(
+            page, selector, want_checked=True, timeout=timeout,
+        )
     elif action == "uncheck":
-        await page.uncheck(selector, timeout=timeout)
+        await _smart_check_with_fallback(
+            page, selector, want_checked=False, timeout=timeout,
+        )
     elif action == "press":
         await page.press(selector or "body", value or "Enter", timeout=timeout)
     elif action == "wait":
