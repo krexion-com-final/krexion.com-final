@@ -5652,9 +5652,28 @@ async def run_real_user_traffic_job(
         else:
             # Budget-based dispatcher: keep spawning until VISIBLE
             # `processed` >= `total` (or HARD_CAP / cancel hit).
-            _hard_cap_mult = max(int(os.environ.get("RUT_HARD_CAP_MULTIPLIER", "20")), 1)
-            HARD_CAP = max(total * _hard_cap_mult, 1000)
+            # HARD_CAP intentionally GENEROUS — when ProxyJet returns
+            # 90 %+ dirty IPs for the offer, we still need hundreds of
+            # attempts to surface `total` clean visits. The earlier
+            # 20× cap (1000 floor) terminated jobs at ~9 visible
+            # visits, which is what the user reported. New cap is
+            # 100× user's target with a 5000 floor, so a 5-click
+            # request can absorb up to 5000 silent skips and a
+            # 50-click request up to 5000. Configurable via
+            # RUT_HARD_CAP_MULTIPLIER for users who want tighter or
+            # looser bounds.
+            _hard_cap_mult = max(int(os.environ.get("RUT_HARD_CAP_MULTIPLIER", "100")), 1)
+            HARD_CAP = max(total * _hard_cap_mult, 5000)
             RUT_JOBS[job_id]["hard_cap"] = HARD_CAP
+            # Secondary early-exit: if we've spawned ≥150 attempts
+            # AND the visible-success ratio is <2 % (i.e. the
+            # ProxyJet pool is genuinely exhausted for this offer,
+            # not just unlucky), give up gracefully so the user
+            # doesn't burn through their full ProxyJet credit on
+            # a hopeless run. 150 is enough to be statistically
+            # confident — 0/150 = exhausted, 3/150 = 2 % = keep going.
+            _MIN_ATTEMPTS_FOR_RATIO_CHECK = 150
+            _MIN_PROGRESS_RATIO = 0.02
             attempt_counter = 0
             in_flight: set = set()
             try:
@@ -5673,6 +5692,20 @@ async def run_real_user_traffic_job(
                             f"Hard cap {HARD_CAP} attempts reached — stopping "
                             f"(visible: {visible_processed}/{total}, silently skipped: {_silent}). "
                             "Most ProxyJet IPs were rejected by the tracker — try a different state or refresh the ProxyJet pool.",
+                        )
+                        break
+                    # ProxyJet-pool-exhausted early exit
+                    if (
+                        attempt_counter >= _MIN_ATTEMPTS_FOR_RATIO_CHECK
+                        and visible_processed < int(attempt_counter * _MIN_PROGRESS_RATIO)
+                    ):
+                        _silent = int(RUT_JOBS[job_id].get("silent_skip_count") or 0)
+                        push_live_step(
+                            job_id, 0, "done", "info",
+                            f"ProxyJet pool exhausted for this offer — stopping at attempt {attempt_counter} "
+                            f"(visible: {visible_processed}/{total}, silently skipped: {_silent}). "
+                            "Less than 2 % of attempts produced a visible visit — try a different US state, "
+                            "refresh your ProxyJet pool, or try again later when more IPs rotate in.",
                         )
                         break
                     # Spawn up to concurrency
@@ -7219,31 +7252,44 @@ async def _record(
         j = RUT_JOBS.setdefault(job_id, {})
         s = entry.get("status", "failed")
 
-        # ── 2026-05: Silent-skip for burnt-IP visits ────────────────────
+        # ── 2026-05: Silent-skip for burnt-IP / dead-proxy visits ──────
         # When `silent_skip_burnt_ip` is true (auto-enabled by ProxyJet
-        # Auto Mode), visits that detected a duplicate-IP or VPN block
-        # page from the offer/tracker are TREATED AS IF THEY NEVER
-        # HAPPENED from the UI's perspective:
-        #   • DO NOT bump `processed` — dashboard count stays clean
-        #   • DO NOT bump `skipped_duplicate_ip` / `skipped_vpn` counters
-        #   • DO NOT add to `report` (ZIP export stays clean)
-        #   • DO NOT add to `events` (Recent Visits in UI stays clean)
-        #   • DO bump a separate `silent_skip_count` for diagnostics
-        #   • DO delete the early-logged click_doc + decrement the
-        #     link.clicks counter (so dashboard Clicks page doesn't
-        #     fill up with "pending → skipped" rows)
-        #   • The IP is ALREADY in rut_burnt_ips (persisted by the
-        #     detection block in process_one), so future jobs avoid it
-        #     even though this visit's click_doc was deleted.
-        # The dispatcher then keeps spawning more visits up to a
-        # HARD_CAP, so the user gets exactly `total_clicks` VISIBLE
-        # successful/failed clicks (no clutter from offer-side blocks).
+        # Auto Mode), visits where the ATTEMPT NEVER REACHED the offer
+        # form because of an offer/tracker-side block or a proxy-side
+        # failure are TREATED AS IF THEY NEVER HAPPENED from the UI's
+        # perspective:
+        #   • skipped_duplicate_ip — offer/tracker said "Duplicate IP"
+        #   • skipped_vpn          — offer said "Please turn off VPN"
+        #   • skipped_dead_proxy   — ProxyJet returned a proxy that
+        #                            couldn't even open a TCP / SSL
+        #                            connection to the offer (Read
+        #                            timeout, 502, WRONG_VERSION_NUMBER…)
+        #   • skipped_no_unique_ip — ProxyJet's pool exhausted state
+        #                            without giving us a unique IP
+        # All four categories share one trait: the user's lead row,
+        # UA, and click budget were NEVER consumed against the offer
+        # — they're pure "infrastructure noise". Hiding them keeps the
+        # UI to a clean "what actually happened against the offer"
+        # view. The dispatcher's HARD_CAP-bounded while-loop keeps
+        # spawning more visits until `total_clicks` VISIBLE visits
+        # have been recorded.
+        _SILENT_SKIP_STATUSES = (
+            "skipped_duplicate_ip",
+            "skipped_vpn",
+            "skipped_dead_proxy",
+            "skipped_no_unique_ip",
+        )
         silent_skip = (
-            s in ("skipped_duplicate_ip", "skipped_vpn")
+            s in _SILENT_SKIP_STATUSES
             and bool(j.get("silent_skip_burnt_ip"))
         )
         if silent_skip:
-            # Tear down the early-logged click_doc + counter bump.
+            # Tear down the early-logged click_doc + counter bump
+            # (only burnt-IP visits get an early click_doc — the
+            # dead-proxy / no-unique-IP paths bail out before
+            # page.goto so they don't have one. Safe to attempt
+            # delete either way — delete_one of a non-existent id
+            # is a no-op.)
             _early_id = entry.get("_early_click_id")
             _link_id = j.get("link_id")
             _owner_id = j.get("link_owner_id")
