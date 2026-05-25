@@ -6492,6 +6492,146 @@ def _substitute(template: str, row: Dict[str, Any]) -> str:
     return re.sub(r"\{\{\s*([^}]+?)\s*\}\}", repl, template)
 
 
+# ── 2026-05: Robust wait_for_selector with state + selector fallbacks ──
+# Why this exists:
+#   Visual Recorder dropdown-binding emits a `wait_for_selector` step
+#   right before the `select` step, with `state="visible"` (Playwright
+#   default). On modern lead-gen pages the actual `<select id="birth_month">`
+#   is often:
+#     1. Hidden via CSS (`opacity:0` / `position:absolute; left:-9999px`)
+#        behind a custom dropdown UI (React-Select, Bootstrap-Select,
+#        Chosen, Select2 etc.) — element exists but is NOT "visible" in
+#        Playwright's strict sense → 25s timeout → visit fails as
+#        "Automation crashed: Page.wait_for_selector: Timeout 25000ms
+#        exceeded. Call log: - waiting for locator(\"#birth_month\") to
+#        be visible".
+#     2. Rendered after a network round-trip so it shows up later than
+#        the surrounding fields.
+#     3. The page changed the element's id (`#birth_month` → `#dob_month`)
+#        between recording and replay.
+#
+#   The downstream `select` action ALREADY handles all three via
+#   _smart_select_with_fallback (it has a JS-driven PHASE 1 that sets
+#   hidden <select> values directly). So the wait_for_selector step is
+#   actually redundant — we just need it to NOT fail when the element
+#   exists but isn't visible. This helper:
+#     • Tries the requested state first (default "visible") with a
+#       reduced 6s budget — fast path stays fast for normal forms.
+#     • Falls back to state="attached" (exists in DOM) — handles hidden
+#       <select> behind custom UIs.
+#     • Tries selector fallbacks derived from the original
+#       (`#birth_month` → `[name="birth_month"]` → `select[name*="birth" i][name*="month" i]`)
+#       — handles renamed ids.
+#     • If everything fails AND step is optional, soft-skips with a
+#       warning (the subsequent select step still has its own fallbacks).
+#     • If everything fails AND step is required, raises with a clear
+#       "tried N selectors / states" message.
+async def _smart_wait_for_selector(page, selector: str, *,
+                                    state: str = "visible",
+                                    timeout: int = 25000) -> str:
+    """Robust wait_for_selector with state + selector fallback.
+    Returns the selector that actually matched (useful for downstream
+    debug logging). Raises Playwright TimeoutError on total failure.
+
+    Total budget is `timeout`. Divided across phases:
+      Phase 1: original selector with requested state (≤ 40% of budget)
+      Phase 2: original selector with state="attached" (≤ 20%)
+      Phase 3: fallback selectors with state="attached" (rest)
+    """
+    import re as _re_local
+    sel = (selector or "").strip()
+    if not sel:
+        raise ValueError("wait_for_selector: empty selector")
+
+    requested_state = (state or "visible").strip().lower()
+    if requested_state not in ("visible", "attached", "hidden", "detached"):
+        requested_state = "visible"
+
+    # ── Build selector fallback chain (same logic as smart_select) ──
+    selectors: List[str] = [sel]
+    key = ""
+    m = _re_local.match(r"^#([\w\-]+)$", sel)
+    if m:
+        key = m.group(1)
+    else:
+        m = _re_local.search(r"\[(?:name|id)\s*=\s*[\"']([^\"']+)[\"']\]", sel)
+        if m:
+            key = m.group(1)
+        else:
+            m = _re_local.search(r"\[name\s*=\s*([^\]\s]+)\]", sel)
+            if m:
+                key = m.group(1).strip("\"'")
+    if key:
+        selectors.extend([
+            f'[id="{key}"]',
+            f'[name="{key}"]',
+            f'select#{key}',
+            f'select[name="{key}"]',
+            f'input[name="{key}"]',
+            f'[id*="{key}" i]',
+            f'[name*="{key}" i]',
+        ])
+        tokens = [t for t in _re_local.split(r"[_\-\s]+", key) if t and len(t) >= 2]
+        if len(tokens) >= 2:
+            selectors.append("".join(f'[name*="{t}" i]' for t in tokens))
+            selectors.append("".join(f'[id*="{t}" i]' for t in tokens))
+
+    # Dedup while preserving order
+    seen: set = set()
+    uniq: List[str] = []
+    for s in selectors:
+        if s and s not in seen:
+            seen.add(s)
+            uniq.append(s)
+
+    total = max(2000, int(timeout))
+    # Tight budgets: we don't want to burn the full 25s budget waiting
+    # for an element that's hidden behind a custom UI to suddenly become
+    # "visible". Fail the visibility check fast and fall back to
+    # state="attached" which succeeds instantly for elements that
+    # already exist in DOM.
+    phase1_t = max(1500, min(int(total * 0.2), 5000))   # ≤5s on visibility
+    phase2_t = max(1500, min(int(total * 0.15), 3000))  # ≤3s on attached for original
+    remaining = max(2000, total - phase1_t - phase2_t)
+    # Per-fallback budget — at least 800ms each, up to ~2.5s
+    per_fallback = max(800, min(remaining // max(1, len(uniq)), 2500))
+
+    last_err: Optional[Exception] = None
+
+    # Phase 1 — original selector, requested state
+    try:
+        await page.wait_for_selector(sel, timeout=phase1_t, state=requested_state)
+        return sel
+    except Exception as e:
+        last_err = e
+
+    # Phase 2 — original selector, attached (handles hidden-behind-custom-UI)
+    if requested_state != "attached":
+        try:
+            await page.wait_for_selector(sel, timeout=phase2_t, state="attached")
+            return sel
+        except Exception as e:
+            last_err = e
+
+    # Phase 3 — fallback selectors with attached state
+    for alt in uniq[1:]:  # skip the original we already tried
+        try:
+            await page.wait_for_selector(alt, timeout=per_fallback, state="attached")
+            return alt
+        except Exception as e:
+            last_err = e
+            continue
+
+    # Total failure — re-raise the last error with a richer message so
+    # the failed-visit row in the UI says WHY (not just "timeout 25s").
+    tried_n = len(uniq)
+    raise type(last_err)(
+        f"wait_for_selector exhausted {tried_n} selector variants and "
+        f"both 'visible' + 'attached' states — original selector "
+        f"{sel!r}. Last error: {last_err}"
+    )
+
+
 # ── 2026-05: Robust select-option with selector + match-strategy fallbacks ──
 # Why this exists:
 #   The original automation steps tried `page.select_option(selector, value=X)`
@@ -6893,9 +7033,22 @@ async def _execute_automation_steps(
             }
             if action in _PRE_WAIT_ACTIONS and selector:
                 try:
-                    await _wait_for_actionable_selector(
-                        page, selector, timeout, visible=True,
-                    )
+                    # 2026-05: For `select` (and check/uncheck which often
+                    # target CSS-hidden checkboxes), use the smart helper
+                    # that falls back to state="attached" + selector
+                    # variants. The downstream smart_select / smart_check
+                    # can drive hidden elements via JS, so requiring
+                    # visibility here is wrong and causes the dropdown
+                    # 25s-timeout bug. Other actions still require true
+                    # visibility (user-perceived presence).
+                    if action in ("select", "check", "uncheck"):
+                        await _smart_wait_for_selector(
+                            page, selector, state="attached", timeout=timeout,
+                        )
+                    else:
+                        await _wait_for_actionable_selector(
+                            page, selector, timeout, visible=True,
+                        )
                 except Exception as _wfa:
                     # Selector never became actionable within the
                     # per-step budget. If the step is optional, fall
@@ -7019,7 +7172,18 @@ async def _execute_automation_steps(
                 elif action == "wait":
                     await page.wait_for_timeout(int(step.get("ms") or 1000))
                 elif action == "wait_for_selector":
-                    await page.wait_for_selector(selector, timeout=timeout, state=step.get("state") or "visible")
+                    # 2026-05: Use smart wait helper that handles hidden
+                    # <select> behind custom dropdown UIs (state=attached
+                    # fallback) + selector renames (#birth_month →
+                    # [name="birth_month"] etc). Fixes "Page.wait_for_selector:
+                    # Timeout 25000ms exceeded — waiting for locator(
+                    # '#birth_month') to be visible" on dropdown-binding
+                    # steps where the native <select> is styled hidden.
+                    await _smart_wait_for_selector(
+                        page, selector,
+                        state=step.get("state") or "visible",
+                        timeout=timeout,
+                    )
                 elif action in ("wait_for_navigation", "wait_for_load", "wait_for_networkidle"):
                     # 2026-01 — Smart load wait for SPA-friendly pages.
                     # The plain `wait_for_load_state("networkidle", timeout=60000)`

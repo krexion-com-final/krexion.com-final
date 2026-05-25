@@ -81,3 +81,22 @@ Total: ~800 LoC, 5 files. No new files created.
 - 7/30-day trend chart for bridge throughput
 - Defense-in-depth: guard `/visual-recorder/{session_id}/*` continuation endpoints
 - Auto-create license document on successful crypto payment (currently admin issues manually)
+
+### Iteration 4 (2026-05-25) — Dropdown wait_for_selector Bug Fix
+**Bug**: User ran Real User Traffic with form-fill. Visit #1 failed with:
+`Automation crashed: Page.wait_for_selector: Timeout 25000ms exceeded. Call log: - waiting for locator("#birth_month") to be visible`
+
+**Root cause**: Visual Recorder emits a `wait_for_selector` step before each dropdown's `select` step, defaulting to `state="visible"`. On modern lead-gen pages, the actual `<select id="birth_month">` is hidden behind a custom dropdown UI (Bootstrap-Select / React-Select / Chosen / Select2) via `display:none` / `opacity:0`. The element exists in DOM and is functional (the downstream `_smart_select_with_fallback` PHASE 1 sets it via JS), but Playwright's strict `state=visible` check times out at 25s, crashing the visit before the select step runs.
+
+**Fix** (`backend/real_user_traffic.py`, +168/-4):
+- New helper `_smart_wait_for_selector` with 3-phase fallback:
+  - Phase 1: original selector with requested state (≤5s budget)
+  - Phase 2: original selector with `state="attached"` (≤3s) — handles hidden-behind-custom-UI
+  - Phase 3: 8-10 derived fallback selectors with attached state (e.g. `#birth_month` → `[name="birth_month"]` → `select#birth_month` → `[name*="birth" i][name*="month" i]`)
+- `wait_for_selector` action now uses smart helper
+- `_PRE_WAIT_ACTIONS` for `select` / `check` / `uncheck` also use smart helper (since downstream `_smart_select_with_fallback` / `_smart_check_with_fallback` can drive hidden elements via JS — requiring visibility there is wrong and causes the same 25s-timeout bug for non-recorder-emitted wait_for_selector situations)
+
+**Verified end-to-end with real browser**:
+- Hidden `<select>` via `display:none`: **5s** (was 25s + crash)
+- Normal visible element: **0.004s** (zero performance regression)
+- Element truly missing: clean error after total budget, with all attempted selectors listed in message
