@@ -4426,6 +4426,101 @@ async def run_real_user_traffic_job(
             if True:
 
                 page = await context.new_page()
+
+                # ── 2026-05 — IP rotation guard (antidetect leak prevention) ─
+                # The httpx probe at ProxyJet-pick time runs over a SEPARATE
+                # TCP connection than the upcoming browser navigation. Even
+                # with sticky-session ProxyJet credentials, residential pools
+                # can occasionally rotate the egress IP between the probe
+                # and the browser's first request — and in extreme cases
+                # mid-visit between page loads. From the advertiser's
+                # perspective, a visit that arrives on one IP and submits a
+                # form / hits the conversion page on a DIFFERENT IP is a
+                # textbook proxy/antidetect leak signature and triggers an
+                # instant ban + lead invalidation.
+                #
+                # This guard does ONE lightweight browser-side IP probe
+                # (https://ipwho.is/) using the same Playwright context
+                # that's about to open the tracker URL. If the actual
+                # browser-egress IP doesn't match the probe IP that
+                # `duplicate_ip_set` already cleared, we:
+                #   • burn BOTH IPs to rut_burnt_ips (+ in-job set)
+                #   • close the browser context ("profile band ho jaye")
+                #   • raise _OfferBlockRetryNeeded so the worker() wrapper
+                #     transparently retries the visit slot with a fresh
+                #     ProxyJet IP — no wasted entry in the report
+                #
+                # Runs only in proxyjet_on_demand mode (legacy paste/upload
+                # proxy flows don't have an IP-source loop to retry against).
+                if proxyjet_on_demand and entry.get("exit_ip"):
+                    _expected_ip = (entry.get("exit_ip") or "").strip()
+                    _actual_ip = ""
+                    _guard_ok = False
+                    try:
+                        _gr = await page.goto(
+                            "https://ipwho.is/",
+                            wait_until="domcontentloaded",
+                            timeout=15000,
+                        )
+                        if _gr is not None and 200 <= (_gr.status or 0) < 400:
+                            try:
+                                _body = await page.evaluate(
+                                    "() => document.body ? document.body.innerText : ''"
+                                )
+                            except Exception:
+                                _body = ""
+                            try:
+                                import json as _ipjson
+                                _data = _ipjson.loads(_body or "{}")
+                                _actual_ip = str(_data.get("ip") or "").strip()
+                            except Exception:
+                                _actual_ip = ""
+                            _guard_ok = bool(_actual_ip)
+                    except Exception:
+                        _guard_ok = False
+
+                    if _guard_ok and _actual_ip and _actual_ip != _expected_ip:
+                        # ── IP ROTATED — abort + burn + retry ────────────
+                        push_live_step(
+                            job_id, i + 1, "filter", "skipped",
+                            f"IP rotation detected · expected {_expected_ip} · got "
+                            f"{_actual_ip} · closing profile + burning both IPs + "
+                            f"retrying with fresh ProxyJet IP",
+                        )
+                        for _b_ip in (_expected_ip, _actual_ip):
+                            if not _b_ip:
+                                continue
+                            if duplicate_ip_set is not None:
+                                try:
+                                    duplicate_ip_set.add(_b_ip)
+                                except Exception:
+                                    pass
+                            _spawn_live(_persist_burnt_ip(
+                                db,
+                                ip=_b_ip,
+                                reason="ip_rotated",
+                                user_id=engine_user_id or "",
+                                offer_url=target_url or "",
+                                state=(entry.get("lead_state") or "").upper(),
+                                job_id=job_id or "",
+                            ))
+                        try:
+                            await context.close()
+                        except Exception:
+                            pass
+                        raise _OfferBlockRetryNeeded(
+                            reason="ip_rotated",
+                            burnt_ip=_actual_ip,
+                        )
+                    elif _guard_ok:
+                        push_live_step(
+                            job_id, i + 1, "filter", "ok",
+                            f"IP guard verified · sticky {_actual_ip} matches probe IP",
+                        )
+                    # else: ipwho.is probe failed — don't block the visit
+                    # on a transient verification glitch; the existing
+                    # post-load duplicate / VPN detectors are still active.
+
                 push_live_step(job_id, i + 1, "browser", "info", f"Opening {target_url}")
 
                 # Tunnel-error retry: ProxyJet sticky sessions sometimes
