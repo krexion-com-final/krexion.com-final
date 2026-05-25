@@ -4427,34 +4427,40 @@ async def run_real_user_traffic_job(
 
                 page = await context.new_page()
 
-                # ── 2026-05 — IP rotation guard (antidetect leak prevention) ─
-                # The httpx probe at ProxyJet-pick time runs over a SEPARATE
-                # TCP connection than the upcoming browser navigation. Even
-                # with sticky-session ProxyJet credentials, residential pools
-                # can occasionally rotate the egress IP between the probe
-                # and the browser's first request — and in extreme cases
-                # mid-visit between page loads. From the advertiser's
-                # perspective, a visit that arrives on one IP and submits a
-                # form / hits the conversion page on a DIFFERENT IP is a
-                # textbook proxy/antidetect leak signature and triggers an
-                # instant ban + lead invalidation.
+                # ── 2026-05 — BROWSER-SIDE duplicate-IP check ───────────
+                # CRITICAL INSIGHT: the httpx probe at ProxyJet-pick time
+                # uses a separate TCP connection (and IPv4-only) than the
+                # upcoming browser navigation. ProxyJet residential pools
+                # are DUAL-STACK — the same sticky session typically gives
+                # the httpx probe an IPv4 (e.g. 172.56.188.10) while the
+                # browser ends up egressing on IPv6 (e.g. 2600:8800:...) or
+                # a DIFFERENT IPv4 entirely. This is NORMAL ProxyJet
+                # behaviour, NOT a leak.
                 #
-                # This guard does ONE lightweight browser-side IP probe
-                # (https://ipwho.is/) using the same Playwright context
-                # that's about to open the tracker URL. If the actual
-                # browser-egress IP doesn't match the probe IP that
-                # `duplicate_ip_set` already cleared, we:
-                #   • burn BOTH IPs to rut_burnt_ips (+ in-job set)
-                #   • close the browser context ("profile band ho jaye")
-                #   • raise _OfferBlockRetryNeeded so the worker() wrapper
-                #     transparently retries the visit slot with a fresh
-                #     ProxyJet IP — no wasted entry in the report
+                # The duplicate-IP check at probe time is therefore wrong:
+                # we cleared `172.56.188.10` against duplicate_ip_set, but
+                # the tracker (krexion.com/api/t/...) actually sees the
+                # IPv6 address. If THAT IPv6 happens to be in clicks DB,
+                # the tracker shows the "Duplicate IP" page even though
+                # our pre-check said "unique".
+                #
+                # Fix: do the duplicate-IP check FROM THE BROWSER, using a
+                # one-shot navigation to https://ipwho.is/ — this returns
+                # exactly the IP the tracker will see (same connection
+                # pool, same protocol). Compare to duplicate_ip_set:
+                #   • duplicate → close profile, burn the BROWSER IP,
+                #                 raise _OfferBlockRetryNeeded (worker()
+                #                 retries with a fresh ProxyJet IP — the
+                #                 wasted attempt is NOT recorded and does
+                #                 NOT consume a visit slot)
+                #   • unique    → reserve it in duplicate_ip_set + entry,
+                #                 then continue to the tracker URL
                 #
                 # Runs only in proxyjet_on_demand mode (legacy paste/upload
-                # proxy flows don't have an IP-source loop to retry against).
-                if proxyjet_on_demand and entry.get("exit_ip"):
-                    _expected_ip = (entry.get("exit_ip") or "").strip()
-                    _actual_ip = ""
+                # proxy flows can't easily retry — they keep their existing
+                # probe-time check).
+                if proxyjet_on_demand:
+                    _browser_ip = ""
                     _guard_ok = False
                     try:
                         _gr = await page.goto(
@@ -4472,50 +4478,61 @@ async def run_real_user_traffic_job(
                             try:
                                 import json as _ipjson
                                 _data = _ipjson.loads(_body or "{}")
-                                _actual_ip = str(_data.get("ip") or "").strip()
+                                _browser_ip = str(_data.get("ip") or "").strip()
                             except Exception:
-                                _actual_ip = ""
-                            _guard_ok = bool(_actual_ip)
+                                _browser_ip = ""
+                            _guard_ok = bool(_browser_ip)
                     except Exception:
                         _guard_ok = False
 
-                    if _guard_ok and _actual_ip and _actual_ip != _expected_ip:
-                        # ── IP ROTATED — abort + burn + retry ────────────
-                        push_live_step(
-                            job_id, i + 1, "filter", "skipped",
-                            f"IP rotation detected · expected {_expected_ip} · got "
-                            f"{_actual_ip} · closing profile + burning both IPs + "
-                            f"retrying with fresh ProxyJet IP",
+                    if _guard_ok and _browser_ip:
+                        # Update entry to reflect the REAL exit IP the
+                        # tracker / offer will see (not the probe IP).
+                        entry["exit_ip"] = _browser_ip
+
+                        _is_dup = (
+                            skip_duplicate_ip
+                            and duplicate_ip_set is not None
+                            and _browser_ip in duplicate_ip_set
                         )
-                        for _b_ip in (_expected_ip, _actual_ip):
-                            if not _b_ip:
-                                continue
-                            if duplicate_ip_set is not None:
-                                try:
-                                    duplicate_ip_set.add(_b_ip)
-                                except Exception:
-                                    pass
+                        if _is_dup:
+                            push_live_step(
+                                job_id, i + 1, "filter", "skipped",
+                                f"Browser-side duplicate IP {_browser_ip} "
+                                f"(probe IP was {(_probe_ip := entry.get('exit_ip', '?'))}) · "
+                                f"closing profile + retrying with fresh ProxyJet IP "
+                                f"(no offer load attempted)",
+                            )
+                            # Persist to rut_burnt_ips so future probes
+                            # and jobs skip this IP outright.
                             _spawn_live(_persist_burnt_ip(
                                 db,
-                                ip=_b_ip,
-                                reason="ip_rotated",
+                                ip=_browser_ip,
+                                reason="browser_duplicate_ip",
                                 user_id=engine_user_id or "",
                                 offer_url=target_url or "",
                                 state=(entry.get("lead_state") or "").upper(),
                                 job_id=job_id or "",
                             ))
-                        try:
-                            await context.close()
-                        except Exception:
-                            pass
-                        raise _OfferBlockRetryNeeded(
-                            reason="ip_rotated",
-                            burnt_ip=_actual_ip,
-                        )
-                    elif _guard_ok:
+                            try:
+                                await context.close()
+                            except Exception:
+                                pass
+                            raise _OfferBlockRetryNeeded(
+                                reason="browser_duplicate_ip",
+                                burnt_ip=_browser_ip,
+                            )
+                        # Unique browser IP — reserve immediately so
+                        # parallel visits don't both land on it.
+                        if duplicate_ip_set is not None:
+                            try:
+                                duplicate_ip_set.add(_browser_ip)
+                            except Exception:
+                                pass
                         push_live_step(
                             job_id, i + 1, "filter", "ok",
-                            f"IP guard verified · sticky {_actual_ip} matches probe IP",
+                            f"Browser-side IP verified · {_browser_ip} unique · "
+                            f"proceeding to tracker URL",
                         )
                     # else: ipwho.is probe failed — don't block the visit
                     # on a transient verification glitch; the existing
@@ -6160,7 +6177,13 @@ async def run_real_user_traffic_job(
                     and not cancel_event.is_set()
                     and not target_drain_event.is_set()
                 ):
-                    t = asyncio.create_task(process_one(attempt_counter, shared_browser))
+                    # 2026-05 — Route through worker() instead of
+                    # process_one() so the _OfferBlockRetryNeeded retry
+                    # loop (added in commit ad037b2) actually fires in
+                    # conversions mode too. Without this wrapper the
+                    # retry exception was leaking out of the task and
+                    # quietly burning the max_attempts budget.
+                    t = asyncio.create_task(worker(attempt_counter, shared_browser))
                     in_flight.add(t)
                     t.add_done_callback(in_flight.discard)
                     attempt_counter += 1
@@ -6289,7 +6312,13 @@ async def run_real_user_traffic_job(
                         and not cancel_event.is_set()
                         and not target_drain_event.is_set()
                     ):
-                        t = asyncio.create_task(process_one(attempt_counter, shared_browser))
+                        # 2026-05 — Route through worker() so the
+                        # _OfferBlockRetryNeeded retry loop fires here
+                        # too (silent clicks-mode dispatcher). Without
+                        # the wrapper, _OfferBlockRetryNeeded exceptions
+                        # leak out of process_one and corrupt the
+                        # silent-skip accounting.
+                        t = asyncio.create_task(worker(attempt_counter, shared_browser))
                         in_flight.add(t)
                         t.add_done_callback(in_flight.discard)
                         attempt_counter += 1
