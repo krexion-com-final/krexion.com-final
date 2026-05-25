@@ -2353,6 +2353,96 @@ async def _detect_offer_vpn_block(page: "Page") -> Tuple[bool, str]:
     return False, ""
 
 
+# ─── 2026-05 — PRE-BROWSER offer-side duplicate/VPN probe ──────────
+# Issue: even when our `duplicate_ip_set` (clicks DB + rut_burnt_ips)
+# says the exit-IP is "unique", the OFFER itself may still reject it
+# because the offer's own dedup list is invisible to us. Previously
+# we only discovered this AFTER spawning Chromium and navigating —
+# which meant the Live Activity feed showed real "Duplicate IP"
+# screenshots and the visit slot wasted ~10-30 seconds of browser
+# overhead per rejected IP.
+#
+# This probe does a cheap GET via httpx (no browser, no JS) against
+# the resolved offer URL through the SAME proxy. If the response
+# body contains any of the duplicate / VPN block phrases, we bail
+# out instantly and the worker retries with a fresh ProxyJet IP —
+# never opening a browser, never producing a screenshot. The
+# operator sees the visit slot transparently scroll through fresh
+# IPs in the Live Activity feed until a clean one is found, with
+# no "Duplicate IP" thumbnails in between.
+#
+# Falls back gracefully on transport errors — those are handled by
+# the existing reachability probe.
+async def _probe_offer_duplicate_via_proxy(
+    proxy: Dict[str, Any], target_url: str, ua: str,
+    timeout_s: float = 12.0,
+) -> Tuple[bool, str, str]:
+    """Pre-browser GET probe to detect offer-side duplicate-IP / VPN block pages.
+
+    Returns ``(is_blocked, reason, snippet)`` where:
+      • is_blocked  — True if the response body matches a known
+                       duplicate-IP or VPN-block phrase
+      • reason      — "duplicate_ip" | "vpn" | "" (never blocked)
+      • snippet     — first ~240 chars of matched context (for logs)
+
+    On transport errors → (False, "", "") so the caller falls through
+    to the normal browser path; the existing reachability probe is
+    responsible for catching dead proxies separately.
+    """
+    server = proxy.get("server", "")
+    if proxy.get("username"):
+        try:
+            prefix, rest = server.split("://", 1)
+            server = f"{prefix}://{proxy['username']}:{proxy.get('password','')}@{rest}"
+        except ValueError:
+            return False, "", ""
+
+    headers = {
+        "User-Agent": ua or "Mozilla/5.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        # Hint we want full HTML so the offer renders its real page
+        # (not a 206 partial-content stub from a Range header).
+        "Cache-Control": "no-cache",
+    }
+    timeout_cfg = httpx.Timeout(timeout_s, connect=min(8.0, timeout_s))
+    try:
+        async with httpx.AsyncClient(
+            proxy=server, timeout=timeout_cfg, headers=headers,
+            verify=False, http2=False, follow_redirects=True,
+        ) as cli:
+            r = await cli.get(target_url)
+            # Only read first ~32 KB — duplicate / VPN markers are
+            # ALWAYS in the visible top-of-page text; deep scans waste
+            # bandwidth on multi-MB landing pages.
+            body = (r.text or "")[:32000].lower()
+    except Exception:
+        # Any transport error → treat as "not blocked here", let the
+        # existing engine handle it via browser. We don't want a
+        # network blip to mark a clean IP as duplicate.
+        return False, "", ""
+
+    if not body:
+        return False, "", ""
+
+    # Check duplicate FIRST (more specific reason for the user)
+    for phrase in _DUPLICATE_IP_PAGE_PHRASES:
+        if phrase in body:
+            idx = body.find(phrase)
+            start = max(0, idx - 30)
+            end = min(len(body), idx + 140)
+            snippet = body[start:end].strip().replace("\n", " ")
+            return True, "duplicate_ip", snippet[:240]
+    for phrase in _VPN_BLOCK_PAGE_PHRASES:
+        if phrase in body:
+            idx = body.find(phrase)
+            start = max(0, idx - 30)
+            end = min(len(body), idx + 140)
+            snippet = body[start:end].strip().replace("\n", " ")
+            return True, "vpn", snippet[:240]
+    return False, "", ""
+
+
 # ─── 2026-05: Persistent burnt-IP block-list (cross-job memory) ────
 # When an exit-IP gets flagged by the offer site (duplicate or VPN)
 # we persist it to `rut_burnt_ips` so EVERY future job loads it into
@@ -4137,6 +4227,64 @@ async def run_real_user_traffic_job(
             job_id, i + 1, "filter", "ok",
             f"Offer reachable via proxy ({_reach_diag})",
         )
+
+        # ── 2026-05 — PRE-BROWSER duplicate / VPN block probe ──────
+        # The reachability check above only confirms transport-level
+        # access (any HTTP status counts as "reachable"). It does NOT
+        # inspect the actual page content, so an exit-IP that the
+        # offer's server-side dedup list rejects with a "Duplicate IP"
+        # or "VPN/proxy detected" page would still slip through and
+        # we'd burn 10-30s of Chromium overhead per rejected IP.
+        #
+        # In ProxyJet on-demand mode we have an unlimited supply of
+        # fresh exit-IPs, so it's MUCH cheaper to do one extra GET
+        # via httpx (no browser, no JS, ~1-3s) and scan the response
+        # body for the same block-page phrases that the post-load
+        # detector would catch. If we see a match here we burn the
+        # IP and raise _OfferBlockRetryNeeded — the worker() wrapper
+        # retries with a fresh IP WITHOUT ever launching a browser
+        # or producing a "Duplicate IP" thumbnail in Live Activity.
+        #
+        # Skipped in legacy proxy-list mode (`proxyjet_on_demand=False`)
+        # because there's no IP-source loop to retry against — the
+        # existing post-load detector still catches those cases.
+        if proxyjet_on_demand:
+            try:
+                _pre_blk, _pre_reason, _pre_snip = await _probe_offer_duplicate_via_proxy(
+                    proxy, _url_to_probe, ua, timeout_s=12.0,
+                )
+            except Exception:
+                _pre_blk, _pre_reason, _pre_snip = (False, "", "")
+            if _pre_blk:
+                _burned_ip_pre = (geo.get("exit_ip") or entry.get("exit_ip") or "").strip()
+                # In-job set update — affects next probe in this job
+                if _burned_ip_pre and duplicate_ip_set is not None:
+                    try:
+                        duplicate_ip_set.add(_burned_ip_pre)
+                    except Exception:
+                        pass
+                # Cross-job persistence — future jobs skip this IP
+                if _burned_ip_pre:
+                    _spawn_live(_persist_burnt_ip(
+                        db,
+                        ip=_burned_ip_pre,
+                        reason=_pre_reason,
+                        user_id=engine_user_id or "",
+                        offer_url=target_url or "",
+                        state=(entry.get("lead_state") or "").upper(),
+                        job_id=job_id or "",
+                    ))
+                _pre_msg = (
+                    f"Pre-browser {_pre_reason.replace('_', ' ')} block · burning "
+                    f"{_burned_ip_pre or '?'} · persisted to rut_burnt_ips · "
+                    f"retrying with fresh IP (no browser launch)"
+                )
+                push_live_step(
+                    job_id, i + 1, "filter", "skipped", _pre_msg,
+                )
+                raise _OfferBlockRetryNeeded(
+                    reason=_pre_reason, burnt_ip=_burned_ip_pre or "",
+                )
 
         # Pick form-fill row — state-matched OR sequential
         # ── 2026-01 ROW-FIRST mode: row was already picked at the
