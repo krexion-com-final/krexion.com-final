@@ -4484,16 +4484,21 @@ async def run_real_user_traffic_job(
                                         # might use to flag this visit as
                                         # duplicate — primary, ipv4, all_ips,
                                         # proxy_ips. Skip IPv6 (tracker does
-                                        # too).
+                                        # too) and the literal sentinel
+                                        # "unknown" / "Unknown" the backend
+                                        # returns when the proxy reached us
+                                        # via IPv6-only headers (no usable
+                                        # IPv4 to match against clicks DB).
+                                        _BAD = {"unknown", "Unknown", "", "None", "none"}
                                         _all = set()
                                         for _k in ("primary", "ipv4"):
                                             _v = (_data.get(_k) or "").strip()
-                                            if _v and ":" not in _v:
+                                            if _v and ":" not in _v and _v not in _BAD:
                                                 _all.add(_v)
                                         for _k in ("all", "proxy_ips"):
                                             for _v in (_data.get(_k) or []):
                                                 _v = (str(_v) or "").strip()
-                                                if _v and ":" not in _v:
+                                                if _v and ":" not in _v and _v not in _BAD:
                                                     _all.add(_v)
                                         _tracker_ips = list(_all)
                                         _guard_ok = bool(_tracker_ips)
