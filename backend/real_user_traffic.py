@@ -367,10 +367,17 @@ async def _install_full_chromium_background() -> None:
 # in-flight crash-recovery relaunch use the EXACT same flags. Order matters
 # for some flags (e.g. --headless=new must precede --disable-features when
 # they share keys), so we keep this as a single source of truth.
+#
+# 2026-05 — single consolidated --disable-features=... entry: Chromium
+# honours ONLY the LAST --disable-features arg, so all keys MUST be in
+# one comma-separated list:
+#   • WebRtcHideLocalIpsWithMdns,AutomationControlled — original anti-detect
+#   • UseDnsHttpsSvcb — block HTTPS DNS records that bypass our AAAA-skip
+#     and reintroduce IPv6 on Chrome 100+
 _BROWSER_LAUNCH_ARGS_BASE = [
     "--no-sandbox",
     "--disable-dev-shm-usage",
-    "--disable-features=WebRtcHideLocalIpsWithMdns,AutomationControlled",
+    "--disable-features=WebRtcHideLocalIpsWithMdns,AutomationControlled,UseDnsHttpsSvcb",
     "--disable-blink-features=AutomationControlled",
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
     "--disable-extensions",
@@ -4612,6 +4619,17 @@ async def run_real_user_traffic_job(
                     "TLSV1_ALERT_INTERNAL_ERROR",
                     "WRONG_VERSION_NUMBER",
                     "ERR_SSL_PROTOCOL_ERROR",
+                    # 2026-05 — chrome-error://chromewebdata happens when
+                    # Chromium can't load a URL (typically after a
+                    # cross-origin redirect through ProxyJet where the
+                    # second-leg CONNECT to the new origin fails). Treat
+                    # as a transient proxy issue, not a real visit
+                    # failure — the dispatcher excludes these from the
+                    # max_attempts budget so the run keeps going until
+                    # real conversions land.
+                    "chrome-error://chromewebdata",
+                    "chrome-error://chromeweb",
+                    "interrupted by another navigation",
                 )
                 MAX_TUNNEL_RETRIES = 3
                 # ── 2026-05: same-proxy retry budget ──
