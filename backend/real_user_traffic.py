@@ -45,6 +45,26 @@ _CHROMIUM_INSTALL_LOCK = asyncio.Lock()
 _CHROMIUM_INSTALL_IN_PROGRESS = False
 
 
+# ──────────────────────────────────────────────────────────────────────
+# 2026-05 — Offer-side duplicate / VPN block retry signal
+# ──────────────────────────────────────────────────────────────────────
+# When the offer's landing page rejects an exit-IP as "Duplicate IP" or
+# "VPN/proxy detected", we want the visit slot to TRANSPARENTLY retry
+# with a fresh ProxyJet IP — without recording a wasted entry in the
+# report. This internal exception is raised by `process_one` and caught
+# by the `worker` wrapper which loops up to `proxyjet_unique_retry_cap`
+# times. The IP that triggered the block is already burned & persisted
+# to `rut_burnt_ips` before the exception, so subsequent retries within
+# the SAME job AND every future job will skip it at the on-demand
+# probe stage.
+class _OfferBlockRetryNeeded(Exception):
+    """Internal signal: offer rejected this IP, retry with fresh IP without recording."""
+    def __init__(self, reason: str = "", burnt_ip: str = ""):
+        super().__init__(f"{reason}:{burnt_ip}")
+        self.reason = reason
+        self.burnt_ip = burnt_ip
+
+
 def get_engine_status() -> Dict[str, Any]:
     """Return the current state of the Playwright chromium-headless-shell
     binary so the frontend can show a coloured "Engine Status" badge:
@@ -4811,6 +4831,21 @@ async def run_real_user_traffic_job(
                         await context.close()
                     except Exception:
                         pass
+                    # ── 2026-05 — transparent retry in ProxyJet on-demand mode ─
+                    # When the offer rejects the IP as duplicate or VPN,
+                    # we DO NOT want to record a wasted visit entry. The
+                    # worker() wrapper catches this exception and retries
+                    # the SAME visit slot with a fresh ProxyJet IP — the
+                    # burnt IP is already persisted above so future probes
+                    # (within this job AND across jobs) will skip it.
+                    # Legacy mode (proxyjet_on_demand=False) still records
+                    # the entry as before since there's no IP-source loop
+                    # to retry against.
+                    if proxyjet_on_demand:
+                        raise _OfferBlockRetryNeeded(
+                            reason=_block_reason,
+                            burnt_ip=_burned_ip or "",
+                        )
                     return await _record(job_id, entry, report, report_lock, db)
 
                 # No form fill → plain real click, just screenshot
@@ -5618,6 +5653,16 @@ async def run_real_user_traffic_job(
                 # Force garbage collection after each visit to prevent memory buildup
                 import gc
                 gc.collect()
+        except _OfferBlockRetryNeeded:
+            # ── 2026-05 — propagate to worker() retry loop ─────────────
+            # Offer rejected this exit-IP. The IP is already burned
+            # (in-job set + persisted to rut_burnt_ips). The worker()
+            # wrapper catches this and re-runs process_one() with a
+            # fresh ProxyJet IP, up to proxyjet_unique_retry_cap times.
+            # We MUST NOT call _record below or this wasted attempt
+            # would clutter the report with a "skipped_duplicate_ip" /
+            # "skipped_vpn" row that the user doesn't want to see.
+            raise
         except Exception as e:
             entry["status"] = "failed"
             entry["error"] = f"{type(e).__name__}: {str(e)[:180]}"
@@ -5670,7 +5715,75 @@ async def run_real_user_traffic_job(
             # run to completion regardless of target_drain_event.
             if cancel_event.is_set() or target_drain_event.is_set():
                 return
-            await process_one(i, shared_browser)
+            # ── 2026-05 — Offer-block retry loop ─────────────────────
+            # When ProxyJet on-demand mode is on, process_one() may
+            # raise _OfferBlockRetryNeeded if the offer rejects the
+            # exit-IP as "Duplicate IP" or "VPN/proxy". The IP is
+            # already burned & persisted before the raise, so the
+            # retry below will pick a FRESH ProxyJet IP that the
+            # offer hasn't seen yet. Capped at
+            # `proxyjet_unique_retry_cap` (default 50) attempts per
+            # visit slot — beyond that we record a final
+            # `skipped_no_unique_ip` so the job doesn't loop forever
+            # when the offer's filter is unrealistically strict.
+            max_offer_retries = (
+                max(1, int(proxyjet_unique_retry_cap or 50))
+                if proxyjet_on_demand else 1
+            )
+            retry_attempts = 0
+            while True:
+                try:
+                    await process_one(i, shared_browser)
+                    return
+                except _OfferBlockRetryNeeded as _ob:
+                    retry_attempts += 1
+                    if retry_attempts >= max_offer_retries:
+                        # Cap exhausted — record a single skipped entry so
+                        # the user can see this visit slot was abandoned.
+                        push_live_step(
+                            job_id, i + 1, "filter", "skipped",
+                            f"Offer-side block · {retry_attempts}/{max_offer_retries} fresh IPs all rejected — giving up this visit",
+                        )
+                        _final_entry = {
+                            "visit_index": i + 1,
+                            "status": "skipped_no_unique_ip",
+                            "proxy": "",
+                            "exit_ip": "",
+                            "country": "",
+                            "city": "",
+                            "timezone": "",
+                            "locale": "",
+                            "os": "",
+                            "ua": "",
+                            "viewport": "",
+                            "device_name": "",
+                            "http_status": "",
+                            "final_url": "",
+                            "landing_url": "",
+                            "conversion_page_reached": False,
+                            "trusted_form": "",
+                            "lead_id": "",
+                            "error": (
+                                f"Offer-site rejected {retry_attempts} fresh ProxyJet IPs "
+                                f"as duplicate/VPN (last: {_ob.burnt_ip or '?'})"
+                            ),
+                            "screenshot": "",
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                        await _record(job_id, _final_entry, report, report_lock, db)
+                        return
+                    push_live_step(
+                        job_id, i + 1, "filter", "info",
+                        f"Offer-side block · burnt {_ob.burnt_ip or '?'} · retrying with fresh IP "
+                        f"(attempt {retry_attempts + 1}/{max_offer_retries})",
+                    )
+                    # Short breather before next attempt — gives the burnt-IP
+                    # persistence task a moment to flush so future probes
+                    # see it in rut_burnt_ips.
+                    await asyncio.sleep(0.5)
+                    if cancel_event.is_set() or target_drain_event.is_set():
+                        return
+                    continue
 
     # ── Launch ONE shared Chromium browser for the WHOLE job ─────────
     # All visits create their own isolated BrowserContext from this single
