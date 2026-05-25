@@ -4427,88 +4427,114 @@ async def run_real_user_traffic_job(
 
                 page = await context.new_page()
 
-                # ── 2026-05 — BROWSER-SIDE duplicate-IP check ───────────
-                # CRITICAL INSIGHT: the httpx probe at ProxyJet-pick time
-                # uses a separate TCP connection (and IPv4-only) than the
-                # upcoming browser navigation. ProxyJet residential pools
-                # are DUAL-STACK — the same sticky session typically gives
-                # the httpx probe an IPv4 (e.g. 172.56.188.10) while the
-                # browser ends up egressing on IPv6 (e.g. 2600:8800:...) or
-                # a DIFFERENT IPv4 entirely. This is NORMAL ProxyJet
-                # behaviour, NOT a leak.
+                # ── 2026-05 — TRACKER-SIDE duplicate-IP pre-flight check ─
+                # Earlier attempts (ipwho.is via the browser) returned the
+                # exit-IP from a DIFFERENT origin's connection pool — and
+                # ProxyJet residential pools assign per-origin exits, so
+                # the IP we measured did NOT match the IP the tracker
+                # actually saw.
                 #
-                # The duplicate-IP check at probe time is therefore wrong:
-                # we cleared `172.56.188.10` against duplicate_ip_set, but
-                # the tracker (krexion.com/api/t/...) actually sees the
-                # IPv6 address. If THAT IPv6 happens to be in clicks DB,
-                # the tracker shows the "Duplicate IP" page even though
-                # our pre-check said "unique".
+                # Fix: probe a NEW endpoint on the SAME origin as the
+                # tracker (`/api/_rut_ipcheck` on krexion.com / api.krexion.com)
+                # before the tracker URL itself. Chromium pools connections
+                # per origin, so both requests share the SAME upstream TCP
+                # tunnel through ProxyJet → guaranteed SAME exit IP.
                 #
-                # Fix: do the duplicate-IP check FROM THE BROWSER, using a
-                # one-shot navigation to https://ipwho.is/ — this returns
-                # exactly the IP the tracker will see (same connection
-                # pool, same protocol). Compare to duplicate_ip_set:
-                #   • duplicate → close profile, burn the BROWSER IP,
-                #                 raise _OfferBlockRetryNeeded (worker()
-                #                 retries with a fresh ProxyJet IP — the
-                #                 wasted attempt is NOT recorded and does
-                #                 NOT consume a visit slot)
-                #   • unique    → reserve it in duplicate_ip_set + entry,
-                #                 then continue to the tracker URL
+                # The endpoint reflects back the EXACT IPs the tracker
+                # would see (primary, ipv4, all_ips, proxy_ips), and we
+                # check ALL of them against duplicate_ip_set. If ANY is
+                # already known to be in clicks DB, abort + retry — no
+                # offer load, no Duplicate-IP screenshot, no wasted slot.
                 #
                 # Runs only in proxyjet_on_demand mode (legacy paste/upload
-                # proxy flows can't easily retry — they keep their existing
-                # probe-time check).
+                # proxy flows can't easily retry).
                 if proxyjet_on_demand:
-                    _browser_ip = ""
-                    _guard_ok = False
+                    # Build the probe URL from target_url's origin.
+                    # target_url is e.g. https://krexion.com/api/t/abc or
+                    # https://api.krexion.com/api/t/abc — keep scheme+host.
                     try:
-                        _gr = await page.goto(
-                            "https://ipwho.is/",
-                            wait_until="domcontentloaded",
-                            timeout=15000,
-                        )
-                        if _gr is not None and 200 <= (_gr.status or 0) < 400:
-                            try:
-                                _body = await page.evaluate(
-                                    "() => document.body ? document.body.innerText : ''"
-                                )
-                            except Exception:
-                                _body = ""
-                            try:
-                                import json as _ipjson
-                                _data = _ipjson.loads(_body or "{}")
-                                _browser_ip = str(_data.get("ip") or "").strip()
-                            except Exception:
-                                _browser_ip = ""
-                            _guard_ok = bool(_browser_ip)
+                        from urllib.parse import urlparse as _urlparse
+                        _u = _urlparse(target_url or "")
+                        _probe_origin = f"{_u.scheme}://{_u.netloc}" if _u.scheme and _u.netloc else ""
                     except Exception:
-                        _guard_ok = False
+                        _probe_origin = ""
+                    _check_url = (_probe_origin + "/api/_rut_ipcheck") if _probe_origin else ""
 
-                    if _guard_ok and _browser_ip:
-                        # Update entry to reflect the REAL exit IP the
-                        # tracker / offer will see (not the probe IP).
-                        entry["exit_ip"] = _browser_ip
+                    _tracker_ips: List[str] = []
+                    _guard_ok = False
+                    if _check_url:
+                        try:
+                            _gr = await page.goto(
+                                _check_url,
+                                wait_until="domcontentloaded",
+                                timeout=15000,
+                            )
+                            if _gr is not None and 200 <= (_gr.status or 0) < 400:
+                                try:
+                                    _body = await page.evaluate(
+                                        "() => document.body ? document.body.innerText : ''"
+                                    )
+                                except Exception:
+                                    _body = ""
+                                try:
+                                    import json as _ipjson
+                                    _data = _ipjson.loads(_body or "{}")
+                                    if _data.get("ok"):
+                                        # Collect every IP variant the tracker
+                                        # might use to flag this visit as
+                                        # duplicate — primary, ipv4, all_ips,
+                                        # proxy_ips. Skip IPv6 (tracker does
+                                        # too).
+                                        _all = set()
+                                        for _k in ("primary", "ipv4"):
+                                            _v = (_data.get(_k) or "").strip()
+                                            if _v and ":" not in _v:
+                                                _all.add(_v)
+                                        for _k in ("all", "proxy_ips"):
+                                            for _v in (_data.get(_k) or []):
+                                                _v = (str(_v) or "").strip()
+                                                if _v and ":" not in _v:
+                                                    _all.add(_v)
+                                        _tracker_ips = list(_all)
+                                        _guard_ok = bool(_tracker_ips)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            _guard_ok = False
 
-                        _is_dup = (
-                            skip_duplicate_ip
-                            and duplicate_ip_set is not None
-                            and _browser_ip in duplicate_ip_set
+                    if _guard_ok and _tracker_ips:
+                        # Set entry["exit_ip"] to the primary tracker IP —
+                        # this is what the report will display and what
+                        # gets recorded in clicks DB on success.
+                        _primary_ip = (
+                            (_data.get("primary") or _data.get("ipv4") or _tracker_ips[0])
+                            .strip()
                         )
-                        if _is_dup:
+                        if _primary_ip:
+                            entry["exit_ip"] = _primary_ip
+
+                        # Check ALL tracker-visible IPs against duplicate_ip_set
+                        _dup_hit = None
+                        if skip_duplicate_ip and duplicate_ip_set is not None:
+                            for _ip in _tracker_ips:
+                                if _ip in duplicate_ip_set:
+                                    _dup_hit = _ip
+                                    break
+
+                        if _dup_hit:
                             push_live_step(
                                 job_id, i + 1, "filter", "skipped",
-                                f"Browser-side duplicate IP {_browser_ip} "
-                                f"(probe IP was {(_probe_ip := entry.get('exit_ip', '?'))}) · "
+                                f"Tracker-visible duplicate IP {_dup_hit} "
+                                f"(of {len(_tracker_ips)} tracker-visible IPs) · "
                                 f"closing profile + retrying with fresh ProxyJet IP "
                                 f"(no offer load attempted)",
                             )
-                            # Persist to rut_burnt_ips so future probes
-                            # and jobs skip this IP outright.
+                            # Persist the duplicate to rut_burnt_ips so
+                            # future probes skip it across jobs.
                             _spawn_live(_persist_burnt_ip(
                                 db,
-                                ip=_browser_ip,
-                                reason="browser_duplicate_ip",
+                                ip=_dup_hit,
+                                reason="tracker_duplicate_ip",
                                 user_id=engine_user_id or "",
                                 offer_url=target_url or "",
                                 state=(entry.get("lead_state") or "").upper(),
@@ -4519,24 +4545,28 @@ async def run_real_user_traffic_job(
                             except Exception:
                                 pass
                             raise _OfferBlockRetryNeeded(
-                                reason="browser_duplicate_ip",
-                                burnt_ip=_browser_ip,
+                                reason="tracker_duplicate_ip",
+                                burnt_ip=_dup_hit,
                             )
-                        # Unique browser IP — reserve immediately so
-                        # parallel visits don't both land on it.
+
+                        # All tracker-visible IPs are unique. Reserve them
+                        # in duplicate_ip_set so concurrent visits don't
+                        # collide on the same exit.
                         if duplicate_ip_set is not None:
-                            try:
-                                duplicate_ip_set.add(_browser_ip)
-                            except Exception:
-                                pass
+                            for _ip in _tracker_ips:
+                                try:
+                                    duplicate_ip_set.add(_ip)
+                                except Exception:
+                                    pass
                         push_live_step(
                             job_id, i + 1, "filter", "ok",
-                            f"Browser-side IP verified · {_browser_ip} unique · "
+                            f"Tracker-side IP check passed · {_primary_ip or '?'} "
+                            f"({len(_tracker_ips)} variant(s)) unique · "
                             f"proceeding to tracker URL",
                         )
-                    # else: ipwho.is probe failed — don't block the visit
-                    # on a transient verification glitch; the existing
-                    # post-load duplicate / VPN detectors are still active.
+                    # else: probe endpoint unreachable — don't block the
+                    # visit on a transient verification glitch; the
+                    # existing post-load detector remains the safety net.
 
                 push_live_step(job_id, i + 1, "browser", "info", f"Opening {target_url}")
 

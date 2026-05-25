@@ -12039,6 +12039,52 @@ async def delete_offer(offer_id: str, user: dict = Depends(get_current_user)):
 # Multiple route decorators to support both direct access and via /api prefix
 # /api/r/ and /api/t/ - accessible through Kubernetes ingress (preferred for Emergent)
 # /t/ and /r/ - for direct backend access and DigitalOcean deployment
+
+# ─── 2026-05 — RUT pre-flight IP probe ────────────────────────────────
+# Returns the EXACT client IP fields the tracker (`/api/t/{code}`) would
+# see for this same request — so the RUT engine can run its duplicate
+# check against the SAME IPs that the tracker will use, instead of the
+# IP from a generic third-party service like ipwho.is (which may differ
+# from the tracker's view if ProxyJet hands out different exits per
+# domain / TCP connection).
+#
+# Critically, this endpoint is opened from the same Playwright context
+# that's about to open `/api/t/{code}` — Chromium pools connections per
+# origin (krexion.com), so the proxy session sees BOTH requests on the
+# SAME upstream TCP tunnel → SAME exit IP. Lets the RUT engine skip
+# any IP that the tracker would have rejected, WITHOUT consuming a
+# visit slot or producing a Duplicate-IP screenshot.
+@api_router.get("/_rut_ipcheck")
+@app.get("/_rut_ipcheck")
+async def rut_ipcheck(request: Request):
+    """Reflect the IPs the tracker would see, in JSON. Read-only, no DB writes.
+
+    Response shape:
+        {
+            "ok": true,
+            "primary": "1.2.3.4",
+            "ipv4": "1.2.3.4",
+            "all": ["1.2.3.4", ...],
+            "proxy_ips": ["1.2.3.4", ...]
+        }
+    """
+    try:
+        ips = get_all_client_ips(request)
+    except Exception as e:  # pragma: no cover
+        return {"ok": False, "error": str(e)[:200]}
+    # Strip IPv6 entries — the tracker explicitly skips IPv6 in its
+    # duplicate scan (see /api/t/ route), so the RUT engine should
+    # compare on IPv4 only too. Keeping them in the response is fine
+    # for debugging but the engine only acts on IPv4.
+    return {
+        "ok": True,
+        "primary": ips.get("primary", "") or "",
+        "ipv4": ips.get("ipv4", "") or "",
+        "all": list(ips.get("all", []) or []),
+        "proxy_ips": list(ips.get("proxy_ips", []) or []),
+    }
+
+
 @api_router.get("/r/{short_code}")
 @api_router.get("/t/{short_code}")
 @app.get("/t/{short_code}")
