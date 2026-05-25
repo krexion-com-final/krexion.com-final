@@ -5664,6 +5664,7 @@ async def rut_ai_learning_stats(
 async def rut_engine_prewarm(
     background: BackgroundTasks,
     user: dict = Depends(get_current_user),
+    _cloud_gate: bool = Depends(require_local_mode),
 ):
     """Trigger a chromium-headless-shell install in the background so the
     user can pre-warm the engine while configuring their RUT job. Idempotent:
@@ -6072,6 +6073,7 @@ async def rut_retry(
     job_id: str,
     background: BackgroundTasks,
     user: dict = Depends(get_current_user),
+    _cloud_gate: bool = Depends(require_local_mode),
 ):
     """Retry a failed/stopped job using its persisted submit_params.
 
@@ -6901,7 +6903,11 @@ async def import_bulk_clicks(
         raise HTTPException(status_code=500, detail=f"Import failed: {str(e)}")
 
 @api_router.post("/clicks/generate-traffic")
-async def generate_traffic(data: BulkTrafficGenerate, user: dict = Depends(get_current_user_with_fresh_data)):
+async def generate_traffic(
+    data: BulkTrafficGenerate,
+    user: dict = Depends(get_current_user_with_fresh_data),
+    _cloud_gate: bool = Depends(require_local_mode),
+):
     """
     Generate realistic Instagram traffic with random user agents and devices.
     Provide your own IP list or let the system generate random IPs.
@@ -15358,6 +15364,16 @@ async def startup_db_indexes():
     # so server boot is instant and users never see an "install in
     # progress" delay on their first job. Only when the binary is truly
     # missing we run the install in a background task.
+    #
+    # 2026-05 — On the cloud edge (KREXION_MODE=cloud) with strict heavy
+    # block enabled (the new default), heavy features (RUT / Form
+    # Filler) refuse to execute on the VPS — they're handled by the
+    # customer's desktop app via the bridge. So we must NOT waste ~150MB
+    # of bandwidth + disk + boot time downloading a Chromium binary the
+    # cloud edge will never use. The legacy opt-out
+    # (STRICT_CLOUD_HEAVY_BLOCK=false) still installs Chromium so cloud
+    # fallback execution keeps working for customers without the desktop
+    # app yet.
     async def _ensure_playwright_chromium():
         try:
             from real_user_traffic import _ensure_chromium_available, get_engine_status
@@ -15381,10 +15397,17 @@ async def startup_db_indexes():
         except Exception as e:
             logger.warning(f"Playwright install startup hook failed (non-fatal): {e}")
 
-    try:
-        asyncio.create_task(_ensure_playwright_chromium())
-    except Exception as e:
-        logger.warning(f"Could not schedule Playwright install check: {e}")
+    if IS_CLOUD and STRICT_CLOUD_HEAVY_BLOCK:
+        logger.info(
+            "Cloud edge with STRICT_CLOUD_HEAVY_BLOCK=true — skipping "
+            "Playwright Chromium install on startup. Heavy features run "
+            "on customer desktop app, not on VPS."
+        )
+    else:
+        try:
+            asyncio.create_task(_ensure_playwright_chromium())
+        except Exception as e:
+            logger.warning(f"Could not schedule Playwright install check: {e}")
 
     # Reap orphan Real-User-Traffic jobs whose worker died before they could
     # mark themselves done. Without this, the UI keeps showing a permanent
@@ -15464,6 +15487,41 @@ async def startup_db_indexes():
                 # Cap bumped from 10 → 100. Combined with the
                 # exponential backoff between resumes, this gives the
                 # job ~1 hour of crash-loop cushion before we give up.
+                #
+                # 2026-05 — On the cloud edge (KREXION_MODE=cloud) with
+                # STRICT_CLOUD_HEAVY_BLOCK=true (the new default), heavy
+                # RUT work must NOT execute on the VPS — the customer's
+                # desktop app handles it via the bridge. So we skip the
+                # in-process auto-resume entirely and just leave the job
+                # in `queued` status (with a clear prep_step) so the
+                # customer's bridge worker picks it up on next poll.
+                # Without this gate, every VPS restart would re-launch
+                # Playwright/Chromium on the cloud for every queued RUT
+                # job — the exact overload scenario STRICT mode exists
+                # to prevent.
+                if IS_CLOUD and STRICT_CLOUD_HEAVY_BLOCK:
+                    try:
+                        await db.real_user_traffic_jobs.update_one(
+                            {"job_id": jid},
+                            {"$set": {
+                                "status": "queued",
+                                "preparing": True,
+                                "prep_step": (
+                                    "Waiting for your desktop app to pick up "
+                                    "this job (heavy work runs on your PC, "
+                                    "not on the cloud)…"
+                                ),
+                                "prep_step_at": now_iso,
+                            }},
+                        )
+                    except Exception:
+                        pass
+                    logger.info(
+                        f"[cloud-strict] Skipped auto-resume of RUT job {jid} "
+                        f"(user={j['user_id'][:8]}) — will be handled by "
+                        f"customer's desktop bridge worker."
+                    )
+                    continue
                 if j.get("is_resumable") and j.get("submit_params") and rc < 100:
                     # Exponential backoff between auto-resume attempts:
                     # rc=0 → 0 s, rc=1 → 2 s, rc=2 → 4 s, rc=3 → 8 s,
