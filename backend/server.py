@@ -2917,6 +2917,129 @@ async def admin_list_heartbeats(admin: dict = Depends(get_current_admin)):
     return {"count": len(items), "heartbeats": items}
 
 
+@api_router.get("/admin/heavy-features-status")
+async def admin_heavy_features_status(admin: dict = Depends(get_current_admin)):
+    """VPS Heavy-Feature Protection Status.
+
+    Shows admin a live view of how the strict-cloud-heavy-block strategy
+    is performing — i.e. how many heavy jobs (RUT / Form Filler / Visual
+    Recorder / bulk proxy tests) were actually routed to customer PCs
+    via the bridge in the last 24h, instead of executing on this VPS.
+
+    Returned shape (consumed by AdminDashboard's "Heavy Features Status"
+    badge):
+      {
+        "deployment": {mode, is_cloud, strict_heavy_block, protected},
+        "bridge_24h": {
+            "total": N,         # all bridge jobs created
+            "done":  N,         # completed successfully on customer PC
+            "failed": N,
+            "pending": N,
+            "by_feature": {feature_name: count, ...}
+        },
+        "customer_pcs": {
+            "online_now": N,    # heartbeat within ONLINE_WINDOW_SEC
+            "active_24h": N,    # any heartbeat in last 24h
+        },
+        "last_bridge_job_at": ISO|null,
+      }
+    """
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    cutoff_24h = (now - timedelta(hours=24)).isoformat()
+
+    # ── Bridge jobs (heavy work routed to customer PCs) ────────────────
+    bridge_24h_total = await db.bridge_jobs.count_documents(
+        {"created_at": {"$gte": cutoff_24h}}
+    )
+    bridge_24h_done = await db.bridge_jobs.count_documents(
+        {"created_at": {"$gte": cutoff_24h}, "status": "done"}
+    )
+    bridge_24h_failed = await db.bridge_jobs.count_documents(
+        {"created_at": {"$gte": cutoff_24h}, "status": "failed"}
+    )
+    bridge_24h_pending = await db.bridge_jobs.count_documents(
+        {"created_at": {"$gte": cutoff_24h}, "status": "pending"}
+    )
+
+    # Per-feature breakdown so admin can see WHICH heavy features
+    # are actually being offloaded (e.g. "proxies/bulk-test: 42").
+    by_feature: Dict[str, int] = {}
+    try:
+        pipeline = [
+            {"$match": {"created_at": {"$gte": cutoff_24h}}},
+            {"$group": {"_id": "$feature", "n": {"$sum": 1}}},
+            {"$sort": {"n": -1}},
+        ]
+        async for row in db.bridge_jobs.aggregate(pipeline):
+            feat = row.get("_id") or "unknown"
+            by_feature[feat] = int(row.get("n") or 0)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[admin/heavy-features-status] aggregate failed: {e}")
+
+    # Most recent bridge job (for "last activity" UI hint)
+    last_doc = await db.bridge_jobs.find_one(
+        {}, {"_id": 0, "created_at": 1, "feature": 1},
+        sort=[("created_at", -1)],
+    )
+
+    # ── Customer-PC heartbeat stats ────────────────────────────────────
+    # Online window: same threshold the bridge uses to decide if a PC
+    # can pick up jobs. We re-import the constant lazily so we don't
+    # couple this endpoint to bridge_module loading.
+    online_window_sec = 120
+    try:
+        from bridge_module import ONLINE_WINDOW_SEC as _ow
+        online_window_sec = int(_ow)
+    except Exception:
+        pass
+    online_cutoff = (now - timedelta(seconds=online_window_sec)).isoformat()
+
+    online_now = await db.sync_heartbeats.count_documents(
+        {"last_seen": {"$gte": online_cutoff}}
+    )
+    active_24h = await db.sync_heartbeats.count_documents(
+        {"last_seen": {"$gte": cutoff_24h}}
+    )
+
+    # ── Deployment posture ─────────────────────────────────────────────
+    protected = IS_CLOUD and STRICT_CLOUD_HEAVY_BLOCK
+    deployment = {
+        "mode": KREXION_MODE,
+        "is_cloud": IS_CLOUD,
+        "strict_heavy_block": STRICT_CLOUD_HEAVY_BLOCK,
+        "protected": protected,
+        "note": (
+            "VPS protected — heavy work routes to customer PCs."
+            if protected
+            else (
+                "Local install — heavy work runs on this machine (expected)."
+                if not IS_CLOUD
+                else "Cloud edge with STRICT block disabled — heavy work may run on VPS."
+            )
+        ),
+    }
+
+    return {
+        "deployment": deployment,
+        "bridge_24h": {
+            "total": bridge_24h_total,
+            "done": bridge_24h_done,
+            "failed": bridge_24h_failed,
+            "pending": bridge_24h_pending,
+            "by_feature": by_feature,
+        },
+        "customer_pcs": {
+            "online_now": online_now,
+            "active_24h": active_24h,
+            "online_window_sec": online_window_sec,
+        },
+        "last_bridge_job_at": (last_doc.get("created_at") if last_doc else None),
+        "last_bridge_job_feature": (last_doc.get("feature") if last_doc else None),
+    }
+
+
 @api_router.get("/admin/users", response_model=List[UserResponse])
 async def get_all_users(admin: dict = Depends(get_current_admin)):
     """Get all registered users with sub-user count"""

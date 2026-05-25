@@ -20,7 +20,7 @@ import {
   LogOut, Settings, Trash2, CheckCircle, XCircle, 
   Clock, Search, RefreshCw, Eye, EyeOff, UserPlus,
   Palette, Image, Type, RotateCcw, Save, Server, Key, Plus, TestTube, Globe,
-  Activity, Mail, Send, ExternalLink, AlertCircle, Menu
+  Activity, Mail, Send, ExternalLink, AlertCircle, Menu, Cpu, ShieldCheck
 } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator } from "../components/ui/dropdown-menu";
 
@@ -52,6 +52,8 @@ export default function AdminDashboard() {
   const [userPassword, setUserPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [activeTab, setActiveTab] = useState("users");
+  // Heavy-features VPS protection badge (cloud+strict block status)
+  const [heavyStatus, setHeavyStatus] = useState(null);
 
   // ── Email settings (admin-managed SMTP / Resend) ──
   const [emailCfg, setEmailCfg] = useState({
@@ -222,17 +224,19 @@ export default function AdminDashboard() {
       };
       
       // Fetch all data with individual error handling
-      const [statsData, usersData, brandingData, subUsersData, userStatsData, apiSettingsData, apiStatusData] = await Promise.all([
+      const [statsData, usersData, brandingData, subUsersData, userStatsData, apiSettingsData, apiStatusData, heavyData] = await Promise.all([
         fetchWithFallback(`${API}/admin/stats`, { total_users: 0, active_users: 0, pending_users: 0, blocked_users: 0, total_links: 0, total_clicks: 0, total_conversions: 0, total_sub_users: 0, users_with_sub_users: 0 }),
         fetchWithFallback(`${API}/admin/users`, []),
         fetchWithFallback(`${API}/admin/branding`, {}),
         fetchWithFallback(`${API}/admin/sub-users`, []),
         fetchWithFallback(`${API}/admin/users/stats/all`, []),
         fetchWithFallback(`${API}/admin/api-settings`, {}),
-        fetchWithFallback(`${API}/admin/api-settings/status`, { apis: [], total_enabled: 0, total_rate_limited: 0 })
+        fetchWithFallback(`${API}/admin/api-settings/status`, { apis: [], total_enabled: 0, total_rate_limited: 0 }),
+        fetchWithFallback(`${API}/admin/heavy-features-status`, null)
       ]);
       
       setStats(statsData);
+      setHeavyStatus(heavyData);
       
       // Merge user stats with user data
       const usersWithStats = usersData.map(user => {
@@ -809,6 +813,124 @@ export default function AdminDashboard() {
       </header>
 
       <main className="container mx-auto px-4 py-8 space-y-8">
+        {/* Heavy-Features Protection Badge — shows VPS load-protection status */}
+        {heavyStatus && (
+          (() => {
+            const dep = heavyStatus.deployment || {};
+            const b = heavyStatus.bridge_24h || {};
+            const pcs = heavyStatus.customer_pcs || {};
+            const protectedMode = dep.protected;
+            const localInstall = !dep.is_cloud;
+            const accent = protectedMode
+              ? { bg: "from-[#022c22] to-[#064e3b]", border: "border-[#10B981]/40", iconBg: "bg-[#10B981]/15", iconColor: "text-[#34D399]", chipBg: "bg-[#10B981]/15 text-[#34D399] border-[#10B981]/30" }
+              : localInstall
+              ? { bg: "from-[#0c1326] to-[#11203f]", border: "border-[#3B82F6]/40", iconBg: "bg-[#3B82F6]/15", iconColor: "text-[#60A5FA]", chipBg: "bg-[#3B82F6]/15 text-[#60A5FA] border-[#3B82F6]/30" }
+              : { bg: "from-[#2a1a05] to-[#3d2607]", border: "border-[#F59E0B]/40", iconBg: "bg-[#F59E0B]/15", iconColor: "text-[#FBBF24]", chipBg: "bg-[#F59E0B]/15 text-[#FBBF24] border-[#F59E0B]/30" };
+            const topFeatures = Object.entries(b.by_feature || {}).slice(0, 3);
+            return (
+              <Card
+                data-testid="heavy-features-status-banner"
+                className={`bg-gradient-to-br ${accent.bg} ${accent.border} border-2`}
+              >
+                <CardContent className="p-5 md:p-6">
+                  <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-5">
+                    {/* Left: status label */}
+                    <div className="flex items-start gap-4">
+                      <div className={`w-12 h-12 rounded-xl ${accent.iconBg} flex items-center justify-center shrink-0`}>
+                        <ShieldCheck className={`w-6 h-6 ${accent.iconColor}`} />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <h3 className="text-lg font-semibold text-white" data-testid="heavy-status-title">
+                            {protectedMode
+                              ? "VPS Protected"
+                              : localInstall
+                              ? "Local Install"
+                              : "Cloud Edge — Strict Block Disabled"}
+                          </h3>
+                          <span className={`px-2 py-0.5 rounded-full text-xs font-medium border ${accent.chipBg}`}>
+                            {dep.mode ? dep.mode.toUpperCase() : "—"}
+                          </span>
+                          {dep.is_cloud && (
+                            <span className={`px-2 py-0.5 rounded-full text-xs font-medium border ${accent.chipBg}`}>
+                              STRICT {dep.strict_heavy_block ? "ON" : "OFF"}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-sm text-[#A1A1AA] mt-1 max-w-2xl" data-testid="heavy-status-note">
+                          {dep.note || ""}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Right: live counters */}
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 lg:gap-4 shrink-0">
+                      <div className="text-center px-3 py-2 rounded-lg bg-black/30 border border-white/5">
+                        <p className="text-2xl font-bold text-white leading-tight" data-testid="heavy-routed-24h">
+                          {b.done || 0}
+                        </p>
+                        <p className="text-[10px] uppercase tracking-wide text-[#A1A1AA] mt-1">
+                          Routed to PCs<br/>(24h)
+                        </p>
+                      </div>
+                      <div className="text-center px-3 py-2 rounded-lg bg-black/30 border border-white/5">
+                        <p className="text-2xl font-bold text-white leading-tight" data-testid="heavy-total-24h">
+                          {b.total || 0}
+                        </p>
+                        <p className="text-[10px] uppercase tracking-wide text-[#A1A1AA] mt-1">
+                          Total Bridge<br/>Jobs (24h)
+                        </p>
+                      </div>
+                      <div className="text-center px-3 py-2 rounded-lg bg-black/30 border border-white/5">
+                        <p className="text-2xl font-bold text-white leading-tight" data-testid="heavy-pcs-online">
+                          {pcs.online_now || 0}
+                        </p>
+                        <p className="text-[10px] uppercase tracking-wide text-[#A1A1AA] mt-1 flex items-center justify-center gap-1">
+                          <Cpu className="w-3 h-3" /> PCs Online<br/>Now
+                        </p>
+                      </div>
+                      <div className="text-center px-3 py-2 rounded-lg bg-black/30 border border-white/5">
+                        <p className="text-2xl font-bold text-white leading-tight" data-testid="heavy-pcs-active-24h">
+                          {pcs.active_24h || 0}
+                        </p>
+                        <p className="text-[10px] uppercase tracking-wide text-[#A1A1AA] mt-1">
+                          PCs Active<br/>(24h)
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Per-feature breakdown (top 3) */}
+                  {topFeatures.length > 0 && (
+                    <div className="mt-4 pt-4 border-t border-white/5 flex flex-wrap items-center gap-2">
+                      <span className="text-xs text-[#A1A1AA] mr-1">Top features routed:</span>
+                      {topFeatures.map(([feat, n]) => (
+                        <span
+                          key={feat}
+                          className="px-2.5 py-1 rounded-md bg-black/30 border border-white/10 text-xs text-white font-mono"
+                          data-testid={`heavy-feature-${feat.replace(/\//g, "-")}`}
+                        >
+                          {feat} <span className="text-[#34D399] font-bold">×{n}</span>
+                        </span>
+                      ))}
+                      {b.pending > 0 && (
+                        <span className="px-2.5 py-1 rounded-md bg-[#F59E0B]/15 border border-[#F59E0B]/30 text-xs text-[#FBBF24]" data-testid="heavy-pending-count">
+                          {b.pending} pending
+                        </span>
+                      )}
+                      {b.failed > 0 && (
+                        <span className="px-2.5 py-1 rounded-md bg-[#EF4444]/15 border border-[#EF4444]/30 text-xs text-[#F87171]" data-testid="heavy-failed-count">
+                          {b.failed} failed
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            );
+          })()
+        )}
+
         {/* Stats Cards */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
           <Card className="bg-[var(--brand-card)] border-[var(--brand-border)]">
