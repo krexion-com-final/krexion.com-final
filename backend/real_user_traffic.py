@@ -4447,72 +4447,93 @@ async def run_real_user_traffic_job(
                 # per origin, so both requests share the SAME upstream TCP
                 # tunnel through ProxyJet → guaranteed SAME exit IP.
                 #
-                # The endpoint reflects back the EXACT IPs the tracker
-                # would see (primary, ipv4, all_ips, proxy_ips), and we
-                # check ALL of them against duplicate_ip_set. If ANY is
-                # already known to be in clicks DB, abort + retry — no
-                # offer load, no Duplicate-IP screenshot, no wasted slot.
-                #
-                # Runs only in proxyjet_on_demand mode (legacy paste/upload
-                # proxy flows can't easily retry).
+                # 2026-05 — Probe BOTH origins (target host AND its parent
+                # apex / sibling). Many setups use `api.krexion.com` →
+                # 302 → `krexion.com` for the actual tracker check.
+                # Probing only the first host misses the IP that the
+                # tracker actually sees AND leaves the cross-origin
+                # TCP tunnel cold (→ chrome-error://chromewebdata on the
+                # second-leg CONNECT). Probing both warms up both
+                # tunnels AND measures both IPs.
                 if proxyjet_on_demand:
-                    # Build the probe URL from target_url's origin.
+                    # Build the probe URLs from target_url's origin.
                     # target_url is e.g. https://krexion.com/api/t/abc or
                     # https://api.krexion.com/api/t/abc — keep scheme+host.
                     try:
                         from urllib.parse import urlparse as _urlparse
                         _u = _urlparse(target_url or "")
-                        _probe_origin = f"{_u.scheme}://{_u.netloc}" if _u.scheme and _u.netloc else ""
+                        _scheme = _u.scheme or "https"
+                        _host = (_u.netloc or "").lower().strip()
                     except Exception:
-                        _probe_origin = ""
-                    _check_url = (_probe_origin + "/api/_rut_ipcheck") if _probe_origin else ""
+                        _scheme, _host = "https", ""
 
-                    _tracker_ips: List[str] = []
+                    _probe_origins: List[str] = []
+                    if _host:
+                        _probe_origins.append(f"{_scheme}://{_host}")
+                        # Add the apex / sibling host if the target is
+                        # on a known multi-subdomain setup:
+                        #   api.krexion.com → also probe krexion.com
+                        #   krexion.com     → also probe api.krexion.com
+                        #   www.example.com → also probe example.com
+                        _parts = _host.split(".")
+                        if len(_parts) >= 3 and _parts[0] in ("api", "www"):
+                            _apex = ".".join(_parts[1:])
+                            _probe_origins.append(f"{_scheme}://{_apex}")
+                        elif len(_parts) == 2:
+                            # Bare apex — also try `api.` subdomain
+                            _probe_origins.append(f"{_scheme}://api.{_host}")
+
+                    _tracker_ips_set: set = set()
                     _guard_ok = False
-                    if _check_url:
+                    _data: Dict[str, Any] = {}
+                    _BAD = {"unknown", "Unknown", "", "None", "none"}
+
+                    for _probe_origin in _probe_origins:
+                        _check_url = _probe_origin + "/api/_rut_ipcheck"
                         try:
                             _gr = await page.goto(
                                 _check_url,
                                 wait_until="domcontentloaded",
-                                timeout=15000,
+                                timeout=12000,
                             )
-                            if _gr is not None and 200 <= (_gr.status or 0) < 400:
-                                try:
-                                    _body = await page.evaluate(
-                                        "() => document.body ? document.body.innerText : ''"
-                                    )
-                                except Exception:
-                                    _body = ""
-                                try:
-                                    import json as _ipjson
-                                    _data = _ipjson.loads(_body or "{}")
-                                    if _data.get("ok"):
-                                        # Collect every IP variant the tracker
-                                        # might use to flag this visit as
-                                        # duplicate — primary, ipv4, all_ips,
-                                        # proxy_ips. Skip IPv6 (tracker does
-                                        # too) and the literal sentinel
-                                        # "unknown" / "Unknown" the backend
-                                        # returns when the proxy reached us
-                                        # via IPv6-only headers (no usable
-                                        # IPv4 to match against clicks DB).
-                                        _BAD = {"unknown", "Unknown", "", "None", "none"}
-                                        _all = set()
-                                        for _k in ("primary", "ipv4"):
-                                            _v = (_data.get(_k) or "").strip()
-                                            if _v and ":" not in _v and _v not in _BAD:
-                                                _all.add(_v)
-                                        for _k in ("all", "proxy_ips"):
-                                            for _v in (_data.get(_k) or []):
-                                                _v = (str(_v) or "").strip()
-                                                if _v and ":" not in _v and _v not in _BAD:
-                                                    _all.add(_v)
-                                        _tracker_ips = list(_all)
-                                        _guard_ok = bool(_tracker_ips)
-                                except Exception:
-                                    pass
+                            if _gr is None or not (200 <= (_gr.status or 0) < 400):
+                                continue
+                            try:
+                                _body = await page.evaluate(
+                                    "() => document.body ? document.body.innerText : ''"
+                                )
+                            except Exception:
+                                _body = ""
+                            try:
+                                import json as _ipjson
+                                _data_one = _ipjson.loads(_body or "{}")
+                            except Exception:
+                                _data_one = {}
+                            if not _data_one.get("ok"):
+                                continue
+                            # Keep the FIRST successful response as
+                            # `_data` (used to set the primary IP on the
+                            # entry record). Both responses go into
+                            # `_tracker_ips_set`.
+                            if not _data:
+                                _data = _data_one
+                            for _k in ("primary", "ipv4"):
+                                _v = (_data_one.get(_k) or "").strip()
+                                if _v and ":" not in _v and _v not in _BAD:
+                                    _tracker_ips_set.add(_v)
+                            for _k in ("all", "proxy_ips"):
+                                for _v in (_data_one.get(_k) or []):
+                                    _v = (str(_v) or "").strip()
+                                    if _v and ":" not in _v and _v not in _BAD:
+                                        _tracker_ips_set.add(_v)
                         except Exception:
-                            _guard_ok = False
+                            # Probe origin unreachable (chrome-error,
+                            # timeout, etc.) — fall through to the next
+                            # origin or to the unguarded visit path.
+                            continue
+
+                    _tracker_ips = list(_tracker_ips_set)
+                    _guard_ok = bool(_tracker_ips)
 
                     if _guard_ok and _tracker_ips:
                         # Set entry["exit_ip"] to the primary tracker IP —
@@ -4522,7 +4543,7 @@ async def run_real_user_traffic_job(
                             (_data.get("primary") or _data.get("ipv4") or _tracker_ips[0])
                             .strip()
                         )
-                        if _primary_ip:
+                        if _primary_ip and _primary_ip not in _BAD:
                             entry["exit_ip"] = _primary_ip
 
                         # Check ALL tracker-visible IPs against duplicate_ip_set
@@ -4537,7 +4558,8 @@ async def run_real_user_traffic_job(
                             push_live_step(
                                 job_id, i + 1, "filter", "skipped",
                                 f"Tracker-visible duplicate IP {_dup_hit} "
-                                f"(of {len(_tracker_ips)} tracker-visible IPs) · "
+                                f"(of {len(_tracker_ips)} tracker-visible IPs across "
+                                f"{len(_probe_origins)} origin(s)) · "
                                 f"closing profile + retrying with fresh ProxyJet IP "
                                 f"(no offer load attempted)",
                             )
@@ -4573,12 +4595,13 @@ async def run_real_user_traffic_job(
                         push_live_step(
                             job_id, i + 1, "filter", "ok",
                             f"Tracker-side IP check passed · {_primary_ip or '?'} "
-                            f"({len(_tracker_ips)} variant(s)) unique · "
-                            f"proceeding to tracker URL",
+                            f"({len(_tracker_ips)} IPs across {len(_probe_origins)} "
+                            f"origin(s)) unique · proceeding to tracker URL",
                         )
-                    # else: probe endpoint unreachable — don't block the
-                    # visit on a transient verification glitch; the
-                    # existing post-load detector remains the safety net.
+                    # else: probe endpoint unreachable on every origin —
+                    # don't block the visit on a transient verification
+                    # glitch; the existing post-load detector remains the
+                    # safety net.
 
                 push_live_step(job_id, i + 1, "browser", "info", f"Opening {target_url}")
 
