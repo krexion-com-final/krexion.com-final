@@ -553,7 +553,16 @@ export default function VisualRecorderPage() {
             selector: d.selector || "select",
             options: d.options,
             element: d.element,
+            wrapper_kind: d.wrapper_kind || "",
+            is_hidden_select: !!d.is_hidden_select,
           });
+          if (d.wrapper_kind) {
+            toast.success(
+              d.is_hidden_select
+                ? `Hidden <select> behind ${d.wrapper_kind} detected — replay will be faster.`
+                : `Custom dropdown UI detected: ${d.wrapper_kind}`
+            );
+          }
         }
       } else if (tool === "random" && d.element) {
         const txt = (d.element.text || "").trim();
@@ -1639,9 +1648,25 @@ export default function VisualRecorderPage() {
                   className="mt-3 p-3 rounded-lg bg-amber-950/30 border border-amber-700/40"
                   data-testid="vr-dropdown-bind-panel"
                 >
-                  <div className="text-xs text-amber-200 mb-1 font-medium flex items-center gap-1">
+                  <div className="text-xs text-amber-200 mb-1 font-medium flex items-center gap-1 flex-wrap">
                     <ChevronDown className="w-3.5 h-3.5" />
                     Bind dropdown <code className="text-zinc-300">{pendingDropdown.selector}</code>
+                    {pendingDropdown.wrapper_kind && (
+                      <span
+                        data-testid="vr-dd-wrapper-badge"
+                        className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-blue-500/20 border border-blue-400/40 text-blue-200"
+                        title={
+                          pendingDropdown.is_hidden_select
+                            ? "Native <select> is CSS-hidden behind this custom UI. Recorder will mark this step state=\"attached\" + prefer JS-set at replay so the visit doesn't 25s-timeout on visibility."
+                            : "Custom dropdown UI detected — replay will use JS-first select."
+                        }
+                      >
+                        {pendingDropdown.wrapper_kind === "generic-custom"
+                          ? "Custom UI"
+                          : pendingDropdown.wrapper_kind}
+                        {pendingDropdown.is_hidden_select ? " · hidden <select>" : ""}
+                      </span>
+                    )}
                   </div>
                   <div className="text-[11px] text-zinc-400 mb-2">
                     {pendingDropdown.options.length} option{pendingDropdown.options.length === 1 ? "" : "s"} found —

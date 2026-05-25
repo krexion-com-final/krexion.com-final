@@ -741,8 +741,19 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
         # For dropdown mode we also need to pull the option list out of
         # the element (or its nearest <select> ancestor) BEFORE leaving
         # the page lock so the DOM is in the state the user just saw.
+        #
+        # 2026-05 — Also DETECT whether the <select> is hidden behind a
+        # custom dropdown UI (Bootstrap-Select, Select2, Chosen, React-
+        # Select, etc). When detected we add `state: "attached"` and
+        # `prefer_js_set: true` hints to the recorded `select` step so
+        # the RUT replay engine skips the (futile) visibility wait and
+        # goes straight to the JS-driven select path. This eliminates
+        # the 5s+ pre-wait per dropdown for every visit of every job
+        # using this automation.
         dropdown_options: List[Dict[str, str]] = []
         dropdown_selector: str = ""
+        dropdown_wrapper_kind: str = ""   # "bootstrap-select"|"select2"|"chosen"|"react-select"|""
+        dropdown_is_hidden: bool = False
         if mode == "dropdown":
             try:
                 opts = await sess.page.evaluate(
@@ -757,6 +768,38 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
                             sel = sel.parentElement;
                         }
                         if(!sel || sel.tagName !== 'SELECT') return null;
+
+                        // ── Detect hidden / custom-UI wrapping ──
+                        var cs = window.getComputedStyle(sel);
+                        var rect = sel.getBoundingClientRect();
+                        var isHidden = (
+                            cs.display === 'none' ||
+                            cs.visibility === 'hidden' ||
+                            parseFloat(cs.opacity || '1') < 0.05 ||
+                            rect.width < 4 || rect.height < 4 ||
+                            rect.left < -2000 || rect.top < -2000
+                        );
+                        // Climb ancestors looking for known wrapper class names
+                        var wrapperKind = '';
+                        var p = sel.parentElement;
+                        var depth = 0;
+                        while(p && depth < 6 && !wrapperKind){
+                            var c = (p.className || '') + '';
+                            var cl = c.toLowerCase();
+                            if(/(^|\\s)bootstrap-select(\\s|$|--)/.test(cl)) wrapperKind = 'bootstrap-select';
+                            else if(/select2(-container|-selection|-hidden|-dropdown)/.test(cl)) wrapperKind = 'select2';
+                            else if(/(^|\\s)chosen-container/.test(cl)) wrapperKind = 'chosen';
+                            else if(/react-select__(control|container|value-container)/.test(cl)) wrapperKind = 'react-select';
+                            else if(/(^|\\s)nice-select(\\s|$)/.test(cl)) wrapperKind = 'nice-select';
+                            else if(/(^|\\s)selectric/.test(cl)) wrapperKind = 'selectric';
+                            else if(/(^|\\s)multiselect(\\s|$|-)/.test(cl)) wrapperKind = 'multiselect';
+                            p = p.parentElement; depth++;
+                        }
+                        // If <select> is hidden but no known wrapper class, still
+                        // treat as custom UI — the user clearly clicked SOMETHING
+                        // visible above the hidden select.
+                        if(isHidden && !wrapperKind) wrapperKind = 'generic-custom';
+
                         var options = [];
                         for(var i=0; i<sel.options.length; i++){
                             var o = sel.options[i];
@@ -771,12 +814,16 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
                             name: sel.getAttribute('name') || '',
                             id: sel.id || '',
                             options: options,
+                            isHidden: isHidden,
+                            wrapperKind: wrapperKind,
                         };
                     }""",
                     [int(x), int(y)],
                 )
                 if opts and opts.get("options"):
                     dropdown_options = opts["options"]
+                    dropdown_is_hidden = bool(opts.get("isHidden"))
+                    dropdown_wrapper_kind = (opts.get("wrapperKind") or "") if dropdown_is_hidden else (opts.get("wrapperKind") or "")
                     # Build the same selector style as form_fill so the
                     # downstream `select` action can find the element.
                     dropdown_selector = _make_selector_for_input({
@@ -951,9 +998,29 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
         # We don't record the `select` step yet — the caller has to bind
         # it (literal option or Excel header) via /dropdown-bind first.
         # Surface the option list so the UI can render a picker.
+        # 2026-05: Also surface custom-UI detection hints so the picker
+        # shows a badge ("Bootstrap-Select detected") and so bind_dropdown
+        # can stamp the right state/JS hints onto the recorded step.
         step = None
         extra["selector"] = dropdown_selector or _make_selector_for_input(info)
         extra["options"] = dropdown_options
+        if dropdown_wrapper_kind:
+            extra["wrapper_kind"] = dropdown_wrapper_kind
+        if dropdown_is_hidden:
+            extra["is_hidden_select"] = True
+            # Stash on the session so /dropdown-bind picks it up
+            sess._pending_dropdown_meta = {  # type: ignore[attr-defined]
+                "selector": dropdown_selector,
+                "wrapper_kind": dropdown_wrapper_kind,
+                "is_hidden_select": True,
+            }
+        else:
+            # Clear any stale meta from a previous dropdown click
+            try:
+                if hasattr(sess, "_pending_dropdown_meta"):
+                    delattr(sess, "_pending_dropdown_meta")
+            except Exception:
+                pass
         if not dropdown_options:
             extra["warning"] = (
                 "No <select> element found at that point — pick the dropdown "
@@ -1074,6 +1141,27 @@ async def bind_dropdown(
         "value": chosen,
         "match_by": match_by_norm,
     }
+    # ── 2026-05: Carry custom-UI hints from the dropdown click ──
+    # If the <select> is hidden behind Bootstrap-Select / Select2 / etc,
+    # the recording-time click stashed metadata on the session. We copy
+    # it onto the step so the RUT replay engine can skip the (useless)
+    # visibility pre-wait and go straight to the JS-driven select path
+    # — saves ~5s of phase-1 wait time per dropdown per visit.
+    meta = getattr(sess, "_pending_dropdown_meta", None)
+    if meta and meta.get("selector") == selector:
+        if meta.get("is_hidden_select"):
+            # Engine reads this and routes wait_for_selector to
+            # state="attached" (vs default "visible") for THIS step,
+            # AND skips the visibility pre-wait entirely.
+            step["state"] = "attached"
+            step["prefer_js_set"] = True
+        if meta.get("wrapper_kind"):
+            step["wrapper_kind"] = meta["wrapper_kind"]
+        # one-shot — clear after use so the next dropdown click starts clean
+        try:
+            delattr(sess, "_pending_dropdown_meta")
+        except Exception:
+            pass
     sess.steps.append(step)
     # 2026-01 — auto wait(500) removed per user request.
     # Brief settle wait so subsequent steps see the post-change DOM

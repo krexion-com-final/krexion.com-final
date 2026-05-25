@@ -100,3 +100,41 @@ Total: ~800 LoC, 5 files. No new files created.
 - Hidden `<select>` via `display:none`: **5s** (was 25s + crash)
 - Normal visible element: **0.004s** (zero performance regression)
 - Element truly missing: clean error after total budget, with all attempted selectors listed in message
+
+### Iteration 5 (2026-05-25) — Smart Recording-Time Custom-Dropdown Detection
+**Goal**: Make NEW recordings inherently more reliable by detecting custom-dropdown UI libraries at recording time and emitting smarter `select` steps.
+
+**Implementation** (backend `visual_recorder.py` +88 / frontend `VisualRecorderPage.js` +27):
+
+**Recording detection** (visual_recorder.py `_handle_click` dropdown mode):
+- Augmented the JS evaluate that runs on dropdown-click to also detect:
+  - `isHidden` — `display:none` / `visibility:hidden` / opacity<0.05 / offscreen / size<4px
+  - `wrapperKind` — walks 6 ancestors looking for known wrapper class patterns: `bootstrap-select`, `select2`, `chosen`, `react-select`, `nice-select`, `selectric`, `multiselect`
+  - Falls back to `generic-custom` when hidden but no known wrapper class
+- Stashes meta on session (`_pending_dropdown_meta`) for one-shot pickup by `/dropdown-bind`
+
+**Hint stamping** (`bind_dropdown`):
+- When recorded `<select>` is hidden behind a custom UI, adds these fields to the recorded step:
+  - `state: "attached"` — replay engine routes wait_for_selector accordingly
+  - `prefer_js_set: true` — informational hint (downstream `_smart_select_with_fallback` is already JS-first)
+  - `wrapper_kind: "<name>"` — for debug logs / future analytics
+- Native visible `<select>` recording stays clean (no extra fields → zero regression)
+
+**Frontend UX badge** (`VisualRecorderPage.js`):
+- Dropdown-bind panel shows a blue chip: `"bootstrap-select · hidden <select>"` etc when custom UI is detected
+- Toast on click: `"Hidden <select> behind bootstrap-select detected — replay will be faster"`
+- Tooltip explains technical detail to power users
+
+**Verified end-to-end**:
+| Test | Result |
+|---|---|
+| Detection — native visible `<select>` | `isHidden=false, wrapperKind=""` ✅ |
+| Detection — `display:none` no wrapper | `isHidden=true, wrapperKind="generic-custom"` ✅ |
+| Detection — Bootstrap-Select wrapper | `bootstrap-select` ✅ |
+| Detection — Select2 wrapper | `select2` ✅ |
+| Detection — Chosen wrapper | `chosen` ✅ |
+| Detection — React-Select wrapper | `react-select` ✅ |
+| bind_dropdown hint stamping | step has `state="attached"` + `prefer_js_set=true` + `wrapper_kind` ✅ |
+| Native visible select step | clean (no hints, no regression) ✅ |
+
+**Benefit**: Every dropdown recorded after this deploy skips the 5s visibility-wait pre-check at replay (saves ~5s × #dropdowns × #visits — easily minutes per RUT job). Plus user gets visual confirmation that recorder understood the dropdown's tech stack.
