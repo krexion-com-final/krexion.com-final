@@ -1,19 +1,101 @@
-import React from "react";
+import React, { useState } from "react";
 import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
+import axios from "axios";
 import {
   Sparkles, Download, Shield, Cpu, HardDrive, Wifi,
-  Check, Copy, ArrowRight, Lock,
+  Check, Copy, ArrowRight, Lock, KeyRound, AlertCircle, Loader2, Mail,
 } from "lucide-react";
 import { toast } from "sonner";
 import WavyBackground from "../components/WavyBackground";
 import PublicMobileMenu from "../components/PublicMobileMenu";
 
-const INSTALLER_URL = "/Krexion-User-Package.zip";
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+const API = `${BACKEND_URL}/api`;
 const INSTALLER_SHA256 = "b21b9f7d7803d3748dfa3e41d5d5a5eee4127b3b592bf2a56395275f6a1502bc";
 const INSTALLER_VERSION = "1.0.4";
 
 export default function DownloadPage() {
+  // ── License-gated download state ───────────────────────────────
+  // 2026-05: Customers must enter their KRX-XXXX-XXXX-XXXX-XXXX key
+  // BEFORE the installer ZIP can be downloaded. The backend verifies
+  // the key (not revoked / not expired) and streams a personalized
+  // ZIP with the key auto-embedded in `license-key.txt`, which the
+  // installer reads to pre-fill LICENSE_KEY= in the generated .env.
+  const [licenseKey, setLicenseKey] = useState("");
+  const [verifying, setVerifying] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [verified, setVerified] = useState(null); // { license, max_pcs, machines_used, machines_remaining }
+
+  const formatKey = (raw) => {
+    // KRX-XXXX-XXXX-XXXX-XXXX — auto-format as user types/pastes.
+    const stripped = (raw || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (!stripped) return "";
+    let core = stripped.startsWith("KRX") ? stripped.slice(3) : stripped;
+    core = core.slice(0, 16);
+    const parts = [];
+    for (let i = 0; i < core.length; i += 4) parts.push(core.slice(i, i + 4));
+    return "KRX-" + parts.join("-");
+  };
+
+  const handleKeyChange = (e) => {
+    setLicenseKey(formatKey(e.target.value));
+    if (verified) setVerified(null); // re-verification required after edit
+  };
+
+  const verifyKey = async () => {
+    const key = (licenseKey || "").trim().toUpperCase();
+    if (!/^KRX-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(key)) {
+      toast.error("License key must look like KRX-XXXX-XXXX-XXXX-XXXX");
+      return;
+    }
+    setVerifying(true);
+    try {
+      const r = await axios.post(`${API}/license/verify-for-download`, { license_key: key });
+      if (r.data?.ok) {
+        setVerified(r.data);
+        toast.success("License verified! You can now download the installer.");
+      } else {
+        toast.error(r.data?.reason || "Could not verify license.");
+      }
+    } catch (e) {
+      const detail = e?.response?.data?.detail || "License verification failed.";
+      toast.error(typeof detail === "string" ? detail : "License verification failed.");
+      setVerified(null);
+    } finally {
+      setVerifying(false);
+    }
+  };
+
+  const downloadInstaller = async () => {
+    const key = (licenseKey || "").trim().toUpperCase();
+    if (!verified) return;
+    setDownloading(true);
+    try {
+      // Use blob download so the personalized ZIP (with embedded
+      // license-key.txt) hits the browser as a normal "save as".
+      const r = await axios.get(`${API}/license/download-installer/${encodeURIComponent(key)}`, {
+        responseType: "blob",
+      });
+      const url = window.URL.createObjectURL(new Blob([r.data], { type: "application/zip" }));
+      const a = document.createElement("a");
+      a.href = url;
+      const tail = key.replace(/-/g, "").slice(-8);
+      a.download = `Krexion-User-Package-${tail}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      toast.success("Installer downloaded with your license pre-embedded.");
+    } catch (e) {
+      const detail = e?.response?.data?.detail
+        || (e?.response?.status === 410 ? "License is no longer valid." : "Download failed.");
+      toast.error(typeof detail === "string" ? detail : "Download failed.");
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   const copyHash = async () => {
     try {
       await navigator.clipboard.writeText(INSTALLER_SHA256);
@@ -77,19 +159,147 @@ export default function DownloadPage() {
           This installer is only needed if you want to run heavy local features like Real User Traffic, Form Filler, or CPI Worker on your own PC.
         </p>
 
-        <a
-          href={INSTALLER_URL}
-          download="Krexion-User-Package.zip"
-          data-testid="download-installer-button"
-          className="inline-flex items-center gap-3 bg-[#3B82F6] text-black font-bold px-10 py-4 rounded-xl hover:bg-[#60A5FA] transition shadow-2xl shadow-[#2563EB]/30"
+        {/* License-gated download card */}
+        <div
+          data-testid="license-gate-card"
+          className="max-w-xl mx-auto bg-white/[0.03] border border-white/10 rounded-2xl p-6 sm:p-8 text-left backdrop-blur-sm"
         >
-          <Download size={20} />
-          Download installer (.zip)
-          <ArrowRight size={18} />
-        </a>
+          <div className="flex items-center gap-2 mb-1">
+            <KeyRound size={18} className="text-[#3B82F6]" />
+            <h3 className="text-lg font-semibold text-white">
+              {verified ? "License verified" : "Enter your license key"}
+            </h3>
+          </div>
+          <p className="text-xs text-[#A1A1AA] mb-5">
+            {verified
+              ? "Your key will be auto-embedded inside the installer — no manual copy needed on your PC."
+              : "Purchase a license first, then enter the KRX-XXXX-XXXX-XXXX-XXXX key we emailed you."}
+          </p>
 
-        <div className="mt-4 text-xs text-[#71717A]">
-          ~20 KB ZIP • Auto-downloads Krexion runtime (~600 MB) during install
+          <div className="flex flex-col sm:flex-row gap-2">
+            <input
+              type="text"
+              data-testid="license-key-input"
+              value={licenseKey}
+              onChange={handleKeyChange}
+              onKeyDown={(e) => { if (e.key === "Enter" && !verified) verifyKey(); }}
+              placeholder="KRX-XXXX-XXXX-XXXX-XXXX"
+              maxLength={23}
+              spellCheck={false}
+              autoCapitalize="characters"
+              className="flex-1 bg-black/40 border border-white/10 rounded-lg px-4 py-3 font-mono tracking-wider text-white placeholder:text-[#52525B] focus:outline-none focus:border-[#3B82F6]"
+            />
+            {!verified ? (
+              <button
+                type="button"
+                onClick={verifyKey}
+                disabled={verifying || !licenseKey}
+                data-testid="verify-license-button"
+                className="inline-flex items-center justify-center gap-2 bg-[#3B82F6] hover:bg-[#60A5FA] disabled:opacity-50 disabled:cursor-not-allowed text-black font-semibold px-6 py-3 rounded-lg transition"
+              >
+                {verifying ? <Loader2 size={16} className="animate-spin" /> : <Shield size={16} />}
+                {verifying ? "Verifying…" : "Verify Key"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => { setVerified(null); }}
+                data-testid="change-license-key-button"
+                className="inline-flex items-center justify-center gap-2 bg-white/5 hover:bg-white/10 text-white px-4 py-3 rounded-lg transition border border-white/10 text-sm"
+              >
+                Change key
+              </button>
+            )}
+          </div>
+
+          {verified && (
+            <div data-testid="license-info-block" className="mt-5 bg-[#10B981]/10 border border-[#10B981]/30 rounded-xl p-4 text-sm">
+              <div className="flex items-center gap-2 text-[#34D399] font-semibold mb-2">
+                <Check size={16} /> License OK — Status: {verified.license?.status || "active"}
+              </div>
+              <div className="grid grid-cols-2 gap-3 text-xs text-[#A1A1AA]">
+                {verified.license?.email && (
+                  <div className="col-span-2 truncate">
+                    <span className="text-[#71717A]">Issued to:</span>{" "}
+                    <span className="text-white">{verified.license.email}</span>
+                  </div>
+                )}
+                {typeof verified.max_pcs === "number" && (
+                  <div>
+                    <span className="text-[#71717A]">PCs allowed:</span>{" "}
+                    <span className="text-white">{verified.max_pcs}</span>
+                  </div>
+                )}
+                {typeof verified.machines_remaining === "number" && (
+                  <div>
+                    <span className="text-[#71717A]">Slots left:</span>{" "}
+                    <span className="text-white">{verified.machines_remaining}</span>
+                  </div>
+                )}
+                {verified.license?.subscription_ends_at && (
+                  <div className="col-span-2">
+                    <span className="text-[#71717A]">Renews:</span>{" "}
+                    <span className="text-white">
+                      {new Date(verified.license.subscription_ends_at).toLocaleDateString()}
+                    </span>
+                  </div>
+                )}
+                {verified.license?.trial_ends_at && verified.license?.status === "trial" && (
+                  <div className="col-span-2">
+                    <span className="text-[#71717A]">Trial ends:</span>{" "}
+                    <span className="text-white">
+                      {new Date(verified.license.trial_ends_at).toLocaleDateString()}
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div className="mt-6 flex flex-col items-center">
+            <button
+              type="button"
+              onClick={downloadInstaller}
+              disabled={!verified || downloading}
+              data-testid="download-installer-button"
+              className={`inline-flex items-center gap-3 font-bold px-10 py-4 rounded-xl transition shadow-2xl w-full sm:w-auto justify-center
+                ${verified
+                  ? "bg-[#3B82F6] hover:bg-[#60A5FA] text-black shadow-[#2563EB]/30 cursor-pointer"
+                  : "bg-white/5 text-[#52525B] cursor-not-allowed shadow-none border border-white/5"}`}
+            >
+              {downloading ? <Loader2 size={20} className="animate-spin" /> : verified ? <Download size={20} /> : <Lock size={20} />}
+              {downloading ? "Preparing your installer…" : verified ? "Download installer (.zip)" : "Verify key to unlock download"}
+              {verified && !downloading && <ArrowRight size={18} />}
+            </button>
+            <div className="mt-3 text-xs text-[#71717A] text-center">
+              ~20 KB ZIP • License key auto-embedded • Auto-downloads Krexion runtime (~600 MB) during install
+            </div>
+          </div>
+
+          {!verified && (
+            <div data-testid="no-license-help" className="mt-6 pt-5 border-t border-white/5 flex flex-col sm:flex-row items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-xs text-[#A1A1AA]">
+                <AlertCircle size={14} className="text-[#F59E0B] shrink-0" />
+                Don't have a license key yet?
+              </div>
+              <div className="flex items-center gap-2">
+                <Link
+                  to="/pricing"
+                  data-testid="purchase-license-link"
+                  className="inline-flex items-center gap-1.5 text-xs bg-[#3B82F6]/15 border border-[#3B82F6]/40 text-[#60A5FA] hover:bg-[#3B82F6]/25 px-3 py-1.5 rounded-md transition"
+                >
+                  See plans <ArrowRight size={12} />
+                </Link>
+                <a
+                  href="mailto:admin@krexion.local?subject=License%20key%20request"
+                  data-testid="contact-admin-link"
+                  className="inline-flex items-center gap-1.5 text-xs bg-white/5 hover:bg-white/10 text-white px-3 py-1.5 rounded-md transition border border-white/10"
+                >
+                  <Mail size={12} /> Contact admin
+                </a>
+              </div>
+            </div>
+          )}
         </div>
       </section>
 

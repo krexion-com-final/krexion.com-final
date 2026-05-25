@@ -202,6 +202,10 @@ class CheckoutRequest(BaseModel):
     origin_url: str = Field(..., description="Frontend origin, e.g. https://app.example.com")
 
 
+class VerifyForDownloadRequest(BaseModel):
+    license_key: str
+
+
 class ConfigUpdate(BaseModel):
     product_name: Optional[str] = None
     monthly_price: Optional[float] = Field(None, ge=0.5, le=10000.0)
@@ -359,6 +363,180 @@ async def validate(body: ValidateRequest):
         {"$set": {"last_validated_at": _now()}},
     )
     return {"ok": True, "status": lic.get("status"), "license": _public_license(lic)}
+
+
+# ═════════════════════════════════════════════════════════════════════
+# DOWNLOAD GATE — verify license key before installer download
+# ═════════════════════════════════════════════════════════════════════
+@license_router.post("/license/verify-for-download")
+async def verify_for_download(body: VerifyForDownloadRequest):
+    """Verify a license key WITHOUT binding it to a machine. Used by the
+    public DownloadPage to gate the installer download:
+
+      • Customer purchases license → admin emails KRX-XXXX-… key
+      • Customer enters key on /download page
+      • This endpoint confirms key exists, isn't revoked, isn't expired
+      • DownloadPage then enables the "Download installer" button which
+        pulls /api/license/download-installer/{key} — the streamed ZIP
+        has the key pre-embedded so the installer auto-fills it.
+
+    Returns 404 if key is unknown, 410 if revoked/expired, 200 if ok.
+    Never auto-creates anything; never binds to a machine. Purely a
+    read-only check + a soft 'last_verified_at' touch on the doc.
+    """
+    cfg = await get_config()
+    if not cfg.get("enabled", True):
+        # Licensing disabled globally → no key check needed, just say OK.
+        return {"ok": True, "status": "licensing_disabled", "license": None}
+
+    key = (body.license_key or "").strip().upper()
+    if not key:
+        raise HTTPException(400, "License key is required.")
+
+    lic = await _db.licenses.find_one({"license_key": key}, {"_id": 0})
+    if not lic:
+        raise HTTPException(404, "License key not recognized. Please check the key in the email we sent after your purchase, or contact support.")
+
+    if lic.get("status") == "revoked":
+        raise HTTPException(410, "This license has been revoked. Please contact support.")
+
+    if _expired(lic):
+        # Persist the expired status so admin UI reflects it.
+        await _db.licenses.update_one(
+            {"license_key": key}, {"$set": {"status": "expired"}}
+        )
+        raise HTTPException(410, "This license / trial period has ended. Please renew before downloading the installer.")
+
+    # Soft touch — useful in admin UI to see "key was verified for download at …"
+    try:
+        await _db.licenses.update_one(
+            {"license_key": key},
+            {"$set": {"last_download_verify_at": _now().isoformat()}},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    max_pcs = max(1, int(cfg.get("max_pcs_per_license", 1)))
+    machines = lic.get("machines") or ([lic.get("machine_id")] if lic.get("machine_id") else [])
+    return {
+        "ok": True,
+        "status": lic.get("status"),
+        "license": _public_license(lic),
+        "max_pcs": max_pcs,
+        "machines_used": len(machines),
+        "machines_remaining": max(0, max_pcs - len(machines)),
+    }
+
+
+@license_router.get("/license/download-installer/{license_key}")
+async def download_installer_with_key(license_key: str, request: Request):
+    """Stream a personalized installer ZIP with the customer's license
+    key pre-embedded as `license-key.txt` at the root. The bundled
+    `install-master.ps1` reads this file and auto-fills the LICENSE_KEY=
+    line in the generated .env — so the customer doesn't have to copy
+    the key manually on their PC.
+
+    Same validity gates as /license/verify-for-download. Streams a
+    StreamingResponse so we don't buffer the full ZIP in RAM.
+
+    Source files: backend's neighbouring `Krexion-User-Package/` dir
+    (the canonical installer payload tracked in this repo). If that
+    directory isn't present (e.g. dev environment without the payload
+    yet), returns 503 with a clear admin-actionable message instead of
+    a 500 stack trace.
+    """
+    import io
+    import zipfile
+    from pathlib import Path
+    from fastapi.responses import StreamingResponse
+
+    # ── 1. Verify the key (re-uses the same logic; never bind machine) ──
+    cfg = await get_config()
+    licensing_enabled = bool(cfg.get("enabled", True))
+    key = (license_key or "").strip().upper()
+    if not key:
+        raise HTTPException(400, "License key is required.")
+
+    lic_doc: Optional[Dict[str, Any]] = None
+    if licensing_enabled:
+        lic_doc = await _db.licenses.find_one({"license_key": key}, {"_id": 0})
+        if not lic_doc:
+            raise HTTPException(404, "License key not recognized.")
+        if lic_doc.get("status") == "revoked":
+            raise HTTPException(410, "This license has been revoked.")
+        if _expired(lic_doc):
+            await _db.licenses.update_one(
+                {"license_key": key}, {"$set": {"status": "expired"}}
+            )
+            raise HTTPException(410, "License / trial expired.")
+
+    # ── 2. Locate installer payload ────────────────────────────────────
+    # Look in repo root (one level up from /app/backend → /app), where
+    # `Krexion-User-Package/` lives in the cloned repo.
+    backend_dir = Path(__file__).resolve().parent
+    candidates = [
+        backend_dir.parent / "Krexion-User-Package",   # /app/Krexion-User-Package
+        backend_dir / "Krexion-User-Package",          # fallback inside backend/
+    ]
+    payload_dir = next((p for p in candidates if p.is_dir()), None)
+    if payload_dir is None:
+        logger.error("[download-installer] payload dir not found in any of: %s", candidates)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Installer payload is not deployed on this server yet. "
+                "Admin: please ensure the `Krexion-User-Package/` folder is "
+                "present in the backend repo root, then retry."
+            ),
+        )
+
+    # ── 3. Build customised ZIP in-memory ──────────────────────────────
+    # Small enough (~100 KB of .bat/.ps1 scripts) that an in-memory
+    # buffer is fine. If the payload ever grows past ~5 MB we should
+    # switch to a temp file. For now this is cleaner + atomic.
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for item in payload_dir.rglob("*"):
+            if item.is_file():
+                arcname = "Krexion-User-Package/" + str(item.relative_to(payload_dir)).replace("\\", "/")
+                zf.write(item, arcname=arcname)
+        # Inject the license-key file at the package root. The installer
+        # PowerShell script checks for this and substitutes it into the
+        # generated .env during STEP 6.
+        email_line = (lic_doc.get("email") if lic_doc else "") or ""
+        status_line = (lic_doc.get("status") if lic_doc else "licensing_disabled") or "active"
+        license_blob = (
+            f"# Krexion auto-generated license file — DO NOT EDIT.\n"
+            f"# Issued for: {email_line}\n"
+            f"# Status at download time: {status_line}\n"
+            f"# Generated at: {_now().isoformat()}\n"
+            f"{key}\n"
+        )
+        zf.writestr("Krexion-User-Package/license-key.txt", license_blob)
+
+    buf.seek(0)
+
+    # Soft analytics so admin sees "installer was actually downloaded"
+    try:
+        await _db.licenses.update_one(
+            {"license_key": key},
+            {"$set": {
+                "installer_downloaded_at": _now().isoformat(),
+                "installer_downloaded_count": (lic_doc.get("installer_downloaded_count") or 0) + 1 if lic_doc else 1,
+            }},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    filename = f"Krexion-User-Package-{key.replace('-', '')[-8:]}.zip"
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @license_router.post("/license/checkout")

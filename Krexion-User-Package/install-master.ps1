@@ -578,6 +578,47 @@ $jwt = New-RandomString -L 32
 $adminPw = New-RandomString -L 16
 $pbToken = New-RandomString -L 24
 
+# ============================================================
+# Auto-read license-key.txt — written by the krexion.com /download
+# gate. The customer entered their KRX-XXXX-… key on the website
+# (verified server-side first) and that key was embedded into this
+# package as `license-key.txt` next to install-master.ps1. We pick
+# it up here so the customer doesn't have to copy it manually into
+# the .env after install.
+# ============================================================
+$licenseKey = ""
+$licenseKeyFile = ""
+$candidates = @(
+    (Join-Path $PSScriptRoot "license-key.txt"),
+    (Join-Path (Get-Location).Path "license-key.txt"),
+    "$INSTALL_DIR\license-key.txt"
+)
+foreach ($cand in $candidates) {
+    if ($cand -and (Test-Path $cand)) {
+        $licenseKeyFile = $cand
+        try {
+            # license-key.txt may contain comment lines starting with '#'.
+            # The real key is the first non-empty, non-comment line.
+            $rawLines = Get-Content -Path $cand -ErrorAction SilentlyContinue
+            foreach ($ln in $rawLines) {
+                $t = ($ln -as [string]).Trim()
+                if ($t -and -not $t.StartsWith("#")) {
+                    $licenseKey = $t.ToUpper()
+                    break
+                }
+            }
+        } catch {
+            $licenseKey = ""
+        }
+        break
+    }
+}
+if ($licenseKey) {
+    Show-Ok ("License key auto-detected from " + $licenseKeyFile + " — will pre-fill .env")
+} else {
+    Show-Warn "No license-key.txt found — .env will be created with LICENSE_KEY empty. Customer can paste it manually later, OR re-download from krexion.com/download after entering their key on the gate."
+}
+
 $envPath = $INSTALL_DIR + "\.env"
 $envLines = @(
     "MONGO_URL=mongodb://mongo:27017",
@@ -594,13 +635,17 @@ $envLines = @(
     "SMTP_PASSWORD=",
     "GOOGLE_SHEETS_SA_PATH=",
     "LICENSE_SERVER_URL=https://krexion.com",
-    "LICENSE_KEY=",
+    ("LICENSE_KEY=" + $licenseKey),
     "KREXION_MODE=local",
     "KREXION_CLOUD_URL=https://krexion.com",
     ("IS_CUSTOMER_INSTALL=" + $CustomerMode.ToString().ToLower())
 )
 $envLines | Set-Content -Path $envPath -Encoding ASCII -Force
-Show-Ok ".env generated [secure random passwords]"
+if ($licenseKey) {
+    Show-Ok (".env generated [secure random passwords + license key pre-filled]")
+} else {
+    Show-Ok ".env generated [secure random passwords]"
+}
 
 # ============================================================
 # STEP 7: Build + Start

@@ -1,60 +1,83 @@
 # Krexion.com — Project Memory
 
 ## Original Problem Statement
-User collaborated on repo `https://github.com/dennisedmaartins9-sudo/krexion.com.git` (public, main branch). Goal: Verify heavy features run on customer's PC, not on VPS. Fix any bugs/conflicts. Then add an admin-dashboard "Heavy Features Status" badge showing VPS protection + bridge offload stats.
+User collaborated on `https://github.com/dennisedmaartins9-sudo/krexion.com.git` (public, main branch). Multiple iteration goals:
+1. Ensure all heavy features run on customer PCs, not the VPS
+2. Add admin "Heavy Features Status" badge
+3. Gate the installer download behind a paid license key + auto-embed the key
 
-Constraint: Don't break anything existing. User pushes via "Save to GitHub" → auto-deploys to VPS. Customer-side updates flow via admin Releases page.
+Constraint: Don't break anything. User pushes via "Save to GitHub" → auto-deploys to VPS. Customer updates via admin Releases page.
 
 ## Architecture
 - Backend: FastAPI (Python, `backend/server.py` 15.8k+ lines) + 25+ modules
 - Frontend: React + craco (`frontend/`) — 43 pages
 - Database: MongoDB
-- Deployment modes:
-  - `KREXION_MODE=cloud` → public krexion.com VPS edge
-  - `KREXION_MODE=local` → customer desktop install (heavy features execute here)
-  - `STRICT_CLOUD_HEAVY_BLOCK=true` (default, 2026-05) → cloud refuses heavy work
+- Deployment modes: `KREXION_MODE=cloud` (VPS edge) vs `local` (customer PC)
+- Strict heavy block: `STRICT_CLOUD_HEAVY_BLOCK=true` default
+- License system: KRX-XXXX-XXXX-XXXX-XXXX keys, admin manually issues post-payment
 
 ## Work Done
 
 ### Iteration 1 (2026-05-25) — Heavy-Feature Audit + 5 Bug Fixes
-Bugs fixed in `backend/server.py` (+63/-5):
-1. **B1** Startup auto-installed Playwright Chromium even on cloud edge → wrapped in cloud-strict gate
-2. **B2** Startup orphan-job reaper auto-resumed RUT jobs on VPS → now leaves jobs `queued` for customer bridge
-3. **B3** `POST /api/real-user-traffic/jobs/{id}/retry` missing guard → added `require_local_mode`
-4. **B4** `POST /api/real-user-traffic/engine-prewarm` missing guard → added
-5. **B5** `POST /api/clicks/generate-traffic` missing guard → added (consistency with siblings)
+Fixed VPS heavy-work leaks in `backend/server.py` (+63/-5):
+- B1: Skip Chromium auto-install on cloud strict
+- B2: Skip orphan RUT auto-resume on cloud strict
+- B3, B4, B5: Added `require_local_mode` to `/rut/jobs/{id}/retry`, `/rut/engine-prewarm`, `/clicks/generate-traffic`
+- Guarded endpoints: 6 → 9
 
-Guarded endpoint count: 6 → 9.
+### Iteration 2 (2026-05-25) — Heavy Features Status Admin Badge
+- Backend: `GET /api/admin/heavy-features-status` returns deployment + bridge_24h + customer_pcs stats (+123 in server.py)
+- Frontend: Color-adaptive banner (GREEN=protected / BLUE=local / YELLOW=strict-off) on AdminDashboard with live counters and feature breakdown (+128 in AdminDashboard.js)
 
-### Iteration 2 (2026-05-25) — Admin "Heavy Features Status" Badge
-**Backend** (+123 lines in `server.py`): New endpoint `GET /api/admin/heavy-features-status` (admin auth required) returns:
-- `deployment`: mode, is_cloud, strict_heavy_block, protected flag, friendly note
-- `bridge_24h`: total/done/failed/pending bridge job counts + by_feature breakdown
-- `customer_pcs`: online_now (heartbeat fresh), active_24h (any heartbeat 24h)
-- `last_bridge_job_at` / `last_bridge_job_feature`
+### Iteration 3 (2026-05-25) — License-Gated Download with Auto-Embed
+**Goal**: Customer must enter purchased license key before download; key gets auto-embedded into installer.
 
-**Frontend** (+128 lines in `AdminDashboard.js`):
-- New state `heavyStatus` populated alongside other admin data
-- Color-adaptive banner at top of dashboard (above stats grid):
-  - GREEN — VPS Protected (cloud + strict mode)
-  - BLUE — Local Install
-  - YELLOW — Cloud edge with STRICT block disabled (warning)
-- Live counters: Routed to PCs (24h), Total Bridge Jobs, PCs Online Now, PCs Active 24h
-- Per-feature breakdown chips (top 3) + pending/failed badges
-- All elements have `data-testid` for testing
+**Backend** (`backend/license_module.py`, +178 lines):
+- `POST /api/license/verify-for-download` — validates key (not bound, not expired, not revoked). Returns license details + machine slot info. 404 unknown / 410 revoked-or-expired / 400 empty.
+- `GET /api/license/download-installer/{license_key}` — re-verifies, then builds on-the-fly ZIP from `Krexion-User-Package/` directory in repo, injecting a `license-key.txt` (KRX key + email + timestamp). Streams as `Krexion-User-Package-XXXXXXXX.zip`. Tracks `installer_downloaded_at` + count for admin analytics.
+- Added `VerifyForDownloadRequest` pydantic model.
 
-### Verification
-- Backend: endpoint tested with curl + admin token → returns correct JSON shape ✅
-- Frontend: ESLint clean ✅, webpack compiled with no new errors ✅
-- Backend restart: clean, no syntax errors ✅
-- Backward compatible: works on local install (BLUE banner) and cloud strict OFF (YELLOW)
+**Installer** (`Krexion-User-Package/install-master.ps1`, +49 lines):
+- New STEP-6 block auto-detects `license-key.txt` (3 lookup paths: $PSScriptRoot, $PWD, $INSTALL_DIR). Parses key from first non-comment line. Substitutes into `LICENSE_KEY=` line of the generated `.env`. Shows clear OK/WARN message. Backwards-compatible: if no file, behaves like before (empty key, customer can paste manually).
+
+**Frontend** (`frontend/src/pages/DownloadPage.js`, +238 lines):
+- Replaced direct static `/Krexion-User-Package.zip` link with a 2-step license-gated card:
+  1. Auto-formatting KRX-XXXX-XXXX-XXXX-XXXX input + "Verify Key" button (calls `/license/verify-for-download`)
+  2. After verification: shows license details (issued-to email, PCs allowed, slots left, renewal date) + active "Download installer" button
+- Download button is `Lock` icon + disabled until verification. After verify, becomes `Download` icon + enabled.
+- Uses blob download with proper filename `Krexion-User-Package-<last8>.zip`
+- "Don't have a key?" footer with links to `/pricing` and `mailto:` admin
+- All elements have `data-testid` attributes (license-gate-card, license-key-input, verify-license-button, license-info-block, download-installer-button, change-license-key-button, purchase-license-link, contact-admin-link, no-license-help).
+
+### End-to-End Verification (tested via curl)
+| Scenario | Result |
+|---|---|
+| Empty key verify | 400 ✅ |
+| Unknown key verify | 404 ✅ |
+| Revoked key verify | 410 with "revoked" message ✅ |
+| Issue + verify active key | 200 with full license info ✅ |
+| Download with valid key | 200, 28KB ZIP, content-type=application/zip ✅ |
+| ZIP includes install-master.ps1 + license-key.txt | ✅ |
+| license-key.txt contains actual KRX key + email + timestamp | ✅ |
+| Download with revoked key | 410 ✅ |
+
+## Files Modified This Session
+- `backend/server.py` — +186/-5 (5 heavy-feature bug fixes + admin status endpoint)
+- `backend/license_module.py` — +178 (verify-for-download + download-installer)
+- `frontend/src/pages/AdminDashboard.js` — +128/-3 (heavy features banner)
+- `frontend/src/pages/DownloadPage.js` — +238/-16 (license-gated download UX)
+- `Krexion-User-Package/install-master.ps1` — +49/-3 (auto-read license-key.txt)
+
+Total: ~800 LoC, 5 files. No new files created.
 
 ## Next Action Items
-- User to "Save to GitHub" → VPS auto-deploys → admin dashboard shows live Heavy Features Status badge
-- No customer-side release needed (backend + admin UI only)
-- On the production VPS (KREXION_MODE=cloud), the banner will display GREEN "VPS Protected" with live offload stats
+1. **User**: "Save to GitHub" → VPS auto-deploys → live ✅
+2. **No customer-side release needed** for the download/admin parts (server-side only)
+3. **Customer-side release** ONLY needed when re-bundling the installer — but the modified `install-master.ps1` IS now part of the zip the server streams, so any download after deploy already includes the auto-embed logic. Existing customers with already-installed Krexion are unaffected.
+4. Optional polish: Admin "License Admin" page can show `installer_downloaded_at` / `installer_downloaded_count` columns to spot keys that never actually pulled the installer.
 
-## Backlog / Future (P2)
-- Audit `/visual-recorder/{session_id}/*` continuation endpoints for defense-in-depth
-- Gate `/api/diagnostics/repair` Chromium-install step behind same flag
-- Add 7-day / 30-day trend chart for bridge job throughput
+## Future / Backlog (P2)
+- Bridge-job failures dashboard (per-customer offload health)
+- 7/30-day trend chart for bridge throughput
+- Defense-in-depth: guard `/visual-recorder/{session_id}/*` continuation endpoints
+- Auto-create license document on successful crypto payment (currently admin issues manually)
