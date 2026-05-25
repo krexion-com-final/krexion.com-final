@@ -6956,9 +6956,10 @@ async def _execute_automation_steps(
     skip_captcha: bool = True,
     self_heal: bool = True,
     on_screenshot: Optional[Callable[[int, str, bytes], Awaitable[None]]] = None,
+    collect_timings: bool = False,
 ) -> Dict[str, Any]:
     """Execute a user-provided automation script step-by-step. Returns
-    {status, error?, executed_steps}.  Each step format:
+    {status, error?, executed_steps, step_results?}.  Each step format:
         {"action": "click", "selector": "a.btn-primary", "wait_nav": true}
         {"action": "fill",  "selector": "input[name=first]", "value": "{{first}}"}
         {"action": "select","selector": "select[name=dobmonth]", "value": "{{month}}"}
@@ -6974,15 +6975,29 @@ async def _execute_automation_steps(
     captures a real PNG of the current page and hands it to the callback
     (along with the step index and the user-supplied name) so the live
     activity / per-visit storage layer can surface it for the operator.
+
+    2026-05 — When `collect_timings=True` (Visual-Recorder live-test mode),
+    we wrap each step in a perf-counter envelope and capture per-step
+    {idx, action, selector, ok, error, ms} into the result. This powers
+    the "Run Live Test" panel in the recorder so the user can see which
+    step is slow/failing BEFORE committing the automation to a RUT job.
+    Production RUT visits leave this OFF (default) so there's zero
+    overhead in the hot loop.
     """
+    import time as _time_mod
     executed = 0
     heal_used = 0
     MAX_HEAL = 3  # total AI recovery attempts per row
+    step_results: List[Dict[str, Any]] = []
+    _t_total_start = _time_mod.perf_counter() if collect_timings else 0.0
     try:
         for idx, step in enumerate(steps or []):
             if not isinstance(step, dict):
                 continue
             action = (step.get("action") or "").strip().lower()
+            _t_step_start = _time_mod.perf_counter() if collect_timings else 0.0
+            _step_ok = True
+            _step_err: Optional[str] = None
             selector = step.get("selector") or ""
             value = _substitute(step.get("value", ""), row)
             # ── 2026-05: longer default per-step timeout ──
@@ -7534,11 +7549,38 @@ async def _execute_automation_steps(
                             _last_url = _cur
                 else:
                     if not optional:
-                        return {"status": "failed", "error": f"Unknown action '{action}' at step {idx+1}", "executed_steps": executed}
+                        if collect_timings:
+                            _step_ok = False
+                            _step_err = f"Unknown action '{action}'"
+                            step_results.append({
+                                "idx": idx, "action": action,
+                                "selector": (selector or "")[:200],
+                                "ok": False, "error": _step_err,
+                                "ms": int((_time_mod.perf_counter() - _t_step_start) * 1000),
+                                "optional": optional,
+                            })
+                        return {"status": "failed", "error": f"Unknown action '{action}' at step {idx+1}", "executed_steps": executed,
+                                **({"step_results": step_results} if collect_timings else {})}
                 executed += 1
+                if collect_timings:
+                    step_results.append({
+                        "idx": idx, "action": action,
+                        "selector": (selector or "")[:200],
+                        "ok": True, "error": None,
+                        "ms": int((_time_mod.perf_counter() - _t_step_start) * 1000),
+                        "optional": optional,
+                    })
             except Exception as e:
                 if optional:
                     executed += 1
+                    if collect_timings:
+                        step_results.append({
+                            "idx": idx, "action": action,
+                            "selector": (selector or "")[:200],
+                            "ok": True, "error": f"(skipped — optional) {str(e)[:140]}",
+                            "ms": int((_time_mod.perf_counter() - _t_step_start) * 1000),
+                            "optional": True,
+                        })
                     continue
                 # ── Self-heal: ask AI to propose a recovery action ──────
                 if self_heal and heal_used < MAX_HEAL:
@@ -7562,16 +7604,46 @@ async def _execute_automation_steps(
                                 wait_nav, row,
                             )
                             executed += 1
+                            if collect_timings:
+                                step_results.append({
+                                    "idx": idx, "action": action,
+                                    "selector": (selector or "")[:200],
+                                    "ok": True,
+                                    "error": f"(self-healed) {str(e)[:120]}",
+                                    "ms": int((_time_mod.perf_counter() - _t_step_start) * 1000),
+                                    "optional": False,
+                                    "self_healed": True,
+                                })
                             continue
                         except Exception as e2:
+                            if collect_timings:
+                                step_results.append({
+                                    "idx": idx, "action": action,
+                                    "selector": (selector or "")[:200],
+                                    "ok": False, "error": str(e2)[:200],
+                                    "ms": int((_time_mod.perf_counter() - _t_step_start) * 1000),
+                                    "optional": False,
+                                })
                             return {"status": "failed",
                                     "error": f"Step {idx+1} ({action}) failed after self-heal: {str(e2)[:200]}",
-                                    "executed_steps": executed}
+                                    "executed_steps": executed,
+                                    **({"step_results": step_results} if collect_timings else {})}
+                if collect_timings:
+                    step_results.append({
+                        "idx": idx, "action": action,
+                        "selector": (selector or "")[:200],
+                        "ok": False, "error": str(e)[:200],
+                        "ms": int((_time_mod.perf_counter() - _t_step_start) * 1000),
+                        "optional": False,
+                    })
                 return {"status": "failed", "error": f"Step {idx+1} ({action}) failed: {str(e)[:200]}", "executed_steps": executed,
-                        "failed_at_idx": idx, "remaining_steps": list(steps[idx+1:])}
-        return {"status": "ok", "executed_steps": executed}
+                        "failed_at_idx": idx, "remaining_steps": list(steps[idx+1:]),
+                        **({"step_results": step_results} if collect_timings else {})}
+        return {"status": "ok", "executed_steps": executed,
+                **({"step_results": step_results, "total_ms": int((_time_mod.perf_counter() - _t_total_start) * 1000)} if collect_timings else {})}
     except Exception as e:
-        return {"status": "failed", "error": f"Automation crashed: {str(e)[:200]}", "executed_steps": executed}
+        return {"status": "failed", "error": f"Automation crashed: {str(e)[:200]}", "executed_steps": executed,
+                **({"step_results": step_results} if collect_timings else {})}
 
 
 async def _wait_for_actionable_selector(

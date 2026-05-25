@@ -3151,6 +3151,71 @@ export default function RealUserTrafficPage() {
               )}
               {!diagLoading && diagData && (
                 <>
+                  {/* ── 2026-05: Smart Replay Diagnostics (script static analysis) ── */}
+                  {diagData.script_diagnostics && (diagData.script_step_count || 0) > 0 && (
+                    <section data-testid="rut-script-diag-section" className="border border-blue-700/40 rounded-lg bg-blue-950/20 p-3">
+                      <h4 className="text-blue-300 font-semibold mb-2 flex items-center gap-2">
+                        <Activity size={14} /> Smart Replay Diagnostics
+                        <span className="text-zinc-500 font-mono text-[11px]">
+                          ({diagData.script_step_count} steps)
+                        </span>
+                      </h4>
+                      <p className="text-zinc-500 mb-3">
+                        Static analysis of your recorded automation. Spot brittle/slow steps before they cost you visits.
+                      </p>
+
+                      {/* Wrapper-kind summary */}
+                      {diagData.script_diagnostics.wrapper_summary && Object.keys(diagData.script_diagnostics.wrapper_summary).length > 0 && (
+                        <div className="mb-3">
+                          <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Dropdown stack</div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {Object.entries(diagData.script_diagnostics.wrapper_summary).map(([k, v]) => (
+                              <span
+                                key={k}
+                                data-testid={`rut-diag-wrap-${k}`}
+                                className={`text-[11px] px-2 py-0.5 rounded-full border ${k === "native" ? "bg-zinc-800 border-zinc-700 text-zinc-300" : "bg-blue-500/15 border-blue-500/40 text-blue-200"}`}
+                              >
+                                {k}: {v}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Anti-patterns */}
+                      {Array.isArray(diagData.script_diagnostics.anti_patterns) && diagData.script_diagnostics.anti_patterns.length > 0 && (
+                        <div className="mb-3">
+                          <div className="text-[10px] uppercase tracking-wide text-amber-400 mb-1 flex items-center gap-1">
+                            <AlertTriangle size={12} /> Anti-patterns ({diagData.script_diagnostics.anti_patterns.length})
+                          </div>
+                          <ul className="space-y-1.5 list-disc list-inside">
+                            {diagData.script_diagnostics.anti_patterns.map((ap, i) => (
+                              <li key={i} data-testid={`rut-diag-ap-${i}`} className="text-zinc-300 leading-snug">{ap}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {/* Recommendations */}
+                      {Array.isArray(diagData.script_diagnostics.recommendations) && diagData.script_diagnostics.recommendations.length > 0 && (
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wide text-emerald-400 mb-1">Recommendations</div>
+                          <ul className="space-y-1.5 list-disc list-inside">
+                            {diagData.script_diagnostics.recommendations.map((rc, i) => (
+                              <li key={i} data-testid={`rut-diag-rec-${i}`} className="text-emerald-100/90 leading-snug">{rc}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {(!diagData.script_diagnostics.anti_patterns || diagData.script_diagnostics.anti_patterns.length === 0) && (
+                        <p className="text-emerald-300/80 italic mt-2" data-testid="rut-diag-no-issues">
+                          ✓ No anti-patterns detected — your recording looks clean.
+                        </p>
+                      )}
+                    </section>
+                  )}
+
                   {/* ── Macro leaks ── */}
                   <section>
                     <h4 className="text-amber-300 font-semibold mb-2 flex items-center gap-2">

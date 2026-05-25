@@ -1103,6 +1103,258 @@ async def add_screenshot_marker(sess: RecorderSession, name: Optional[str] = Non
     return {"recorded": True, "step": step}
 
 
+async def live_test(
+    sess: RecorderSession,
+    sample_row: Optional[Dict[str, Any]] = None,
+    fresh_page: bool = False,
+) -> Dict[str, Any]:
+    """Run the current recorded steps end-to-end against the live page,
+    returning per-step timing + ok/error + a static-analysis diagnostic
+    summary. This is the "Run Live Test" button in the recorder.
+
+    Strategy:
+      • Open a fresh page (default) so we mirror what a RUT visit would
+        actually see — fresh cookies, fresh DOM, fresh JS state. If the
+        user wants to replay on the CURRENT page (e.g. to debug only
+        the last few steps), they can pass fresh_page=False.
+      • Substitute {{header}} placeholders with values from `sample_row`
+        (defaults to the session's sample_row).
+      • Reuse `_execute_automation_steps` with collect_timings=True so
+        every step gets {idx, action, selector, ok, error, ms}.
+      • Layer a static-analysis pass on the steps array for
+        anti-patterns / wrapper-kind summary / top-3 slowest hints.
+
+    Returns:
+      {
+        ok: bool,
+        total_ms: int,
+        executed_steps: int,
+        error: str|None,
+        step_results: [{idx, action, selector, ok, error, ms, optional, self_healed?}, ...],
+        diagnostics: {
+          slowest: [{idx, action, ms}, ...3],
+          anti_patterns: [str, ...],
+          wrapper_summary: {bootstrap-select: 3, ...} | {},
+          recommendations: [str, ...],
+        },
+        final_url: str,
+      }
+    """
+    sess.touch()
+    if sess.state != "ready" or sess.page is None:
+        return {"ok": False, "error": "Recorder session not ready"}
+    if not sess.steps:
+        return {"ok": False, "error": "No steps recorded yet — record at least one step before running Live Test."}
+
+    # Lazy import to avoid the visual_recorder ↔ real_user_traffic
+    # circular import at module-load time. real_user_traffic also
+    # depends on small helpers in this module via runtime calls.
+    try:
+        from real_user_traffic import _execute_automation_steps
+    except Exception as e:  # pragma: no cover
+        return {"ok": False, "error": f"Engine import failed: {e}"}
+
+    row = dict(sample_row or sess.sample_row or {})
+
+    async with sess.lock:
+        # Optionally open a fresh page for an honest end-to-end test.
+        # We DO NOT close the recorder's existing page — the user is
+        # mid-recording and switching back to it should still work.
+        page = sess.page
+        fresh_ctx = None
+        fresh_page_obj = None
+        if fresh_page and sess.context is not None:
+            try:
+                fresh_page_obj = await sess.context.new_page()
+                if sess.url:
+                    await fresh_page_obj.goto(sess.url, timeout=45000, wait_until="domcontentloaded")
+                page = fresh_page_obj
+            except Exception as e:
+                # Fresh-page setup failed — fall back to current page so
+                # the live-test still returns useful timing data.
+                if fresh_page_obj is not None:
+                    try:
+                        await fresh_page_obj.close()
+                    except Exception:
+                        pass
+                fresh_page_obj = None
+                page = sess.page
+                logger.warning(f"[live-test] fresh-page setup failed, using recorder page: {e}")
+
+        try:
+            res = await _execute_automation_steps(
+                page=page,
+                row=row,
+                steps=list(sess.steps),
+                skip_captcha=True,
+                self_heal=False,  # IMPORTANT: no AI healing during test — user wants to see RAW failures
+                collect_timings=True,
+            )
+        except Exception as e:
+            res = {"status": "failed", "error": f"Live test crashed: {e}", "executed_steps": 0, "step_results": []}
+        finally:
+            # Best-effort close of the fresh page (if any)
+            if fresh_page_obj is not None:
+                try:
+                    await fresh_page_obj.close()
+                except Exception:
+                    pass
+
+        final_url = ""
+        try:
+            final_url = sess.page.url or ""
+        except Exception:
+            pass
+
+    # ── Layer the static-analysis diagnostic pass on top of timings ──
+    step_results = res.get("step_results") or []
+    diagnostics = analyse_steps(sess.steps, step_results)
+
+    return {
+        "ok": res.get("status") == "ok",
+        "status": res.get("status"),
+        "error": res.get("error"),
+        "executed_steps": res.get("executed_steps", 0),
+        "total_ms": res.get("total_ms"),
+        "step_results": step_results,
+        "diagnostics": diagnostics,
+        "final_url": final_url,
+        "failed_at_idx": res.get("failed_at_idx"),
+        "total_steps": len(sess.steps),
+        "fresh_page": bool(fresh_page),
+    }
+
+
+def analyse_steps(
+    steps: List[Dict[str, Any]],
+    step_results: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Smart Replay Diagnostics — static analysis on the steps array,
+    optionally combined with runtime per-step timings.
+
+    Detects:
+      • Top-3 slowest steps (if runtime timings provided)
+      • Anti-patterns:
+          - click → fill/select on different selector with no wait
+          - wait_for_selector state="visible" without wrapper hint
+            (dropdown landmines from older recordings)
+          - long sequence with no screenshot for debug visibility
+          - hard wait of >5000ms (flag for replacement with
+            wait_for_load_state or wait_for_selector)
+          - select step on dropdown without match_by clarification
+      • Wrapper-kind summary (count of bootstrap-select / select2 etc)
+      • Recommendations (actionable, one-liner each)
+    """
+    steps = list(steps or [])
+    sr = list(step_results or [])
+
+    # ── Wrapper-kind summary ─────────────────────────────────────────
+    wrapper_summary: Dict[str, int] = {}
+    for s in steps:
+        wk = (s.get("wrapper_kind") or "").strip()
+        if wk:
+            wrapper_summary[wk] = wrapper_summary.get(wk, 0) + 1
+    native_selects = sum(1 for s in steps if (s.get("action") == "select") and not s.get("wrapper_kind"))
+    if native_selects > 0:
+        wrapper_summary.setdefault("native", 0)
+        wrapper_summary["native"] += native_selects
+
+    # ── Top-3 slowest steps (needs runtime data) ─────────────────────
+    slowest: List[Dict[str, Any]] = []
+    if sr:
+        ranked = sorted(
+            [{"idx": r.get("idx"), "action": r.get("action"), "selector": r.get("selector"), "ms": int(r.get("ms") or 0)} for r in sr if r.get("ms") is not None],
+            key=lambda r: r["ms"], reverse=True,
+        )
+        slowest = ranked[:3]
+
+    # ── Anti-pattern detection ───────────────────────────────────────
+    anti: List[str] = []
+    recs: List[str] = []
+
+    # 1. wait_for_selector state="visible" on a dropdown-like selector
+    #    without wrapper_kind hint (legacy recording pattern → may 25s
+    #    timeout on hidden-behind-custom-UI selects).
+    for i, s in enumerate(steps):
+        if s.get("action") == "wait_for_selector" and (s.get("state") or "visible") == "visible":
+            sel = (s.get("selector") or "").lower()
+            if any(k in sel for k in ("select", "month", "year", "day", "country", "state", "gender", "dob")):
+                # Look at next non-wait step for a select action
+                for j in range(i + 1, min(i + 3, len(steps))):
+                    if steps[j].get("action") == "select":
+                        anti.append(
+                            f"Step #{i+1} `wait_for_selector` with state=\"visible\" before a `select` — "
+                            f"if the underlying <select> is hidden behind a custom dropdown, this could "
+                            f"25s-timeout on replay. (Newer iteration-4 helper now auto-falls back, but "
+                            f"re-recording stamps the hint cleanly.)"
+                        )
+                        recs.append(
+                            f"Re-record step #{i+1}'s dropdown — the recorder now auto-detects custom UIs "
+                            f"and stamps state=\"attached\" + wrapper_kind for instant matching."
+                        )
+                        break
+
+    # 2. Click immediately followed by fill/select on a DIFFERENT selector,
+    #    with no wait_for_selector / wait between them.
+    for i, s in enumerate(steps[:-1]):
+        if s.get("action") == "click":
+            nxt = steps[i + 1]
+            if nxt.get("action") in ("fill", "select", "type") and nxt.get("selector") and s.get("selector") != nxt.get("selector"):
+                anti.append(
+                    f"Step #{i+1} click → step #{i+2} {nxt.get('action')} on a different selector with no "
+                    f"wait between them. If the click triggers DOM changes (e.g. step-2 of a multi-page form), "
+                    f"the next step may race the DOM update."
+                )
+                recs.append(
+                    f"Insert a 'Wait for navigation' or 'Wait for selector' between steps #{i+1} and #{i+2}."
+                )
+
+    # 3. Hard wait > 5s — usually a sign the recording is over-cautious
+    for i, s in enumerate(steps):
+        if s.get("action") == "wait":
+            ms = int(s.get("ms") or 0)
+            if ms > 5000:
+                anti.append(
+                    f"Step #{i+1} hard wait of {ms}ms (>5s). Hard waits inflate every visit's runtime."
+                )
+                recs.append(
+                    f"Replace step #{i+1}'s hard wait with `wait_for_selector` on whatever element you're "
+                    f"actually waiting for. Saves ~{(ms - 1500) / 1000:.1f}s per visit."
+                )
+
+    # 4. select step with no match_by — may match the wrong option on
+    #    forms with duplicate labels (e.g. "Other" appearing twice).
+    for i, s in enumerate(steps):
+        if s.get("action") == "select" and not s.get("match_by"):
+            anti.append(
+                f"Step #{i+1} select without match_by — defaults to 'label' which may match the wrong "
+                f"option on forms with duplicate visible text."
+            )
+            recs.append(
+                f"Re-bind step #{i+1} via the dropdown picker so match_by is explicitly set."
+            )
+
+    # 5. Long automation with no screenshots — hard to debug a failed visit
+    if len(steps) >= 12 and not any(s.get("action") == "screenshot" for s in steps):
+        anti.append(
+            "No screenshot steps in a long automation — when a visit fails in production "
+            "you'll have nothing to look at."
+        )
+        recs.append(
+            "Add a Screenshot step right before the submit click (Insert → Screenshot) so "
+            "failed visits surface the form state."
+        )
+
+    return {
+        "slowest": slowest,
+        "anti_patterns": anti,
+        "wrapper_summary": wrapper_summary,
+        "recommendations": recs,
+        "total_steps": len(steps),
+        "has_runtime_data": bool(sr),
+    }
+
+
 async def bind_dropdown(
     sess: RecorderSession,
     selector: str,

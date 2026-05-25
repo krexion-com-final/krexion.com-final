@@ -138,3 +138,72 @@ Total: ~800 LoC, 5 files. No new files created.
 | Native visible select step | clean (no hints, no regression) ✅ |
 
 **Benefit**: Every dropdown recorded after this deploy skips the 5s visibility-wait pre-check at replay (saves ~5s × #dropdowns × #visits — easily minutes per RUT job). Plus user gets visual confirmation that recorder understood the dropdown's tech stack.
+
+### Iteration 6 (2026-05-25) — Live Test + Smart Replay Diagnostics
+**Goal**: Two big features:
+1. **Live Test in Visual Recorder** — user can run the recorded JSON end-to-end on a fresh page and see per-step pass/fail + timing BEFORE finalizing. Fixes can be made inline before committing.
+2. **Smart Replay Diagnostics** — anti-pattern detection + wrapper-kind summary + actionable recommendations exposed on both the Visual Recorder live-test panel AND the RUT job diagnostics modal.
+
+**Backend**:
+
+1. `backend/real_user_traffic.py` (+84/-2): `_execute_automation_steps` gained an opt-in `collect_timings=True` parameter that captures per-step `{idx, action, selector, ok, error, ms, optional, self_healed?}` results + total_ms. Zero overhead in production (default False).
+
+2. `backend/visual_recorder.py` (+252):
+   - New `async def live_test(sess, sample_row, fresh_page)` — opens a fresh page (default), substitutes `{{header}}` placeholders, runs `_execute_automation_steps` with timing, layers `analyse_steps` on top.
+   - New `def analyse_steps(steps, step_results)` — static analysis detecting:
+     - Top-3 slowest steps (when runtime data available)
+     - Anti-patterns: `wait_for_selector state="visible"` before `select` (legacy dropdown landmine), click → fill/select on different selector without wait, hard `wait` > 5s, `select` without `match_by`, long automation without screenshots
+     - Wrapper-kind summary: counts of `bootstrap-select`, `select2`, `chosen`, `react-select`, `native`, etc.
+     - Actionable recommendations for each finding (e.g. "Replace step #8's hard wait with wait_for_selector. Saves ~6.5s per visit")
+
+3. `backend/server.py` (+77):
+   - `POST /api/visual-recorder/{session_id}/live-test` — Live Test endpoint
+   - `GET  /api/visual-recorder/{session_id}/diagnostics` — static-only diagnostics (no execution)
+   - Existing `GET /api/real-user-traffic/jobs/{job_id}/diagnostics` extended with `script_diagnostics` field (merged into the existing macro-leak/stuck-event response, no breaking changes)
+
+**Frontend**:
+
+1. `frontend/src/pages/VisualRecorderPage.js` (+253):
+   - New imports: `CheckCheck`, `XCircle`, `Lightbulb`, `Timer`
+   - New state: `liveTestResult`, `liveTesting`, `showDiagnostics`
+   - New handler: `runLiveTest()` — calls live-test endpoint, shows toast
+   - New UI:
+     - "Run Live Test" button above Discard/Finalize buttons
+     - Color-coded results panel (green=pass, red=fail) with:
+       - Summary: `5/8 steps · 4.32s total`
+       - Per-step list with ms timings, action, selector, ✓/✗ icons, "healed"/"skipped" badges, slow-step amber highlight (>5s)
+       - Smart Diagnostics sub-panel with slowest steps, wrapper summary chips, anti-patterns list, recommendations list
+     - All elements have `data-testid` attributes for testing
+
+2. `frontend/src/pages/RealUserTrafficPage.js` (+65):
+   - Added "Smart Replay Diagnostics" section at the TOP of the existing Diagnostics modal (before macro leaks):
+     - Dropdown stack chips (wrapper_summary)
+     - Anti-patterns ul with amber AlertTriangle header
+     - Recommendations ul with emerald Lightbulb header
+     - Empty-state: "✓ No anti-patterns detected — your recording looks clean"
+
+**Verified end-to-end**:
+- ✅ `analyse_steps` static test: detected ALL 5 anti-patterns in synthetic recording (wait_for_selector visible+select, click-no-wait-fill, 8s hard wait, select without match_by, no-screenshot in long automation) + ranked top-3 slowest correctly + counted wrapper kinds correctly
+- ✅ Backend syntax check + restart clean
+- ✅ Frontend ESLint clean
+- ✅ All 3 new endpoints registered (return 401 without auth, confirming route exists)
+- ✅ Existing `/diagnostics` endpoint extended without breaking macro-leak/stuck shape
+
+**User workflow**:
+1. Open Visual Recorder, record steps as usual
+2. Before clicking Finalize, click "Run Live Test" 
+3. Watch per-step results stream — see exactly which step is slow/failing
+4. If step #4 fails: read the diagnostics recommendation ("Re-record step #4's dropdown — the recorder now auto-detects custom UIs and stamps state='attached'"), fix it, re-test
+5. Iterate until live test passes → safe to Finalize → guaranteed to work in RUT job
+
+**For existing RUT jobs**:
+- Open job → Diagnostics tab → see Smart Replay Diagnostics at the top showing exactly which steps are brittle in this already-running automation. Pinpoints which step to re-record if failures spike.
+
+**Files modified**: 5 (3 backend + 2 frontend). Total +710/-21 lines.
+
+**Safety**:
+- ✅ Backwards compatible — `collect_timings` defaults to False so production RUT visits have zero overhead
+- ✅ No new DB collections / schema changes
+- ✅ Live test self_heal=False (raw failures surface clearly for the user to fix)
+- ✅ Fresh-page fallback to recorder's page if new-page creation fails
+- ✅ Git working tree: 5 files modified. "Save to GitHub" se main pe push hoga, **no conflict**

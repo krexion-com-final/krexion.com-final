@@ -5910,11 +5910,19 @@ async def rut_job_diagnostics(
     macros (`{{ccpa}}` etc.) and where individual visits got stuck.
     Powers the "Diagnostics" tab on the Real-User-Traffic job-detail
     page so the operator can see WHY an offer isn't reaching its final
-    page without scraping log files."""
+    page without scraping log files.
+
+    2026-05 — ALSO returns `script_diagnostics`: Smart Replay Diagnostics
+    (anti-pattern detection + wrapper-kind summary + top-3 slowest
+    recommendation) computed via static analysis of the recorded
+    automation script. Helps the operator spot brittle/slow steps in
+    their recording without ever opening a log file.
+    """
     check_user_feature(user, "real_user_traffic")
     # Ownership check
     db_job = await db.real_user_traffic_jobs.find_one(
-        {"job_id": job_id, "user_id": user["id"]}, {"_id": 0, "user_id": 1}
+        {"job_id": job_id, "user_id": user["id"]},
+        {"_id": 0, "user_id": 1, "script": 1, "submit_params": 1, "name": 1},
     )
     if not db_job:
         # Allow in-flight jobs too (not yet persisted)
@@ -5922,6 +5930,13 @@ async def rut_job_diagnostics(
         live = _RJ.get(job_id) or {}
         if live.get("user_id") != user["id"]:
             raise HTTPException(status_code=404, detail="Job not found")
+        # We still want to surface script diagnostics for in-flight jobs;
+        # pull the script from the live object if persisted form is missing.
+        if not db_job:
+            db_job = {
+                "script": live.get("script"),
+                "submit_params": live.get("submit_params"),
+            }
 
     macro_cursor = db.rut_diagnostics.find(
         {"job_id": job_id, "kind": "macro_leak"},
@@ -5959,6 +5974,23 @@ async def rut_job_diagnostics(
             stuck_host_counter["(unknown)"] += 1
     top_stuck_hosts = [{"host": h, "count": c} for h, c in stuck_host_counter.most_common(10)]
 
+    # ── 2026-05: Smart Replay Diagnostics (static analysis) ────────
+    # Pull the recorded script from either the persisted job doc or its
+    # submit_params, then run analyse_steps on it.
+    script_steps: List[Dict[str, Any]] = []
+    if isinstance(db_job.get("script"), list):
+        script_steps = db_job["script"]
+    elif isinstance(db_job.get("submit_params"), dict):
+        s = db_job["submit_params"].get("steps") or db_job["submit_params"].get("script")
+        if isinstance(s, list):
+            script_steps = s
+    script_diag: Dict[str, Any] = {}
+    try:
+        if vr is not None and hasattr(vr, "analyse_steps") and script_steps:
+            script_diag = vr.analyse_steps(script_steps, None)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[rut_job_diagnostics] analyse_steps failed: {e}")
+
     return {
         "job_id": job_id,
         "macro_leaks": macro_events,
@@ -5967,6 +5999,8 @@ async def rut_job_diagnostics(
         "stuck_events": stuck_events,
         "stuck_event_count": len(stuck_events),
         "top_stuck_hosts": top_stuck_hosts,
+        "script_diagnostics": script_diag,
+        "script_step_count": len(script_steps),
     }
 
 
@@ -14335,6 +14369,45 @@ async def vr_dropdown_bind(session_id: str, req: VRDropdownBindReq, user: dict =
         header_name=req.header_name,
         match_by=req.match_by,
     )
+
+
+# ── 2026-05: Live Test + Diagnostics endpoints ─────────────────────
+class _VRLiveTestReq(BaseModel):
+    sample_row: Optional[Dict[str, Any]] = None
+    fresh_page: bool = True
+
+@api_router.post("/visual-recorder/{session_id}/live-test")
+async def vr_live_test(session_id: str, req: _VRLiveTestReq, user: dict = Depends(get_current_user)):
+    """Run the current recorded steps end-to-end and return per-step
+    timing + ok/error + a Smart Replay Diagnostics summary. Powers the
+    "Run Live Test" button in the Visual Recorder UI."""
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.live_test(
+        sess,
+        sample_row=req.sample_row,
+        fresh_page=req.fresh_page,
+    )
+
+
+@api_router.get("/visual-recorder/{session_id}/diagnostics")
+async def vr_diagnostics(session_id: str, user: dict = Depends(get_current_user)):
+    """Static-analysis-only diagnostics for the current recorded steps
+    (no execution). Useful as a quick lint pass before running a live
+    test. Returns the same `diagnostics` shape as live-test minus the
+    runtime-dependent fields."""
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"diagnostics": vr.analyse_steps(sess.steps, None), "total_steps": len(sess.steps)}
 
 
 @api_router.delete("/visual-recorder/{session_id}/step/{index}")

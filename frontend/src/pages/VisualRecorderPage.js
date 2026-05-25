@@ -34,6 +34,10 @@ import {
   Zap,
   AlertCircle,
   Activity,
+  CheckCheck,
+  XCircle,
+  Lightbulb,
+  Timer,
 } from "lucide-react";
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
@@ -139,6 +143,10 @@ export default function VisualRecorderPage() {
   const [pjCountry, setPjCountry] = useState("US");
   const [saving, setSaving] = useState(false);
   const [savedToLibraryId, setSavedToLibraryId] = useState(null);
+  // ── 2026-05: Live Test + Smart Diagnostics ──
+  const [liveTestResult, setLiveTestResult] = useState(null); // {ok, total_ms, step_results, diagnostics, ...}
+  const [liveTesting, setLiveTesting] = useState(false);
+  const [showDiagnostics, setShowDiagnostics] = useState(true);
   const imgRef = useRef(null);
   const sessionStartedAt = useRef(null);
   const [recordingElapsed, setRecordingElapsed] = useState(0);
@@ -929,6 +937,44 @@ export default function VisualRecorderPage() {
   // Save the finalized automation JSON into the user's Uploaded Things
   // library so they can pick it from a dropdown in the RUT page on every
   // future job without copy-pasting.
+  // ── 2026-05: Live Test + Diagnostics ─────────────────────────────
+  // Runs the current recorded steps end-to-end (fresh page in same
+  // browser context) and shows per-step timing + pass/fail + a Smart
+  // Replay Diagnostics summary. User can iterate the recording until
+  // every step passes before finalising the JSON.
+  const runLiveTest = async () => {
+    if (!sessionId) return;
+    if (!steps || steps.length === 0) {
+      toast.error("Record at least one step first.");
+      return;
+    }
+    setLiveTesting(true);
+    setLiveTestResult(null);
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/live-test`, {
+        method: "POST",
+        headers: { ...authH(), "Content-Type": "application/json" },
+        body: JSON.stringify({ fresh_page: true }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      setLiveTestResult(d);
+      if (d.ok) {
+        toast.success(`Live test PASSED — ${d.executed_steps}/${d.total_steps} steps in ${(d.total_ms / 1000).toFixed(1)}s`);
+      } else {
+        toast.error(
+          d.error
+            ? `Live test FAILED at step #${(d.failed_at_idx ?? 0) + 1}: ${d.error.slice(0, 120)}`
+            : "Live test failed."
+        );
+      }
+    } catch (e) {
+      toast.error(`Live test crashed: ${e.message || e}`);
+    } finally {
+      setLiveTesting(false);
+    }
+  };
+
   const saveToLibrary = async () => {
     if (!finalBundle) return;
     const defaultName = `Recording-${new Date().toISOString().slice(0, 16).replace("T", " ")}`;
@@ -1883,23 +1929,204 @@ export default function VisualRecorderPage() {
               </div>
 
               {/* Action buttons */}
-              <div className="mt-3 pt-3 border-t border-zinc-800 grid grid-cols-2 gap-2">
+              <div className="mt-3 pt-3 border-t border-zinc-800 space-y-2">
                 <button
-                  onClick={stopAndDiscard}
-                  className="inline-flex items-center justify-center gap-1.5 py-2 rounded bg-zinc-800 hover:bg-rose-700 text-zinc-300 hover:text-white text-sm transition-colors"
-                  data-testid="vr-discard-btn"
+                  onClick={runLiveTest}
+                  disabled={steps.length === 0 || liveTesting || busy}
+                  data-testid="vr-live-test-btn"
+                  className="w-full inline-flex items-center justify-center gap-1.5 py-2 rounded bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white text-sm font-medium transition-colors"
+                  title="Run all recorded steps end-to-end on a fresh page (using your sample row) and see per-step timing + pass/fail before you finalize."
                 >
-                  <Square className="w-4 h-4" /> Discard
+                  {liveTesting ? (
+                    <><Loader2 className="w-4 h-4 animate-spin" /> Running live test…</>
+                  ) : (
+                    <><Zap className="w-4 h-4" /> Run Live Test ({steps.length} step{steps.length === 1 ? "" : "s"})</>
+                  )}
                 </button>
-                <button
-                  onClick={finalize}
-                  disabled={steps.length < 2 || busy}
-                  className="inline-flex items-center justify-center gap-1.5 py-2 rounded bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white text-sm font-medium transition-colors"
-                  data-testid="vr-finalize-btn"
-                >
-                  <CheckCircle2 className="w-4 h-4" /> Finalize
-                </button>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={stopAndDiscard}
+                    className="inline-flex items-center justify-center gap-1.5 py-2 rounded bg-zinc-800 hover:bg-rose-700 text-zinc-300 hover:text-white text-sm transition-colors"
+                    data-testid="vr-discard-btn"
+                  >
+                    <Square className="w-4 h-4" /> Discard
+                  </button>
+                  <button
+                    onClick={finalize}
+                    disabled={steps.length < 2 || busy}
+                    className="inline-flex items-center justify-center gap-1.5 py-2 rounded bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white text-sm font-medium transition-colors"
+                    data-testid="vr-finalize-btn"
+                  >
+                    <CheckCircle2 className="w-4 h-4" /> Finalize
+                  </button>
+                </div>
               </div>
+
+              {/* Live Test Results Panel */}
+              {liveTestResult && (
+                <div
+                  data-testid="vr-live-test-results"
+                  className={`mt-3 rounded-lg border ${
+                    liveTestResult.ok
+                      ? "bg-emerald-950/30 border-emerald-700/40"
+                      : "bg-rose-950/30 border-rose-700/40"
+                  }`}
+                >
+                  <div className="p-3 flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2">
+                      {liveTestResult.ok ? (
+                        <CheckCheck className="w-4 h-4 text-emerald-400" />
+                      ) : (
+                        <XCircle className="w-4 h-4 text-rose-400" />
+                      )}
+                      <span className={`text-sm font-medium ${liveTestResult.ok ? "text-emerald-200" : "text-rose-200"}`}>
+                        Live test {liveTestResult.ok ? "passed" : "FAILED"}
+                      </span>
+                      <span className="text-xs text-zinc-400" data-testid="vr-live-test-summary">
+                        {liveTestResult.executed_steps}/{liveTestResult.total_steps} steps
+                        {typeof liveTestResult.total_ms === "number" && (
+                          <> · {(liveTestResult.total_ms / 1000).toFixed(2)}s total</>
+                        )}
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => setLiveTestResult(null)}
+                      className="text-xs text-zinc-500 hover:text-zinc-200"
+                      data-testid="vr-live-test-close"
+                    >
+                      Close ✕
+                    </button>
+                  </div>
+
+                  {liveTestResult.error && (
+                    <div className="mx-3 mb-2 p-2 rounded bg-rose-900/40 border border-rose-700/40 text-xs text-rose-100" data-testid="vr-live-test-error">
+                      <AlertCircle className="inline w-3.5 h-3.5 mr-1" />
+                      {liveTestResult.error}
+                    </div>
+                  )}
+
+                  {/* Per-step timing list */}
+                  {Array.isArray(liveTestResult.step_results) && liveTestResult.step_results.length > 0 && (
+                    <div className="mx-3 mb-2 max-h-56 overflow-y-auto rounded border border-zinc-800 bg-zinc-950/60 divide-y divide-zinc-800/60">
+                      {liveTestResult.step_results.map((r) => (
+                        <div
+                          key={`vrst-${r.idx}`}
+                          data-testid={`vr-live-step-${r.idx}`}
+                          className={`px-2 py-1.5 text-xs flex items-center justify-between gap-2 ${
+                            r.ok
+                              ? "text-zinc-200"
+                              : "text-rose-200 bg-rose-950/40"
+                          }`}
+                          title={r.error || ""}
+                        >
+                          <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                            {r.ok ? (
+                              <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
+                            ) : (
+                              <XCircle className="w-3 h-3 text-rose-400 shrink-0" />
+                            )}
+                            <span className="text-zinc-500 w-7 shrink-0">#{(r.idx ?? 0) + 1}</span>
+                            <span className="font-mono text-[11px] uppercase shrink-0 text-zinc-400">{r.action}</span>
+                            <span className="truncate text-zinc-500">{r.selector}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {r.self_healed && (
+                              <span className="text-[10px] px-1 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">healed</span>
+                            )}
+                            {r.optional && !r.ok && (
+                              <span className="text-[10px] px-1 py-0.5 rounded bg-zinc-700/40 text-zinc-400">skipped</span>
+                            )}
+                            <span className={`font-mono text-[11px] ${(r.ms || 0) > 5000 ? "text-amber-300" : "text-zinc-400"}`}>
+                              <Timer className="inline w-3 h-3 mr-0.5" />{r.ms ?? 0}ms
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Smart Diagnostics */}
+                  {liveTestResult.diagnostics && showDiagnostics && (
+                    <div className="mx-3 mb-3 rounded border border-zinc-800 bg-zinc-950/60 p-2" data-testid="vr-diagnostics-panel">
+                      <div className="flex items-center justify-between mb-1">
+                        <div className="flex items-center gap-1 text-xs font-medium text-blue-300">
+                          <Lightbulb className="w-3.5 h-3.5" /> Smart Replay Diagnostics
+                        </div>
+                        <button
+                          onClick={() => setShowDiagnostics(false)}
+                          className="text-[10px] text-zinc-500 hover:text-zinc-200"
+                        >
+                          Hide
+                        </button>
+                      </div>
+
+                      {/* Top-3 slowest */}
+                      {Array.isArray(liveTestResult.diagnostics.slowest) && liveTestResult.diagnostics.slowest.length > 0 && (
+                        <div className="mb-2">
+                          <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Top slowest steps</div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {liveTestResult.diagnostics.slowest.map((s) => (
+                              <span
+                                key={`slow-${s.idx}`}
+                                data-testid={`vr-diag-slow-${s.idx}`}
+                                className={`text-[10px] px-2 py-0.5 rounded-full border ${(s.ms || 0) > 5000 ? "bg-amber-500/15 border-amber-500/40 text-amber-200" : "bg-zinc-800 border-zinc-700 text-zinc-300"}`}
+                              >
+                                #{(s.idx ?? 0) + 1} {s.action} · {s.ms}ms
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Wrapper summary */}
+                      {liveTestResult.diagnostics.wrapper_summary && Object.keys(liveTestResult.diagnostics.wrapper_summary).length > 0 && (
+                        <div className="mb-2">
+                          <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">Dropdown wrappers</div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {Object.entries(liveTestResult.diagnostics.wrapper_summary).map(([k, v]) => (
+                              <span
+                                key={`wk-${k}`}
+                                data-testid={`vr-diag-wrap-${k}`}
+                                className={`text-[10px] px-2 py-0.5 rounded-full border ${k === "native" ? "bg-zinc-800 border-zinc-700 text-zinc-300" : "bg-blue-500/15 border-blue-500/40 text-blue-200"}`}
+                              >
+                                {k}: {v}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Anti-patterns */}
+                      {Array.isArray(liveTestResult.diagnostics.anti_patterns) && liveTestResult.diagnostics.anti_patterns.length > 0 && (
+                        <div className="mb-2">
+                          <div className="text-[10px] uppercase tracking-wide text-amber-400 mb-1 flex items-center gap-1">
+                            <AlertCircle className="w-3 h-3" /> Anti-patterns ({liveTestResult.diagnostics.anti_patterns.length})
+                          </div>
+                          <ul className="space-y-1 text-[11px] text-zinc-300 list-disc list-inside">
+                            {liveTestResult.diagnostics.anti_patterns.map((ap, i) => (
+                              <li key={`ap-${i}`} data-testid={`vr-diag-ap-${i}`} className="leading-snug">{ap}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {/* Recommendations */}
+                      {Array.isArray(liveTestResult.diagnostics.recommendations) && liveTestResult.diagnostics.recommendations.length > 0 && (
+                        <div>
+                          <div className="text-[10px] uppercase tracking-wide text-emerald-400 mb-1 flex items-center gap-1">
+                            <Lightbulb className="w-3 h-3" /> Recommendations
+                          </div>
+                          <ul className="space-y-1 text-[11px] text-emerald-100/90 list-disc list-inside">
+                            {liveTestResult.diagnostics.recommendations.map((rc, i) => (
+                              <li key={`rc-${i}`} data-testid={`vr-diag-rec-${i}`} className="leading-snug">{rc}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         )}
