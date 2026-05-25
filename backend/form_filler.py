@@ -671,8 +671,44 @@ async def _fill_form(page: Page, row: Dict[str, Any]) -> Dict[str, Any]:
 
     for el in inputs:
         try:
-            if not await el.is_visible():
-                continue
+            # 2026-05 — visibility check carve-out for <select>
+            # Bootstrap-Select / Select2 / Chosen / React-Select all HIDE
+            # the native <select> via display:none and surface a custom
+            # button + dropdown UI. is_visible() returns False on the
+            # native element, so the OLD `continue` here meant we
+            # silently skipped EVERY plugin-styled dropdown — leaving
+            # Birth Month / Birth Day / Birth Year empty on lead-gen
+            # pages that use Bootstrap-Select (the screenshot the user
+            # reported).
+            #
+            # For <select>, accept the element as long as it's IN the
+            # DOM and not aria-hidden / display-none on an ancestor that
+            # truly removes it from the form (the JS-driven select_option
+            # in _select_option_smart below handles the rest).
+            _tag_local = ""
+            try:
+                _tag_local = (await el.evaluate("e => e.tagName ? e.tagName.toLowerCase() : ''")) or ""
+            except Exception:
+                pass
+            if _tag_local == "select":
+                # Skip only if the element was detached or in a closed
+                # <details> / hidden ancestor — anything else (including
+                # bootstrap-select hidden native) we want to fill via JS.
+                try:
+                    _attached_ok = await el.evaluate(
+                        "e => !!(e.isConnected && e.form)"
+                    )
+                except Exception:
+                    _attached_ok = True
+                if not _attached_ok:
+                    continue
+            else:
+                # Original visible-check path for inputs / textareas.
+                try:
+                    if not await el.is_visible():
+                        continue
+                except Exception:
+                    pass
         except Exception:
             pass
         try:
@@ -738,16 +774,91 @@ async def _fill_form(page: Page, row: Dict[str, Any]) -> Dict[str, Any]:
         final_value = _reformat_value(cand_keys, attrs, value)
         try:
             if attrs.get("tag") == "select":
-                # Try select by value / label / index
+                # 2026-05 — JS-driven select for plugin-hidden natives.
+                # Playwright's el.select_option() waits for actionability
+                # (element visible + stable), which fails when Bootstrap-
+                # Select / Select2 / Chosen hide the native <select>. The
+                # native still drives form submission, so setting .value
+                # + dispatching change events is the correct fix.
+                #
+                # We try in this order:
+                #   1. JS: find option whose label OR value matches
+                #      `final_value` (trimmed, case-insensitive); set
+                #      .value + dispatch input/change events + jQuery
+                #      .selectpicker('refresh') / .chosen:updated so the
+                #      visible plugin UI stays in sync.
+                #   2. JS by numeric index if value looks like "1", "2"...
+                #   3. Fall back to native el.select_option (label →
+                #      value → index) for plain visible selects.
+                _str_val = str(final_value)
+                _js_ok = False
+                _js_src = """(args) => {
+                    const el = args.el;
+                    const raw = String(args.raw);
+                    const wantTrim = raw.trim().toLowerCase();
+                    function setIt(opt) {
+                        el.value = opt.value;
+                        try { el.dispatchEvent(new Event('input',  {bubbles: true})); } catch(e){}
+                        try { el.dispatchEvent(new Event('change', {bubbles: true})); } catch(e){}
+                        try {
+                            if (window.jQuery && window.jQuery(el).length) {
+                                window.jQuery(el).val(opt.value).trigger('change');
+                                try { window.jQuery(el).selectpicker('refresh'); } catch(e){}
+                                try { window.jQuery(el).trigger('chosen:updated'); } catch(e){}
+                            }
+                        } catch(e){}
+                        return true;
+                    }
+                    // 1) exact label / value (case-insensitive)
+                    for (let i = 0; i < el.options.length; i++) {
+                        const o = el.options[i];
+                        const t = (o.text || '').trim().toLowerCase();
+                        const l = (o.label || '').trim().toLowerCase();
+                        if (t === wantTrim || l === wantTrim || String(o.value).toLowerCase() === wantTrim) {
+                            return setIt(o);
+                        }
+                    }
+                    // 2) substring (handles 'May' matching 'May (5)')
+                    for (let i = 0; i < el.options.length; i++) {
+                        const o = el.options[i];
+                        const t = (o.text || '').trim().toLowerCase();
+                        if (t && wantTrim && t.indexOf(wantTrim) === 0) {
+                            return setIt(o);
+                        }
+                    }
+                    // 3) numeric index (raw="5" → options[5])
+                    if (/^\\d+$/.test(raw)) {
+                        const idx = parseInt(raw, 10);
+                        if (idx >= 0 && idx < el.options.length) {
+                            return setIt(el.options[idx]);
+                        }
+                    }
+                    return false;
+                }"""
                 try:
-                    await el.select_option(value=str(final_value))
+                    _js_ok = bool(await page.evaluate(
+                        _js_src, {"el": el, "raw": _str_val}
+                    ))
+                except Exception:
+                    _js_ok = False
+                if _js_ok:
+                    # JS path worked — for the few plugin UIs that ALSO
+                    # need a click on the visible proxy (rare), the
+                    # form's own change handler typically re-renders the
+                    # visible label from el.value. We're done.
+                    filled.append(cand_keys[0] if cand_keys else "")
+                    continue
+                # JS missed — fall through to Playwright's actionable
+                # select_option (works for plain visible <select>).
+                try:
+                    await el.select_option(value=_str_val)
                 except Exception:
                     try:
-                        await el.select_option(label=str(final_value))
+                        await el.select_option(label=_str_val)
                     except Exception:
                         # Last resort — try by numeric index (month as "1" → index 1)
                         try:
-                            idx = int(final_value)
+                            idx = int(_str_val)
                             await el.select_option(index=idx)
                         except Exception:
                             continue
