@@ -147,6 +147,14 @@ export default function VisualRecorderPage() {
   const [liveTestResult, setLiveTestResult] = useState(null); // {ok, total_ms, step_results, diagnostics, ...}
   const [liveTesting, setLiveTesting] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(true);
+  // ── 2026-05: Auto-fix history + auto-retest toggle ──
+  // Persisted across the session so the user can: 1) Auto-fix all,
+  // 2) automatically re-run Live Test, 3) Finalize — in 3 clicks
+  // total. Undo button reverts the most recent fix if it broke
+  // something specific to the user's page.
+  const [fixHistoryCount, setFixHistoryCount] = useState(0);
+  const [lastUndoneFix, setLastUndoneFix] = useState(null);
+  const [autoRetestEnabled, setAutoRetestEnabled] = useState(true);
   const imgRef = useRef(null);
   const sessionStartedAt = useRef(null);
   const [recordingElapsed, setRecordingElapsed] = useState(0);
@@ -970,6 +978,101 @@ export default function VisualRecorderPage() {
       }
     } catch (e) {
       toast.error(`Live test crashed: ${e.message || e}`);
+    } finally {
+      setLiveTesting(false);
+    }
+  };
+
+  // ── 2026-05: Auto-fix one or all anti-pattern findings ───────────
+  // Applies a structured fix (or all auto-fixable fixes in one shot)
+  // to the recorder session. Re-fetches steps + diagnostics on
+  // success so the UI re-renders with the post-fix state.
+  //
+  // 2026-05 update: also tracks `fix_history_count` from the response
+  // (powers the Undo button) and, when `autoRetestEnabled` is on,
+  // automatically triggers Run Live Test after the fix succeeds — so
+  // the full loop becomes: Live Test → Auto-fix all → (auto Live Test) →
+  // Finalize. Three clicks total.
+  const applyAutoFix = async ({ kind, at_step, extra } = {}, applyAll = false) => {
+    if (!sessionId) return;
+    setLiveTesting(true);
+    try {
+      const body = applyAll ? { apply_all: true } : { kind, at_step, extra };
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/auto-fix`, {
+        method: "POST",
+        headers: { ...authH(), "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+
+      if (Array.isArray(d.steps)) setSteps(d.steps);
+      if (typeof d.fix_history_count === "number") setFixHistoryCount(d.fix_history_count);
+      setLastUndoneFix(null); // any new fix invalidates the "last undone" hint
+
+      if (liveTestResult) {
+        setLiveTestResult({
+          ...liveTestResult,
+          diagnostics: d.diagnostics || liveTestResult.diagnostics,
+        });
+      }
+
+      const nApplied = (d.applied || []).length;
+      const nSkipped = (d.skipped || []).length;
+      if (applyAll) {
+        toast.success(
+          nApplied > 0
+            ? `Auto-fix applied ${nApplied} fix${nApplied === 1 ? "" : "es"}${nSkipped ? ` · ${nSkipped} skipped` : ""}.`
+            : "Nothing to fix — all anti-patterns are non-auto-fixable.",
+        );
+      } else {
+        toast.success(d.applied?.[0]?.summary || "Auto-fix applied.");
+      }
+
+      // Auto-retest: if enabled and we actually applied at least one
+      // fix, immediately re-run Live Test so the user sees the result
+      // of the fix without another click.
+      if (autoRetestEnabled && nApplied > 0) {
+        // Brief pause so the toast registers + steps state propagates
+        // through React before the next fetch fires.
+        setTimeout(() => { runLiveTest(); }, 400);
+      }
+    } catch (e) {
+      toast.error(`Auto-fix failed: ${e.message || e}`);
+    } finally {
+      setLiveTesting(false);
+    }
+  };
+
+  // ── 2026-05: Undo last auto-fix ──────────────────────────────────
+  // Pops the most-recent fix from history and restores the pre-fix
+  // snapshot of the steps array. Used when an auto-fix turned out to
+  // break something specific to the user's page that the static
+  // analyser couldn't predict.
+  const undoLastAutoFix = async () => {
+    if (!sessionId || fixHistoryCount === 0) return;
+    setLiveTesting(true);
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/auto-fix/undo`, {
+        method: "POST",
+        headers: authH(),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+
+      if (Array.isArray(d.steps)) setSteps(d.steps);
+      if (typeof d.fix_history_count === "number") setFixHistoryCount(d.fix_history_count);
+      setLastUndoneFix(d.undone || null);
+      if (liveTestResult) {
+        setLiveTestResult({
+          ...liveTestResult,
+          diagnostics: d.diagnostics || liveTestResult.diagnostics,
+        });
+      }
+      const k = d.undone?.kind || "last fix";
+      toast.success(`Undone: ${k}. Run Live Test to re-verify.`);
+    } catch (e) {
+      toast.error(`Undo failed: ${e.message || e}`);
     } finally {
       setLiveTesting(false);
     }
@@ -1989,14 +2092,58 @@ export default function VisualRecorderPage() {
                         )}
                       </span>
                     </div>
-                    <button
-                      onClick={() => setLiveTestResult(null)}
-                      className="text-xs text-zinc-500 hover:text-zinc-200"
-                      data-testid="vr-live-test-close"
-                    >
-                      Close ✕
-                    </button>
+                    <div className="flex items-center gap-2">
+                      {/* Auto-retest toggle */}
+                      <label
+                        className="inline-flex items-center gap-1 text-[10px] text-zinc-400 cursor-pointer select-none"
+                        title="When ON, Live Test is automatically re-run after every Auto-fix so you can see the result without an extra click. Off if you want manual control."
+                        data-testid="vr-autoretest-toggle-label"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={autoRetestEnabled}
+                          onChange={(e) => setAutoRetestEnabled(e.target.checked)}
+                          data-testid="vr-autoretest-toggle"
+                          className="accent-blue-500 cursor-pointer"
+                        />
+                        Auto-retest after fix
+                      </label>
+                      {/* Undo button (only when there's fix history) */}
+                      {fixHistoryCount > 0 && (
+                        <button
+                          onClick={undoLastAutoFix}
+                          disabled={liveTesting}
+                          data-testid="vr-undo-fix-btn"
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-600/20 hover:bg-amber-600/40 border border-amber-500/40 text-amber-200 text-[10px] font-medium transition-colors disabled:opacity-40"
+                          title="Revert the most recent Auto-fix. Use this if the fix turned out to break something specific to your page."
+                        >
+                          <Undo2 className="w-3 h-3" />
+                          Undo ({fixHistoryCount})
+                        </button>
+                      )}
+                      <button
+                        onClick={() => setLiveTestResult(null)}
+                        className="text-xs text-zinc-500 hover:text-zinc-200"
+                        data-testid="vr-live-test-close"
+                      >
+                        Close ✕
+                      </button>
+                    </div>
                   </div>
+
+                  {/* Optional "last undone" hint */}
+                  {lastUndoneFix && (
+                    <div
+                      className="mx-3 mb-2 p-2 rounded bg-amber-950/40 border border-amber-700/40 text-[11px] text-amber-100 flex items-start gap-1.5"
+                      data-testid="vr-last-undone-hint"
+                    >
+                      <Undo2 className="w-3 h-3 mt-0.5 shrink-0" />
+                      <span>
+                        Reverted: <code className="text-amber-300">{lastUndoneFix.kind}</code> @ step #{(lastUndoneFix.at_step ?? 0) + 1}.
+                        Re-run Live Test to confirm the previous state still works.
+                      </span>
+                    </div>
+                  )}
 
                   {liveTestResult.error && (
                     <div className="mx-3 mb-2 p-2 rounded bg-rose-900/40 border border-rose-700/40 text-xs text-rose-100" data-testid="vr-live-test-error">
@@ -2096,22 +2243,79 @@ export default function VisualRecorderPage() {
                         </div>
                       )}
 
-                      {/* Anti-patterns */}
-                      {Array.isArray(liveTestResult.diagnostics.anti_patterns) && liveTestResult.diagnostics.anti_patterns.length > 0 && (
-                        <div className="mb-2">
-                          <div className="text-[10px] uppercase tracking-wide text-amber-400 mb-1 flex items-center gap-1">
-                            <AlertCircle className="w-3 h-3" /> Anti-patterns ({liveTestResult.diagnostics.anti_patterns.length})
+                      {/* Anti-patterns / Findings — with Auto-fix buttons */}
+                      {(Array.isArray(liveTestResult.diagnostics.findings) && liveTestResult.diagnostics.findings.length > 0) ? (
+                        <div className="mb-2" data-testid="vr-diag-findings-section">
+                          <div className="flex items-center justify-between mb-1.5 flex-wrap gap-1">
+                            <div className="text-[10px] uppercase tracking-wide text-amber-400 flex items-center gap-1">
+                              <AlertCircle className="w-3 h-3" /> Anti-patterns ({liveTestResult.diagnostics.findings.length})
+                            </div>
+                            {(liveTestResult.diagnostics.auto_fixable_count || 0) > 0 && (
+                              <button
+                                onClick={() => applyAutoFix({}, true)}
+                                disabled={liveTesting}
+                                data-testid="vr-autofix-all-btn"
+                                className="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white text-[10px] font-medium transition-colors"
+                                title="Apply every auto-fixable finding in one shot. Re-run Live Test after to confirm."
+                              >
+                                <Sparkles className="w-3 h-3" />
+                                Auto-fix all ({liveTestResult.diagnostics.auto_fixable_count})
+                              </button>
+                            )}
                           </div>
-                          <ul className="space-y-1 text-[11px] text-zinc-300 list-disc list-inside">
-                            {liveTestResult.diagnostics.anti_patterns.map((ap, i) => (
-                              <li key={`ap-${i}`} data-testid={`vr-diag-ap-${i}`} className="leading-snug">{ap}</li>
+                          <ul className="space-y-1.5 text-[11px]">
+                            {liveTestResult.diagnostics.findings.map((f, i) => (
+                              <li
+                                key={`f-${i}-${f.kind}-${f.at_step}`}
+                                data-testid={`vr-diag-finding-${i}`}
+                                className="rounded border border-zinc-800 bg-zinc-950/40 p-1.5 flex items-start gap-2"
+                              >
+                                <div className="flex-1 min-w-0">
+                                  <div className="text-zinc-200 leading-snug">{f.message}</div>
+                                  {f.fix_summary && (
+                                    <div className="text-emerald-300/80 mt-0.5 text-[10px] flex items-start gap-1">
+                                      <Lightbulb className="w-2.5 h-2.5 mt-0.5 shrink-0" />
+                                      <span>{f.fix_summary}</span>
+                                    </div>
+                                  )}
+                                </div>
+                                {f.auto_fixable ? (
+                                  <button
+                                    onClick={() => applyAutoFix({ kind: f.kind, at_step: f.at_step, extra: f.extra })}
+                                    disabled={liveTesting}
+                                    data-testid={`vr-autofix-btn-${i}`}
+                                    className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-600/30 hover:bg-emerald-600/60 border border-emerald-500/40 text-emerald-100 text-[10px] font-medium transition-colors disabled:opacity-40"
+                                    title={f.fix_summary || "Apply this fix"}
+                                  >
+                                    <Sparkles className="w-2.5 h-2.5" /> Auto-fix
+                                  </button>
+                                ) : (
+                                  <span className="shrink-0 text-[10px] text-zinc-500 px-1 py-0.5">manual</span>
+                                )}
+                              </li>
                             ))}
                           </ul>
                         </div>
+                      ) : (
+                        // Fallback to legacy string-only render for builds without findings field
+                        Array.isArray(liveTestResult.diagnostics.anti_patterns) && liveTestResult.diagnostics.anti_patterns.length > 0 && (
+                          <div className="mb-2">
+                            <div className="text-[10px] uppercase tracking-wide text-amber-400 mb-1 flex items-center gap-1">
+                              <AlertCircle className="w-3 h-3" /> Anti-patterns ({liveTestResult.diagnostics.anti_patterns.length})
+                            </div>
+                            <ul className="space-y-1 text-[11px] text-zinc-300 list-disc list-inside">
+                              {liveTestResult.diagnostics.anti_patterns.map((ap, i) => (
+                                <li key={`ap-${i}`} data-testid={`vr-diag-ap-${i}`} className="leading-snug">{ap}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )
                       )}
 
-                      {/* Recommendations */}
-                      {Array.isArray(liveTestResult.diagnostics.recommendations) && liveTestResult.diagnostics.recommendations.length > 0 && (
+                      {/* Recommendations — only show if NO structured findings
+                          (otherwise the fix_summary inside each finding is
+                          already showing the actionable advice) */}
+                      {(!Array.isArray(liveTestResult.diagnostics.findings) || liveTestResult.diagnostics.findings.length === 0) && Array.isArray(liveTestResult.diagnostics.recommendations) && liveTestResult.diagnostics.recommendations.length > 0 && (
                         <div>
                           <div className="text-[10px] uppercase tracking-wide text-emerald-400 mb-1 flex items-center gap-1">
                             <Lightbulb className="w-3 h-3" /> Recommendations

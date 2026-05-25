@@ -353,6 +353,12 @@ class RecorderSession:
     lock: Optional[asyncio.Lock] = None
     # Background startup task (so we can cancel it on stop)
     startup_task: Any = None
+    # ── 2026-05: Auto-fix history for Undo support ──
+    # Each entry: {kind, at_step, summary, applied_at, snapshot_before}
+    # where snapshot_before is a deep-copy of `steps` BEFORE that fix
+    # was applied. Capped at 20 entries (LRU) so memory stays bounded
+    # even for sessions where the user spams Auto-fix-all repeatedly.
+    fix_history: List[Dict[str, Any]] = field(default_factory=list)
 
     def touch(self):
         self.last_activity = time.time()
@@ -1269,8 +1275,19 @@ def analyse_steps(
         slowest = ranked[:3]
 
     # ── Anti-pattern detection ───────────────────────────────────────
+    # Two-tier output:
+    #   `anti` / `recs` — legacy string lists for the existing UI panels
+    #   `findings`      — structured records the new Auto-fix endpoint
+    #                     can act on. Each finding has:
+    #                       kind:          stable id (e.g. "hard_wait_too_long")
+    #                       at_step:       0-indexed step the fix targets
+    #                       message:       human-readable description
+    #                       fix_summary:   what the auto-fix WILL do
+    #                       auto_fixable:  bool (false means user must re-record)
+    #                       extra:         per-kind data the apply step needs
     anti: List[str] = []
     recs: List[str] = []
+    findings: List[Dict[str, Any]] = []
 
     # 1. wait_for_selector state="visible" on a dropdown-like selector
     #    without wrapper_kind hint (legacy recording pattern → may 25s
@@ -1282,16 +1299,25 @@ def analyse_steps(
                 # Look at next non-wait step for a select action
                 for j in range(i + 1, min(i + 3, len(steps))):
                     if steps[j].get("action") == "select":
-                        anti.append(
+                        msg = (
                             f"Step #{i+1} `wait_for_selector` with state=\"visible\" before a `select` — "
                             f"if the underlying <select> is hidden behind a custom dropdown, this could "
-                            f"25s-timeout on replay. (Newer iteration-4 helper now auto-falls back, but "
-                            f"re-recording stamps the hint cleanly.)"
+                            f"25s-timeout on replay."
                         )
+                        rec = f"Switch step #{i+1}'s state from 'visible' to 'attached'."
+                        anti.append(msg + " (Newer iteration-4 helper now auto-falls back, but re-recording stamps the hint cleanly.)")
                         recs.append(
                             f"Re-record step #{i+1}'s dropdown — the recorder now auto-detects custom UIs "
                             f"and stamps state=\"attached\" + wrapper_kind for instant matching."
                         )
+                        findings.append({
+                            "kind": "wait_for_visible_before_select",
+                            "at_step": i,
+                            "message": msg,
+                            "fix_summary": rec,
+                            "auto_fixable": True,
+                            "extra": {},
+                        })
                         break
 
     # 2. Click immediately followed by fill/select on a DIFFERENT selector,
@@ -1300,42 +1326,87 @@ def analyse_steps(
         if s.get("action") == "click":
             nxt = steps[i + 1]
             if nxt.get("action") in ("fill", "select", "type") and nxt.get("selector") and s.get("selector") != nxt.get("selector"):
-                anti.append(
+                msg = (
                     f"Step #{i+1} click → step #{i+2} {nxt.get('action')} on a different selector with no "
                     f"wait between them. If the click triggers DOM changes (e.g. step-2 of a multi-page form), "
                     f"the next step may race the DOM update."
                 )
-                recs.append(
-                    f"Insert a 'Wait for navigation' or 'Wait for selector' between steps #{i+1} and #{i+2}."
-                )
+                rec = f"Insert a wait_for_selector('{nxt.get('selector')}') between steps #{i+1} and #{i+2}."
+                anti.append(msg)
+                recs.append(f"Insert a 'Wait for navigation' or 'Wait for selector' between steps #{i+1} and #{i+2}.")
+                findings.append({
+                    "kind": "click_then_action_no_wait",
+                    "at_step": i,
+                    "message": msg,
+                    "fix_summary": rec,
+                    "auto_fixable": True,
+                    "extra": {"next_selector": nxt.get("selector"), "next_action": nxt.get("action")},
+                })
 
     # 3. Hard wait > 5s — usually a sign the recording is over-cautious
     for i, s in enumerate(steps):
         if s.get("action") == "wait":
             ms = int(s.get("ms") or 0)
             if ms > 5000:
-                anti.append(
-                    f"Step #{i+1} hard wait of {ms}ms (>5s). Hard waits inflate every visit's runtime."
-                )
+                # Find the NEXT actionable step (fill/click/select/type/check)
+                # so we can replace the hard wait with wait_for_selector on it.
+                next_sel = None
+                next_action_idx = None
+                for j in range(i + 1, min(i + 6, len(steps))):
+                    sj = steps[j]
+                    if sj.get("action") in ("fill", "click", "select", "type", "check", "uncheck") and sj.get("selector"):
+                        next_sel = sj.get("selector")
+                        next_action_idx = j
+                        break
+                msg = f"Step #{i+1} hard wait of {ms}ms (>5s). Hard waits inflate every visit's runtime."
+                if next_sel:
+                    rec = f"Replace step #{i+1}'s hard {ms}ms wait with wait_for_selector('{next_sel}', timeout={max(8000, ms)}ms) — saves ~{(ms - 1500) / 1000:.1f}s per visit."
+                    fixable = True
+                else:
+                    rec = f"Replace step #{i+1}'s hard wait with wait_for_selector — but no actionable step follows it within 5 steps. Manual review needed."
+                    fixable = False
+                anti.append(msg)
                 recs.append(
                     f"Replace step #{i+1}'s hard wait with `wait_for_selector` on whatever element you're "
                     f"actually waiting for. Saves ~{(ms - 1500) / 1000:.1f}s per visit."
                 )
+                findings.append({
+                    "kind": "hard_wait_too_long",
+                    "at_step": i,
+                    "message": msg,
+                    "fix_summary": rec,
+                    "auto_fixable": fixable,
+                    "extra": {"ms": ms, "next_selector": next_sel, "next_action_idx": next_action_idx},
+                })
 
     # 4. select step with no match_by — may match the wrong option on
     #    forms with duplicate labels (e.g. "Other" appearing twice).
     for i, s in enumerate(steps):
         if s.get("action") == "select" and not s.get("match_by"):
-            anti.append(
+            msg = (
                 f"Step #{i+1} select without match_by — defaults to 'label' which may match the wrong "
                 f"option on forms with duplicate visible text."
             )
-            recs.append(
-                f"Re-bind step #{i+1} via the dropdown picker so match_by is explicitly set."
-            )
+            rec = f"Set step #{i+1}'s match_by to 'label' explicitly."
+            anti.append(msg)
+            recs.append(f"Re-bind step #{i+1} via the dropdown picker so match_by is explicitly set.")
+            findings.append({
+                "kind": "select_missing_match_by",
+                "at_step": i,
+                "message": msg,
+                "fix_summary": rec,
+                "auto_fixable": True,
+                "extra": {},
+            })
 
     # 5. Long automation with no screenshots — hard to debug a failed visit
     if len(steps) >= 12 and not any(s.get("action") == "screenshot" for s in steps):
+        # Find the LAST click (likely the submit) to insert screenshot just before it.
+        last_click_idx = None
+        for i in range(len(steps) - 1, -1, -1):
+            if steps[i].get("action") == "click":
+                last_click_idx = i
+                break
         anti.append(
             "No screenshot steps in a long automation — when a visit fails in production "
             "you'll have nothing to look at."
@@ -1344,15 +1415,137 @@ def analyse_steps(
             "Add a Screenshot step right before the submit click (Insert → Screenshot) so "
             "failed visits surface the form state."
         )
+        if last_click_idx is not None:
+            findings.append({
+                "kind": "long_automation_no_screenshot",
+                "at_step": last_click_idx,
+                "message": "Long automation with no screenshot — failed visits won't have a debug image.",
+                "fix_summary": f"Insert a screenshot step right before step #{last_click_idx+1} (the last click).",
+                "auto_fixable": True,
+                "extra": {"insert_before_idx": last_click_idx},
+            })
 
     return {
         "slowest": slowest,
         "anti_patterns": anti,
         "wrapper_summary": wrapper_summary,
         "recommendations": recs,
+        "findings": findings,
+        "auto_fixable_count": sum(1 for f in findings if f.get("auto_fixable")),
         "total_steps": len(steps),
         "has_runtime_data": bool(sr),
     }
+
+
+def apply_auto_fix(
+    steps: List[Dict[str, Any]],
+    kind: str,
+    at_step: int,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[Dict[str, Any]], str]:
+    """Apply a single auto-fix to a steps array. Returns the NEW steps
+    array + a human-readable description of what was changed.
+
+    Pure function — does not mutate the input array. Caller is
+    responsible for persisting the result (e.g. `sess.steps = new_steps`).
+
+    Supported kinds (must match analyse_steps `findings[*].kind`):
+      • `wait_for_visible_before_select` — flip state="visible" → "attached"
+      • `hard_wait_too_long` — replace hard wait with wait_for_selector
+        on the next actionable step's selector
+      • `select_missing_match_by` — set match_by="label" on the select step
+      • `click_then_action_no_wait` — insert wait_for_selector for the
+        following step's selector AFTER the click
+      • `long_automation_no_screenshot` — insert a screenshot step
+        immediately before the last click (the "submit")
+
+    Returns (new_steps, change_summary). If kind is unknown or at_step
+    is out of range, raises ValueError so the caller can surface a
+    clear error to the user.
+    """
+    if not isinstance(steps, list) or at_step < 0 or at_step >= len(steps):
+        raise ValueError(f"Invalid step index {at_step} for {len(steps)} steps")
+
+    new_steps = [dict(s) for s in steps]  # deep-ish copy of each step dict
+    extra = extra or {}
+
+    if kind == "wait_for_visible_before_select":
+        s = new_steps[at_step]
+        if s.get("action") != "wait_for_selector":
+            raise ValueError(f"Step #{at_step+1} is not a wait_for_selector — cannot apply fix")
+        s["state"] = "attached"
+        return new_steps, f"Step #{at_step+1}: changed state from 'visible' → 'attached' (handles dropdowns hidden behind custom UIs)."
+
+    if kind == "hard_wait_too_long":
+        s = new_steps[at_step]
+        if s.get("action") != "wait":
+            raise ValueError(f"Step #{at_step+1} is not a wait — cannot apply fix")
+        next_sel = extra.get("next_selector")
+        if not next_sel:
+            # Re-derive from following steps in case extra is missing.
+            for j in range(at_step + 1, min(at_step + 6, len(new_steps))):
+                sj = new_steps[j]
+                if sj.get("action") in ("fill", "click", "select", "type", "check", "uncheck") and sj.get("selector"):
+                    next_sel = sj.get("selector")
+                    break
+        if not next_sel:
+            raise ValueError(f"No actionable step follows step #{at_step+1} within 5 steps — fix not applicable.")
+        original_ms = int(s.get("ms") or 0)
+        # Replace in place with a wait_for_selector. Timeout: use the
+        # original wait ms (capped at 25s) so a slow page that needed
+        # 8s still gets up to 8s before failing — but the wait ends as
+        # soon as the element appears, saving the rest.
+        new_steps[at_step] = {
+            "action": "wait_for_selector",
+            "selector": next_sel,
+            "state": "attached",
+            "timeout": min(max(8000, original_ms), 25000),
+            "optional": True,
+            "_auto_fix": "hard_wait_too_long",
+        }
+        saved = max(0, (original_ms - 1500) / 1000)
+        return new_steps, f"Step #{at_step+1}: replaced {original_ms}ms hard wait with wait_for_selector('{next_sel}', state='attached'). Saves up to ~{saved:.1f}s/visit."
+
+    if kind == "select_missing_match_by":
+        s = new_steps[at_step]
+        if s.get("action") != "select":
+            raise ValueError(f"Step #{at_step+1} is not a select — cannot apply fix")
+        s["match_by"] = "label"
+        return new_steps, f"Step #{at_step+1}: set match_by='label' explicitly (default behavior, but now defensive against future engine changes)."
+
+    if kind == "click_then_action_no_wait":
+        s = new_steps[at_step]
+        if s.get("action") != "click":
+            raise ValueError(f"Step #{at_step+1} is not a click — cannot apply fix")
+        next_sel = extra.get("next_selector")
+        if not next_sel:
+            if at_step + 1 < len(new_steps):
+                next_sel = new_steps[at_step + 1].get("selector")
+        if not next_sel:
+            raise ValueError(f"Next step has no selector — fix not applicable.")
+        # Insert a wait_for_selector RIGHT AFTER the click.
+        wait_step = {
+            "action": "wait_for_selector",
+            "selector": next_sel,
+            "state": "attached",
+            "timeout": 15000,
+            "optional": True,
+            "_auto_fix": "click_then_action_no_wait",
+        }
+        new_steps.insert(at_step + 1, wait_step)
+        return new_steps, f"Inserted wait_for_selector('{next_sel}') right after step #{at_step+1}'s click. Eliminates the race condition."
+
+    if kind == "long_automation_no_screenshot":
+        # Insert a screenshot step BEFORE the at_step (which is the last click)
+        screenshot_step = {
+            "action": "screenshot",
+            "name": f"before-step-{at_step+1}",
+            "_auto_fix": "long_automation_no_screenshot",
+        }
+        new_steps.insert(at_step, screenshot_step)
+        return new_steps, f"Inserted screenshot step right before step #{at_step+1} (your submit click). Failed visits will now have a debug image."
+
+    raise ValueError(f"Unknown auto-fix kind: {kind!r}")
 
 
 async def bind_dropdown(

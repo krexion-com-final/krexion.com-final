@@ -14376,6 +14376,14 @@ class _VRLiveTestReq(BaseModel):
     sample_row: Optional[Dict[str, Any]] = None
     fresh_page: bool = True
 
+class _VRAutoFixReq(BaseModel):
+    # Apply EITHER a single fix (kind + at_step) OR every auto_fixable
+    # finding in one shot (apply_all=True).
+    kind: Optional[str] = None
+    at_step: Optional[int] = None
+    extra: Optional[Dict[str, Any]] = None
+    apply_all: bool = False
+
 @api_router.post("/visual-recorder/{session_id}/live-test")
 async def vr_live_test(session_id: str, req: _VRLiveTestReq, user: dict = Depends(get_current_user)):
     """Run the current recorded steps end-to-end and return per-step
@@ -14408,6 +14416,174 @@ async def vr_diagnostics(session_id: str, user: dict = Depends(get_current_user)
     except KeyError:
         raise HTTPException(status_code=404, detail="Session not found")
     return {"diagnostics": vr.analyse_steps(sess.steps, None), "total_steps": len(sess.steps)}
+
+
+@api_router.post("/visual-recorder/{session_id}/auto-fix")
+async def vr_auto_fix(session_id: str, req: _VRAutoFixReq, user: dict = Depends(get_current_user)):
+    """Apply one (or all) auto-fixable anti-pattern findings to the
+    session's recorded steps. After applying, re-runs analyse_steps and
+    returns the new diagnostics so the UI can refresh.
+
+    Body:
+      • Single fix: {"kind": "hard_wait_too_long", "at_step": 7}
+      • Apply all: {"apply_all": true}
+
+    Returns:
+      {
+        applied: [{kind, at_step, summary}, ...],
+        skipped: [{kind, at_step, reason}, ...],
+        steps:   [<new steps array>],
+        total_steps: int,
+        diagnostics: {<re-analysed>},
+        fix_history_count: int,
+      }
+
+    2026-05 — Every successful fix is pushed to `sess.fix_history` (capped
+    at 20 entries, oldest evicted) with a snapshot of `steps` BEFORE the
+    fix. This powers the new Undo endpoint so users can revert a fix
+    that turned out to break their specific page.
+    """
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if not hasattr(vr, "apply_auto_fix") or not hasattr(vr, "analyse_steps"):
+        raise HTTPException(status_code=500, detail="Auto-fix helpers unavailable in this build.")
+
+    import copy as _copy
+    from datetime import datetime, timezone
+
+    applied: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+
+    def _push_history(kind: str, at_step: int, summary: str, snapshot_before: List[Dict[str, Any]]):
+        """Append fix to session history, evicting oldest if over cap (20)."""
+        entry = {
+            "kind": kind,
+            "at_step": at_step,
+            "summary": summary,
+            "applied_at": datetime.now(timezone.utc).isoformat(),
+            "snapshot_before": _copy.deepcopy(snapshot_before),
+        }
+        sess.fix_history.append(entry)
+        # LRU cap — keep last 20
+        if len(sess.fix_history) > 20:
+            sess.fix_history = sess.fix_history[-20:]
+
+    if req.apply_all:
+        cur_steps = list(sess.steps)
+        max_iter = 30
+        for _ in range(max_iter):
+            diag = vr.analyse_steps(cur_steps, None)
+            todo = [f for f in (diag.get("findings") or []) if f.get("auto_fixable")]
+            if not todo:
+                break
+            f = todo[0]
+            try:
+                pre_snapshot = _copy.deepcopy(cur_steps)
+                new_steps, summary = vr.apply_auto_fix(
+                    cur_steps, f["kind"], int(f["at_step"]), f.get("extra"),
+                )
+                if new_steps == cur_steps:
+                    skipped.append({
+                        "kind": f["kind"],
+                        "at_step": f["at_step"],
+                        "reason": "Fix produced no change (likely already applied).",
+                    })
+                    break
+                cur_steps = new_steps
+                applied.append({"kind": f["kind"], "at_step": f["at_step"], "summary": summary})
+                _push_history(f["kind"], int(f["at_step"]), summary, pre_snapshot)
+            except ValueError as ve:
+                skipped.append({"kind": f["kind"], "at_step": f["at_step"], "reason": str(ve)})
+                continue
+        sess.steps = cur_steps
+        sess.touch()
+        return {
+            "applied": applied,
+            "skipped": skipped,
+            "steps": sess.steps,
+            "total_steps": len(sess.steps),
+            "diagnostics": vr.analyse_steps(sess.steps, None),
+            "fix_history_count": len(sess.fix_history),
+        }
+
+    # Single-fix path
+    if not req.kind or req.at_step is None:
+        raise HTTPException(status_code=400, detail="kind + at_step required (or apply_all=true)")
+    try:
+        pre_snapshot = _copy.deepcopy(list(sess.steps))
+        new_steps, summary = vr.apply_auto_fix(
+            list(sess.steps), req.kind, int(req.at_step), req.extra,
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    sess.steps = new_steps
+    sess.touch()
+    applied.append({"kind": req.kind, "at_step": int(req.at_step), "summary": summary})
+    _push_history(req.kind, int(req.at_step), summary, pre_snapshot)
+    return {
+        "applied": applied,
+        "skipped": skipped,
+        "steps": sess.steps,
+        "total_steps": len(sess.steps),
+        "diagnostics": vr.analyse_steps(sess.steps, None),
+        "fix_history_count": len(sess.fix_history),
+    }
+
+
+@api_router.post("/visual-recorder/{session_id}/auto-fix/undo")
+async def vr_auto_fix_undo(session_id: str, user: dict = Depends(get_current_user)):
+    """Undo the MOST RECENT auto-fix by restoring the `snapshot_before`
+    captured at apply time. Pops the entry from history.
+
+    Returns same shape as `/auto-fix` plus `undone: {kind, at_step, summary}`.
+    Returns 400 if history is empty.
+    """
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not sess.fix_history:
+        raise HTTPException(status_code=400, detail="No auto-fix history to undo.")
+
+    last = sess.fix_history.pop()
+    sess.steps = list(last.get("snapshot_before") or [])
+    sess.touch()
+    return {
+        "undone": {
+            "kind": last.get("kind"),
+            "at_step": last.get("at_step"),
+            "summary": last.get("summary"),
+            "applied_at": last.get("applied_at"),
+        },
+        "steps": sess.steps,
+        "total_steps": len(sess.steps),
+        "diagnostics": vr.analyse_steps(sess.steps, None),
+        "fix_history_count": len(sess.fix_history),
+    }
+
+
+@api_router.get("/visual-recorder/{session_id}/auto-fix/history")
+async def vr_auto_fix_history(session_id: str, user: dict = Depends(get_current_user)):
+    """Return the auto-fix history for this session (most recent first),
+    WITHOUT the per-entry `snapshot_before` blobs (keeps payload small)."""
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    items = [
+        {k: v for k, v in e.items() if k != "snapshot_before"}
+        for e in reversed(sess.fix_history)
+    ]
+    return {"history": items, "count": len(items)}
 
 
 @api_router.delete("/visual-recorder/{session_id}/step/{index}")

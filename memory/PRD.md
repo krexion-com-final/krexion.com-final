@@ -207,3 +207,119 @@ Total: ~800 LoC, 5 files. No new files created.
 - ✅ Live test self_heal=False (raw failures surface clearly for the user to fix)
 - ✅ Fresh-page fallback to recorder's page if new-page creation fails
 - ✅ Git working tree: 5 files modified. "Save to GitHub" se main pe push hoga, **no conflict**
+
+### Iteration 7 (2026-05-25) — Auto-Fix in Live Test Diagnostics
+**Goal**: Close the diagnostic → fix loop. User clicks "Auto-fix" next to any anti-pattern finding (or "Auto-fix all"), and the recorded steps array is transformed in-place. Then Run Live Test → Finalize.
+
+**Backend**:
+
+1. `backend/visual_recorder.py` (+215 lines):
+   - `analyse_steps()` extended to ALSO emit a structured `findings` array alongside existing string `anti_patterns` / `recommendations` (backwards compatible). Each finding has: `{kind, at_step, message, fix_summary, auto_fixable, extra}`. New `auto_fixable_count` field at top level.
+   - New `apply_auto_fix(steps, kind, at_step, extra)` pure function that returns `(new_steps, summary)`. Supports 5 fix kinds:
+     - `wait_for_visible_before_select` → flip `state: visible → attached`
+     - `hard_wait_too_long` → replace hard `wait` with `wait_for_selector` on next actionable step's selector
+     - `select_missing_match_by` → set `match_by: "label"` explicitly
+     - `click_then_action_no_wait` → insert `wait_for_selector` immediately after the click for next step's selector
+     - `long_automation_no_screenshot` → insert a `screenshot` step before the last click (submit)
+   - Each fix marks new/modified step with `_auto_fix: <kind>` for debug visibility.
+
+2. `backend/server.py` (+109 lines):
+   - New endpoint `POST /api/visual-recorder/{session_id}/auto-fix`:
+     - Single fix: `{kind, at_step, extra}`
+     - Apply all: `{apply_all: true}` — iteratively re-analyses + applies the FIRST fixable finding each iteration (max 30) so insertions don't invalidate indices. Returns `{applied, skipped, steps, total_steps, diagnostics}`.
+
+**Frontend** (`VisualRecorderPage.js`, +126 lines):
+   - New handler `applyAutoFix({kind, at_step, extra}, applyAll=false)` that posts to the endpoint, updates `setSteps()` with the new steps array, and refreshes `liveTestResult.diagnostics`.
+   - Diagnostics panel restructured:
+     - Per-finding row now renders the `message` + `fix_summary` + an inline **Auto-fix** button (if `auto_fixable`) or "manual" badge
+     - Header has an "**Auto-fix all (N)**" button that fires when `auto_fixable_count > 0`
+   - Toast feedback: per-fix summary OR "Auto-fix applied N fixes" for the bulk case
+   - Backwards compatible — falls back to legacy string lists if the backend hasn't been updated yet.
+
+**Verified end-to-end (synthetic recording)**:
+Test input: 15-step recording with 6 distinct anti-patterns (visible-state wait before select, hard 8s wait, click-no-wait-fill, missing match_by, long-automation-no-screenshot).
+
+| Iteration | Action applied | After |
+|---|---|---|
+| 0 | `wait_for_visible_before_select` @ #2 | state: visible → attached |
+| 1 | `click_then_action_no_wait` @ #4 | inserted wait_for_selector |
+| 2 | `click_then_action_no_wait` @ #8 (shifted) | inserted wait_for_selector |
+| 3 | `hard_wait_too_long` @ #7 | wait 8000ms → wait_for_selector(button.submit) |
+| 4 | `select_missing_match_by` @ #3 | match_by="label" |
+| 5 | `long_automation_no_screenshot` @ #8 | screenshot inserted before last click |
+| 6 | (no findings left) | done — 0 anti-patterns remaining |
+
+Final state: 15 steps → 18 steps. All 6 anti-patterns resolved. `_auto_fix` markers visible on every modified/inserted step.
+
+**Files modified**: 3 (2 backend + 1 frontend). +426/-24 lines.
+
+**Safety**:
+- ✅ `apply_auto_fix` is pure — never mutates input. Endpoint commits `sess.steps = new_steps` only on success.
+- ✅ Apply-all iterates with hard cap of 30 to prevent infinite loops.
+- ✅ Each fix is reversible by re-recording or manually editing the step.
+- ✅ Auto-fixed steps are tagged `_auto_fix: <kind>` so they show up in step lists.
+- ✅ Frontend gracefully falls back to legacy anti_patterns string list if backend `findings` field is missing.
+- ✅ Backend syntax + frontend ESLint clean; both restart clean.
+- ✅ Git: 3 files modified — push to main, **no conflict**.
+
+**Final user loop** (exactly what was asked):
+1. Record steps in Visual Recorder
+2. Click **Run Live Test** → see per-step pass/fail + timings + anti-patterns
+3. Click **Auto-fix all (N)** (or per-finding **Auto-fix**) → steps update inline → diagnostics re-rendered with the new (smaller) findings list
+4. Click **Run Live Test** again → verify green
+5. Click **Finalize** → save → drop into RUT job
+
+The fully closed AI loop: diagnose → suggest → apply → re-verify, all without leaving the recorder.
+
+### Iteration 8 (2026-05-25) — Auto-Fix Undo + Auto-Retest Toggle
+**Goal**: Close the loop tighter — 3 clicks instead of 4. Live Test → Auto-fix all → (automatic Live Test) → Finalize. Plus reversibility for any fix that turned out to break a user's specific page.
+
+**Backend** (+25 in visual_recorder.py, +176 in server.py):
+
+1. `RecorderSession` gained `fix_history: List[Dict]` field. Each entry stores `{kind, at_step, summary, applied_at, snapshot_before}` where `snapshot_before` is a deep copy of `steps` BEFORE that fix. LRU-capped at 20 entries.
+
+2. `POST /api/visual-recorder/{id}/auto-fix` now:
+   - Pushes each successful fix to `sess.fix_history` (with pre-snapshot)
+   - Returns `fix_history_count` in response
+
+3. Two new endpoints:
+   - `POST /api/visual-recorder/{id}/auto-fix/undo` — pops most-recent history entry, restores `sess.steps = entry.snapshot_before`. Returns `{undone, steps, diagnostics, fix_history_count}`. 400 if history empty.
+   - `GET /api/visual-recorder/{id}/auto-fix/history` — returns history (snapshot_before stripped for payload size), most-recent first.
+
+**Frontend** (`VisualRecorderPage.js`, +130):
+
+1. New state: `fixHistoryCount`, `lastUndoneFix`, `autoRetestEnabled` (default `true`).
+
+2. `applyAutoFix` updated:
+   - Reads `fix_history_count` from response → drives the Undo button
+   - Clears `lastUndoneFix` on any new fix (so the undo hint disappears)
+   - When `autoRetestEnabled && nApplied > 0` → fires `runLiveTest()` after a 400ms delay so toast/state propagate first
+
+3. New handler `undoLastAutoFix` — POSTs to undo endpoint, updates steps + diagnostics, sets `lastUndoneFix` so the UI shows a "Reverted: <kind> @ step #N" amber hint.
+
+4. New UI in Live Test results header:
+   - **"Auto-retest after fix"** checkbox toggle (right-aligned, tiny). Hover tooltip explains.
+   - **"Undo (N)"** button appears only when `fixHistoryCount > 0`. Amber color so it stands out.
+   - **Amber hint banner** "Reverted: <kind> @ step #N. Re-run Live Test to confirm…" — only after an undo, auto-clears on next fix.
+
+**3-Click User Flow** (exactly what was requested):
+1. Click **Run Live Test** (sees per-step results + N anti-patterns)
+2. Click **Auto-fix all (N)** → fixes applied → auto-retest fires → green
+3. Click **Finalize** → save
+
+Or 4 clicks with undo: 1) Live Test, 2) Auto-fix all + auto-retest, 3) Undo if user's page broke, 4) Finalize.
+
+**Files modified**: 3 (2 backend + 1 frontend). +604/-31 lines.
+
+**Safety**:
+- ✅ History capped at 20 → bounded memory even on auto-fix spam
+- ✅ Undo uses pre-fix snapshot (deep copy) → 100% reversible
+- ✅ `lastUndoneFix` cleared on next fix → no stale UI
+- ✅ Auto-retest 400ms delay prevents stale-state race
+- ✅ Auto-retest toggle defaults ON but easily disabled by user
+- ✅ Empty-history undo returns 400 with clear message (no crash)
+- ✅ Backend syntax + frontend ESLint clean
+- ✅ All 3 endpoints registered & auth-protected
+- ✅ Git: 3 files modified — push to main, **no conflict**
+
+**Smart UX detail**: Auto-retest can be turned OFF mid-flow if user wants to apply several manual edits between fixes without each one triggering a Playwright re-run. State persists for the entire recording session.
