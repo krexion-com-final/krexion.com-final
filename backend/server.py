@@ -14421,6 +14421,9 @@ async def vr_dropdown_bind(session_id: str, req: VRDropdownBindReq, user: dict =
 class _VRLiveTestReq(BaseModel):
     sample_row: Optional[Dict[str, Any]] = None
     fresh_page: bool = True
+    # 2026-01 "Replay from here" — skip the first N steps and pick up
+    # replay on the current browser state. Forces fresh_page=False.
+    start_index: int = 0
 
 class _VRAutoFixReq(BaseModel):
     # Apply EITHER a single fix (kind + at_step) OR every auto_fixable
@@ -14446,6 +14449,7 @@ async def vr_live_test(session_id: str, req: _VRLiveTestReq, user: dict = Depend
         sess,
         sample_row=req.sample_row,
         fresh_page=req.fresh_page,
+        start_index=max(0, int(req.start_index or 0)),
     )
 
 

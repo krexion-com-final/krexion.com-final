@@ -1113,10 +1113,20 @@ async def live_test(
     sess: RecorderSession,
     sample_row: Optional[Dict[str, Any]] = None,
     fresh_page: bool = False,
+    start_index: int = 0,
 ) -> Dict[str, Any]:
     """Run the current recorded steps end-to-end against the live page,
     returning per-step timing + ok/error + a static-analysis diagnostic
     summary. This is the "Run Live Test" button in the recorder.
+
+    `start_index` (2026-01) — skip the first N steps and pick up replay
+    from step `start_index` onwards. Powers the "Replay from here"
+    button on the Live Test results panel: when step #15 fails, the
+    user fixes it and re-runs from #15 — the browser is already on the
+    correct page state (because the previous test got us there), so we
+    DO NOT open a fresh page and we DO NOT execute steps 0..14 again.
+    This makes the debug loop ~5-10× faster vs. re-running the whole
+    automation each time.
 
     Strategy:
       • Open a fresh page (default) so we mirror what a RUT visit would
@@ -1162,6 +1172,23 @@ async def live_test(
 
     row = dict(sample_row or sess.sample_row or {})
 
+    # 2026-01: "Replay from here" — slice steps when start_index > 0.
+    # The browser stays on its current state (no fresh_page) so the
+    # remaining steps pick up exactly where the previous run failed.
+    # We re-index the per-step results back to the ORIGINAL indices
+    # before returning so the UI panel highlights the right rows.
+    full_steps = list(sess.steps)
+    if start_index < 0:
+        start_index = 0
+    if start_index >= len(full_steps):
+        return {"ok": False, "error": f"start_index {start_index} ≥ total steps {len(full_steps)}"}
+    steps_to_run = full_steps[start_index:]
+    if start_index > 0:
+        # Forcing fresh_page=False — the WHOLE POINT of replay-from-here
+        # is to preserve the post-failure browser state. Override any
+        # accidental fresh_page=True from the caller.
+        fresh_page = False
+
     async with sess.lock:
         # Optionally open a fresh page for an honest end-to-end test.
         # We DO NOT close the recorder's existing page — the user is
@@ -1191,7 +1218,7 @@ async def live_test(
             res = await _execute_automation_steps(
                 page=page,
                 row=row,
-                steps=list(sess.steps),
+                steps=steps_to_run,
                 skip_captcha=True,
                 self_heal=False,  # IMPORTANT: no AI healing during test — user wants to see RAW failures
                 collect_timings=True,
@@ -1215,7 +1242,28 @@ async def live_test(
 
     # ── Layer the static-analysis diagnostic pass on top of timings ──
     step_results = res.get("step_results") or []
+
+    # 2026-01: when start_index > 0 ("Replay from here"), the runtime
+    # indices in step_results are 0..N relative to the sliced steps —
+    # re-map them to the ORIGINAL recording's indices so the UI shows
+    # the right rows highlighted in red/green.
+    if start_index > 0:
+        for sr_item in step_results:
+            if isinstance(sr_item, dict) and "idx" in sr_item:
+                try:
+                    sr_item["idx"] = int(sr_item["idx"]) + start_index
+                except (TypeError, ValueError):
+                    pass
+
     diagnostics = analyse_steps(sess.steps, step_results)
+
+    # Same re-map for failed_at_idx
+    failed_at = res.get("failed_at_idx")
+    if failed_at is not None and start_index > 0:
+        try:
+            failed_at = int(failed_at) + start_index
+        except (TypeError, ValueError):
+            pass
 
     return {
         "ok": res.get("status") == "ok",
@@ -1226,9 +1274,10 @@ async def live_test(
         "step_results": step_results,
         "diagnostics": diagnostics,
         "final_url": final_url,
-        "failed_at_idx": res.get("failed_at_idx"),
+        "failed_at_idx": failed_at,
         "total_steps": len(sess.steps),
         "fresh_page": bool(fresh_page),
+        "start_index": start_index,
     }
 
 

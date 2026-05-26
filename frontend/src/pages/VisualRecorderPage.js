@@ -41,6 +41,7 @@ import {
   Pencil,
   Brain,
   Trash,
+  FastForward,
 } from "lucide-react";
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
@@ -1361,25 +1362,33 @@ export default function VisualRecorderPage() {
   // browser context) and shows per-step timing + pass/fail + a Smart
   // Replay Diagnostics summary. User can iterate the recording until
   // every step passes before finalising the JSON.
-  const runLiveTest = async () => {
+  const runLiveTest = async (opts = {}) => {
     if (!sessionId) return;
     if (!steps || steps.length === 0) {
       toast.error("Record at least one step first.");
       return;
     }
+    // 2026-01: "Replay from here" — `opts.startIndex` skips the first
+    // N steps and forces fresh_page=false so the browser stays on its
+    // current state (post-previous-failure page).
+    const startIndex = Math.max(0, Number(opts.startIndex || 0));
+    const freshPage = startIndex > 0 ? false : true;
     setLiveTesting(true);
     setLiveTestResult(null);
     try {
       const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/live-test`, {
         method: "POST",
         headers: { ...authH(), "Content-Type": "application/json" },
-        body: JSON.stringify({ fresh_page: true }),
+        body: JSON.stringify({ fresh_page: freshPage, start_index: startIndex }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
       setLiveTestResult(d);
       if (d.ok) {
-        toast.success(`Live test PASSED — ${d.executed_steps}/${d.total_steps} steps in ${(d.total_ms / 1000).toFixed(1)}s`);
+        const range = startIndex > 0
+          ? ` (resumed from step #${startIndex + 1})`
+          : "";
+        toast.success(`Live test PASSED — ${d.executed_steps}/${d.total_steps} steps in ${(d.total_ms / 1000).toFixed(1)}s${range}`);
       } else {
         toast.error(
           d.error
@@ -2826,9 +2835,27 @@ export default function VisualRecorderPage() {
                                   <Pencil className="w-3 h-3" /> Edit step #{fix.edit_idx + 1}
                                 </button>
                               )}
+                              {/* "Replay from here" — picks up replay
+                                  on the CURRENT page state (no fresh
+                                  page) starting at the failed step.
+                                  Saves the user from re-running 1-2
+                                  min of preceding steps. Available
+                                  whenever a specific step index
+                                  failed. */}
+                              {typeof failedIdx === "number" && failedIdx > 0 && (
+                                <button
+                                  onClick={() => runLiveTest({ startIndex: failedIdx })}
+                                  disabled={liveTesting}
+                                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-fuchsia-700 hover:bg-fuchsia-600 text-white text-[11px] font-medium disabled:opacity-40"
+                                  data-testid="vr-fix-resume-btn"
+                                  title={`Re-run from step #${failedIdx + 1} only — keeps the browser on its current state. ~5-10× faster than a full re-run.`}
+                                >
+                                  <FastForward className="w-3 h-3" /> Replay from step #{failedIdx + 1}
+                                </button>
+                              )}
                               {fix.action === "rerun" && (
                                 <button
-                                  onClick={runLiveTest}
+                                  onClick={() => runLiveTest()}
                                   disabled={liveTesting}
                                   className="inline-flex items-center gap-1 px-2 py-1 rounded bg-blue-700 hover:bg-blue-600 text-white text-[11px] font-medium disabled:opacity-40"
                                   data-testid="vr-fix-rerun-btn"
