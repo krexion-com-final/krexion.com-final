@@ -7596,35 +7596,49 @@ async def _execute_automation_steps(
                 elif action == "fill":
                     # 2026-01 Anti-detect: humanise the fill (see notes
                     # at the second fill handler ~4675 for the rationale).
-                    try:
-                        from form_filler import _human_type_field as _htf, _human_tab_or_pause as _htp
-                        el_h = await page.query_selector(selector)
-                        if el_h is not None:
-                            ok_h = await _htf(page, el_h, str(value))
-                            if ok_h:
-                                await _htp(page)
+                    # NEW (2026-01) — per-step opt-out: if user set
+                    # `humanize: false` via the Edit-step UI (Visual
+                    # Recorder), skip slow per-char typing and use
+                    # page.fill() directly. Useful for live-test
+                    # debugging or internal forms where stealth doesn't
+                    # matter. Defaults to True (humanised) so existing
+                    # recorded steps keep their anti-detect behaviour.
+                    if step.get("humanize") is False:
+                        await page.fill(selector, str(value), timeout=timeout)
+                    else:
+                        try:
+                            from form_filler import _human_type_field as _htf, _human_tab_or_pause as _htp
+                            el_h = await page.query_selector(selector)
+                            if el_h is not None:
+                                ok_h = await _htf(page, el_h, str(value))
+                                if ok_h:
+                                    await _htp(page)
+                                else:
+                                    await page.fill(selector, str(value), timeout=timeout)
                             else:
                                 await page.fill(selector, str(value), timeout=timeout)
-                        else:
+                        except Exception:
                             await page.fill(selector, str(value), timeout=timeout)
-                    except Exception:
-                        await page.fill(selector, str(value), timeout=timeout)
                 elif action == "type":
                     # Slower per-char typing (more human) — now with
                     # variable delay + thinking pauses via the helper.
-                    try:
-                        from form_filler import _human_type_field as _htf, _human_tab_or_pause as _htp
-                        el_h = await page.query_selector(selector)
-                        if el_h is not None:
-                            ok_h = await _htf(page, el_h, str(value))
-                            if ok_h:
-                                await _htp(page)
+                    # Same per-step humanize opt-out as `fill` above.
+                    if step.get("humanize") is False:
+                        await page.type(selector, str(value), delay=int(step.get("delay") or 50), timeout=timeout)
+                    else:
+                        try:
+                            from form_filler import _human_type_field as _htf, _human_tab_or_pause as _htp
+                            el_h = await page.query_selector(selector)
+                            if el_h is not None:
+                                ok_h = await _htf(page, el_h, str(value))
+                                if ok_h:
+                                    await _htp(page)
+                                else:
+                                    await page.type(selector, str(value), delay=int(step.get("delay") or 50), timeout=timeout)
                             else:
                                 await page.type(selector, str(value), delay=int(step.get("delay") or 50), timeout=timeout)
-                        else:
+                        except Exception:
                             await page.type(selector, str(value), delay=int(step.get("delay") or 50), timeout=timeout)
-                    except Exception:
-                        await page.type(selector, str(value), delay=int(step.get("delay") or 50), timeout=timeout)
                 elif action == "select":
                     # 2026-05: robust select with match-strategy + selector
                     # fallbacks (see _smart_select_with_fallback docstring).
@@ -8170,36 +8184,46 @@ async def _dispatch_single_action(page: Page, action: str, selector: str,
         # used Playwright's .fill(). Fall back to .fill() only if the
         # element can't be queried (e.g. selector refers to a hidden
         # form sync target).
-        try:
-            from form_filler import _human_type_field as _htf, _human_tab_or_pause as _htp
-            el_h = await page.query_selector(selector)
-            if el_h is not None:
-                ok_h = await _htf(page, el_h, str(value))
-                if ok_h:
-                    await _htp(page)
+        # NEW (2026-01) — per-step opt-out: `humanize: false` skips
+        # human-typing for this step. See parallel block in
+        # `_execute_automation_steps` for full rationale.
+        if step.get("humanize") is False:
+            await page.fill(selector, str(value), timeout=timeout)
+        else:
+            try:
+                from form_filler import _human_type_field as _htf, _human_tab_or_pause as _htp
+                el_h = await page.query_selector(selector)
+                if el_h is not None:
+                    ok_h = await _htf(page, el_h, str(value))
+                    if ok_h:
+                        await _htp(page)
+                    else:
+                        await page.fill(selector, str(value), timeout=timeout)
                 else:
                     await page.fill(selector, str(value), timeout=timeout)
-            else:
+            except Exception:
                 await page.fill(selector, str(value), timeout=timeout)
-        except Exception:
-            await page.fill(selector, str(value), timeout=timeout)
     elif action == "type":
         # 2026-01 Anti-detect: humanise per-char typing — variable
         # delay + occasional pause replaces the flat delay=50 which
         # detectors histogram as a bot signature.
-        try:
-            from form_filler import _human_type_field as _htf, _human_tab_or_pause as _htp
-            el_h = await page.query_selector(selector)
-            if el_h is not None:
-                ok_h = await _htf(page, el_h, str(value))
-                if ok_h:
-                    await _htp(page)
+        # Same per-step humanize opt-out as `fill`.
+        if step.get("humanize") is False:
+            await page.type(selector, str(value), delay=int(step.get("delay") or 50), timeout=timeout)
+        else:
+            try:
+                from form_filler import _human_type_field as _htf, _human_tab_or_pause as _htp
+                el_h = await page.query_selector(selector)
+                if el_h is not None:
+                    ok_h = await _htf(page, el_h, str(value))
+                    if ok_h:
+                        await _htp(page)
+                    else:
+                        await page.type(selector, str(value), delay=int(step.get("delay") or 50), timeout=timeout)
                 else:
                     await page.type(selector, str(value), delay=int(step.get("delay") or 50), timeout=timeout)
-            else:
+            except Exception:
                 await page.type(selector, str(value), delay=int(step.get("delay") or 50), timeout=timeout)
-        except Exception:
-            await page.type(selector, str(value), delay=int(step.get("delay") or 50), timeout=timeout)
     elif action == "select":
         # 2026-05: routed through _smart_select_with_fallback so this
         # path benefits from selector fallbacks too (e.g. #birth_month

@@ -2034,6 +2034,68 @@ def rename_step(sess: RecorderSession, index: int, name: str) -> Dict[str, Any]:
     return {"renamed": True, "name": sess.steps[index].get("name")}
 
 
+# Fields that the UI is allowed to patch on an existing recorded step.
+# We deliberately do NOT allow changing `action` (that would break replay
+# semantics — user should delete + record a new step instead). The
+# `humanize` flag (new 2026-01) lets the user opt OUT of slow per-char
+# human typing for individual fill/type steps when speed matters more
+# than stealth (e.g. live-test debugging, internal forms).
+_EDITABLE_STEP_FIELDS = {
+    "selector", "value", "timeout", "key", "ms",
+    "state", "delay", "match_by", "humanize", "name",
+}
+
+
+def update_step(sess: RecorderSession, index: int, patch: Dict[str, Any]) -> Dict[str, Any]:
+    """Update one or more whitelisted fields on an existing step.
+    Used by the new "Edit step" UI modal in the Visual Recorder when a
+    live-test reveals a wrong selector / too-low timeout / etc. Does NOT
+    re-execute the step against the live browser — the new values take
+    effect on the NEXT Live Test or RUT run.
+
+    Whitelisted fields: see `_EDITABLE_STEP_FIELDS`.
+    `action` is intentionally read-only (changing it would break replay).
+    """
+    sess.touch()
+    if not (0 <= index < len(sess.steps)):
+        return {"updated": False, "reason": "index out of range"}
+    if not isinstance(patch, dict):
+        return {"updated": False, "reason": "patch must be a dict"}
+
+    step = sess.steps[index]
+    applied: Dict[str, Any] = {}
+    for k, v in patch.items():
+        if k not in _EDITABLE_STEP_FIELDS:
+            continue
+        # Normalise empty strings to None for optional text fields so the
+        # downstream replay doesn't see "" and try to act on it.
+        if isinstance(v, str):
+            v_clean = v.strip()
+            if k in ("value", "name", "match_by", "state"):
+                step[k] = v_clean or None
+            elif k in ("selector", "key"):
+                # Selector / key are required-ish — keep as empty string
+                # if user explicitly cleared (caller's responsibility to
+                # validate before saving in the UI).
+                step[k] = v_clean
+            else:
+                step[k] = v_clean
+            applied[k] = step[k]
+        elif k in ("timeout", "ms", "delay") and v is not None:
+            try:
+                step[k] = max(0, int(v))
+                applied[k] = step[k]
+            except (TypeError, ValueError):
+                continue
+        elif k == "humanize":
+            step[k] = bool(v)
+            applied[k] = step[k]
+        else:
+            step[k] = v
+            applied[k] = v
+    return {"updated": True, "applied": applied, "step": step}
+
+
 async def press_key(sess: RecorderSession, key: str) -> Dict[str, Any]:
     """Send a single keyboard key press to the page (Enter, Tab, Escape,
     Backspace, ArrowLeft, ArrowRight, ArrowUp, ArrowDown, PageDown, etc.).

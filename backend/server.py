@@ -14684,6 +14684,22 @@ async def vr_rename_step(session_id: str, index: int, req: _VRRenameReq, user: d
     return vr.rename_step(sess, index, req.name or "")
 
 
+# ── Edit step — patch whitelisted fields (selector/value/timeout/etc.) ──
+# Added 2026-01 to let the user fix wrong selectors / bump timeouts on
+# steps that fail during Live Test, without having to delete + re-record
+# the whole sequence. See `update_step` in visual_recorder.py for the
+# allowed-field whitelist (action is intentionally NOT editable).
+@api_router.patch("/visual-recorder/{session_id}/step/{index}")
+async def vr_update_step(session_id: str, index: int, patch: Dict[str, Any] = Body(...), user: dict = Depends(get_current_user)):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return vr.update_step(sess, index, patch or {})
+
+
 # ── New action endpoints (press-key, hover, wait-for-selector) ───────
 class _VRKeyReq(BaseModel):
     key: str

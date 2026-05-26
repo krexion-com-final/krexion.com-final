@@ -38,6 +38,7 @@ import {
   XCircle,
   Lightbulb,
   Timer,
+  Pencil,
 } from "lucide-react";
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
@@ -119,6 +120,10 @@ export default function VisualRecorderPage() {
   const [shotErrorCount, setShotErrorCount] = useState(0);
   const [viewport, setViewport] = useState({ width: 412, height: 914 });
   const [steps, setSteps] = useState([]);
+  // Edit-step modal state (2026-01) — null when closed; otherwise
+  // {index, draft} where `draft` is a mutable copy of the step the
+  // user is editing. See `openEditStep` / `saveEditStep` below.
+  const [editingStep, setEditingStep] = useState(null);
   const [pageMeta, setPageMeta] = useState({ url: "", title: "" });
   const [tool, setTool] = useState("default");
   const [pendingFormFill, setPendingFormFill] = useState(null); // {selector, header_name?}
@@ -904,6 +909,85 @@ export default function VisualRecorderPage() {
       });
       refreshState();
     } catch {}
+  };
+
+  // ── Edit step (2026-01) ──────────────────────────────────────────
+  // Opens the Edit modal pre-filled with the current step's editable
+  // fields (selector / value / timeout / etc.). Lets the user fix a
+  // wrong selector or bump a timeout after a Live Test failure
+  // (e.g. the #birth_month case from the screenshots), then PATCHes
+  // the change to the backend and refreshes the recorded-steps list.
+  const openEditStep = (idx) => {
+    if (idx < 0 || idx >= steps.length) return;
+    const s = steps[idx] || {};
+    setEditingStep({
+      index: idx,
+      draft: {
+        action: s.action || "",       // read-only display
+        selector: s.selector || "",
+        value: s.value != null ? String(s.value) : "",
+        timeout: s.timeout != null ? String(s.timeout) : "",
+        key: s.key || "",
+        ms: s.ms != null ? String(s.ms) : "",
+        state: s.state || "",
+        delay: s.delay != null ? String(s.delay) : "",
+        match_by: s.match_by || "",
+        humanize: s.humanize !== false,   // default true (existing behaviour)
+        name: s.name || "",
+      },
+    });
+  };
+
+  const cancelEditStep = () => setEditingStep(null);
+
+  const saveEditStep = async () => {
+    if (!editingStep || !sessionId) return;
+    const { index, draft } = editingStep;
+    // Build patch payload — only include fields relevant to this action
+    // so we don't write empty strings into steps that never had them.
+    const patch = {};
+    const action = (draft.action || "").toLowerCase();
+    if (draft.selector !== undefined) patch.selector = draft.selector;
+    if (draft.name !== undefined) patch.name = draft.name;
+    if (action === "fill" || action === "type" || action === "select") {
+      patch.value = draft.value;
+      patch.timeout = draft.timeout === "" ? 0 : Number(draft.timeout);
+      if (action !== "select") patch.humanize = !!draft.humanize;
+      if (action === "type" && draft.delay !== "") patch.delay = Number(draft.delay);
+      if (action === "select" && draft.match_by) patch.match_by = draft.match_by;
+    } else if (action === "wait_for_selector") {
+      patch.timeout = draft.timeout === "" ? 0 : Number(draft.timeout);
+      if (draft.state) patch.state = draft.state;
+    } else if (action === "wait") {
+      if (draft.ms !== "") patch.ms = Number(draft.ms);
+    } else if (action === "press") {
+      patch.key = draft.key;
+      if (draft.selector) patch.selector = draft.selector;
+    } else if (action === "click" || action === "hover" || action === "check" || action === "uncheck") {
+      patch.timeout = draft.timeout === "" ? 0 : Number(draft.timeout);
+    } else {
+      // Fallback — pass through whatever non-empty fields the user touched.
+      if (draft.value) patch.value = draft.value;
+      if (draft.timeout !== "") patch.timeout = Number(draft.timeout);
+    }
+
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/step/${index}`, {
+        method: "PATCH",
+        headers: authH(),
+        body: JSON.stringify(patch),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || d.updated === false) {
+        toast.error(d.detail || d.reason || "Edit failed");
+        return;
+      }
+      toast.success(`Step #${index + 1} updated`);
+      setEditingStep(null);
+      refreshState();
+    } catch (e) {
+      toast.error(e.message || "Edit failed");
+    }
   };
 
   const deleteStep = async (idx) => {
@@ -2019,6 +2103,14 @@ export default function VisualRecorderPage() {
                         data-testid={`vr-step-dup-${i}`}
                       >⎘</button>
                       <button
+                        onClick={() => openEditStep(i)}
+                        title="Edit step (selector, value, timeout, etc.)"
+                        className="p-0.5 text-zinc-600 hover:text-amber-400"
+                        data-testid={`vr-step-edit-${i}`}
+                      >
+                        <Pencil className="w-3 h-3" />
+                      </button>
+                      <button
                         onClick={() => deleteStep(i)}
                         title="Delete"
                         className="p-0.5 text-zinc-600 hover:text-rose-400"
@@ -2432,6 +2524,298 @@ export default function VisualRecorderPage() {
           </div>
         )}
       </div>
+
+      {/* ── Edit Step Modal (2026-01) ─────────────────────────────────
+          Opened by the per-step pencil button. Lets the user fix a
+          wrong selector / bump a timeout / change a value or key after
+          a Live Test failure, without deleting + re-recording.
+          `action` is shown read-only — changing it would break replay
+          semantics (delete + re-record instead). ────────────────── */}
+      {editingStep && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+          onClick={cancelEditStep}
+          data-testid="vr-edit-modal-backdrop"
+        >
+          <div
+            className="w-full max-w-lg bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+            data-testid="vr-edit-modal"
+          >
+            <div className="flex items-center justify-between p-4 border-b border-zinc-800">
+              <div className="flex items-center gap-2">
+                <Pencil className="w-4 h-4 text-amber-400" />
+                <h3 className="text-sm font-semibold text-zinc-100">
+                  Edit Step #{editingStep.index + 1}
+                </h3>
+                <span className="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-400 text-[10px] font-mono uppercase">
+                  {editingStep.draft.action || "step"}
+                </span>
+              </div>
+              <button
+                onClick={cancelEditStep}
+                className="p-1 text-zinc-500 hover:text-zinc-200"
+                data-testid="vr-edit-modal-close"
+              >
+                <XCircle className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3 max-h-[70vh] overflow-y-auto">
+              {/* Name (label) */}
+              <div>
+                <label className="block text-[11px] text-zinc-400 mb-1">
+                  Step name (label only)
+                </label>
+                <input
+                  type="text"
+                  value={editingStep.draft.name}
+                  onChange={(e) =>
+                    setEditingStep({
+                      ...editingStep,
+                      draft: { ...editingStep.draft, name: e.target.value },
+                    })
+                  }
+                  placeholder={editingStep.draft.action}
+                  className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-amber-500 text-zinc-200 text-xs outline-none"
+                  data-testid="vr-edit-name"
+                />
+              </div>
+
+              {/* Selector — shown for all element-targeted actions */}
+              {!["wait", "goto"].includes(
+                (editingStep.draft.action || "").toLowerCase()
+              ) && (
+                <div>
+                  <label className="block text-[11px] text-zinc-400 mb-1">
+                    Selector{" "}
+                    <span className="text-zinc-600">
+                      (CSS — e.g. <code>#birth_month</code>,{" "}
+                      <code>[name="month"]</code>)
+                    </span>
+                  </label>
+                  <input
+                    type="text"
+                    value={editingStep.draft.selector}
+                    onChange={(e) =>
+                      setEditingStep({
+                        ...editingStep,
+                        draft: { ...editingStep.draft, selector: e.target.value },
+                      })
+                    }
+                    className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-amber-500 text-zinc-200 text-xs font-mono outline-none"
+                    data-testid="vr-edit-selector"
+                  />
+                </div>
+              )}
+
+              {/* Value — for fill / type / select / goto */}
+              {["fill", "type", "select", "goto"].includes(
+                (editingStep.draft.action || "").toLowerCase()
+              ) && (
+                <div>
+                  <label className="block text-[11px] text-zinc-400 mb-1">
+                    Value{" "}
+                    <span className="text-zinc-600">
+                      (supports <code>{"{{header}}"}</code> placeholders)
+                    </span>
+                  </label>
+                  <input
+                    type="text"
+                    value={editingStep.draft.value}
+                    onChange={(e) =>
+                      setEditingStep({
+                        ...editingStep,
+                        draft: { ...editingStep.draft, value: e.target.value },
+                      })
+                    }
+                    className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-amber-500 text-zinc-200 text-xs font-mono outline-none"
+                    data-testid="vr-edit-value"
+                  />
+                </div>
+              )}
+
+              {/* Key — for press action */}
+              {(editingStep.draft.action || "").toLowerCase() === "press" && (
+                <div>
+                  <label className="block text-[11px] text-zinc-400 mb-1">
+                    Key{" "}
+                    <span className="text-zinc-600">
+                      (Enter, Tab, Escape, ArrowDown, etc.)
+                    </span>
+                  </label>
+                  <input
+                    type="text"
+                    value={editingStep.draft.key}
+                    onChange={(e) =>
+                      setEditingStep({
+                        ...editingStep,
+                        draft: { ...editingStep.draft, key: e.target.value },
+                      })
+                    }
+                    className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-amber-500 text-zinc-200 text-xs font-mono outline-none"
+                    data-testid="vr-edit-key"
+                  />
+                </div>
+              )}
+
+              {/* Timeout — shown for everything except plain "wait" */}
+              {(editingStep.draft.action || "").toLowerCase() !== "wait" && (
+                <div>
+                  <label className="block text-[11px] text-zinc-400 mb-1">
+                    Timeout{" "}
+                    <span className="text-zinc-600">
+                      (ms — e.g. 8000. Bump this if the element appears slowly.)
+                    </span>
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="500"
+                    value={editingStep.draft.timeout}
+                    onChange={(e) =>
+                      setEditingStep({
+                        ...editingStep,
+                        draft: { ...editingStep.draft, timeout: e.target.value },
+                      })
+                    }
+                    className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-amber-500 text-zinc-200 text-xs outline-none"
+                    data-testid="vr-edit-timeout"
+                  />
+                </div>
+              )}
+
+              {/* ms — for "wait" action */}
+              {(editingStep.draft.action || "").toLowerCase() === "wait" && (
+                <div>
+                  <label className="block text-[11px] text-zinc-400 mb-1">
+                    Wait duration (ms)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="100"
+                    value={editingStep.draft.ms}
+                    onChange={(e) =>
+                      setEditingStep({
+                        ...editingStep,
+                        draft: { ...editingStep.draft, ms: e.target.value },
+                      })
+                    }
+                    className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-amber-500 text-zinc-200 text-xs outline-none"
+                    data-testid="vr-edit-ms"
+                  />
+                </div>
+              )}
+
+              {/* State — for wait_for_selector */}
+              {(editingStep.draft.action || "").toLowerCase() ===
+                "wait_for_selector" && (
+                <div>
+                  <label className="block text-[11px] text-zinc-400 mb-1">
+                    State
+                  </label>
+                  <select
+                    value={editingStep.draft.state || "visible"}
+                    onChange={(e) =>
+                      setEditingStep({
+                        ...editingStep,
+                        draft: { ...editingStep.draft, state: e.target.value },
+                      })
+                    }
+                    className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-amber-500 text-zinc-200 text-xs outline-none"
+                    data-testid="vr-edit-state"
+                  >
+                    <option value="visible">visible (default)</option>
+                    <option value="attached">attached (DOM only, may be hidden)</option>
+                    <option value="hidden">hidden</option>
+                    <option value="detached">detached</option>
+                  </select>
+                </div>
+              )}
+
+              {/* match_by — for select action */}
+              {(editingStep.draft.action || "").toLowerCase() === "select" && (
+                <div>
+                  <label className="block text-[11px] text-zinc-400 mb-1">
+                    Match by
+                  </label>
+                  <select
+                    value={editingStep.draft.match_by || "label"}
+                    onChange={(e) =>
+                      setEditingStep({
+                        ...editingStep,
+                        draft: { ...editingStep.draft, match_by: e.target.value },
+                      })
+                    }
+                    className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-amber-500 text-zinc-200 text-xs outline-none"
+                    data-testid="vr-edit-match-by"
+                  >
+                    <option value="label">label (visible text)</option>
+                    <option value="value">value (HTML value attr)</option>
+                    <option value="index">index (0-based)</option>
+                  </select>
+                </div>
+              )}
+
+              {/* Humanize toggle — for fill / type only */}
+              {["fill", "type"].includes(
+                (editingStep.draft.action || "").toLowerCase()
+              ) && (
+                <div className="p-2.5 rounded bg-zinc-900/60 border border-zinc-800">
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={editingStep.draft.humanize}
+                      onChange={(e) =>
+                        setEditingStep({
+                          ...editingStep,
+                          draft: {
+                            ...editingStep.draft,
+                            humanize: e.target.checked,
+                          },
+                        })
+                      }
+                      className="mt-0.5 w-3.5 h-3.5 accent-emerald-500"
+                      data-testid="vr-edit-humanize"
+                    />
+                    <div className="flex-1">
+                      <div className="text-xs text-zinc-200 font-medium">
+                        Human-like typing
+                        <span className="ml-1 text-emerald-400 text-[10px]">
+                          (anti-detect — default)
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-zinc-500 mt-0.5">
+                        Types character-by-character with realistic
+                        delays (~50-180ms each + thinking pauses).
+                        Uncheck for fast <code>page.fill()</code> — useful
+                        for debugging or internal forms where speed
+                        matters more than stealth.
+                      </div>
+                    </div>
+                  </label>
+                </div>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-2 p-4 border-t border-zinc-800">
+              <button
+                onClick={cancelEditStep}
+                className="px-4 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs"
+                data-testid="vr-edit-cancel"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveEditStep}
+                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded bg-amber-600 hover:bg-amber-500 text-white text-xs font-medium"
+                data-testid="vr-edit-save"
+              >
+                <Save className="w-3.5 h-3.5" /> Save Changes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
