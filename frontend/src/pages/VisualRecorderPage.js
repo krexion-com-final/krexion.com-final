@@ -1029,6 +1029,105 @@ export default function VisualRecorderPage() {
     setHoverPreview(null);
   };
 
+  // ── Smart Error → Fix Suggester (2026-01) ────────────────────────
+  // Parses common Playwright / replay errors and returns a friendly
+  // explanation + a recommended next action the user can take from the
+  // Live Test results panel. Returns null when no rule matches (raw
+  // error is then shown verbatim).
+  const getSuggestedFix = (errorMsg, action, failedIdx) => {
+    if (!errorMsg) return null;
+    const e = String(errorMsg).toLowerCase();
+
+    // 1. Execution context destroyed (navigation during evaluate / click)
+    if (e.includes("execution context") || e.includes("context was destroyed")) {
+      return {
+        cause: "JavaScript ran a click that navigated the page mid-evaluate. The replay engine has been updated to swallow this safely — most likely just needs a re-run.",
+        fix: "Click Re-run Live Test. If it persists, the JS may be navigating before doing all its work — split into two steps (one to click, one to wait_for_navigation).",
+        action: "rerun",
+      };
+    }
+
+    // 2. Selector exhausted (smart_wait gave up)
+    if (e.includes("exhausted") && e.includes("selector variants")) {
+      return {
+        cause: "The recorded selector — and all auto-derived fallbacks — no longer match anything on the page. The site likely renamed this form field.",
+        fix: typeof failedIdx === "number"
+          ? `Open the Edit modal (✏️) on step #${failedIdx + 1}, click "Find similar" — Krexion will scan the live page and suggest the new selector. Saved as a permanent alias for future runs.`
+          : "Edit the failing step and use Find similar to pick the correct selector. Save = permanent alias.",
+        action: "edit",
+        edit_idx: failedIdx,
+      };
+    }
+
+    // 3. Generic timeout on wait_for_selector
+    if (e.includes("timeout") && (e.includes("wait_for_selector") || e.includes("waiting for"))) {
+      return {
+        cause: "Element didn't appear within the step's timeout — page may be slow, or the selector is wrong, or the element is hidden behind a custom UI.",
+        fix: "Edit the step: (a) increase timeout (e.g., 8000 → 20000), (b) change State to 'attached' if the element is hidden, OR (c) Find similar if the selector is stale.",
+        action: "edit",
+        edit_idx: failedIdx,
+      };
+    }
+
+    // 4. Element not visible / not stable
+    if (e.includes("not visible") || e.includes("element is not stable") || e.includes("element is outside of the viewport")) {
+      return {
+        cause: "Element exists in the DOM but is hidden (display:none) or being animated/transformed when we tried to act on it.",
+        fix: "In Edit modal, change State to 'attached' (DOM-only). For check/select on hidden inputs, this usually fixes it instantly.",
+        action: "edit",
+        edit_idx: failedIdx,
+      };
+    }
+
+    // 5. Net errors / navigation timeout
+    if (e.includes("net::") || e.includes("err_") || e.includes("navigation timeout") || e.includes("page.goto")) {
+      return {
+        cause: "Page failed to load — proxy issue, DNS failure, target site down, or strict CAPTCHA before content.",
+        fix: "Verify the URL works in a normal browser. If using a proxy, try without it first. Try a different proxy region. Increase the goto timeout if the page is just slow.",
+        action: "rerun",
+      };
+    }
+
+    // 6. Captcha
+    if (e.includes("captcha")) {
+      return {
+        cause: "The page is showing a CAPTCHA challenge before our automation could proceed.",
+        fix: "Some offers show CAPTCHA only on specific proxies/UAs. Switch proxy region or User-Agent. Add a 'wait' step to give the page time to settle. Consider AdsPower profiles for fingerprint-resistant runs.",
+        action: "rerun",
+      };
+    }
+
+    // 7. Target / browser closed
+    if (e.includes("target closed") || e.includes("browser has been closed") || e.includes("connection closed")) {
+      return {
+        cause: "Browser session ended unexpectedly — usually a memory pressure event or the recorder session expired.",
+        fix: "Discard this session and start a fresh recording. Steps already saved are NOT lost — they remain in your sample data.",
+        action: "restart",
+      };
+    }
+
+    // 8. Frame detached
+    if (e.includes("frame was detached") || e.includes("frame got detached")) {
+      return {
+        cause: "An iframe holding the element was removed mid-action. Common on SPA-style pages that swap content.",
+        fix: "Add a small 'wait' (1000ms) step BEFORE the failing step so the frame has time to mount stably.",
+        action: "manual_add",
+      };
+    }
+
+    // 9. Generic fill / type fail
+    if (action === "fill" || action === "type") {
+      return {
+        cause: "Could not type into the input. Either the selector is wrong, the field is read-only/disabled, or a different element is intercepting focus.",
+        fix: "Edit step → Find similar (may have renamed) OR try uncheck 'Human-like typing' (some pages reject character-by-character input).",
+        action: "edit",
+        edit_idx: failedIdx,
+      };
+    }
+
+    return null;
+  };
+
   // ── Manual Add Step (2026-01) ────────────────────────────────────
   // Opens a creation modal so the user can author a step by hand
   // (action + selector + value + timeout). Accepts both CSS and XPath.
@@ -2411,14 +2510,17 @@ export default function VisualRecorderPage() {
                   disabled={steps.length === 0 || liveTesting || busy}
                   data-testid="vr-live-test-btn"
                   className="w-full inline-flex items-center justify-center gap-1.5 py-2 rounded bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white text-sm font-medium transition-colors"
-                  title="Run all recorded steps end-to-end on a fresh page (using your sample row) and see per-step timing + pass/fail before you finalize."
+                  title="Opens a FRESH page and runs all recorded steps end-to-end from the start — exactly like a real RUT visit. See per-step pass/fail + suggested fixes for any failures before you Finalize."
                 >
                   {liveTesting ? (
-                    <><Loader2 className="w-4 h-4 animate-spin" /> Running live test…</>
+                    <><Loader2 className="w-4 h-4 animate-spin" /> Running from start…</>
                   ) : (
-                    <><Zap className="w-4 h-4" /> Run Live Test ({steps.length} step{steps.length === 1 ? "" : "s"})</>
+                    <><Zap className="w-4 h-4" /> Run Live Test from Start ({steps.length} step{steps.length === 1 ? "" : "s"})</>
                   )}
                 </button>
+                <div className="text-[10px] text-zinc-500 text-center -mt-1">
+                  Opens a fresh browser tab and replays your steps from step 0
+                </div>
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     onClick={stopAndDiscard}
@@ -2518,12 +2620,94 @@ export default function VisualRecorderPage() {
                     </div>
                   )}
 
-                  {liveTestResult.error && (
-                    <div className="mx-3 mb-2 p-2 rounded bg-rose-900/40 border border-rose-700/40 text-xs text-rose-100" data-testid="vr-live-test-error">
-                      <AlertCircle className="inline w-3.5 h-3.5 mr-1" />
-                      {liveTestResult.error}
-                    </div>
-                  )}
+                  {liveTestResult.error && (() => {
+                    // 2026-01: Smart fix suggester — parses the error
+                    // and surfaces a one-liner cause + recommended
+                    // action with quick-jump buttons.
+                    const failedIdx = liveTestResult.failed_at_idx;
+                    const failedStep = (typeof failedIdx === "number" && steps[failedIdx]) || null;
+                    const failedAction = failedStep?.action || null;
+                    const fix = getSuggestedFix(liveTestResult.error, failedAction, failedIdx);
+                    return (
+                      <div className="mx-3 mb-2 space-y-1.5" data-testid="vr-live-test-error">
+                        {/* Raw error */}
+                        <div className="p-2 rounded bg-rose-900/40 border border-rose-700/40 text-xs text-rose-100">
+                          <AlertCircle className="inline w-3.5 h-3.5 mr-1" />
+                          {liveTestResult.error}
+                        </div>
+                        {/* Smart suggestion */}
+                        {fix && (
+                          <div
+                            className="p-2.5 rounded bg-sky-950/30 border border-sky-700/30"
+                            data-testid="vr-fix-suggestion"
+                          >
+                            <div className="flex items-start gap-2 mb-1.5">
+                              <Lightbulb className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                              <div className="flex-1">
+                                <div className="text-[11px] font-semibold text-amber-200 mb-0.5">
+                                  WHY THIS HAPPENED
+                                </div>
+                                <div className="text-xs text-zinc-200 leading-relaxed">
+                                  {fix.cause}
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex items-start gap-2 mb-2">
+                              <Sparkles className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                              <div className="flex-1">
+                                <div className="text-[11px] font-semibold text-emerald-300 mb-0.5">
+                                  SUGGESTED FIX
+                                </div>
+                                <div className="text-xs text-zinc-200 leading-relaxed">
+                                  {fix.fix}
+                                </div>
+                              </div>
+                            </div>
+                            {/* Quick-jump action buttons */}
+                            <div className="flex items-center gap-1.5 flex-wrap mt-2">
+                              {fix.action === "edit" && typeof fix.edit_idx === "number" && (
+                                <button
+                                  onClick={() => openEditStep(fix.edit_idx)}
+                                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-700 hover:bg-amber-600 text-white text-[11px] font-medium"
+                                  data-testid="vr-fix-edit-btn"
+                                >
+                                  <Pencil className="w-3 h-3" /> Edit step #{fix.edit_idx + 1}
+                                </button>
+                              )}
+                              {fix.action === "rerun" && (
+                                <button
+                                  onClick={runLiveTest}
+                                  disabled={liveTesting}
+                                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-blue-700 hover:bg-blue-600 text-white text-[11px] font-medium disabled:opacity-40"
+                                  data-testid="vr-fix-rerun-btn"
+                                >
+                                  <Zap className="w-3 h-3" /> Re-run Live Test
+                                </button>
+                              )}
+                              {fix.action === "manual_add" && (
+                                <button
+                                  onClick={openManualAddStep}
+                                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-sky-700 hover:bg-sky-600 text-white text-[11px] font-medium"
+                                  data-testid="vr-fix-add-btn"
+                                >
+                                  <ListPlus className="w-3 h-3" /> Add a wait step
+                                </button>
+                              )}
+                              {fix.action === "restart" && (
+                                <button
+                                  onClick={stopAndDiscard}
+                                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-rose-700 hover:bg-rose-600 text-white text-[11px] font-medium"
+                                  data-testid="vr-fix-restart-btn"
+                                >
+                                  <RefreshCw className="w-3 h-3" /> Discard & restart
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {/* Per-step timing list */}
                   {Array.isArray(liveTestResult.step_results) && liveTestResult.step_results.length > 0 && (

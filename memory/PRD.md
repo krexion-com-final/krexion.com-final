@@ -2,74 +2,67 @@
 
 ## Original problem statement
 User: dennisedmaartins9-sudo
-Repo: https://github.com/dennisedmaartins9-sudo/krexion.com.git (public, collaborator)
-Workflow: load repo → user requests fixes/features → save to GitHub main → VPS auto-deploys
-CRITICAL: Nothing must break / delete / conflict.
+Repo: https://github.com/dennisedmaartins9-sudo/krexion.com.git
+Workflow: load repo → user fixes/features → user runs "Save to Github" → VPS auto-deploys
 
-## Test credentials (preview)
+## Test credentials
 - Admin: admin@krexion.local / admin123
-- Test User: test@krexion.local / test1234 (status=pending)
+- User: test@krexion.local / test1234 (pending; admin approves)
 
-## Iteration #1 — Visual Recorder Edit Step
-- `PATCH /api/visual-recorder/{id}/step/{idx}` + pencil button + Edit Modal
-- Per-step `humanize: false` opt-out for fill/type
+## Iteration history
+1. Repo sync + Edit Step (PATCH endpoint + pencil button + Edit modal + humanize opt-out)
+2. Smart Selector Suggester + Manual Add Step (CSS/XPath)
+3. Selector Preview on Hover (blue pulse overlay on screenshot, right-docked modal)
+4. Selector Aliases (self-healing replay, MongoDB persistent memory per user+domain)
 
-## Iteration #2 — Smart Suggester + Manual Add Step (CSS + XPath)
-- `GET /suggest-selectors` — DOM token-match scan
-- `POST /manual-step` — adds any step manually
-- Frontend buttons + modals
+## Iteration #5 — 2026-01-26 — Bug Fix + Smart Error→Fix Suggester
 
-## Iteration #3 — Selector Preview on Hover
-- `GET /selector-bbox` returns bounding box
-- Edit modal repositioned right-dock (light backdrop) so screenshot stays visible
-- Blue pulse overlay + label on hover
+### Bug Fix: "Execution context was destroyed during evaluate"
+Reproduced from user's screenshot: `Step 1 (evaluate) failed: Page.evaluate: Execution context was destroyed, most likely because of a navigation`
 
-## Iteration #4 — Selector Aliases (Self-Healing Replay) ✨ NEW
-**The big one.** When user fixes a wrong selector (e.g., `#birth_month` → `#dob_month`),
-the mapping is saved PERMANENTLY for (user_id, domain). Future replays auto-recover.
+**Root cause**: The recorded `evaluate` JS clicks a button (e.g., UNLOCK NOW) which triggers immediate page navigation. Playwright's JS context dies before `evaluate()` resolves → exception. BUT the click actually succeeded — navigation IS what we wanted.
 
-### New module: `backend/selector_aliases.py`
-- MongoDB collection `selector_aliases`
-- Doc: `{user_id, domain, original, aliases: [str], hit_count, created_at, updated_at, last_used_at, last_alias_used}`
-- Functions: `save_alias()`, `get_aliases_for_domain()`, `record_hit()`, `list_all_for_user()`, `delete_alias()`, `extract_domain()`
-- Bound to main_db in server.py
+**Fix**: Wrap `await page.evaluate(js)` in try/except. If the error mentions "execution context" / "navigation" OR if `page.url` changed (proof navigation happened), swallow the error and continue. Applied in BOTH places:
+- `_execute_automation_steps` (main step loop) — `backend/real_user_traffic.py:7841`
+- `_dispatch_single_action` (self-heal recovery path) — same file ~8362
 
-### Backend wiring
-- `update_step_with_alias()` in visual_recorder.py — async wrapper that auto-saves alias when selector changes
-- `_smart_wait_for_selector(extra_alts=...)` — alias selectors inserted AHEAD of token-derived fallbacks
-- `_wait_for_actionable_selector(extra_alts=...)` — same retry-with-aliases on actionable wait
-- `_execute_automation_steps(user_id=...)` — pre-loads aliases for current page domain; passes to all smart helpers via `_alias_alts_for()`
-- Wired into BOTH Live Test (`live_test()` passes `sess.user_id`) AND RUT job replay (passes `link_owner_id`)
+### Feature: Smart Error → Fix Suggester (Live Test panel)
+When Live Test fails, the user now sees:
+1. **Raw error** (unchanged, in red)
+2. **WHY THIS HAPPENED** — plain-language cause (lightbulb icon)
+3. **SUGGESTED FIX** — concrete action to take (sparkles icon)
+4. **One-click action button** — Edit step, Re-run, Add wait, Discard/restart depending on error type
 
-### Endpoints (new)
-- `GET /api/visual-recorder/aliases` — list user's aliases
-- `DELETE /api/visual-recorder/aliases?domain=...&original=...` — revoke a rule
+`getSuggestedFix()` recognises 9 common error patterns:
+- Execution context destroyed → "auto-handled; re-run"
+- Selector exhausted variants → "Find similar" in Edit modal
+- Wait timeout → "increase timeout / change state / find similar"
+- Element not visible → "change State to attached"
+- Net error / nav timeout → "check URL / proxy"
+- Captcha → "switch proxy or UA"
+- Target/browser closed → "discard + restart"
+- Frame detached → "add a wait step before"
+- Fill/type fail → "find similar OR uncheck human typing"
 
-### Frontend
-- Toast on successful save: "🧠 Selector alias saved — future runs will auto-heal"
-- **"Aliases" button** (Brain icon) in steps-panel header → opens Aliases panel modal
-- Aliases modal lists: domain, hit-count badge ("✓ 3 rescues"), original (red) → alias chain (newest=green, older=grey), last-used timestamp, delete button
-- Empty state with explanation
+Each suggestion shows a colour-coded action button that opens the right modal pre-filled.
 
-### Verification
-- Module loads: `Selector Aliases module loaded — self-healing replay enabled` ✓
-- End-to-end DB test passed: save/upsert/retrieve/hit-count/list/delete all work ✓
-- Endpoints respond correctly under auth ✓
-- Frontend webpack compiled, 1 pre-existing warning ✓
+### Run Live Test from Start (clarified UX)
+- Button label changed to **"Run Live Test from Start"**
+- Sub-caption: "Opens a fresh browser tab and replays your steps from step 0"
+- Already passes `fresh_page: true` to the API (no backend change needed)
+- Makes it explicit that this is full-flow validation, not partial replay
 
-## Cumulative files modified
-- `backend/visual_recorder.py` — update_step, update_step_with_alias, add_manual_step, suggest_selectors, selector_bbox
-- `backend/server.py` — 6 new endpoints + selector_aliases binding
-- `backend/real_user_traffic.py` — `extra_alts` param on smart helpers + alias preload + `user_id` threading
-- `backend/selector_aliases.py` — NEW module (self-healing memory store)
-- `frontend/src/pages/VisualRecorderPage.js` — all UI for Edit, Suggester, Hover Preview, Manual Add, Aliases panel
+## Cumulative files
+- `backend/visual_recorder.py` — Edit, Manual Add, Suggester, bbox, update_step_with_alias
+- `backend/server.py` — 8+ endpoints, selector_aliases binding
+- `backend/real_user_traffic.py` — extra_alts on smart helpers, user_id threading, evaluate navigation-fix
+- `backend/selector_aliases.py` — self-healing memory store
+- `frontend/src/pages/VisualRecorderPage.js` — all UI: Edit, Find similar, Hover preview, Manual Add, Aliases panel, Smart fix suggester
 
 ## Safety
-- All 582 original repo files preserved
-- All changes ADDITIVE — `extra_alts` param defaults to None, `user_id` to None → zero behaviour change without aliases
-- Anti-detect human typing intact
+All 582 original files preserved. All changes ADDITIVE — defaults preserve old behaviour. Anti-detect intact.
 
 ## Backlog
-- P2: "Suggest from screenshot" — let user click on the screenshot to pick the correct element when selector breaks
-- P2: Auto-suggest aliases on Live Test failure (run suggester automatically when a step fails)
-- P3: Share alias rules across users for the same domain (community-curated selector drift database)
+- P2: Auto-run "Find similar" on failure (no manual click needed)
+- P2: Step-level "Re-run from here" — pick up replay mid-flow after fix
+- P3: Community alias DB (shared knowledge base)

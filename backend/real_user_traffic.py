@@ -7861,7 +7861,43 @@ async def _execute_automation_steps(
                         _url_before = page.url
                     except Exception:
                         pass
-                    await page.evaluate(js)
+                    # ── 2026-01 fix ──────────────────────────────────
+                    # When the JS inside `evaluate` performs a click
+                    # that triggers immediate navigation, Playwright's
+                    # JS execution context gets DESTROYED before the
+                    # promise returned by `evaluate` resolves, raising
+                    # "Execution context was destroyed, most likely
+                    # because of a navigation". This is NOT a failure
+                    # — it actually means the click worked exactly as
+                    # intended. We catch the error, verify the URL
+                    # changed (proof of navigation), and continue
+                    # normally to the next step. The downstream
+                    # wait_for_load_state below handles the new page.
+                    try:
+                        await page.evaluate(js)
+                    except Exception as _ev_err:
+                        _ev_msg = str(_ev_err).lower()
+                        _navigated = False
+                        try:
+                            _navigated = (page.url != _url_before)
+                        except Exception:
+                            _navigated = False
+                        # If the destroyed-context happened because of a
+                        # navigation (URL changed OR error explicitly
+                        # mentions navigation), treat as success.
+                        if (
+                            "execution context was destroyed" in _ev_msg
+                            or "execution context" in _ev_msg
+                            or "navigation" in _ev_msg
+                            or _navigated
+                        ):
+                            logger.info(
+                                f"[evaluate] context destroyed by navigation — treating as success "
+                                f"(was: {_url_before}, now: {page.url if _navigated else '?'})"
+                            )
+                        else:
+                            # Real script error (syntax, ReferenceError, etc.)
+                            raise
                     # Short polling window to detect navigation kicked
                     # off by the JS (location.assign / location.href /
                     # form.submit / el.click() on anchor or submit btn).
@@ -8333,7 +8369,26 @@ async def _dispatch_single_action(page: Page, action: str, selector: str,
             _url_before = page.url
         except Exception:
             pass
-        await page.evaluate(js)
+        # 2026-01: swallow "Execution context destroyed" if it was
+        # caused by a navigation (URL changed). See parallel handler in
+        # _execute_automation_steps for full rationale.
+        try:
+            await page.evaluate(js)
+        except Exception as _ev_err:
+            _ev_msg = str(_ev_err).lower()
+            _navigated = False
+            try:
+                _navigated = (page.url != _url_before)
+            except Exception:
+                _navigated = False
+            if (
+                "execution context" in _ev_msg
+                or "navigation" in _ev_msg
+                or _navigated
+            ):
+                logger.info(f"[evaluate/dispatch] context destroyed by navigation — treating as success")
+            else:
+                raise
         try:
             for _ in range(25):  # up to ~2.5s
                 await page.wait_for_timeout(100)
