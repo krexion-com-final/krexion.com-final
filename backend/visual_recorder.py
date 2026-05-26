@@ -1195,6 +1195,7 @@ async def live_test(
                 skip_captcha=True,
                 self_heal=False,  # IMPORTANT: no AI healing during test — user wants to see RAW failures
                 collect_timings=True,
+                user_id=sess.user_id,   # enable self-healing aliases (2026-01)
             )
         except Exception as e:
             res = {"status": "failed", "error": f"Live test crashed: {e}", "executed_steps": 0, "step_results": []}
@@ -2055,6 +2056,10 @@ def update_step(sess: RecorderSession, index: int, patch: Dict[str, Any]) -> Dic
 
     Whitelisted fields: see `_EDITABLE_STEP_FIELDS`.
     `action` is intentionally read-only (changing it would break replay).
+
+    Returns include `alias_saved` flag (True iff a selector rename was
+    persisted to the global Selector Aliases store for self-healing
+    future replays).
     """
     sess.touch()
     if not (0 <= index < len(sess.steps)):
@@ -2063,6 +2068,7 @@ def update_step(sess: RecorderSession, index: int, patch: Dict[str, Any]) -> Dic
         return {"updated": False, "reason": "patch must be a dict"}
 
     step = sess.steps[index]
+    old_selector = step.get("selector") or ""
     applied: Dict[str, Any] = {}
     for k, v in patch.items():
         if k not in _EDITABLE_STEP_FIELDS:
@@ -2093,7 +2099,32 @@ def update_step(sess: RecorderSession, index: int, patch: Dict[str, Any]) -> Dic
         else:
             step[k] = v
             applied[k] = v
-    return {"updated": True, "applied": applied, "step": step}
+    return {"updated": True, "applied": applied, "step": step, "_old_selector": old_selector}
+
+
+async def update_step_with_alias(sess: RecorderSession, index: int, patch: Dict[str, Any]) -> Dict[str, Any]:
+    """Async wrapper around `update_step` that ALSO persists a selector
+    alias when the user changed the selector — the cornerstone of
+    self-healing replay. Saves under (sess.user_id, sess.url domain,
+    old_selector → new_selector). Best-effort: if the aliases store is
+    unreachable, the edit still succeeds and we just skip the save."""
+    result = update_step(sess, index, patch)
+    if not result.get("updated"):
+        return result
+
+    old_sel = result.pop("_old_selector", "") or ""
+    new_sel = (result.get("applied") or {}).get("selector")
+    alias_saved = False
+    if new_sel and old_sel and new_sel.strip() != old_sel.strip():
+        try:
+            import selector_aliases as _sa
+            domain = _sa.extract_domain(sess.url or "")
+            if domain and sess.user_id:
+                alias_saved = await _sa.save_alias(sess.user_id, domain, old_sel, new_sel)
+        except Exception:
+            alias_saved = False
+    result["alias_saved"] = alias_saved
+    return result
 
 
 # Whitelisted action types for "manual add step" — these can be added

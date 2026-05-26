@@ -14697,7 +14697,7 @@ async def vr_update_step(session_id: str, index: int, patch: Dict[str, Any] = Bo
         sess = vr.get_session(session_id, user["id"])
     except KeyError:
         raise HTTPException(status_code=404, detail="Session not found")
-    return vr.update_step(sess, index, patch or {})
+    return await vr.update_step_with_alias(sess, index, patch or {})
 
 
 # ── Manual Add Step (2026-01) ─────────────────────────────────────
@@ -14758,6 +14758,38 @@ async def vr_selector_bbox(
         raise HTTPException(status_code=404, detail="Session not found")
     _vr_require_ready(sess)
     return await vr.selector_bbox(sess, selector)
+
+
+# ── Selector Aliases (Self-healing replay, 2026-01) ──────────────
+# Read-only listing + delete. Mappings are written automatically when
+# the user edits a step's selector — no manual create endpoint is
+# needed. Powers an optional settings UI where users can review the
+# self-healing rules their fixes have produced over time.
+@api_router.get("/visual-recorder/aliases")
+async def vr_list_aliases(user: dict = Depends(get_current_user)):
+    """List every selector alias mapping the current user has accumulated.
+    Sorted by domain then original selector."""
+    try:
+        import selector_aliases as _sa
+        items = await _sa.list_all_for_user(user["id"])
+        return {"aliases": items, "total": len(items)}
+    except Exception as _e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Aliases unavailable: {_e}")
+
+
+@api_router.delete("/visual-recorder/aliases")
+async def vr_delete_alias(
+    domain: str,
+    original: str,
+    user: dict = Depends(get_current_user),
+):
+    """Delete a single alias mapping by (domain, original_selector)."""
+    try:
+        import selector_aliases as _sa
+        ok = await _sa.delete_alias(user["id"], domain, original)
+        return {"deleted": ok}
+    except Exception as _e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Delete failed: {_e}")
 
 
 # ── New action endpoints (press-key, hover, wait-for-selector) ───────
@@ -15308,6 +15340,19 @@ try:
     logger.info("Releases module loaded — /api/admin/releases + /api/system/*")
 except Exception as _rel_err:  # noqa: BLE001
     logger.error(f"Releases module failed to load: {_rel_err}")
+
+
+# ─── Selector Aliases (Self-healing automation, 2026-01) ──────────────
+# Permanent memory of selector renames per (user, domain). When the
+# user fixes a wrong selector in the Visual Recorder Edit modal, the
+# mapping is saved; future replays silently fall back to it when the
+# original selector fails. Wired here so all modules share one db ref.
+try:
+    import selector_aliases as _sel_aliases
+    _sel_aliases._bind(main_db)
+    logger.info("Selector Aliases module loaded — self-healing replay enabled")
+except Exception as _sa_err:  # noqa: BLE001
+    logger.error(f"Selector Aliases module failed to load: {_sa_err}")
 
 
 # ─── Sync daemon (LOCAL install only — pushes/pulls to cloud edge) ────

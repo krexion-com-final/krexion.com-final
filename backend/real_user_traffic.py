@@ -5274,6 +5274,7 @@ async def run_real_user_traffic_job(
                                 page, row or {}, automation_steps, skip_captcha=skip_captcha,
                                 self_heal=self_heal,
                                 on_screenshot=_on_user_capture,
+                                user_id=link_owner_id,   # enable self-healing aliases (2026-01)
                             )
                         )
 
@@ -6989,7 +6990,8 @@ def _substitute(template: str, row: Dict[str, Any]) -> str:
 #       "tried N selectors / states" message.
 async def _smart_wait_for_selector(page, selector: str, *,
                                     state: str = "visible",
-                                    timeout: int = 25000) -> str:
+                                    timeout: int = 25000,
+                                    extra_alts: Optional[List[str]] = None) -> str:
     """Robust wait_for_selector with state + selector fallback.
     Returns the selector that actually matched (useful for downstream
     debug logging). Raises Playwright TimeoutError on total failure.
@@ -6998,6 +7000,11 @@ async def _smart_wait_for_selector(page, selector: str, *,
       Phase 1: original selector with requested state (≤ 40% of budget)
       Phase 2: original selector with state="attached" (≤ 20%)
       Phase 3: fallback selectors with state="attached" (rest)
+
+    `extra_alts` (2026-01) — alias selectors loaded from the user's
+    permanent Selector Aliases store (self-healing replay). Inserted
+    AHEAD of the token-derived fallbacks so a known-good rename wins
+    before we burn time on guesses.
     """
     import re as _re_local
     sel = (selector or "").strip()
@@ -7010,6 +7017,13 @@ async def _smart_wait_for_selector(page, selector: str, *,
 
     # ── Build selector fallback chain (same logic as smart_select) ──
     selectors: List[str] = [sel]
+    # User-aliased selectors come BEFORE token-derived guesses — they
+    # were already proven correct by the user via the Edit modal.
+    if extra_alts:
+        for a in extra_alts:
+            a = (a or "").strip()
+            if a and a != sel:
+                selectors.append(a)
     key = ""
     m = _re_local.match(r"^#([\w\-]+)$", sel)
     if m:
@@ -7418,6 +7432,7 @@ async def _execute_automation_steps(
     self_heal: bool = True,
     on_screenshot: Optional[Callable[[int, str, bytes], Awaitable[None]]] = None,
     collect_timings: bool = False,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute a user-provided automation script step-by-step. Returns
     {status, error?, executed_steps, step_results?}.  Each step format:
@@ -7451,6 +7466,37 @@ async def _execute_automation_steps(
     MAX_HEAL = 3  # total AI recovery attempts per row
     step_results: List[Dict[str, Any]] = []
     _t_total_start = _time_mod.perf_counter() if collect_timings else 0.0
+
+    # ── 2026-01: Selector Aliases (self-healing replay) ──────────────
+    # If user_id is provided, pre-load all alias mappings for the
+    # current page's domain. When a step's selector fails, the smart
+    # wait/select/click helpers will additionally try these aliases
+    # AHEAD of the token-derived guesses. This rescues recordings
+    # whose target website renamed a form field after the recording
+    # was made (the classic "#birth_month → #dob_month" case).
+    aliases_for_domain: Dict[str, List[str]] = {}
+    alias_user_id: Optional[str] = user_id
+    alias_domain: str = ""
+    if user_id:
+        try:
+            import selector_aliases as _sa
+            try:
+                alias_domain = _sa.extract_domain(page.url or "")
+            except Exception:
+                alias_domain = ""
+            if alias_domain:
+                aliases_for_domain = await _sa.get_aliases_for_domain(user_id, alias_domain)
+                if aliases_for_domain:
+                    logger.info(f"[selector_aliases] loaded {len(aliases_for_domain)} alias mappings for domain={alias_domain}")
+        except Exception as _ae:  # noqa: BLE001
+            logger.debug(f"[selector_aliases] preload skipped: {_ae}")
+
+    def _alias_alts_for(sel: str) -> List[str]:
+        """Return alias selectors for `sel` (or empty list)."""
+        if not sel or not aliases_for_domain:
+            return []
+        return list(aliases_for_domain.get(sel.strip(), []))
+
     try:
         for idx, step in enumerate(steps or []):
             if not isinstance(step, dict):
@@ -7520,10 +7566,12 @@ async def _execute_automation_steps(
                     if action in ("select", "check", "uncheck"):
                         await _smart_wait_for_selector(
                             page, selector, state="attached", timeout=timeout,
+                            extra_alts=_alias_alts_for(selector),
                         )
                     else:
                         await _wait_for_actionable_selector(
                             page, selector, timeout, visible=True,
+                            extra_alts=_alias_alts_for(selector),
                         )
                 except Exception as _wfa:
                     # Selector never became actionable within the
@@ -7669,10 +7717,13 @@ async def _execute_automation_steps(
                     # Timeout 25000ms exceeded — waiting for locator(
                     # '#birth_month') to be visible" on dropdown-binding
                     # steps where the native <select> is styled hidden.
+                    # 2026-01: also fed user-saved alias selectors so
+                    # known renames win instantly.
                     await _smart_wait_for_selector(
                         page, selector,
                         state=step.get("state") or "visible",
                         timeout=timeout,
+                        extra_alts=_alias_alts_for(selector),
                     )
                 elif action in ("wait_for_navigation", "wait_for_load", "wait_for_networkidle"):
                     # 2026-01 — Smart load wait for SPA-friendly pages.
@@ -8069,6 +8120,7 @@ async def _execute_automation_steps(
                             await _execute_automation_steps(
                                 page, row, [heal_action],
                                 skip_captcha=skip_captcha, self_heal=False,
+                                user_id=alias_user_id,
                             )
                         except Exception:
                             pass
@@ -8126,6 +8178,7 @@ async def _wait_for_actionable_selector(
     selector: str,
     timeout: int,
     visible: bool = True,
+    extra_alts: Optional[List[str]] = None,
 ) -> bool:
     """
     ── 2026-05: smart pre-wait for the actionable selector ──
@@ -8136,21 +8189,10 @@ async def _wait_for_actionable_selector(
     to next agr last name hai to last name put hone tak auto wait phr
     next step hone tak auto wait".
 
-    Why this is the permanent fix:
-      • Old behaviour: page.fill() / page.click() auto-waited up to
-        `timeout` (default 10s in old code). If the element wasn't
-        present within 10s, it failed. With `optional: true` on the
-        step (Visual Recorder default), it skipped silently — bot
-        did nothing, page froze, watchdog killed at 60s.
-      • New behaviour: we wait for the selector to be PRESENT (or
-        visible) for the full step timeout — polling internally at
-        ~100ms. As soon as the element is ready we return; if it
-        truly never appears we raise so the caller can handle as
-        optional (skip) or non-optional (fail/self-heal).
-      • Page-load lag is handled implicitly: while we wait for the
-        selector, the page is still rendering. The watchdog's DOM-
-        progress detector sees these renders as activity and won't
-        kill the visit.
+    2026-01: `extra_alts` (user-saved selector aliases for self-healing
+    replay). If the original selector fails AND we have aliases, try
+    each in turn against the remaining budget so a known-good rename
+    rescues the step transparently.
 
     Returns True if the selector became actionable; raises the
     underlying Playwright exception otherwise. (Caller's
@@ -8159,8 +8201,29 @@ async def _wait_for_actionable_selector(
     if not selector:
         return True
     state = "visible" if visible else "attached"
-    await page.wait_for_selector(selector, timeout=timeout, state=state)
-    return True
+    try:
+        await page.wait_for_selector(selector, timeout=timeout, state=state)
+        return True
+    except Exception as primary_err:
+        # If user has saved aliases for this selector, try them — they
+        # were proven correct by the user via the Edit modal, so they
+        # deserve a real attempt before we give up.
+        if not extra_alts:
+            raise
+        per_alt = max(800, timeout // max(1, len(extra_alts) + 1))
+        last_err = primary_err
+        for alt in extra_alts:
+            alt = (alt or "").strip()
+            if not alt or alt == selector:
+                continue
+            try:
+                await page.wait_for_selector(alt, timeout=per_alt, state=state)
+                logger.info(f"[selector_aliases] HIT — '{selector}' rescued by alias '{alt}'")
+                return True
+            except Exception as e:
+                last_err = e
+                continue
+        raise last_err
 
 
 async def _dispatch_single_action(page: Page, action: str, selector: str,

@@ -39,6 +39,8 @@ import {
   Lightbulb,
   Timer,
   Pencil,
+  Brain,
+  Trash,
 } from "lucide-react";
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
@@ -132,6 +134,8 @@ export default function VisualRecorderPage() {
   const [hoverPreview, setHoverPreview] = useState(null);   // { x, y, width, height, viewport }
   // Manual "Add Step" modal — null when closed; otherwise a draft step
   const [manualStepDraft, setManualStepDraft] = useState(null);
+  // Selector Aliases panel (2026-01, self-healing memory) — null = closed
+  const [aliasesPanel, setAliasesPanel] = useState(null);   // { loading, items, error }
   const [pageMeta, setPageMeta] = useState({ url: "", title: "" });
   const [tool, setTool] = useState("default");
   const [pendingFormFill, setPendingFormFill] = useState(null); // {selector, header_name?}
@@ -1046,6 +1050,48 @@ export default function VisualRecorderPage() {
 
   const cancelManualAddStep = () => setManualStepDraft(null);
 
+  // ── Selector Aliases panel (2026-01) ─────────────────────────────
+  // Opens a read-only list of every selector rename the user has
+  // accumulated across all their recordings. Each entry is one-click
+  // deletable in case the user wants to revoke a past self-heal rule.
+  const openAliasesPanel = async () => {
+    setAliasesPanel({ loading: true, items: [], error: "" });
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/aliases`, {
+        headers: authH(),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setAliasesPanel({ loading: false, items: [], error: d.detail || "Failed to load aliases" });
+        return;
+      }
+      setAliasesPanel({ loading: false, items: d.aliases || [], error: "" });
+    } catch (e) {
+      setAliasesPanel({ loading: false, items: [], error: e.message || "Failed to load" });
+    }
+  };
+
+  const closeAliasesPanel = () => setAliasesPanel(null);
+
+  const deleteAlias = async (domain, original) => {
+    try {
+      const r = await fetch(
+        `${API_URL}/api/visual-recorder/aliases?domain=${encodeURIComponent(domain)}&original=${encodeURIComponent(original)}`,
+        { method: "DELETE", headers: authH() },
+      );
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.deleted) {
+        toast.error(d.detail || "Delete failed");
+        return;
+      }
+      toast.success("Alias removed");
+      // Refresh the panel
+      openAliasesPanel();
+    } catch (e) {
+      toast.error(e.message || "Delete failed");
+    }
+  };
+
   const saveManualAddStep = async () => {
     if (!manualStepDraft || !sessionId) return;
     const d = manualStepDraft;
@@ -1148,6 +1194,14 @@ export default function VisualRecorderPage() {
         return;
       }
       toast.success(`Step #${index + 1} updated`);
+      if (d.alias_saved) {
+        // Self-healing memory — let the user know their fix is now
+        // permanent for this domain (future replays will auto-recover).
+        toast.success("🧠 Selector alias saved — future runs will auto-heal", {
+          duration: 5000,
+          description: `Krexion will remember this rename for future recordings on this site.`,
+        });
+      }
       setEditingStep(null);
       refreshState();
     } catch (e) {
@@ -2245,6 +2299,14 @@ export default function VisualRecorderPage() {
                   </span>
                 </h3>
                 <div className="flex items-center gap-1">
+                  <button
+                    onClick={openAliasesPanel}
+                    title="View self-healing selector aliases (saved automatically when you fix wrong selectors)"
+                    className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md bg-zinc-800 hover:bg-fuchsia-700/40 border border-zinc-700 hover:border-fuchsia-500/40 text-zinc-300 hover:text-fuchsia-200 transition-colors"
+                    data-testid="vr-aliases-btn"
+                  >
+                    <Brain className="w-3 h-3" /> Aliases
+                  </button>
                   <button
                     onClick={openManualAddStep}
                     title="Add a step manually (CSS / XPath selector + action)"
@@ -3427,6 +3489,142 @@ export default function VisualRecorderPage() {
                 data-testid="vr-manual-save"
               >
                 <ListPlus className="w-3.5 h-3.5" /> Add Step
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Selector Aliases Panel (2026-01) ──────────────────────────
+          Read-only listing of all self-healing rules the user has
+          accumulated. Each row shows the original selector + the alias
+          chain + per-row hit count + delete button. ─────────────── */}
+      {aliasesPanel && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+          onClick={closeAliasesPanel}
+          data-testid="vr-aliases-modal-backdrop"
+        >
+          <div
+            className="w-full max-w-2xl max-h-[80vh] bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+            data-testid="vr-aliases-modal"
+          >
+            <div className="flex items-center justify-between p-4 border-b border-zinc-800">
+              <div className="flex items-center gap-2">
+                <Brain className="w-4 h-4 text-fuchsia-400" />
+                <h3 className="text-sm font-semibold text-zinc-100">
+                  Self-Healing Selector Aliases
+                </h3>
+                {aliasesPanel.items && (
+                  <span className="px-1.5 py-0.5 rounded bg-fuchsia-900/40 border border-fuchsia-700/40 text-fuchsia-200 text-[10px] font-mono">
+                    {aliasesPanel.items.length} rule{aliasesPanel.items.length === 1 ? "" : "s"}
+                  </span>
+                )}
+              </div>
+              <button
+                onClick={closeAliasesPanel}
+                className="p-1 text-zinc-500 hover:text-zinc-200"
+                data-testid="vr-aliases-close"
+              >
+                <XCircle className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 flex-1 overflow-y-auto">
+              <div className="text-[11px] text-zinc-500 mb-3 leading-relaxed">
+                Every time you fix a wrong selector via the Edit modal,
+                Krexion saves the mapping below. Future Live Tests and
+                RUT jobs on the same website silently try these aliases
+                when the original selector fails — so your recordings
+                keep working even after the site renames its form fields.
+              </div>
+              {aliasesPanel.loading && (
+                <div className="flex items-center justify-center py-6 text-zinc-500 text-xs gap-2">
+                  <Loader2 className="w-4 h-4 animate-spin" /> Loading aliases…
+                </div>
+              )}
+              {!aliasesPanel.loading && aliasesPanel.error && (
+                <div className="p-3 rounded border border-rose-700/40 bg-rose-950/30 text-rose-300 text-xs">
+                  {aliasesPanel.error}
+                </div>
+              )}
+              {!aliasesPanel.loading &&
+                !aliasesPanel.error &&
+                aliasesPanel.items.length === 0 && (
+                  <div className="text-center py-8 text-zinc-500 text-xs">
+                    <Brain className="w-10 h-10 mx-auto mb-2 text-zinc-700" />
+                    No aliases yet. They are saved automatically when you
+                    edit a step's selector via the pencil icon.
+                  </div>
+                )}
+              {!aliasesPanel.loading && aliasesPanel.items.length > 0 && (
+                <div className="space-y-2">
+                  {aliasesPanel.items.map((a) => (
+                    <div
+                      key={a._id}
+                      className="p-2.5 rounded border border-zinc-800 bg-zinc-900/60 hover:border-fuchsia-700/30 transition-colors"
+                      data-testid={`vr-alias-row-${a._id}`}
+                    >
+                      <div className="flex items-center justify-between gap-2 mb-1">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Globe className="w-3 h-3 text-emerald-400 shrink-0" />
+                          <span className="text-[11px] text-zinc-300 font-mono truncate">
+                            {a.domain}
+                          </span>
+                          {(a.hit_count || 0) > 0 && (
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-900/40 border border-emerald-700/40 text-emerald-300 text-[9px] font-mono shrink-0">
+                              ✓ {a.hit_count} rescue{a.hit_count === 1 ? "" : "s"}
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => deleteAlias(a.domain, a.original)}
+                          title="Delete this alias"
+                          className="p-1 text-zinc-500 hover:text-rose-400 shrink-0"
+                          data-testid={`vr-alias-delete-${a._id}`}
+                        >
+                          <Trash className="w-3 h-3" />
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-2 flex-wrap text-[11px] font-mono">
+                        <code className="px-1.5 py-0.5 rounded bg-rose-950/50 border border-rose-800/40 text-rose-200">
+                          {a.original}
+                        </code>
+                        <ArrowRight className="w-3 h-3 text-zinc-600" />
+                        <div className="flex items-center gap-1 flex-wrap">
+                          {(a.aliases || []).map((alt, k) => (
+                            <code
+                              key={k}
+                              className={`px-1.5 py-0.5 rounded ${
+                                k === 0
+                                  ? "bg-emerald-950/50 border border-emerald-700/40 text-emerald-200"
+                                  : "bg-zinc-800/60 border border-zinc-700/40 text-zinc-400"
+                              }`}
+                              title={k === 0 ? "Most recent — tried first" : `Older alias (#${k + 1})`}
+                            >
+                              {alt}
+                            </code>
+                          ))}
+                        </div>
+                      </div>
+                      {a.last_used_at && (
+                        <div className="text-[10px] text-zinc-600 mt-1">
+                          Last used: {new Date(a.last_used_at).toLocaleString()}
+                          {a.last_alias_used && <span className="ml-1 font-mono">via {a.last_alias_used}</span>}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-2 p-4 border-t border-zinc-800">
+              <button
+                onClick={closeAliasesPanel}
+                className="px-4 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs"
+                data-testid="vr-aliases-cancel"
+              >
+                Close
               </button>
             </div>
           </div>
