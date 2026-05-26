@@ -14740,6 +14740,26 @@ async def vr_suggest_selectors(
     return await vr.suggest_selectors(sess, failed, max(1, min(int(limit), 20)))
 
 
+# ── Selector bbox preview (2026-01) ──────────────────────────────
+# Returns the bounding box of the first element matching the given
+# selector, in CSS pixel coordinates. Frontend overlays a blue pulse
+# outline on the live screenshot when the user hovers a suggestion.
+@api_router.get("/visual-recorder/{session_id}/selector-bbox")
+async def vr_selector_bbox(
+    session_id: str,
+    selector: str,
+    user: dict = Depends(get_current_user),
+):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.selector_bbox(sess, selector)
+
+
 # ── New action endpoints (press-key, hover, wait-for-selector) ───────
 class _VRKeyReq(BaseModel):
     key: str

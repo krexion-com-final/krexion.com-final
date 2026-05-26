@@ -2336,6 +2336,49 @@ async def suggest_selectors(sess: RecorderSession, failed_selector: str, limit: 
     }
 
 
+async def selector_bbox(sess: RecorderSession, selector: str) -> Dict[str, Any]:
+    """Return the bounding box of the first element matching `selector`
+    on the LIVE page, in CSS pixel coordinates relative to the
+    viewport. Used by the Edit modal's "hover-to-preview" feature
+    to draw a blue outline overlay on the screenshot.
+
+    Returns:
+      { found: bool, x, y, width, height,
+        viewport: {width, height}, error?: str }
+    """
+    sess.touch()
+    if sess.state != "ready" or not sess.page:
+        return {"found": False, "error": f"Session not ready ({sess.state})"}
+    sel = (selector or "").strip()
+    if not sel:
+        return {"found": False, "error": "empty selector"}
+
+    # Playwright auto-detects XPath when selector starts with `//`, `..`,
+    # or `xpath=` — no special handling needed here. We just call
+    # query_selector and bounding_box; both work for CSS + XPath.
+    try:
+        async with sess.lock:
+            el = await sess.page.query_selector(sel)
+            if el is None:
+                # Get viewport size for debugging
+                vp = sess.page.viewport_size or {"width": 0, "height": 0}
+                return {"found": False, "error": "Element not found", "viewport": vp}
+            bbox = await el.bounding_box()
+            vp = sess.page.viewport_size or {"width": 0, "height": 0}
+            if bbox is None:
+                return {"found": False, "error": "Element has no bounding box (likely hidden)", "viewport": vp}
+            return {
+                "found": True,
+                "x": float(bbox.get("x", 0)),
+                "y": float(bbox.get("y", 0)),
+                "width": float(bbox.get("width", 0)),
+                "height": float(bbox.get("height", 0)),
+                "viewport": vp,
+            }
+    except Exception as e:
+        return {"found": False, "error": str(e)}
+
+
 async def press_key(sess: RecorderSession, key: str) -> Dict[str, Any]:
     """Send a single keyboard key press to the page (Enter, Tab, Escape,
     Backspace, ArrowLeft, ArrowRight, ArrowUp, ArrowDown, PageDown, etc.).

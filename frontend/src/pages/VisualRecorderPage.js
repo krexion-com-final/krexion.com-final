@@ -126,6 +126,10 @@ export default function VisualRecorderPage() {
   const [editingStep, setEditingStep] = useState(null);
   // Smart Selector Suggester state (2026-01) — { loading, items[], failedSelector }
   const [selectorSuggest, setSelectorSuggest] = useState({ loading: false, items: null, error: "" });
+  // Hover-preview state (2026-01) — bbox of the suggestion currently
+  // being hovered, drawn as a blue pulse outline overlay on the
+  // live screenshot. null = no preview.
+  const [hoverPreview, setHoverPreview] = useState(null);   // { x, y, width, height, viewport }
   // Manual "Add Step" modal — null when closed; otherwise a draft step
   const [manualStepDraft, setManualStepDraft] = useState(null);
   const [pageMeta, setPageMeta] = useState({ url: "", title: "" });
@@ -946,6 +950,7 @@ export default function VisualRecorderPage() {
   const cancelEditStep = () => {
     setEditingStep(null);
     setSelectorSuggest({ loading: false, items: null, error: "" });
+    setHoverPreview(null);
   };
 
   // Fetch live-page DOM candidates for a given (failed) selector and
@@ -983,6 +988,41 @@ export default function VisualRecorderPage() {
       draft: { ...editingStep.draft, selector: sel },
     });
     toast.success("Selector updated — review and Save");
+  };
+
+  // Hover-preview: fetch the bounding box of `selector` from the live
+  // page and stash it so the screenshot overlay renders a blue pulse.
+  // Debounced via a tiny ref so quick hovers across the list don't
+  // hammer the backend.
+  const previewFetchRef = useRef(0);
+  const showSelectorPreview = async (selector) => {
+    if (!sessionId || !selector) return;
+    const myReq = ++previewFetchRef.current;
+    try {
+      const r = await fetch(
+        `${API_URL}/api/visual-recorder/${sessionId}/selector-bbox?selector=${encodeURIComponent(selector)}`,
+        { headers: authH() },
+      );
+      const d = await r.json().catch(() => ({}));
+      // Discard if another hover already fired after this one
+      if (myReq !== previewFetchRef.current) return;
+      if (r.ok && d.found) {
+        setHoverPreview({
+          x: d.x, y: d.y, width: d.width, height: d.height,
+          viewport: d.viewport || { width: viewport.width, height: viewport.height },
+          selector,
+        });
+      } else {
+        setHoverPreview(null);
+      }
+    } catch {
+      setHoverPreview(null);
+    }
+  };
+
+  const clearSelectorPreview = () => {
+    previewFetchRef.current++;   // invalidate any in-flight request
+    setHoverPreview(null);
   };
 
   // ── Manual Add Step (2026-01) ────────────────────────────────────
@@ -1786,6 +1826,50 @@ export default function VisualRecorderPage() {
                     <Loader2 className="w-6 h-6 animate-spin mr-2" /> Loading first frame…
                   </div>
                 )}
+
+                {/* ── Selector hover-preview overlay (2026-01) ────────
+                    Drawn when the user hovers a suggestion in the
+                    Edit-modal's "Find similar" panel. Position is
+                    percent-based on viewport so it stays aligned even
+                    if the screenshot is responsively scaled. */}
+                {hoverPreview && hoverPreview.viewport?.width > 0 && (
+                  <>
+                    {/* Outer pulse ring */}
+                    <div
+                      className="absolute pointer-events-none animate-ping rounded-sm"
+                      style={{
+                        left: `${(hoverPreview.x / hoverPreview.viewport.width) * 100}%`,
+                        top: `${(hoverPreview.y / hoverPreview.viewport.height) * 100}%`,
+                        width: `${(hoverPreview.width / hoverPreview.viewport.width) * 100}%`,
+                        height: `${(hoverPreview.height / hoverPreview.viewport.height) * 100}%`,
+                        boxShadow: "0 0 0 3px rgba(59, 130, 246, 0.5)",
+                        backgroundColor: "rgba(59, 130, 246, 0.10)",
+                      }}
+                    />
+                    {/* Solid outline + label badge */}
+                    <div
+                      className="absolute pointer-events-none rounded-sm transition-all duration-150"
+                      style={{
+                        left: `${(hoverPreview.x / hoverPreview.viewport.width) * 100}%`,
+                        top: `${(hoverPreview.y / hoverPreview.viewport.height) * 100}%`,
+                        width: `${(hoverPreview.width / hoverPreview.viewport.width) * 100}%`,
+                        height: `${(hoverPreview.height / hoverPreview.viewport.height) * 100}%`,
+                        outline: "2px solid rgb(59, 130, 246)",
+                        outlineOffset: "0px",
+                        backgroundColor: "rgba(59, 130, 246, 0.12)",
+                        boxShadow: "0 0 12px 2px rgba(59, 130, 246, 0.6)",
+                      }}
+                    >
+                      <div
+                        className="absolute -top-5 left-0 px-1.5 py-0.5 rounded-sm bg-blue-600 text-white text-[10px] font-mono whitespace-nowrap shadow-lg"
+                        data-testid="vr-hover-preview-label"
+                      >
+                        {hoverPreview.selector}
+                      </div>
+                    </div>
+                  </>
+                )}
+
                 {busy && (
                   <div className="absolute inset-0 bg-black/30 flex items-center justify-center">
                     <Loader2 className="w-8 h-8 animate-spin text-emerald-400" />
@@ -2668,12 +2752,18 @@ export default function VisualRecorderPage() {
           semantics (delete + re-record instead). ────────────────── */}
       {editingStep && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
-          onClick={cancelEditStep}
+          className="fixed inset-0 z-50 flex items-stretch justify-end pointer-events-none"
           data-testid="vr-edit-modal-backdrop"
         >
+          {/* Transparent click-catcher (close on outside click) — does NOT
+              blur the page so the live screenshot stays visible for
+              hover-preview. */}
           <div
-            className="w-full max-w-lg bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl"
+            className="absolute inset-0 pointer-events-auto bg-black/10"
+            onClick={cancelEditStep}
+          />
+          <div
+            className="relative w-full max-w-md bg-zinc-950/95 border-l border-zinc-800 shadow-2xl backdrop-blur-md pointer-events-auto flex flex-col"
             onClick={(e) => e.stopPropagation()}
             data-testid="vr-edit-modal"
           >
@@ -2695,7 +2785,7 @@ export default function VisualRecorderPage() {
                 <XCircle className="w-4 h-4" />
               </button>
             </div>
-            <div className="p-4 space-y-3 max-h-[70vh] overflow-y-auto">
+            <div className="p-4 space-y-3 flex-1 overflow-y-auto">
               {/* Name (label) */}
               <div>
                 <label className="block text-[11px] text-zinc-400 mb-1">
@@ -2776,6 +2866,10 @@ export default function VisualRecorderPage() {
                             type="button"
                             key={k}
                             onClick={() => applySuggestion(s.selector)}
+                            onMouseEnter={() => showSelectorPreview(s.selector)}
+                            onMouseLeave={clearSelectorPreview}
+                            onFocus={() => showSelectorPreview(s.selector)}
+                            onBlur={clearSelectorPreview}
                             className="w-full text-left p-1.5 rounded bg-zinc-900/80 hover:bg-emerald-900/40 border border-zinc-800 hover:border-emerald-600/40 transition-colors group"
                             data-testid={`vr-edit-suggest-item-${k}`}
                           >
