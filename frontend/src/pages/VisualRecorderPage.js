@@ -160,6 +160,15 @@ export default function VisualRecorderPage() {
   const [pjCountry, setPjCountry] = useState("US");
   const [saving, setSaving] = useState(false);
   const [savedToLibraryId, setSavedToLibraryId] = useState(null);
+  // JSON editor state (2026-01) — when truthy, the Preview JSON block
+  // turns into an editable textarea on the Recording Complete screen.
+  const [editingJson, setEditingJson] = useState(false);
+  const [editingJsonText, setEditingJsonText] = useState("");
+  const [editingJsonError, setEditingJsonError] = useState("");
+  // Live Visual Test state — when running, the finalized page shows a
+  // progress overlay and re-opens the recorder so the user can watch
+  // the full automation step-by-step.
+  const [replayLaunching, setReplayLaunching] = useState(false);
   // ── 2026-05: Live Test + Smart Diagnostics ──
   const [liveTestResult, setLiveTestResult] = useState(null); // {ok, total_ms, step_results, diagnostics, ...}
   const [liveTesting, setLiveTesting] = useState(false);
@@ -1504,6 +1513,149 @@ export default function VisualRecorderPage() {
       toast.error(`Save failed: ${e.message || e}`);
     } finally {
       setSaving(false);
+    }
+  };
+
+  // ── JSON inline edit (2026-01) ──────────────────────────────────
+  // On the Recording Complete page, lets the user toggle the JSON
+  // preview into an editable textarea, fix anything by hand
+  // (selectors, timeouts, add/remove steps), then save back into the
+  // `finalBundle` so the Copy/Download/Save-to-Library + Live Visual
+  // Test buttons all use the edited version. Validates the JSON is a
+  // non-empty array of step objects.
+  const openJsonEditor = () => {
+    if (!finalBundle) return;
+    setEditingJsonText(JSON.stringify(finalBundle.automation_json, null, 2));
+    setEditingJsonError("");
+    setEditingJson(true);
+  };
+
+  const cancelJsonEditor = () => {
+    setEditingJson(false);
+    setEditingJsonError("");
+  };
+
+  const saveJsonEditor = () => {
+    let parsed;
+    try {
+      parsed = JSON.parse(editingJsonText);
+    } catch (e) {
+      setEditingJsonError(`Invalid JSON: ${e.message}`);
+      return;
+    }
+    if (!Array.isArray(parsed)) {
+      setEditingJsonError("JSON must be an array of step objects (e.g., [{...}, {...}])");
+      return;
+    }
+    if (parsed.length === 0) {
+      setEditingJsonError("Steps array cannot be empty");
+      return;
+    }
+    // Per-step lightweight validation
+    for (let i = 0; i < parsed.length; i++) {
+      const s = parsed[i];
+      if (!s || typeof s !== "object") {
+        setEditingJsonError(`Step ${i + 1} is not an object`);
+        return;
+      }
+      if (!s.action || typeof s.action !== "string") {
+        setEditingJsonError(`Step ${i + 1} is missing 'action' (string)`);
+        return;
+      }
+    }
+    setFinalBundle({
+      ...finalBundle,
+      automation_json: parsed,
+      step_count: parsed.length,
+    });
+    setEditingJson(false);
+    setEditingJsonError("");
+    toast.success(`JSON updated — ${parsed.length} steps`);
+    if (savedToLibraryId) {
+      toast.info("Tip: Re-click 'Save to Library' to update the saved template with these edits.", { duration: 6000 });
+    }
+  };
+
+  // ── Live Visual Test on finalized bundle (2026-01) ───────────────
+  // Re-opens a fresh recorder session with the saved URL / proxy / UA,
+  // imports the finalized JSON, then drops the UI back into recording
+  // mode so the existing "Run Live Test from Start" button + live
+  // screenshot polling shows the full automation step-by-step. Any
+  // failure surfaces the Smart Fix suggester so the user can edit
+  // problematic steps and re-test — and on Finalize again, the
+  // updated steps are exported.
+  const launchVisualReplay = async () => {
+    if (!finalBundle) return;
+    if (!finalBundle.url) {
+      toast.error("Cannot replay — original URL is missing from the bundle");
+      return;
+    }
+    setReplayLaunching(true);
+    try {
+      // 1. Start a fresh recorder session with the same params
+      const startRes = await fetch(`${API_URL}/api/visual-recorder/start`, {
+        method: "POST",
+        headers: authH(),
+        body: JSON.stringify({
+          url: finalBundle.url,
+          proxy: finalBundle.proxy || null,
+          user_agent: finalBundle.user_agent || null,
+          headers: finalBundle.headers || [],
+          sample_row: Object.keys(sampleRow || {}).length ? sampleRow : null,
+        }),
+      });
+      const startData = await startRes.json();
+      if (!startRes.ok) {
+        throw new Error(startData.detail || `Failed to start replay session: HTTP ${startRes.status}`);
+      }
+      const newSid = startData.session_id;
+
+      // 2. Poll until ready (max ~30s)
+      let ready = false;
+      for (let i = 0; i < 60; i++) {
+        await new Promise((r) => setTimeout(r, 500));
+        const sr = await fetch(`${API_URL}/api/visual-recorder/${newSid}/state`, { headers: authH() });
+        const sd = await sr.json().catch(() => ({}));
+        if (sd.state === "ready") { ready = true; break; }
+        if (sd.state === "error") {
+          throw new Error(sd.error_msg || "Replay session failed to start");
+        }
+      }
+      if (!ready) {
+        throw new Error("Replay session timed out while loading the page");
+      }
+
+      // 3. Import the saved steps into the new session
+      const impRes = await fetch(`${API_URL}/api/visual-recorder/${newSid}/import-steps`, {
+        method: "POST",
+        headers: authH(),
+        body: JSON.stringify({
+          steps: finalBundle.automation_json,
+          sample_row: Object.keys(sampleRow || {}).length ? sampleRow : null,
+          headers: finalBundle.headers || [],
+        }),
+      });
+      const impData = await impRes.json();
+      if (!impRes.ok || impData.imported === false) {
+        throw new Error(impData.detail || impData.reason || "Failed to import steps");
+      }
+
+      // 4. Transition UI back into recording mode with the imported state
+      setSessionId(newSid);
+      setSessionState("ready");
+      setSteps(finalBundle.automation_json);
+      setUrl(finalBundle.url);
+      setProxy(finalBundle.proxy || "");
+      setUa(finalBundle.user_agent || "");
+      setHeaders(finalBundle.headers || []);
+      setFinalBundle(null);
+      setEditingJson(false);
+      setSetupStage("recording");
+      toast.success(`Replay session ready — ${impData.total} steps loaded. Click "Run Live Test from Start" to watch the full flow.`, { duration: 6000 });
+    } catch (e) {
+      toast.error(`Visual replay failed: ${e.message || e}`);
+    } finally {
+      setReplayLaunching(false);
     }
   };
 
@@ -2916,6 +3068,19 @@ export default function VisualRecorderPage() {
 
             <div className="flex flex-wrap gap-2 mb-4">
               <button
+                onClick={launchVisualReplay}
+                disabled={replayLaunching || !finalBundle.url}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white text-sm font-medium transition-colors"
+                data-testid="vr-visual-replay-btn"
+                title="Re-opens a fresh browser session and replays the full saved JSON step-by-step with live visual — perfect for verifying everything works end-to-end before deploying."
+              >
+                {replayLaunching ? (
+                  <><Loader2 className="w-4 h-4 animate-spin" /> Launching replay…</>
+                ) : (
+                  <><Zap className="w-4 h-4" /> Live Visual Test (Step-by-Step)</>
+                )}
+              </button>
+              <button
                 onClick={copyJson}
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-700/40 hover:bg-emerald-700/60 border border-emerald-500/40 text-emerald-100 text-sm font-medium transition-colors"
                 data-testid="vr-copy-json-btn"
@@ -2931,13 +3096,13 @@ export default function VisualRecorderPage() {
               </button>
               <button
                 onClick={saveToLibrary}
-                disabled={saving || savedToLibraryId}
+                disabled={saving}
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-700/40 hover:bg-indigo-700/60 border border-indigo-500/40 text-indigo-100 text-sm font-medium disabled:opacity-60 transition-colors"
                 data-testid="vr-save-library-btn"
                 title="Save as reusable template in Uploaded Things library"
               >
                 {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : savedToLibraryId ? <CheckCircle2 className="w-4 h-4" /> : <Save className="w-4 h-4" />}
-                {savedToLibraryId ? "Saved to Library" : "Save to Library"}
+                {savedToLibraryId ? "Saved (re-save to update)" : "Save to Library"}
               </button>
               {finalBundle.target_screenshot_path && (
                 <button
@@ -2952,15 +3117,64 @@ export default function VisualRecorderPage() {
 
             <details className="mt-4" open>
               <summary className="cursor-pointer text-sm text-zinc-400 hover:text-zinc-200 select-none flex items-center gap-1">
-                <ChevronDown className="w-4 h-4" /> Preview JSON
-                <span className="text-[10px] text-zinc-600 ml-auto">syntax-highlighted</span>
+                <ChevronDown className="w-4 h-4" /> {editingJson ? "Edit JSON" : "Preview JSON"}
+                {!editingJson && (
+                  <button
+                    type="button"
+                    onClick={(e) => { e.preventDefault(); openJsonEditor(); }}
+                    className="ml-auto inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-700/40 hover:bg-amber-700/60 border border-amber-500/40 text-amber-200 text-[10px] font-medium"
+                    data-testid="vr-edit-json-btn"
+                    title="Edit the finalized JSON directly — fix selectors, tweak timeouts, add/remove steps"
+                  >
+                    <Pencil className="w-3 h-3" /> Edit JSON
+                  </button>
+                )}
+                {editingJson && <span className="text-[10px] text-amber-400 ml-auto">unsaved changes</span>}
               </summary>
-              <pre
-                className="mt-2 p-3 rounded bg-zinc-950 border border-zinc-800 text-xs overflow-x-auto max-h-96 font-mono leading-relaxed"
-                dangerouslySetInnerHTML={{
-                  __html: colorizeJson(finalBundle.automation_json),
-                }}
-              />
+              {editingJson ? (
+                <div className="mt-2 space-y-2">
+                  <textarea
+                    value={editingJsonText}
+                    onChange={(e) => { setEditingJsonText(e.target.value); setEditingJsonError(""); }}
+                    spellCheck={false}
+                    className="w-full p-3 rounded bg-zinc-950 border border-amber-700/40 focus:border-amber-500 text-emerald-300 text-xs font-mono leading-relaxed outline-none resize-y"
+                    style={{ minHeight: "24rem", maxHeight: "60vh" }}
+                    data-testid="vr-edit-json-textarea"
+                  />
+                  {editingJsonError && (
+                    <div className="p-2 rounded bg-rose-900/40 border border-rose-700/40 text-xs text-rose-200" data-testid="vr-edit-json-error">
+                      <AlertCircle className="inline w-3.5 h-3.5 mr-1" />
+                      {editingJsonError}
+                    </div>
+                  )}
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={saveJsonEditor}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-amber-600 hover:bg-amber-500 text-white text-xs font-medium"
+                      data-testid="vr-save-json-btn"
+                    >
+                      <Save className="w-3.5 h-3.5" /> Save JSON Changes
+                    </button>
+                    <button
+                      onClick={cancelJsonEditor}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs"
+                      data-testid="vr-cancel-json-btn"
+                    >
+                      Cancel
+                    </button>
+                    <div className="text-[10px] text-zinc-500 ml-2">
+                      Must be a JSON array of step objects with <code className="text-zinc-300">"action"</code>.
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <pre
+                  className="mt-2 p-3 rounded bg-zinc-950 border border-zinc-800 text-xs overflow-x-auto max-h-96 font-mono leading-relaxed"
+                  dangerouslySetInnerHTML={{
+                    __html: colorizeJson(finalBundle.automation_json),
+                  }}
+                />
+              )}
             </details>
 
             <div className="mt-5 flex gap-3">

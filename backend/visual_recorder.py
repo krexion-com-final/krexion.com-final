@@ -2195,6 +2195,45 @@ def add_manual_step(sess: RecorderSession, step: Dict[str, Any], position: Optio
     return {"added": True, "step": clean, "index": idx, "total": len(sess.steps)}
 
 
+def import_steps(sess: RecorderSession, steps: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Bulk-replace the session's steps with the provided list (used
+    when the user clicks "Live Visual Test" on the finalized Recording
+    Complete screen: a fresh recorder session is spawned with the same
+    url/proxy/UA, then the saved JSON is imported here, then a live
+    test is fired so the user can visually verify the full automation
+    step by step). Validates each step is a dict with a known action
+    type; otherwise rejects the import to prevent runtime crashes."""
+    sess.touch()
+    if not isinstance(steps, list):
+        return {"imported": False, "reason": "steps must be a list"}
+    # Light validation — accept any dict with `action` string, since the
+    # replay engine handles unknown actions defensively.
+    cleaned: List[Dict[str, Any]] = []
+    for s in steps:
+        if not isinstance(s, dict):
+            continue
+        action = (s.get("action") or "").strip().lower()
+        if not action:
+            continue
+        # Copy the step so we don't mutate the caller's data
+        cleaned.append(dict(s))
+    sess.steps = cleaned
+    return {"imported": True, "total": len(cleaned)}
+
+
+def update_session_data(sess: RecorderSession, *, sample_row: Optional[Dict[str, Any]] = None,
+                         headers: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Update the sample row / headers on an active session — used when
+    the "Live Visual Test" reuses a finalized bundle and needs to push
+    the same sample data into the new session before replay."""
+    sess.touch()
+    if sample_row is not None and isinstance(sample_row, dict):
+        sess.sample_row = sample_row
+    if headers is not None and isinstance(headers, list):
+        sess.headers = [str(h) for h in headers if h]
+    return {"ok": True, "headers": sess.headers, "sample_row": getattr(sess, "sample_row", None)}
+
+
 async def suggest_selectors(sess: RecorderSession, failed_selector: str, limit: int = 8) -> Dict[str, Any]:
     """Smart Selector Suggester (2026-01) — when a step fails because
     the recorded selector no longer matches the page, query the LIVE

@@ -14719,6 +14719,37 @@ async def vr_add_manual_step(session_id: str, body: Dict[str, Any] = Body(...), 
     return vr.add_manual_step(sess, step, position)
 
 
+# ── Bulk import steps (2026-01) ─────────────────────────────────
+# Used by the "Live Visual Test" button on the Recording Complete
+# page — it spawns a fresh recorder session with the original URL/UA/
+# proxy, then imports the finalized JSON via this endpoint, then
+# triggers a Live Test so the user can visually watch the full
+# automation replay step-by-step.
+@api_router.post("/visual-recorder/{session_id}/import-steps")
+async def vr_import_steps(
+    session_id: str,
+    body: Dict[str, Any] = Body(...),
+    user: dict = Depends(get_current_user),
+):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    steps = body.get("steps")
+    if not isinstance(steps, list):
+        raise HTTPException(status_code=400, detail="steps must be a list")
+    result = vr.import_steps(sess, steps)
+    # Also accept inline sample_row / headers updates so caller doesn't
+    # have to hit /update-data separately.
+    sr = body.get("sample_row")
+    hdrs = body.get("headers")
+    if sr is not None or hdrs is not None:
+        vr.update_session_data(sess, sample_row=sr, headers=hdrs)
+    return result
+
+
 # ── Smart Selector Suggester (2026-01) ───────────────────────────
 # Given a failed/incorrect selector, scans the LIVE page DOM and
 # returns ranked candidate selectors. Powers the "🔍 Find similar
