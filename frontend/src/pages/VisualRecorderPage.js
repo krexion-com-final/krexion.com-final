@@ -124,6 +124,10 @@ export default function VisualRecorderPage() {
   // {index, draft} where `draft` is a mutable copy of the step the
   // user is editing. See `openEditStep` / `saveEditStep` below.
   const [editingStep, setEditingStep] = useState(null);
+  // Smart Selector Suggester state (2026-01) — { loading, items[], failedSelector }
+  const [selectorSuggest, setSelectorSuggest] = useState({ loading: false, items: null, error: "" });
+  // Manual "Add Step" modal — null when closed; otherwise a draft step
+  const [manualStepDraft, setManualStepDraft] = useState(null);
   const [pageMeta, setPageMeta] = useState({ url: "", title: "" });
   const [tool, setTool] = useState("default");
   const [pendingFormFill, setPendingFormFill] = useState(null); // {selector, header_name?}
@@ -920,6 +924,7 @@ export default function VisualRecorderPage() {
   const openEditStep = (idx) => {
     if (idx < 0 || idx >= steps.length) return;
     const s = steps[idx] || {};
+    setSelectorSuggest({ loading: false, items: null, error: "" });
     setEditingStep({
       index: idx,
       draft: {
@@ -938,7 +943,127 @@ export default function VisualRecorderPage() {
     });
   };
 
-  const cancelEditStep = () => setEditingStep(null);
+  const cancelEditStep = () => {
+    setEditingStep(null);
+    setSelectorSuggest({ loading: false, items: null, error: "" });
+  };
+
+  // Fetch live-page DOM candidates for a given (failed) selector and
+  // surface them in the Edit modal as one-click suggestions.
+  const fetchSelectorSuggestions = async () => {
+    if (!editingStep || !sessionId) return;
+    const failed = (editingStep.draft.selector || "").trim();
+    if (!failed) {
+      toast.error("Enter a selector first (or paste the failed one) before suggesting alternatives.");
+      return;
+    }
+    setSelectorSuggest({ loading: true, items: null, error: "" });
+    try {
+      const r = await fetch(
+        `${API_URL}/api/visual-recorder/${sessionId}/suggest-selectors?failed=${encodeURIComponent(failed)}&limit=10`,
+        { headers: authH() },
+      );
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setSelectorSuggest({ loading: false, items: [], error: d.detail || "Suggest failed" });
+        return;
+      }
+      const items = d.suggestions || [];
+      setSelectorSuggest({ loading: false, items, error: items.length === 0 ? "No similar elements found on the live page." : "" });
+    } catch (e) {
+      setSelectorSuggest({ loading: false, items: [], error: e.message || "Suggest failed" });
+    }
+  };
+
+  // Apply a clicked suggestion → write into the Edit-modal selector field.
+  const applySuggestion = (sel) => {
+    if (!editingStep) return;
+    setEditingStep({
+      ...editingStep,
+      draft: { ...editingStep.draft, selector: sel },
+    });
+    toast.success("Selector updated — review and Save");
+  };
+
+  // ── Manual Add Step (2026-01) ────────────────────────────────────
+  // Opens a creation modal so the user can author a step by hand
+  // (action + selector + value + timeout). Accepts both CSS and XPath.
+  const openManualAddStep = () => {
+    setManualStepDraft({
+      action: "wait_for_selector",
+      selector: "",
+      value: "",
+      timeout: "8000",
+      key: "",
+      ms: "1000",
+      state: "visible",
+      match_by: "label",
+      humanize: true,
+      name: "",
+      position: "",   // empty = append to end
+    });
+  };
+
+  const cancelManualAddStep = () => setManualStepDraft(null);
+
+  const saveManualAddStep = async () => {
+    if (!manualStepDraft || !sessionId) return;
+    const d = manualStepDraft;
+    const action = (d.action || "").toLowerCase();
+    // Build clean step payload based on action
+    const step = { action };
+    if (d.name && d.name.trim()) step.name = d.name.trim();
+    if (["wait_for_selector", "click", "fill", "type", "select", "hover", "check", "uncheck", "press"].includes(action)) {
+      if (!d.selector || !d.selector.trim()) {
+        toast.error("Selector is required for this action");
+        return;
+      }
+      step.selector = d.selector.trim();
+    }
+    if (["fill", "type", "select"].includes(action)) {
+      step.value = d.value || "";
+      step.timeout = d.timeout === "" ? 8000 : Number(d.timeout);
+      if (action !== "select") step.humanize = !!d.humanize;
+      if (action === "select" && d.match_by) step.match_by = d.match_by;
+    } else if (action === "wait_for_selector") {
+      step.timeout = d.timeout === "" ? 8000 : Number(d.timeout);
+      if (d.state) step.state = d.state;
+    } else if (action === "wait") {
+      step.ms = d.ms === "" ? 1000 : Number(d.ms);
+    } else if (action === "press") {
+      if (!d.key || !d.key.trim()) {
+        toast.error("Key is required (e.g., Enter, Tab, Escape)");
+        return;
+      }
+      step.key = d.key.trim();
+      if (d.selector) step.selector = d.selector.trim();
+    } else if (["click", "hover", "check", "uncheck"].includes(action)) {
+      step.timeout = d.timeout === "" ? 8000 : Number(d.timeout);
+    }
+
+    const body = { step };
+    if (d.position !== "" && d.position != null && !isNaN(Number(d.position))) {
+      body.position = Math.max(0, Number(d.position) - 1); // user enters 1-based
+    }
+
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/manual-step`, {
+        method: "POST",
+        headers: authH(),
+        body: JSON.stringify(body),
+      });
+      const dr = await r.json().catch(() => ({}));
+      if (!r.ok || dr.added === false) {
+        toast.error(dr.detail || dr.reason || "Add step failed");
+        return;
+      }
+      toast.success(`Manual step added at #${(dr.index ?? 0) + 1}`);
+      setManualStepDraft(null);
+      refreshState();
+    } catch (e) {
+      toast.error(e.message || "Add step failed");
+    }
+  };
 
   const saveEditStep = async () => {
     if (!editingStep || !sessionId) return;
@@ -2035,16 +2160,26 @@ export default function VisualRecorderPage() {
                     {steps.length}
                   </span>
                 </h3>
-                {steps.length > 0 && (
+                <div className="flex items-center gap-1">
                   <button
-                    onClick={undoLastStep}
-                    title="Undo last step (Ctrl+Z)"
-                    className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md bg-zinc-800 hover:bg-amber-700/40 border border-zinc-700 hover:border-amber-500/40 text-zinc-300 hover:text-amber-200 transition-colors"
-                    data-testid="vr-undo-btn"
+                    onClick={openManualAddStep}
+                    title="Add a step manually (CSS / XPath selector + action)"
+                    className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md bg-zinc-800 hover:bg-sky-700/40 border border-zinc-700 hover:border-sky-500/40 text-zinc-300 hover:text-sky-200 transition-colors"
+                    data-testid="vr-add-manual-step-btn"
                   >
-                    <Undo2 className="w-3 h-3" /> Undo
+                    <ListPlus className="w-3 h-3" /> Add Step
                   </button>
-                )}
+                  {steps.length > 0 && (
+                    <button
+                      onClick={undoLastStep}
+                      title="Undo last step (Ctrl+Z)"
+                      className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md bg-zinc-800 hover:bg-amber-700/40 border border-zinc-700 hover:border-amber-500/40 text-zinc-300 hover:text-amber-200 transition-colors"
+                      data-testid="vr-undo-btn"
+                    >
+                      <Undo2 className="w-3 h-3" /> Undo
+                    </button>
+                  )}
+                </div>
               </div>
 
               <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
@@ -2586,13 +2721,30 @@ export default function VisualRecorderPage() {
                 (editingStep.draft.action || "").toLowerCase()
               ) && (
                 <div>
-                  <label className="block text-[11px] text-zinc-400 mb-1">
-                    Selector{" "}
-                    <span className="text-zinc-600">
-                      (CSS — e.g. <code>#birth_month</code>,{" "}
-                      <code>[name="month"]</code>)
-                    </span>
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-[11px] text-zinc-400">
+                      Selector{" "}
+                      <span className="text-zinc-600">
+                        (CSS or XPath — e.g. <code>#birth_month</code>,{" "}
+                        <code>{`//input[@name="month"]`}</code>)
+                      </span>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={fetchSelectorSuggestions}
+                      disabled={selectorSuggest.loading}
+                      className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded bg-emerald-700/30 hover:bg-emerald-700/50 border border-emerald-600/40 text-emerald-200 disabled:opacity-50"
+                      title="Scan the live page for elements that look like what you meant"
+                      data-testid="vr-edit-suggest-btn"
+                    >
+                      {selectorSuggest.loading ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <Sparkles className="w-3 h-3" />
+                      )}
+                      Find similar
+                    </button>
+                  </div>
                   <input
                     type="text"
                     value={editingStep.draft.selector}
@@ -2605,6 +2757,56 @@ export default function VisualRecorderPage() {
                     className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-amber-500 text-zinc-200 text-xs font-mono outline-none"
                     data-testid="vr-edit-selector"
                   />
+                  {/* Suggestions panel */}
+                  {selectorSuggest.items !== null && (
+                    <div className="mt-2 rounded border border-emerald-700/30 bg-emerald-950/20 p-2">
+                      <div className="text-[10px] text-emerald-300/80 font-medium mb-1.5 flex items-center gap-1">
+                        <Sparkles className="w-3 h-3" />
+                        Smart Selector Suggestions
+                        {selectorSuggest.items.length > 0 && (
+                          <span className="text-zinc-500">({selectorSuggest.items.length} matches)</span>
+                        )}
+                      </div>
+                      {selectorSuggest.error && (
+                        <div className="text-[11px] text-amber-400 mb-1">{selectorSuggest.error}</div>
+                      )}
+                      <div className="space-y-1 max-h-48 overflow-y-auto">
+                        {selectorSuggest.items.map((s, k) => (
+                          <button
+                            type="button"
+                            key={k}
+                            onClick={() => applySuggestion(s.selector)}
+                            className="w-full text-left p-1.5 rounded bg-zinc-900/80 hover:bg-emerald-900/40 border border-zinc-800 hover:border-emerald-600/40 transition-colors group"
+                            data-testid={`vr-edit-suggest-item-${k}`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <code className="text-[11px] text-emerald-300 font-mono truncate">
+                                {s.selector}
+                              </code>
+                              <span className="text-[9px] px-1 rounded bg-zinc-800 border border-zinc-700 text-zinc-400 uppercase font-mono shrink-0">
+                                {s.tag}
+                                {s.input_type ? `[${s.input_type}]` : ""}
+                              </span>
+                            </div>
+                            <div className="text-[10px] text-zinc-500 mt-0.5 truncate">
+                              {s.label && <span className="text-zinc-300">{s.label}</span>}
+                              {s.placeholder && !s.label && (
+                                <span>placeholder: {s.placeholder}</span>
+                              )}
+                              {(s.matched_tokens || []).length > 0 && (
+                                <span className="ml-2 text-emerald-400/70">
+                                  ✓ {(s.matched_tokens || []).join(", ")}
+                                </span>
+                              )}
+                              {!s.visible && (
+                                <span className="ml-2 text-amber-500/70">hidden</span>
+                              )}
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -2811,6 +3013,326 @@ export default function VisualRecorderPage() {
                 data-testid="vr-edit-save"
               >
                 <Save className="w-3.5 h-3.5" /> Save Changes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Manual Add Step Modal (2026-01) ───────────────────────────
+          Opened by the "+ Add Step" button. Lets the user inject a
+          step the auto-recorder didn't capture — supports BOTH CSS
+          and XPath selectors. ───────────────────────────────────── */}
+      {manualStepDraft && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+          onClick={cancelManualAddStep}
+          data-testid="vr-manual-modal-backdrop"
+        >
+          <div
+            className="w-full max-w-lg bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+            data-testid="vr-manual-modal"
+          >
+            <div className="flex items-center justify-between p-4 border-b border-zinc-800">
+              <div className="flex items-center gap-2">
+                <ListPlus className="w-4 h-4 text-sky-400" />
+                <h3 className="text-sm font-semibold text-zinc-100">
+                  Add Manual Step
+                </h3>
+                <span className="px-1.5 py-0.5 rounded bg-sky-900/40 border border-sky-700/40 text-sky-300 text-[10px] font-mono uppercase">
+                  CSS or XPath
+                </span>
+              </div>
+              <button
+                onClick={cancelManualAddStep}
+                className="p-1 text-zinc-500 hover:text-zinc-200"
+                data-testid="vr-manual-close"
+              >
+                <XCircle className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3 max-h-[70vh] overflow-y-auto">
+              {/* Action type */}
+              <div>
+                <label className="block text-[11px] text-zinc-400 mb-1">
+                  Action type
+                </label>
+                <select
+                  value={manualStepDraft.action}
+                  onChange={(e) =>
+                    setManualStepDraft({
+                      ...manualStepDraft,
+                      action: e.target.value,
+                    })
+                  }
+                  className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-sky-500 text-zinc-200 text-xs outline-none"
+                  data-testid="vr-manual-action"
+                >
+                  <option value="wait_for_selector">wait_for_selector — wait until element appears</option>
+                  <option value="click">click — click an element</option>
+                  <option value="fill">fill — type into input</option>
+                  <option value="type">type — slow per-char typing</option>
+                  <option value="select">select — choose a &lt;select&gt; option</option>
+                  <option value="press">press — keyboard key (Enter / Tab / etc.)</option>
+                  <option value="wait">wait — pause for N ms</option>
+                  <option value="hover">hover — mouse over element</option>
+                  <option value="check">check — tick a checkbox/radio</option>
+                  <option value="uncheck">uncheck — untick a checkbox</option>
+                  <option value="screenshot">screenshot — capture page state</option>
+                </select>
+              </div>
+
+              {/* Step name (optional label) */}
+              <div>
+                <label className="block text-[11px] text-zinc-400 mb-1">
+                  Step name <span className="text-zinc-600">(optional label)</span>
+                </label>
+                <input
+                  type="text"
+                  value={manualStepDraft.name}
+                  onChange={(e) =>
+                    setManualStepDraft({ ...manualStepDraft, name: e.target.value })
+                  }
+                  placeholder={manualStepDraft.action}
+                  className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-sky-500 text-zinc-200 text-xs outline-none"
+                  data-testid="vr-manual-name"
+                />
+              </div>
+
+              {/* Selector — for most actions */}
+              {!["wait"].includes(manualStepDraft.action) && (
+                <div>
+                  <label className="block text-[11px] text-zinc-400 mb-1">
+                    Selector{" "}
+                    <span className="text-zinc-600">
+                      (CSS like <code>#email</code>, OR XPath like{" "}
+                      <code>{`//input[@name="email"]`}</code>)
+                    </span>
+                  </label>
+                  <input
+                    type="text"
+                    value={manualStepDraft.selector}
+                    onChange={(e) =>
+                      setManualStepDraft({
+                        ...manualStepDraft,
+                        selector: e.target.value,
+                      })
+                    }
+                    placeholder="#email  OR  //input[@name='email']"
+                    className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-sky-500 text-zinc-200 text-xs font-mono outline-none"
+                    data-testid="vr-manual-selector"
+                  />
+                  <div className="text-[10px] text-zinc-500 mt-1">
+                    Playwright auto-detects XPath (starts with <code>//</code> or <code>(</code>).
+                    For complex cases, prefix with <code>xpath=</code>.
+                  </div>
+                </div>
+              )}
+
+              {/* Value — for fill / type / select */}
+              {["fill", "type", "select"].includes(manualStepDraft.action) && (
+                <div>
+                  <label className="block text-[11px] text-zinc-400 mb-1">
+                    Value{" "}
+                    <span className="text-zinc-600">
+                      (supports <code>{"{{header}}"}</code> placeholders)
+                    </span>
+                  </label>
+                  <input
+                    type="text"
+                    value={manualStepDraft.value}
+                    onChange={(e) =>
+                      setManualStepDraft({
+                        ...manualStepDraft,
+                        value: e.target.value,
+                      })
+                    }
+                    className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-sky-500 text-zinc-200 text-xs font-mono outline-none"
+                    data-testid="vr-manual-value"
+                  />
+                </div>
+              )}
+
+              {/* Key — for press */}
+              {manualStepDraft.action === "press" && (
+                <div>
+                  <label className="block text-[11px] text-zinc-400 mb-1">
+                    Key
+                  </label>
+                  <input
+                    type="text"
+                    value={manualStepDraft.key}
+                    onChange={(e) =>
+                      setManualStepDraft({ ...manualStepDraft, key: e.target.value })
+                    }
+                    placeholder="Enter / Tab / Escape / ArrowDown"
+                    className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-sky-500 text-zinc-200 text-xs font-mono outline-none"
+                    data-testid="vr-manual-key"
+                  />
+                </div>
+              )}
+
+              {/* Timeout (most actions) */}
+              {!["wait", "press"].includes(manualStepDraft.action) && (
+                <div>
+                  <label className="block text-[11px] text-zinc-400 mb-1">
+                    Timeout (ms)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="500"
+                    value={manualStepDraft.timeout}
+                    onChange={(e) =>
+                      setManualStepDraft({
+                        ...manualStepDraft,
+                        timeout: e.target.value,
+                      })
+                    }
+                    className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-sky-500 text-zinc-200 text-xs outline-none"
+                    data-testid="vr-manual-timeout"
+                  />
+                </div>
+              )}
+
+              {/* ms — for wait */}
+              {manualStepDraft.action === "wait" && (
+                <div>
+                  <label className="block text-[11px] text-zinc-400 mb-1">
+                    Wait duration (ms)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="100"
+                    value={manualStepDraft.ms}
+                    onChange={(e) =>
+                      setManualStepDraft({ ...manualStepDraft, ms: e.target.value })
+                    }
+                    className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-sky-500 text-zinc-200 text-xs outline-none"
+                    data-testid="vr-manual-ms"
+                  />
+                </div>
+              )}
+
+              {/* State — for wait_for_selector */}
+              {manualStepDraft.action === "wait_for_selector" && (
+                <div>
+                  <label className="block text-[11px] text-zinc-400 mb-1">
+                    State
+                  </label>
+                  <select
+                    value={manualStepDraft.state}
+                    onChange={(e) =>
+                      setManualStepDraft({
+                        ...manualStepDraft,
+                        state: e.target.value,
+                      })
+                    }
+                    className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-sky-500 text-zinc-200 text-xs outline-none"
+                    data-testid="vr-manual-state"
+                  >
+                    <option value="visible">visible (default)</option>
+                    <option value="attached">attached (DOM only)</option>
+                    <option value="hidden">hidden</option>
+                    <option value="detached">detached</option>
+                  </select>
+                </div>
+              )}
+
+              {/* match_by — for select */}
+              {manualStepDraft.action === "select" && (
+                <div>
+                  <label className="block text-[11px] text-zinc-400 mb-1">
+                    Match by
+                  </label>
+                  <select
+                    value={manualStepDraft.match_by}
+                    onChange={(e) =>
+                      setManualStepDraft({
+                        ...manualStepDraft,
+                        match_by: e.target.value,
+                      })
+                    }
+                    className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-sky-500 text-zinc-200 text-xs outline-none"
+                    data-testid="vr-manual-match-by"
+                  >
+                    <option value="label">label (visible text)</option>
+                    <option value="value">value</option>
+                    <option value="index">index (0-based)</option>
+                  </select>
+                </div>
+              )}
+
+              {/* humanize for fill / type */}
+              {["fill", "type"].includes(manualStepDraft.action) && (
+                <label className="flex items-start gap-2 cursor-pointer p-2.5 rounded bg-zinc-900/60 border border-zinc-800">
+                  <input
+                    type="checkbox"
+                    checked={manualStepDraft.humanize}
+                    onChange={(e) =>
+                      setManualStepDraft({
+                        ...manualStepDraft,
+                        humanize: e.target.checked,
+                      })
+                    }
+                    className="mt-0.5 w-3.5 h-3.5 accent-emerald-500"
+                    data-testid="vr-manual-humanize"
+                  />
+                  <div className="flex-1">
+                    <div className="text-xs text-zinc-200 font-medium">
+                      Human-like typing
+                      <span className="ml-1 text-emerald-400 text-[10px]">
+                        (anti-detect — default)
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-zinc-500 mt-0.5">
+                      Uncheck for fast <code>page.fill()</code>.
+                    </div>
+                  </div>
+                </label>
+              )}
+
+              {/* Position — where in the steps list to insert */}
+              <div>
+                <label className="block text-[11px] text-zinc-400 mb-1">
+                  Insert at position{" "}
+                  <span className="text-zinc-600">
+                    (leave empty = append to end; 1-based)
+                  </span>
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max={steps.length + 1}
+                  value={manualStepDraft.position}
+                  onChange={(e) =>
+                    setManualStepDraft({
+                      ...manualStepDraft,
+                      position: e.target.value,
+                    })
+                  }
+                  placeholder={`${steps.length + 1} (end)`}
+                  className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-sky-500 text-zinc-200 text-xs outline-none"
+                  data-testid="vr-manual-position"
+                />
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 p-4 border-t border-zinc-800">
+              <button
+                onClick={cancelManualAddStep}
+                className="px-4 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs"
+                data-testid="vr-manual-cancel"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveManualAddStep}
+                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded bg-sky-600 hover:bg-sky-500 text-white text-xs font-medium"
+                data-testid="vr-manual-save"
+              >
+                <ListPlus className="w-3.5 h-3.5" /> Add Step
               </button>
             </div>
           </div>

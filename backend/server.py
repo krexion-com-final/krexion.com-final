@@ -14700,6 +14700,46 @@ async def vr_update_step(session_id: str, index: int, patch: Dict[str, Any] = Bo
     return vr.update_step(sess, index, patch or {})
 
 
+# ── Manual Add Step (2026-01) ─────────────────────────────────────
+# Lets the user inject a step the auto-recorder didn't capture — e.g.,
+# a `wait_for_selector` on a hidden field that requires an XPath, or a
+# `click` on an element behind an overlay. Both CSS and XPath selectors
+# pass through unchanged (Playwright auto-detects xpath at replay).
+@api_router.post("/visual-recorder/{session_id}/manual-step")
+async def vr_add_manual_step(session_id: str, body: Dict[str, Any] = Body(...), user: dict = Depends(get_current_user)):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    step = body.get("step") or {}
+    position = body.get("position")
+    return vr.add_manual_step(sess, step, position)
+
+
+# ── Smart Selector Suggester (2026-01) ───────────────────────────
+# Given a failed/incorrect selector, scans the LIVE page DOM and
+# returns ranked candidate selectors. Powers the "🔍 Find similar
+# selectors" button in the Edit-step modal.
+@api_router.get("/visual-recorder/{session_id}/suggest-selectors")
+async def vr_suggest_selectors(
+    session_id: str,
+    failed: str,
+    limit: int = 8,
+    user: dict = Depends(get_current_user),
+):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.suggest_selectors(sess, failed, max(1, min(int(limit), 20)))
+
+
 # ── New action endpoints (press-key, hover, wait-for-selector) ───────
 class _VRKeyReq(BaseModel):
     key: str

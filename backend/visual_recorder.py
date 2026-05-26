@@ -2096,6 +2096,246 @@ def update_step(sess: RecorderSession, index: int, patch: Dict[str, Any]) -> Dic
     return {"updated": True, "applied": applied, "step": step}
 
 
+# Whitelisted action types for "manual add step" — these can be added
+# without browser interaction (just appended to sess.steps). Replay
+# happens during Live Test / RUT run. We don't allow `goto` from
+# manual-add since that's better done by starting a new recording at
+# the new URL.
+_MANUAL_STEP_ACTIONS = {
+    "wait_for_selector", "click", "fill", "type", "select", "press",
+    "wait", "wait_for_load", "wait_for_navigation", "wait_for_networkidle",
+    "hover", "check", "uncheck", "screenshot",
+}
+
+
+def add_manual_step(sess: RecorderSession, step: Dict[str, Any], position: Optional[int] = None) -> Dict[str, Any]:
+    """Append (or insert at `position`) a manually-authored step into the
+    recorder session. Used by the new "Add Manual Step" UI button when
+    the user needs to inject a step that the auto-recorder didn't pick
+    up (e.g., hidden field needing an XPath selector). Validates the
+    action type against the whitelist; selector / value pass-through
+    unchanged so the user can supply BOTH CSS (`#x`, `[name=x]`) and
+    XPath (`//input[@name="x"]`, `xpath=//div`) — Playwright auto-
+    detects xpath at replay time. Returns the inserted step + new
+    index."""
+    sess.touch()
+    if not isinstance(step, dict):
+        return {"added": False, "reason": "step must be a dict"}
+    action = (step.get("action") or "").strip().lower()
+    if action not in _MANUAL_STEP_ACTIONS:
+        return {
+            "added": False,
+            "reason": f"action '{action}' not allowed for manual add. "
+                      f"Allowed: {sorted(_MANUAL_STEP_ACTIONS)}",
+        }
+
+    # Build a clean step dict — only keep known fields, normalise types.
+    clean: Dict[str, Any] = {"action": action}
+    for k in ("selector", "value", "key", "state", "match_by", "name"):
+        v = step.get(k)
+        if v is not None and str(v).strip() != "":
+            clean[k] = str(v).strip()
+    for k in ("timeout", "ms", "delay"):
+        v = step.get(k)
+        if v is not None:
+            try:
+                clean[k] = max(0, int(v))
+            except (TypeError, ValueError):
+                pass
+    if "humanize" in step:
+        clean["humanize"] = bool(step["humanize"])
+    # Tag this step so the UI can show a small "manual" badge — purely
+    # cosmetic, doesn't affect replay.
+    clean["source"] = "manual"
+
+    # Default timeouts so users don't have to set them every time.
+    if action in ("wait_for_selector", "click", "fill", "type", "select", "hover", "check", "uncheck") and "timeout" not in clean:
+        clean["timeout"] = 8000
+    if action == "wait" and "ms" not in clean:
+        clean["ms"] = 1000
+
+    # Insert at position (clamped to valid range) or append.
+    n = len(sess.steps)
+    if position is None or not isinstance(position, int):
+        idx = n
+    else:
+        idx = max(0, min(int(position), n))
+    sess.steps.insert(idx, clean)
+    return {"added": True, "step": clean, "index": idx, "total": len(sess.steps)}
+
+
+async def suggest_selectors(sess: RecorderSession, failed_selector: str, limit: int = 8) -> Dict[str, Any]:
+    """Smart Selector Suggester (2026-01) — when a step fails because
+    the recorded selector no longer matches the page, query the LIVE
+    DOM for nearby candidates that look similar and rank them.
+
+    Used by the Edit-step modal's "🔍 Find similar selectors" button.
+    Returns a list of candidate selectors with metadata so the user can
+    one-click swap the failed selector for the right one.
+
+    Strategy:
+      1. Extract identifier tokens from the failed selector
+         (e.g., `#birth_month` → ["birth", "month"];
+          `[name="dob_year"]` → ["dob", "year"];
+          `//input[@id='first']` → ["first"]).
+      2. In a single page.evaluate() call, scan all form-relevant
+         elements (input/select/textarea/button) and score each by
+         how many tokens appear in its id/name/class/aria-label/
+         placeholder/label text.
+      3. Return top `limit` candidates sorted by score, each with a
+         ready-to-paste CSS selector + tag + visible label preview.
+    """
+    sess.touch()
+    if sess.state != "ready" or not sess.page:
+        return {"suggestions": [], "error": f"Session not ready ({sess.state})"}
+
+    sel = (failed_selector or "").strip()
+    if not sel:
+        return {"suggestions": [], "error": "empty selector"}
+
+    # ── Token extraction (handles CSS id/name attr + xpath patterns) ─
+    import re as _re
+    tokens: List[str] = []
+
+    # #id
+    for m in _re.finditer(r"#([\w\-]+)", sel):
+        tokens.append(m.group(1))
+    # [name="x"], [id="x"], [name=x], [id=x]
+    for m in _re.finditer(r"\[(?:name|id)\s*=\s*[\"']?([\w\-]+)[\"']?\]", sel):
+        tokens.append(m.group(1))
+    # xpath @id='x' / @name='x'
+    for m in _re.finditer(r"@(?:name|id)\s*=\s*[\"']([\w\-]+)[\"']", sel):
+        tokens.append(m.group(1))
+    # If the selector itself is a bare word (no special chars), use it
+    if not tokens and _re.match(r"^[\w\-]+$", sel):
+        tokens.append(sel)
+
+    # Sub-tokens (split on _ - space camelCase)
+    sub: List[str] = []
+    for t in tokens:
+        for piece in _re.split(r"[_\-\s]+", t):
+            if piece and len(piece) >= 2:
+                sub.append(piece.lower())
+        # camelCase → snake-ish
+        for piece in _re.findall(r"[A-Z]?[a-z]+", t):
+            if piece and len(piece) >= 2:
+                sub.append(piece.lower())
+    # Dedup preserving order
+    seen: set = set()
+    search_tokens: List[str] = []
+    for t in sub:
+        tl = t.lower()
+        if tl not in seen:
+            seen.add(tl)
+            search_tokens.append(tl)
+    if not search_tokens:
+        return {"suggestions": [], "error": "could not extract tokens from selector", "tokens": []}
+
+    # ── Run DOM scan in browser ──────────────────────────────────────
+    js = """
+    (params) => {
+      const tokens = params.tokens.map(t => t.toLowerCase());
+      const candidates = [];
+      const els = document.querySelectorAll('input, select, textarea, button, [contenteditable=true]');
+      function visibleLabel(el) {
+        // Linked <label for=id>
+        const id = el.getAttribute('id');
+        if (id) {
+          const lab = document.querySelector('label[for="' + CSS.escape(id) + '"]');
+          if (lab && lab.innerText) return lab.innerText.trim().slice(0, 60);
+        }
+        // Ancestor <label> wrapping the field
+        const parentLab = el.closest('label');
+        if (parentLab && parentLab.innerText) return parentLab.innerText.trim().slice(0, 60);
+        // aria-label
+        const aria = el.getAttribute('aria-label');
+        if (aria) return aria.trim().slice(0, 60);
+        // placeholder fallback
+        const ph = el.getAttribute('placeholder');
+        if (ph) return ph.trim().slice(0, 60);
+        return '';
+      }
+      function isVisible(el) {
+        const r = el.getBoundingClientRect();
+        if (r.width === 0 && r.height === 0) return false;
+        const cs = window.getComputedStyle(el);
+        if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return false;
+        return true;
+      }
+      els.forEach(el => {
+        const id = (el.getAttribute('id') || '').toLowerCase();
+        const name = (el.getAttribute('name') || '').toLowerCase();
+        const cls = (el.getAttribute('class') || '').toLowerCase();
+        const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+        const ph = (el.getAttribute('placeholder') || '').toLowerCase();
+        const type = (el.getAttribute('type') || '').toLowerCase();
+        const label = visibleLabel(el).toLowerCase();
+        const haystack = [id, name, cls, aria, ph, label].join(' | ');
+        let score = 0;
+        let matched = [];
+        tokens.forEach(t => {
+          if (!t) return;
+          if (id === t) { score += 10; matched.push(t); return; }
+          if (name === t) { score += 8; matched.push(t); return; }
+          if (id.includes(t) || name.includes(t)) { score += 5; matched.push(t); return; }
+          if (aria.includes(t) || ph.includes(t) || label.includes(t)) { score += 3; matched.push(t); return; }
+          if (cls.includes(t)) { score += 1; matched.push(t); return; }
+        });
+        if (score <= 0) return;
+        // Build a stable selector — prefer #id, then [name=], then nth-of-type tag
+        let suggested = '';
+        if (id) {
+          suggested = '#' + id;
+        } else if (name) {
+          suggested = el.tagName.toLowerCase() + '[name="' + name + '"]';
+        } else if (aria) {
+          suggested = el.tagName.toLowerCase() + '[aria-label="' + el.getAttribute('aria-label') + '"]';
+        } else {
+          // fallback: nth-of-type within parent
+          const parent = el.parentElement;
+          if (parent) {
+            const sibs = Array.from(parent.children).filter(c => c.tagName === el.tagName);
+            const idx = sibs.indexOf(el);
+            suggested = el.tagName.toLowerCase() + ':nth-of-type(' + (idx + 1) + ')';
+          } else {
+            suggested = el.tagName.toLowerCase();
+          }
+        }
+        candidates.push({
+          selector: suggested,
+          tag: el.tagName.toLowerCase(),
+          input_type: type || null,
+          id: id || null,
+          name: name || null,
+          label: visibleLabel(el) || null,
+          placeholder: el.getAttribute('placeholder') || null,
+          visible: isVisible(el),
+          matched_tokens: matched,
+          score: score,
+        });
+      });
+      // Sort by score DESC, then visible first
+      candidates.sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return (b.visible ? 1 : 0) - (a.visible ? 1 : 0);
+      });
+      return candidates.slice(0, params.limit);
+    }
+    """
+
+    try:
+        async with sess.lock:
+            results = await sess.page.evaluate(js, {"tokens": search_tokens, "limit": int(limit)})
+    except Exception as e:
+        return {"suggestions": [], "error": f"DOM scan failed: {e}", "tokens": search_tokens}
+
+    return {
+        "suggestions": results or [],
+        "tokens": search_tokens,
+        "failed_selector": sel,
+    }
+
+
 async def press_key(sess: RecorderSession, key: str) -> Dict[str, Any]:
     """Send a single keyboard key press to the page (Enter, Tab, Escape,
     Backspace, ArrowLeft, ArrowRight, ArrowUp, ArrowDown, PageDown, etc.).
