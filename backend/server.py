@@ -14522,6 +14522,25 @@ async def vr_screenshot_marker(session_id: str, req: VRScreenshotMarkerReq, user
     return await vr.add_screenshot_marker(sess, name=req.name)
 
 
+# 2026-05: Add an explicit "close browser" step at the current
+# position in the recording. The RUT runner will close the visit's
+# page + context as soon as it reaches this step — freeing RAM/proxy
+# slot for the next worker. Recommended placement: right after the
+# conversion-confirmation screenshot so the heavy lifting is done
+# before the close fires.
+@api_router.post("/visual-recorder/{session_id}/close-browser-step")
+async def vr_close_browser_step(session_id: str, user: dict = Depends(get_current_user)):
+    """Append a `{"action":"close"}` step to the current recording."""
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.add_close_browser_step(sess)
+
+
 class VRDropdownBindReq(BaseModel):
     selector: str
     value: Optional[str] = None

@@ -65,6 +65,12 @@ const TOOLS = [
   { id: "capture",   icon: ImageIcon,   label: "Capture",     key: "6", help: "Insert a screenshot marker — shown in Live Activity" },
   { id: "final",     icon: Flag,        label: "Mark Final",  key: "7", help: "Capture this page as conversion target" },
   { id: "nav_only",  icon: ArrowRight,  label: "Move",        key: "8", help: "Click without recording — use to navigate past a Random Pick step" },
+  // 2026-05: explicit "close browser" step. Inserts {"action":"close"}
+  // at current position so the RUT runner frees the browser as soon
+  // as it reaches this step (recommended right after the conversion-
+  // confirmation Capture so post-submit pixel chains don't keep the
+  // tile alive on slower VPSes).
+  { id: "close_browser", icon: XCircle, label: "Close Browser", key: "9", help: "Insert a close-browser step — RUT runner will end this visit's browser immediately when reached (frees RAM for next worker)" },
 ];
 
 // Device-viewport presets — applied at session start so the recording
@@ -572,6 +578,31 @@ export default function VisualRecorderPage() {
         refreshState();
       } catch (err) {
         toast.error(`Insert capture failed: ${err.message || err}`);
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
+    // 2026-05: "close_browser" tool — no click needed, just append a
+    // {"action":"close"} step at the current position. Same pattern as
+    // the capture tool above. We auto-flip back to "default" so the
+    // operator can keep recording (or save/test) without manually
+    // changing the tool.
+    if (tool === "close_browser") {
+      setBusy(true);
+      try {
+        const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/close-browser-step`, {
+          method: "POST",
+          headers: authH(),
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+        toast.success("🔌 Close-browser step inserted — RUT will end the visit's browser here");
+        setTool("default");
+        refreshState();
+      } catch (err) {
+        toast.error(`Insert close failed: ${err.message || err}`);
       } finally {
         setBusy(false);
       }
@@ -2453,6 +2484,31 @@ export default function VisualRecorderPage() {
                     <button
                       key={t.id}
                       onClick={() => {
+                        // 2026-05: `close_browser` is an instant-action
+                        // tool — there's nothing to "click on the page"
+                        // for it. Fire the insert immediately and snap
+                        // back to the default tool so the operator can
+                        // keep recording without an extra step.
+                        if (t.id === "close_browser") {
+                          (async () => {
+                            setBusy(true);
+                            try {
+                              const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/close-browser-step`, {
+                                method: "POST",
+                                headers: authH(),
+                              });
+                              const d = await r.json();
+                              if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+                              toast.success("🔌 Close-browser step inserted");
+                              refreshState();
+                            } catch (err) {
+                              toast.error(`Insert close failed: ${err.message || err}`);
+                            } finally {
+                              setBusy(false);
+                            }
+                          })();
+                          return;
+                        }
                         setTool(t.id);
                         if (t.id !== "random") {
                           setPendingRandom([]);

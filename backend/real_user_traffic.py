@@ -8457,6 +8457,78 @@ async def _execute_automation_steps(
                                 await on_screenshot(idx + 1, shot_name, png_bytes)
                             except Exception:
                                 pass
+                elif action in ("close", "close_browser", "browser_close"):
+                    # ── 2026-05: User-requested explicit browser-close step ──
+                    # The user noticed that visits keep the browser around
+                    # for a moment after the LAST recorded step finishes
+                    # (the per-visit context is closed in the parent
+                    # finally-block, but that runs AFTER the offer page's
+                    # post-submit redirect / 3rd-party pixel chain settles).
+                    # On medium-RAM VPSes this stacks up: a finished visit
+                    # still holds ~150-300 MB until the parent loop reaches
+                    # the finally. Recording an explicit `close` step at the
+                    # end of the JSON (or anywhere mid-flow if the operator
+                    # has already captured the conversion) lets the operator
+                    # free that browser IMMEDIATELY so the next worker can
+                    # start. Safe because:
+                    #   • page.close() / context.close() are idempotent —
+                    #     the outer `finally` in process_one() still calls
+                    #     context.close() but the second call is a no-op.
+                    #   • We return status="ok" with a flag so the caller
+                    #     knows the step deliberately terminated the visit
+                    #     early (NOT a failure — `executed` is incremented).
+                    #   • Any steps AFTER `close` in the JSON are ignored
+                    #     by design — that's the whole point of this step.
+                    try:
+                        # Close the page first (releases DOM / JS heap).
+                        await page.close()
+                    except Exception as _pe:
+                        logger.debug(f"close step: page.close() failed (continuing): {_pe}")
+                    # Try to close the parent context too, if it's still
+                    # accessible — this is what actually frees the proxy
+                    # connection + cookies + storage.
+                    try:
+                        _ctx = page.context
+                        if _ctx is not None:
+                            await _ctx.close()
+                    except Exception as _ce:
+                        logger.debug(f"close step: context.close() failed (continuing): {_ce}")
+                    executed += 1
+                    if collect_timings:
+                        step_results.append({
+                            "idx": idx, "action": action,
+                            "selector": "", "ok": True, "error": None,
+                            "ms": int((_time_mod.perf_counter() - _t_step_start) * 1000),
+                            "optional": optional,
+                            "closed_early": True,
+                        })
+                    # Emit a final progress event so Live Activity grid
+                    # shows "✓ closed" instead of the visit getting stuck
+                    # at the prior step indefinitely.
+                    if on_step_progress is not None:
+                        try:
+                            await on_step_progress({
+                                "idx": idx + 1,
+                                "action": action,
+                                "selector": "",
+                                "total_steps": len(steps or []),
+                                "status": "ok",
+                                "note": "browser closed by JSON step",
+                                "ms": int((_time_mod.perf_counter() - _t_step_start) * 1000),
+                                "timestamp_ms": int(_time_mod.time() * 1000),
+                                "screenshot_b64": "",
+                                "page_url": "",
+                            })
+                        except Exception:
+                            pass
+                    return {
+                        "status": "ok",
+                        "executed_steps": executed,
+                        "closed_early": True,
+                        **({"step_results": step_results,
+                            "total_ms": int((_time_mod.perf_counter() - _t_total_start) * 1000)}
+                           if collect_timings else {}),
+                    }
                 elif action in ("auto_continue", "auto_continue_survey"):
                     # 2026-01 — Smart multi-page survey continuation.
                     # After the user's custom JSON has filled the initial

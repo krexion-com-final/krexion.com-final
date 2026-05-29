@@ -1117,6 +1117,41 @@ async def add_screenshot_marker(sess: RecorderSession, name: Optional[str] = Non
     return {"recorded": True, "step": step}
 
 
+# ── 2026-05: User-requested explicit "close browser" recording step ──
+# Why this exists:
+#   The user noticed visits in the Live Visual Grid keep their browser
+#   tile populated for a few seconds after the final recorded step,
+#   while the per-visit Playwright context is still being torn down by
+#   the outer finally-block. On medium-RAM VPSes this stacks (each
+#   visit holds ~150-300 MB until its finally fires), so concurrent
+#   workers were sometimes starved of RAM and the next worker booted
+#   slowly. With this `close` step the operator can mark "browser
+#   work is done here, free it NOW" at any point in the recording —
+#   typically right after the conversion-confirmation screenshot.
+#   The RUT runner already handles this action (see real_user_traffic.
+#   py / `elif action in ("close", "close_browser", ...)`).
+#
+# Notes:
+#   • optional=False on purpose — close is a final step; if it can't
+#     run (e.g. page already gone), we WANT to know about it in the
+#     diagnostics so the recording isn't silently incomplete.
+#   • No selector / no timeout — it's a pure browser-lifecycle action.
+async def add_close_browser_step(sess: RecorderSession) -> Dict[str, Any]:
+    """Insert a 'close' action step at the current position. The RUT
+    runner will close the per-visit page+context as soon as it reaches
+    this step, releasing RAM/proxy slot for the next worker."""
+    sess.touch()
+    step = {
+        "action": "close",
+        # No timeout/selector — pure lifecycle step. Not marked optional
+        # because if the runner can't reach it, the operator should see
+        # it in the diagnostics report (silently skipping a close would
+        # leak the very resource this step exists to free).
+    }
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
 async def live_test(
     sess: RecorderSession,
     sample_row: Optional[Dict[str, Any]] = None,
