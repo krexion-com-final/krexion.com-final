@@ -32,6 +32,7 @@ import {
   Activity,
   X,
   Zap,
+  Loader2,
 } from "lucide-react";
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
@@ -3281,6 +3282,14 @@ export default function RealUserTrafficPage() {
                           status === 'ok' ? 'bg-emerald-900/90 text-emerald-200' :
                           status === 'failed' ? 'bg-rose-900/90 text-rose-200' :
                           'bg-blue-900/90 text-blue-200';
+                        // 2026-01: support BOTH event shapes:
+                        //  (a) automation_steps callback → action, selector, idx, ms
+                        //  (b) push_live_step mirror     → stage, status, detail
+                        const descr = ev.action
+                          ? `step #${(ev.idx ?? 0) + 1} · ${ev.action}${ev.selector ? ' ' + ev.selector.slice(0, 30) : ''}`
+                          : ev.stage
+                          ? `${ev.stage} · ${(ev.detail || '').slice(0, 50)}`
+                          : 'starting…';
                         return (
                           <div
                             key={vid}
@@ -3315,19 +3324,14 @@ export default function RealUserTrafficPage() {
                             {/* Current step info — bottom overlay */}
                             <div className="absolute bottom-0 left-0 right-0 bg-black/80 text-white px-2 py-1 text-[11px] font-mono">
                               <div className="flex items-center justify-between gap-2">
-                                <span className="truncate">
-                                  step #{(ev.idx ?? 0) + 1} · {ev.action || '...'}
-                                  {ev.selector && (
-                                    <span className="text-zinc-400"> {ev.selector.slice(0, 30)}</span>
-                                  )}
-                                </span>
+                                <span className="truncate">{descr}</span>
                                 {typeof ev.ms === 'number' && (
                                   <span className="text-zinc-400 flex-shrink-0">{ev.ms}ms</span>
                                 )}
                               </div>
-                              {status === 'failed' && ev.error && (
-                                <div className="text-rose-300 truncate text-[10px] mt-0.5" title={ev.error}>
-                                  ⚠ {ev.error.slice(0, 80)}
+                              {(status === 'failed' && (ev.error || ev.detail)) && (
+                                <div className="text-rose-300 truncate text-[10px] mt-0.5" title={ev.error || ev.detail}>
+                                  ⚠ {(ev.error || ev.detail).slice(0, 80)}
                                 </div>
                               )}
                             </div>

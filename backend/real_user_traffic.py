@@ -9589,6 +9589,42 @@ def push_live_step(job_id: str, visit: int, stage: str, status: str, detail: str
     # Cap buffer
     if len(buf) > _MAX_LIVE_STEPS:
         del buf[:-_MAX_LIVE_STEPS]
+    # 2026-01 (additive): also mirror the most recent stage into
+    # `live_visits` so the Visual Live Grid shows ALL active visits —
+    # including ones still in proxy/browser setup BEFORE the automation
+    # steps callback starts firing. Without this, the grid stays empty
+    # for the first ~5-15s of each visit (proxy pick + browser launch),
+    # giving the false impression that nothing is happening.
+    # Skip visit==0 (job-level events that aren't tied to a single
+    # visit slot, e.g. "preflight" / "engine_check").
+    if visit and isinstance(visit, int) and visit > 0:
+        lv = j.setdefault("live_visits", {})
+        vkey = str(visit)
+        v = lv.setdefault(vkey, {
+            "visit_idx": visit,
+            "started_at": time.time(),
+            "events_count": 0,
+            "latest_event": None,
+            "latest_frame_b64": "",
+            "page_url": "",
+            "status": "running",
+        })
+        # Only overwrite latest_event when the new event is NOT a
+        # screenshot-bearing _execute_automation_steps callback (those
+        # carry a richer payload via _visit_progress_cb and we want
+        # them to take precedence over generic stage messages).
+        existing = v.get("latest_event") or {}
+        if not (existing.get("action") and existing.get("status") == "running"):
+            v["latest_event"] = {
+                "stage": stage,
+                "status": status,
+                "detail": (detail or "")[:200],
+                "timestamp_ms": int(time.time() * 1000),
+            }
+        v["events_count"] = int(v.get("events_count", 0)) + 1
+        if status == "failed":
+            v["status"] = "failed"
+        v["last_update"] = time.time()
 
 
 def get_live_steps(job_id: str, since: int = 0) -> Dict[str, Any]:
