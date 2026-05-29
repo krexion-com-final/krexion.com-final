@@ -390,18 +390,23 @@ async def require_local_mode(request: Request):
       • Cloud edge + STRICT_CLOUD_HEAVY_BLOCK=false (legacy opt-out)
             → allow (the endpoint may still try to bridge first; if the
               bridge fails it falls back to cloud execution as before).
-              Admins flip this on when not all customers have the
-              desktop app yet.
 
-      • Cloud edge + STRICT_CLOUD_HEAVY_BLOCK=true (NEW DEFAULT, 2026-05)
-            → REFUSE. Returns 503 with a clear "open desktop app"
-              message + the user's actual local-PC heartbeat status so
-              the frontend can tailor the dialog (PC online → "open it"
-              vs PC offline → "turn it on / install"). Endpoints that
-              already bridge (proxies bulk-test, install-update) route
-              to the local PC BEFORE this dependency runs and return
-              the bridged result; only direct unbridged calls reach
-              this block.
+      • Cloud edge + STRICT_CLOUD_HEAVY_BLOCK=true + PC ONLINE
+            → ALLOW. (2026-05 refinement.) The customer literally has
+              "PC connected · X GB / Y cores" in their header bar — the
+              whole point of strict mode is to protect the VPS WHEN THE
+              CUSTOMER HAS NO LOCAL FALLBACK. If their heartbeat is
+              fresh, they have one. Endpoints that bridge route the
+              request to the desktop app; endpoints that don't bridge
+              run inline on the cloud — either is fine because the
+              customer's own machine is active and accountable.
+
+      • Cloud edge + STRICT_CLOUD_HEAVY_BLOCK=true + PC OFFLINE
+            → REFUSE. Returns 503 + customer's local-PC heartbeat
+              status so the frontend modal shows the right copy
+              ("turn on your PC" vs "install desktop app"). This is
+              the ONLY case we block — the case the customer asked
+              for: "agar PC OFF ho to VPS pe load na pare".
     """
     if request.headers.get("X-Krexion-Bridge-Job"):
         return True
@@ -412,29 +417,58 @@ async def require_local_mode(request: Request):
     if not await get_effective_strict_heavy_block():
         return True
 
-    # ── 2026-05: enrich the 503 with the user's actual local-PC status ──
-    # The frontend (cloudGateInterceptor) can then choose between
-    # "open your desktop app" (PC online) vs "turn on your PC / install"
-    # (PC offline) instead of always showing the offline copy.
+    # ── 2026-05 refinement: only block when PC is OFFLINE ──
+    # Before this fix, strict mode was blocking heavy features even when
+    # the customer's desktop app was actively connected (showing
+    # "PC connected · 31.9 GB / 8 cores" in the UI). The customer's
+    # explicit ask was: "agar customer ka PC OFF ho to VPS pe load na
+    # pare" — i.e. block ONLY when the PC is offline. If PC is online,
+    # the customer has resources & accountability — allow.
+    #
+    # We resolve the user from the bearer token WITHOUT re-running the
+    # full JWT dependency (avoids HTTPException side-effects inside this
+    # dependency). On any error we fail CLOSED (block) for safety.
     local_status: Dict[str, Any] = {"online": False, "reason": "status_unknown"}
     try:
         from bridge_module import is_user_local_online as _is_online
-        # Resolve user from Authorization header without re-running the
-        # full JWT dependency (avoids HTTPException side-effects inside
-        # this dependency). If anything fails, we degrade gracefully to
-        # the generic "offline" copy.
         auth = request.headers.get("Authorization") or ""
         token = auth[7:] if auth.lower().startswith("bearer ") else ""
         if token:
             try:
                 _payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-                _uid = _payload.get("user_id") or _payload.get("sub")
+                # ── 2026-05 fix ──
+                # JWT `sub` is the user's EMAIL (see get_current_user
+                # line ~1220). The heartbeat collection keys on
+                # `user_id` (the document `id` UUID), so we MUST resolve
+                # email → user_id before calling is_user_local_online.
+                # Without this resolution the previous code looked up
+                # `user_id = "user@example.com"` against `user_id=UUID`
+                # rows, never matched, and always returned offline
+                # even when the desktop app was actively heart-beating —
+                # which is the EXACT customer-reported bug
+                # ("PC already connected hai phir bhi error aya").
+                _uid = _payload.get("user_id")
+                if not _uid:
+                    _email = _payload.get("sub")
+                    if _email:
+                        _u = await db.users.find_one(
+                            {"email": _email}, {"id": 1, "_id": 0}
+                        )
+                        if _u:
+                            _uid = _u.get("id")
                 if _uid:
                     local_status = await _is_online(_uid)
             except Exception:
                 pass
     except Exception:
         pass
+
+    # PC ONLINE → allow. This is the customer's expected behaviour
+    # ("mera PC already connected hai, error kyun aya"). The /api/mode
+    # banner stays "strict" because the protection IS active — it just
+    # didn't need to trigger for this request.
+    if local_status.get("online"):
+        return True
 
     raise HTTPException(
         status_code=503,
@@ -445,9 +479,8 @@ async def require_local_mode(request: Request):
             "download_url": "https://krexion.com/download",
             "local_status": local_status,
             "actionable_hint": (
-                "open_desktop_app" if local_status.get("online")
-                else ("turn_on_pc" if local_status.get("reason") == "stale_heartbeat"
-                      else "install_desktop_app")
+                "turn_on_pc" if local_status.get("reason") == "stale_heartbeat"
+                else "install_desktop_app"
             ),
         },
     )
