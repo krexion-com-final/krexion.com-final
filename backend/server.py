@@ -15005,6 +15005,22 @@ async def vr_lint(session_id: str, user: dict = Depends(get_current_user)):
     return vr.lint_session(sess)
 
 
+@api_router.get("/visual-recorder/{session_id}/live-progress")
+async def vr_live_progress(session_id: str, since: int = 0,
+                            user: dict = Depends(get_current_user)):
+    """Real-time live-test progress feed. Polled by the frontend every
+    ~400ms during a live test run. Returns an incremental list of step
+    events (running / ok / failed) so the UI can show what the backend
+    is currently doing at each step."""
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return vr.get_live_progress(sess, since_idx=since)
+
+
 # Also expose a `lint` endpoint that accepts arbitrary steps (no
 # session) — useful for the frontend when the user wants to validate a
 # pasted JSON before importing it.

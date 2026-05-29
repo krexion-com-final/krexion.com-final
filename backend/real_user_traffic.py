@@ -7476,6 +7476,7 @@ async def _execute_automation_steps(
     on_screenshot: Optional[Callable[[int, str, bytes], Awaitable[None]]] = None,
     collect_timings: bool = False,
     user_id: Optional[str] = None,
+    on_step_progress: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
 ) -> Dict[str, Any]:
     """Execute a user-provided automation script step-by-step. Returns
     {status, error?, executed_steps, step_results?}.  Each step format:
@@ -7578,6 +7579,27 @@ async def _execute_automation_steps(
             timeout = int(step.get("timeout") or 25000)
             optional = bool(step.get("optional") or False)
             wait_nav = bool(step.get("wait_nav") or False)
+
+            # 2026-01 (additive): real-time step progress callback. When
+            # the caller provides `on_step_progress`, we emit a
+            # "running" event BEFORE the action executes so the UI can
+            # show "step #N (action) — running…" live. Followed by an
+            # "ok" / "failed" event in the respective code paths below.
+            # Failures here are swallowed — the callback is purely
+            # informational; never blocks the automation.
+            if on_step_progress is not None:
+                try:
+                    await on_step_progress({
+                        "idx": idx,
+                        "action": action,
+                        "selector": (selector or "")[:200],
+                        "value_preview": (str(value) if value else "")[:80],
+                        "total_steps": len(steps or []),
+                        "status": "running",
+                        "timestamp_ms": int(_time_mod.time() * 1000),
+                    })
+                except Exception:
+                    pass
 
             if skip_captcha and action not in ("wait", "screenshot", "evaluate"):
                 if await _page_has_captcha(page):
@@ -8268,6 +8290,20 @@ async def _execute_automation_steps(
                         "ms": int((_time_mod.perf_counter() - _t_step_start) * 1000),
                         "optional": optional,
                     })
+                # 2026-01: emit "ok" progress event
+                if on_step_progress is not None:
+                    try:
+                        await on_step_progress({
+                            "idx": idx,
+                            "action": action,
+                            "selector": (selector or "")[:200],
+                            "total_steps": len(steps or []),
+                            "status": "ok",
+                            "ms": int((_time_mod.perf_counter() - _t_step_start) * 1000),
+                            "timestamp_ms": int(_time_mod.time() * 1000),
+                        })
+                    except Exception:
+                        pass
             except Exception as e:
                 # 2026-01 (additive): per-step retry. When the step
                 # carries `retry: N`, attempt the SAME step up to N more
@@ -8391,6 +8427,22 @@ async def _execute_automation_steps(
                 _err_msg = f"Step {idx+1} ({action}) failed: {str(e)[:200]}"
                 if _hint:
                     _err_msg = f"{_err_msg} | Hint: {_hint}"
+                # 2026-01: emit "failed" progress event
+                if on_step_progress is not None:
+                    try:
+                        await on_step_progress({
+                            "idx": idx,
+                            "action": action,
+                            "selector": (selector or "")[:200],
+                            "total_steps": len(steps or []),
+                            "status": "failed",
+                            "error": str(e)[:200],
+                            "friendly_hint": _hint,
+                            "ms": int((_time_mod.perf_counter() - _t_step_start) * 1000),
+                            "timestamp_ms": int(_time_mod.time() * 1000),
+                        })
+                    except Exception:
+                        pass
                 return {"status": "failed", "error": _err_msg, "executed_steps": executed,
                         "failed_at_idx": idx, "remaining_steps": list(steps[idx+1:]),
                         "friendly_hint": _hint,

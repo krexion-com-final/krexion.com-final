@@ -353,6 +353,14 @@ class RecorderSession:
     lock: Optional[asyncio.Lock] = None
     # Background startup task (so we can cancel it on stop)
     startup_task: Any = None
+    # 2026-01 (additive): live progress feed for live_test. Polled by the
+    # frontend at ~400ms intervals to show real-time step execution
+    # ("step #5 click button.submit — running…", "step #5 ok in 230ms").
+    # Reset at the start of every live_test invocation.
+    live_progress: List[Dict[str, Any]] = field(default_factory=list)
+    live_progress_running: bool = False
+    live_progress_started_at: Optional[float] = None
+    live_progress_finished_at: Optional[float] = None
     # ── 2026-05: Auto-fix history for Undo support ──
     # Each entry: {kind, at_step, summary, applied_at, snapshot_before}
     # where snapshot_before is a deep-copy of `steps` BEFORE that fix
@@ -1189,6 +1197,33 @@ async def live_test(
         # accidental fresh_page=True from the caller.
         fresh_page = False
 
+    # 2026-01 (additive): reset live-progress feed at the start of every
+    # live_test invocation. The callback below appends one event per
+    # step transition (running → ok / failed) so the UI can show a
+    # live "step #N — running…" / "step #N ok in 230ms" feed.
+    sess.live_progress = []
+    sess.live_progress_running = True
+    sess.live_progress_started_at = time.time()
+    sess.live_progress_finished_at = None
+
+    async def _progress_cb(event: Dict[str, Any]) -> None:
+        try:
+            # Re-map sliced idx back to ORIGINAL recording idx so the UI
+            # highlights the right row when start_index > 0.
+            if start_index > 0 and "idx" in event:
+                try:
+                    event = dict(event)
+                    event["idx"] = int(event["idx"]) + start_index
+                except (TypeError, ValueError):
+                    pass
+            # Cap memory — keep the most recent 500 events. A live_test
+            # of 50 steps produces ~100-150 events, so 500 is plenty.
+            sess.live_progress.append(event)
+            if len(sess.live_progress) > 500:
+                sess.live_progress = sess.live_progress[-500:]
+        except Exception:
+            pass
+
     async with sess.lock:
         # Optionally open a fresh page for an honest end-to-end test.
         # We DO NOT close the recorder's existing page — the user is
@@ -1223,6 +1258,7 @@ async def live_test(
                 self_heal=False,  # IMPORTANT: no AI healing during test — user wants to see RAW failures
                 collect_timings=True,
                 user_id=sess.user_id,   # enable self-healing aliases (2026-01)
+                on_step_progress=_progress_cb,  # 2026-01: real-time step feed
             )
         except Exception as e:
             res = {"status": "failed", "error": f"Live test crashed: {e}", "executed_steps": 0, "step_results": []}
@@ -1233,6 +1269,9 @@ async def live_test(
                     await fresh_page_obj.close()
                 except Exception:
                     pass
+            # 2026-01: mark live progress feed as finished
+            sess.live_progress_running = False
+            sess.live_progress_finished_at = time.time()
 
         final_url = ""
         try:
@@ -2695,6 +2734,35 @@ def add_dismiss_popups_step(sess: RecorderSession) -> Dict[str, Any]:
     step = {"action": "dismiss_popups", "optional": True}
     sess.steps.append(step)
     return {"recorded": True, "step": step}
+
+
+def get_live_progress(sess: RecorderSession, since_idx: int = 0) -> Dict[str, Any]:
+    """Return the current live-progress feed for an in-flight or recently
+    completed live_test. Frontend polls this every ~400ms.
+
+    Args:
+        since_idx: only return events with array index >= since_idx
+            (lets the frontend do incremental fetches).
+
+    Returns:
+        {
+          running: bool,        # True while live_test is executing
+          started_at: float,    # epoch seconds
+          finished_at: float | None,
+          total_events: int,
+          events: [{idx, action, selector, status, ms?, error?, friendly_hint?, timestamp_ms}, ...],
+        }
+    """
+    sess.touch()
+    all_events = sess.live_progress or []
+    since = max(0, int(since_idx or 0))
+    return {
+        "running": bool(sess.live_progress_running),
+        "started_at": sess.live_progress_started_at,
+        "finished_at": sess.live_progress_finished_at,
+        "total_events": len(all_events),
+        "events": all_events[since:],
+    }
 
 
 async def finalize(sess: RecorderSession) -> Dict[str, Any]:

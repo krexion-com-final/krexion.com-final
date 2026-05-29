@@ -173,6 +173,10 @@ export default function VisualRecorderPage() {
   // ── 2026-05: Live Test + Smart Diagnostics ──
   const [liveTestResult, setLiveTestResult] = useState(null); // {ok, total_ms, step_results, diagnostics, ...}
   const [liveTesting, setLiveTesting] = useState(false);
+  // 2026-01: Real-time step-by-step progress feed during live test.
+  // Populated by polling /live-progress endpoint every ~400ms while
+  // a test is running. Cleared at the start of each run.
+  const [liveProgress, setLiveProgress] = useState([]);
   const [showDiagnostics, setShowDiagnostics] = useState(true);
   // ── 2026-05: Auto-fix history + auto-retest toggle ──
   // Persisted across the session so the user can: 1) Auto-fix all,
@@ -1473,6 +1477,37 @@ export default function VisualRecorderPage() {
     const freshPage = startIndex > 0 ? false : true;
     setLiveTesting(true);
     setLiveTestResult(null);
+    // 2026-01: real-time progress feed — clear & start polling
+    setLiveProgress([]);
+    let sinceIdx = 0;
+    const pollProgress = async () => {
+      try {
+        const r = await fetch(
+          `${API_URL}/api/visual-recorder/${sessionId}/live-progress?since=${sinceIdx}`,
+          { headers: authH() }
+        );
+        if (!r.ok) return;
+        const d = await r.json();
+        if (Array.isArray(d.events) && d.events.length > 0) {
+          sinceIdx = d.total_events;
+          setLiveProgress((prev) => [...prev, ...d.events].slice(-200));
+        }
+        return d.running;
+      } catch {
+        return null;
+      }
+    };
+    // Start polling every 400ms
+    const pollTimer = setInterval(async () => {
+      const stillRunning = await pollProgress();
+      // Auto-stop polling if backend says it's finished (but keep one
+      // last poll to drain final events)
+      if (stillRunning === false) {
+        await pollProgress();
+        clearInterval(pollTimer);
+      }
+    }, 400);
+
     try {
       const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/live-test`, {
         method: "POST",
@@ -1497,6 +1532,9 @@ export default function VisualRecorderPage() {
     } catch (e) {
       toast.error(`Live test crashed: ${e.message || e}`);
     } finally {
+      // Drain final progress events, then stop polling
+      try { await pollProgress(); } catch {}
+      clearInterval(pollTimer);
       setLiveTesting(false);
     }
   };
@@ -2935,6 +2973,97 @@ export default function VisualRecorderPage() {
                   </button>
                 </div>
               </div>
+
+              {/* 2026-01: Live Activity Panel — real-time step feed during live test */}
+              {(liveTesting || (liveProgress && liveProgress.length > 0 && !liveTestResult)) && (
+                <div
+                  className="mb-2 p-2 rounded border bg-zinc-950/80 border-blue-500/30"
+                  data-testid="vr-live-activity-panel"
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-medium text-blue-300 flex items-center gap-1">
+                      {liveTesting ? (
+                        <><Loader2 className="w-3 h-3 animate-spin" /> Live Activity — backend pe kya chal raha hai</>
+                      ) : (
+                        <>📋 Live Activity (last run)</>
+                      )}
+                    </span>
+                    {liveProgress.length > 0 && (() => {
+                      const okCount = liveProgress.filter(e => e.status === "ok").length;
+                      const failedCount = liveProgress.filter(e => e.status === "failed").length;
+                      const runningCount = liveProgress.filter(e => e.status === "running").length;
+                      const totalSteps = liveProgress[0]?.total_steps || steps.length;
+                      return (
+                        <span className="text-[10px] text-zinc-400 font-mono">
+                          {okCount}✓ / {failedCount}✗ / {Math.max(0, runningCount - okCount - failedCount)}⏵ / {totalSteps}
+                        </span>
+                      );
+                    })()}
+                  </div>
+                  {/* Progress bar */}
+                  {liveProgress.length > 0 && (() => {
+                    const okCount = liveProgress.filter(e => e.status === "ok").length;
+                    const failedCount = liveProgress.filter(e => e.status === "failed").length;
+                    const totalSteps = liveProgress[0]?.total_steps || steps.length || 1;
+                    const pct = Math.min(100, ((okCount + failedCount) / totalSteps) * 100);
+                    return (
+                      <div className="mb-1.5 h-1 bg-zinc-800 rounded overflow-hidden">
+                        <div
+                          className={`h-full transition-all ${failedCount > 0 ? 'bg-rose-500' : 'bg-emerald-500'}`}
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                    );
+                  })()}
+                  {/* Event log — most recent first, max 12 visible */}
+                  <div
+                    className="max-h-48 overflow-y-auto space-y-0.5 text-[10px] font-mono"
+                    data-testid="vr-live-activity-log"
+                  >
+                    {liveProgress.length === 0 ? (
+                      <div className="text-zinc-500 italic">Waiting for first step…</div>
+                    ) : (
+                      [...liveProgress].reverse().slice(0, 30).map((ev, k) => {
+                        const stepNum = (ev.idx ?? 0) + 1;
+                        const icon =
+                          ev.status === "ok" ? "✓" :
+                          ev.status === "failed" ? "✗" :
+                          "⏵";
+                        const color =
+                          ev.status === "ok" ? "text-emerald-400" :
+                          ev.status === "failed" ? "text-rose-400" :
+                          "text-blue-400 animate-pulse";
+                        const time = ev.timestamp_ms ?
+                          new Date(ev.timestamp_ms).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }) :
+                          "";
+                        return (
+                          <div
+                            key={`${ev.timestamp_ms}-${ev.idx}-${ev.status}-${k}`}
+                            className={`flex items-start gap-1.5 ${color}`}
+                            data-testid={`vr-live-event-${k}`}
+                          >
+                            <span className="flex-shrink-0 w-3">{icon}</span>
+                            <span className="flex-shrink-0 text-zinc-500">[{time}]</span>
+                            <span className="flex-shrink-0">#{stepNum}</span>
+                            <span className="flex-shrink-0 text-zinc-300">{ev.action}</span>
+                            {ev.selector && (
+                              <span className="flex-shrink-0 text-zinc-500 truncate max-w-[140px]" title={ev.selector}>
+                                {ev.selector.slice(0, 24)}{ev.selector.length > 24 ? '…' : ''}
+                              </span>
+                            )}
+                            {ev.status === "ok" && typeof ev.ms === "number" && (
+                              <span className="flex-shrink-0 text-zinc-500">{ev.ms}ms</span>
+                            )}
+                            {ev.status === "failed" && ev.error && (
+                              <span className="text-rose-300 truncate" title={ev.error}>{ev.error.slice(0, 80)}</span>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* Live Test Results Panel */}
               {liveTestResult && (
