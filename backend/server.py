@@ -318,6 +318,42 @@ STRICT_CLOUD_HEAVY_BLOCK = (
     in ("true", "1", "yes", "on")
 )
 
+# ── 2026-05: Runtime DB-backed override for STRICT_CLOUD_HEAVY_BLOCK ──
+# Why this exists:
+#   Editing the VPS .env + restarting docker-compose every time the
+#   admin wants to flip strict-mode is painful (SSH, vim, restart,
+#   30s downtime). For an URGENT toggle ("a customer's PC died,
+#   temporarily allow VPS fallback for them") this is unworkable.
+#   This DB-backed override stores the admin's last-chosen value in
+#   `runtime_settings` and overrides the env var at REQUEST time —
+#   takes effect instantly across all worker pods (Mongo is shared).
+#
+# Document shape (single doc in `runtime_settings`):
+#   { _id: "strict_heavy_block",
+#     enabled: bool | None,           # None == "use env var"
+#     updated_at: datetime, updated_by: str (admin_email) }
+#
+# Resolution order at request time:
+#   1. DB override (if `enabled` is True or False)
+#   2. STRICT_CLOUD_HEAVY_BLOCK env var
+async def get_effective_strict_heavy_block() -> bool:
+    """Return the effective strict-heavy-block flag. DB override beats
+    env var; on any error (DB down, etc.) we DEFAULT TO STRICT — the
+    whole point is to protect the VPS, so failing-open would defeat it."""
+    if not IS_CLOUD:
+        # Local installs always run heavy work locally — flag is moot.
+        return False
+    try:
+        doc = await db["runtime_settings"].find_one(
+            {"_id": "strict_heavy_block"}, {"enabled": 1, "_id": 0}
+        )
+        if doc and isinstance(doc.get("enabled"), bool):
+            return doc["enabled"]
+    except Exception as _e:
+        # Mongo unreachable etc. — fall through to env var.
+        pass
+    return STRICT_CLOUD_HEAVY_BLOCK
+
 CLOUD_HEAVY_FEATURE_MSG = (
     "This feature runs on your own PC for full speed and unlimited scale. "
     "Download the Krexion desktop app (free with your license) at "
@@ -371,7 +407,9 @@ async def require_local_mode(request: Request):
         return True
     if not IS_CLOUD:
         return True
-    if not STRICT_CLOUD_HEAVY_BLOCK:
+    # 2026-05: use the DB-backed override so the admin's last UI-toggle
+    # decision wins over the env var without needing a restart.
+    if not await get_effective_strict_heavy_block():
         return True
 
     # ── 2026-05: enrich the 503 with the user's actual local-PC status ──
@@ -431,10 +469,14 @@ async def health_check():
 @app.get("/api/mode")
 @app.get("/mode")
 async def get_mode():
+    # 2026-05: report the EFFECTIVE flag (DB override beats env var)
+    # so the frontend banner reflects reality after a UI toggle.
+    effective = await get_effective_strict_heavy_block() if IS_CLOUD else False
     return {
         "mode": KREXION_MODE,           # "cloud" or "local"
         "is_cloud": IS_CLOUD,
-        "strict_heavy_block": STRICT_CLOUD_HEAVY_BLOCK,
+        "strict_heavy_block": effective,
+        "strict_heavy_block_env": STRICT_CLOUD_HEAVY_BLOCK,  # what .env says
         "download_url": "https://krexion.com/download" if IS_CLOUD else None,
     }
 
@@ -3396,11 +3438,12 @@ async def admin_host_stats(admin: dict = Depends(get_current_admin)):
     written every minute by the host watcher. Falls back to container
     psutil if the host watcher isn't configured yet."""
     import json as _json
-    strict_block = STRICT_CLOUD_HEAVY_BLOCK
+    strict_block = await get_effective_strict_heavy_block() if IS_CLOUD else False
     deployment = {
         "mode": KREXION_MODE,
         "is_cloud": IS_CLOUD,
         "strict_heavy_block": strict_block,
+        "strict_heavy_block_env": STRICT_CLOUD_HEAVY_BLOCK,
         "strict_help_url": "https://krexion.com/admin/system-maintenance",
     }
     try:
@@ -3428,6 +3471,94 @@ async def admin_host_stats(admin: dict = Depends(get_current_admin)):
         }
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"Could not read system stats: {e}")
+
+
+# ── 2026-05: Admin-controlled runtime toggle for strict-heavy-block ──
+# Why this exists:
+#   Previously the admin had to SSH into the VPS, edit
+#   /opt/krexion/backend/.env (STRICT_CLOUD_HEAVY_BLOCK=true), and
+#   `docker compose restart backend` to flip the flag. Every restart is
+#   30-60s of API downtime + breaks any in-flight customer requests.
+#   This endpoint lets the admin toggle the flag from the VPS Maintenance
+#   page in a single click — change takes effect on the next request
+#   (no restart, no downtime). The `enabled` value is stored in the
+#   `runtime_settings` Mongo collection and beats the .env value via
+#   `get_effective_strict_heavy_block()`.
+#
+# Customer-facing impact when ENABLED:
+#   • All heavy endpoints (RUT, Form Filler, Visual Recorder, bulk
+#     proxy tests) bridged via desktop app — if the customer's PC is
+#     offline they get a clear "turn on your PC" notification BEFORE
+#     the job is queued. Result: ZERO accidental VPS load.
+#   • Existing in-flight jobs are NOT cancelled — only newly-queued ones
+#     are gated. (Cancelling in-flight would lose customer data/results.)
+@api_router.get("/admin/system/strict-mode")
+async def admin_get_strict_mode(admin: dict = Depends(get_current_admin)):
+    """Return the current strict-mode setting (DB override + env baseline)."""
+    effective = await get_effective_strict_heavy_block()
+    override_doc = None
+    try:
+        override_doc = await db["runtime_settings"].find_one(
+            {"_id": "strict_heavy_block"}, {"_id": 0}
+        )
+    except Exception:
+        pass
+    return {
+        "enabled": effective,
+        "env_default": STRICT_CLOUD_HEAVY_BLOCK,
+        "is_cloud": IS_CLOUD,
+        "override": override_doc,   # None if no UI override set yet
+        "help": (
+            "When enabled, heavy features (Real User Traffic, Form Filler, "
+            "Visual Recorder, bulk proxy tests) REFUSE to run on this VPS — "
+            "they only run on the customer's desktop app. If the customer's "
+            "PC is offline, the customer sees a clear 'turn on your PC' "
+            "notification and the job is NEVER queued onto the VPS. This "
+            "protects the VPS from accidental load."
+        ),
+    }
+
+
+class StrictModeReq(BaseModel):
+    enabled: bool
+
+
+@api_router.post("/admin/system/strict-mode")
+async def admin_set_strict_mode(
+    req: StrictModeReq, admin: dict = Depends(get_current_admin)
+):
+    """Persist an admin runtime override for STRICT_CLOUD_HEAVY_BLOCK.
+    Beats the env-var on the next request. No restart needed."""
+    if not IS_CLOUD:
+        # Local installs run heavy work locally regardless — toggling
+        # would have zero effect and would be confusing.
+        raise HTTPException(
+            status_code=400,
+            detail="Strict-mode toggle only meaningful on cloud deployments "
+                   "(this instance is KREXION_MODE != 'cloud').",
+        )
+    now = datetime.now(timezone.utc)
+    await db["runtime_settings"].update_one(
+        {"_id": "strict_heavy_block"},
+        {"$set": {
+            "enabled": bool(req.enabled),
+            "updated_at": now,
+            "updated_by": admin.get("email") or admin.get("id") or "admin",
+        }},
+        upsert=True,
+    )
+    logger.info(
+        f"[strict-mode] admin {admin.get('email')} set strict_heavy_block "
+        f"= {req.enabled} (effective immediately, no restart)"
+    )
+    return {
+        "ok": True,
+        "enabled": bool(req.enabled),
+        "message": (
+            f"Strict mode {'ENABLED' if req.enabled else 'DISABLED'} — "
+            "takes effect on the next request (no restart needed)."
+        ),
+    }
 
 
 def _safe_in_container_cleanup() -> dict:

@@ -46,6 +46,22 @@ axios.interceptors.response.use(
     ) {
       const localOnline = !!(detail.local_status && detail.local_status.online);
       const hint = detail.actionable_hint || (localOnline ? "open_desktop_app" : "install_desktop_app");
+
+      // 2026-05: Dispatch a global event so the LocalPCOfflineDialog
+      // component (mounted once in App.js) can show a PROMINENT modal.
+      // The toast below still fires as a non-blocking confirmation for
+      // repeat attempts after the modal is dismissed. The combination
+      // (modal + toast) ensures the customer can NEVER accidentally
+      // bypass the "your PC is off" warning and dump load on the VPS.
+      try {
+        window.dispatchEvent(
+          new CustomEvent("krexion:local-pc-offline", { detail })
+        );
+      } catch (_e) {
+        // Browsers without CustomEvent support — graceful no-op,
+        // toast below still fires.
+      }
+
       let msg;
       let actionLabel = "Download";
       let actionHref = detail.download_url || "/download";

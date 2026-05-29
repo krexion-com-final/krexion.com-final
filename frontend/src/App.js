@@ -51,6 +51,7 @@ import { Toaster } from "./components/ui/sonner";
 import { BrandingProvider } from "./context/BrandingContext";
 import { ThemeProvider } from "./context/ThemeContext";
 import { ModeProvider } from "./context/ModeContext";
+import LocalPCOfflineDialog from "./components/LocalPCOfflineDialog";
 import "./utils/cloudGateInterceptor";
 
 // Apply blue theme to body
@@ -292,6 +293,10 @@ function App() {
           </Routes>
         </BrowserRouter>
         <Toaster position="bottom-left" />
+        {/* 2026-05: Global modal for "your PC is offline" — pops up
+            whenever a heavy-feature request is gated. See
+            components/LocalPCOfflineDialog.js + utils/cloudGateInterceptor.js. */}
+        <LocalPCOfflineDialog />
       </div>
       </ModeProvider>
       </ThemeProvider>

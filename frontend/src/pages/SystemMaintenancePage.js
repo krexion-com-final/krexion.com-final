@@ -89,6 +89,34 @@ export default function SystemMaintenancePage() {
     }
   };
 
+  // 2026-05: One-click toggle for strict-heavy-block. Replaces the
+  // old SSH-into-VPS + edit .env + docker restart workflow.
+  // Effect: backend's `require_local_mode` reads the DB override on the
+  // next request — instant, no downtime.
+  const [togglingStrict, setTogglingStrict] = useState(false);
+  const toggleStrictMode = async () => {
+    if (!deployment) return;
+    const next = !deployment.strict_heavy_block;
+    const confirmMsg = next
+      ? "Enable strict mode? Heavy features (Real User Traffic, Form Filler, Visual Recorder, bulk proxy tests) will REFUSE to run on this VPS. Customers with offline PCs will get a 'turn on your PC' notification."
+      : "Disable strict mode? Heavy features will fall back to running on this VPS when customer PCs are offline — VPS load may spike.";
+    if (!window.confirm(confirmMsg)) return;
+    setTogglingStrict(true);
+    try {
+      const r = await axios.post(
+        `${API}/admin/system/strict-mode`,
+        { enabled: next },
+        { headers: authHeaders() },
+      );
+      toast.success(r.data?.message || "Strict-mode updated");
+      await fetchAll();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Failed to toggle strict-mode");
+    } finally {
+      setTogglingStrict(false);
+    }
+  };
+
   const diskPct = stats?.disk_used_pct ?? 0;
   const memPct = stats?.memory_used_pct ?? 0;
   const swapPct = stats?.swap_used_pct ?? 0;
@@ -163,6 +191,40 @@ export default function SystemMaintenancePage() {
                       <div className="text-emerald-300">STRICT_CLOUD_HEAVY_BLOCK=true</div>
                       <div className="text-[#A1A1AA] mt-1"># Then: docker compose restart backend</div>
                     </div>
+                    <p className="text-[#A1A1AA]">
+                      <span className="text-emerald-300 font-semibold">Or click the toggle below</span> — takes effect instantly, no SSH or restart needed.
+                    </p>
+                  </div>
+                )}
+                {/* 2026-05: One-click strict-mode toggle. Replaces the
+                    SSH-into-VPS + edit-.env + docker-restart dance with
+                    an instant DB-backed override (effective on next
+                    request, no downtime). */}
+                {deployment.is_cloud && (
+                  <div className="mt-3 flex flex-wrap items-center gap-3">
+                    <button
+                      onClick={toggleStrictMode}
+                      disabled={togglingStrict}
+                      className={`px-4 py-2 rounded-lg text-xs font-semibold transition-all ${
+                        deployment.strict_heavy_block
+                          ? "bg-yellow-600 hover:bg-yellow-500 text-black"
+                          : "bg-emerald-600 hover:bg-emerald-500 text-white"
+                      } ${togglingStrict ? "opacity-50 cursor-not-allowed" : ""}`}
+                      data-testid="strict-mode-toggle"
+                    >
+                      {togglingStrict
+                        ? "Updating…"
+                        : deployment.strict_heavy_block
+                          ? "Disable strict mode (allow VPS fallback)"
+                          : "Enable strict mode (protect VPS — recommended)"}
+                    </button>
+                    {deployment.strict_heavy_block_env !== undefined &&
+                      deployment.strict_heavy_block !== deployment.strict_heavy_block_env && (
+                        <span className="text-[11px] text-yellow-400">
+                          ⚡ Runtime override active — overriding .env baseline
+                          ({deployment.strict_heavy_block_env ? "true" : "false"})
+                        </span>
+                      )}
                   </div>
                 )}
               </div>
