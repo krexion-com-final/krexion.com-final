@@ -379,6 +379,15 @@ export default function RealUserTrafficPage() {
   const liveCursorRef = useRef(0);
   const liveTimerRef = useRef(null);
 
+  // 2026-01: Visual Live Grid — real-time per-visit browser frames for
+  // concurrent RUT visits. Mirrors the Visual Recorder live test feed
+  // but at job scale (20+ tiles when 20 concurrency).
+  const [visualGridOpen, setVisualGridOpen] = useState(false);
+  const [visualGridMinimized, setVisualGridMinimized] = useState(false);
+  const [liveVisits, setLiveVisits] = useState({}); // { "1": {visit_idx, latest_frame_b64, latest_event, ...} }
+  const [expandedVisit, setExpandedVisit] = useState(null); // tile id when expanded to fullscreen
+  const visualGridTimerRef = useRef(null);
+
   // Diagnostics modal — shows macro-leak + stuck-visit events recorded
   // during the run. Powers the "Why didn't this offer convert?" workflow.
   const [diagModalOpen, setDiagModalOpen] = useState(false);
@@ -598,6 +607,50 @@ export default function RealUserTrafficPage() {
     if (liveTimerRef.current) {
       clearInterval(liveTimerRef.current);
       liveTimerRef.current = null;
+    }
+  };
+
+  // ─── 2026-01: Visual Live Grid polling (per-visit screenshots) ──
+  const fetchLiveVisits = async (jobId) => {
+    try {
+      const r = await fetch(
+        `${API_URL}/api/real-user-traffic/jobs/${jobId}/live-visits?include_frames=true`,
+        { headers: authH() }
+      );
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data && data.visits) setLiveVisits(data.visits);
+      if (!data.job_running) {
+        // Job ended — do one more poll then stop
+        setTimeout(() => {
+          if (visualGridTimerRef.current) {
+            clearInterval(visualGridTimerRef.current);
+            visualGridTimerRef.current = null;
+          }
+        }, 1500);
+      }
+    } catch (_) { /* ignore */ }
+  };
+
+  const openVisualGrid = () => {
+    if (!activeJob?.job_id) return;
+    setLiveVisits({});
+    setVisualGridOpen(true);
+    setVisualGridMinimized(false);
+    fetchLiveVisits(activeJob.job_id);
+    // Poll every 800ms — slower than visual recorder because of grid load
+    if (visualGridTimerRef.current) clearInterval(visualGridTimerRef.current);
+    visualGridTimerRef.current = setInterval(
+      () => fetchLiveVisits(activeJob.job_id), 800
+    );
+  };
+
+  const closeVisualGrid = () => {
+    setVisualGridOpen(false);
+    setExpandedVisit(null);
+    if (visualGridTimerRef.current) {
+      clearInterval(visualGridTimerRef.current);
+      visualGridTimerRef.current = null;
     }
   };
 
@@ -2861,6 +2914,15 @@ export default function RealUserTrafficPage() {
                     <Activity size={16} className="mr-2" /> Show Live Activity
                   </Button>
                   <Button
+                    data-testid="rut-visual-grid-btn"
+                    onClick={openVisualGrid}
+                    variant="outline"
+                    className="bg-zinc-800 border-blue-700 text-blue-200 hover:bg-blue-950"
+                    title="Real-time grid of all concurrent visits — see each browser session live"
+                  >
+                    <Activity size={16} className="mr-2" /> Live Visual Grid
+                  </Button>
+                  <Button
                     data-testid="rut-show-diagnostics-btn"
                     onClick={openDiagnostics}
                     variant="outline"
@@ -3119,6 +3181,174 @@ export default function RealUserTrafficPage() {
               )}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ═══ 2026-01: Visual Live Grid — per-visit browser tiles ═══ */}
+      {visualGridOpen && (
+        <div
+          className={`fixed z-40 ${visualGridMinimized
+            ? 'bottom-3 right-3 w-72 h-12'
+            : 'inset-3 bg-black/85 backdrop-blur-sm flex flex-col'}`}
+          data-testid="rut-visual-grid-modal"
+        >
+          {visualGridMinimized ? (
+            <button
+              onClick={() => setVisualGridMinimized(false)}
+              className="w-full h-full flex items-center justify-between px-3 rounded-lg bg-blue-900 hover:bg-blue-800 border border-blue-500 text-white text-sm shadow-2xl"
+              data-testid="rut-visual-grid-restore"
+            >
+              <span className="flex items-center gap-2">
+                <Activity size={14} className="animate-pulse" />
+                Live Grid ({Object.keys(liveVisits).length} visits)
+              </span>
+              <span className="text-xs opacity-70">▴ click to expand</span>
+            </button>
+          ) : (
+            <div className="flex-1 flex flex-col bg-zinc-950 border border-blue-900/50 rounded-xl overflow-hidden">
+              {/* Header */}
+              <div className="flex items-center justify-between px-4 py-2.5 border-b border-zinc-800 flex-shrink-0">
+                <div className="flex items-center gap-2">
+                  <Activity size={18} className="text-blue-400 animate-pulse" />
+                  <h3 className="text-white font-semibold">
+                    Live Visual Grid —
+                    <span className="text-blue-300 ml-1">
+                      {Object.keys(liveVisits).length}
+                    </span>
+                    <span className="text-zinc-500 text-sm font-normal ml-1">
+                      / {activeJob?.concurrency || activeJob?.total || '?'} concurrent visits
+                    </span>
+                  </h3>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setVisualGridMinimized(true)}
+                    className="px-2 py-1 text-zinc-400 hover:text-white text-xs rounded hover:bg-zinc-800"
+                    title="Minimize (keeps polling)"
+                    data-testid="rut-visual-grid-minimize"
+                  >
+                    ▾ Minimize
+                  </button>
+                  <button
+                    onClick={closeVisualGrid}
+                    className="text-zinc-400 hover:text-white p-1 rounded"
+                    title="Close (stops polling)"
+                    data-testid="rut-visual-grid-close"
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+              </div>
+              {/* Sub-header info */}
+              <div className="px-4 py-2 border-b border-zinc-800 text-xs text-zinc-400 flex items-center gap-3 flex-shrink-0">
+                <span>Polling every 800ms · live browser frames</span>
+                <span className="text-zinc-600">·</span>
+                <span>
+                  Tiles: <span className="text-emerald-300 font-mono">{Object.values(liveVisits).filter(v => v.latest_event?.status === 'ok').length}✓</span>
+                  {' '}
+                  <span className="text-rose-300 font-mono">{Object.values(liveVisits).filter(v => v.status === 'failed').length}✗</span>
+                  {' '}
+                  <span className="text-blue-300 font-mono">{Object.values(liveVisits).filter(v => v.latest_event?.status === 'running').length}⏵</span>
+                </span>
+                <span className="text-zinc-600">·</span>
+                <span>Click any tile to expand</span>
+              </div>
+              {/* Grid body */}
+              <div className="flex-1 overflow-y-auto p-3" data-testid="rut-visual-grid-body">
+                {Object.keys(liveVisits).length === 0 ? (
+                  <div className="text-center text-zinc-500 py-20">
+                    <Loader2 className="w-8 h-8 animate-spin inline-block mb-2" />
+                    <div>Waiting for first visit to start…</div>
+                    <div className="text-xs text-zinc-600 mt-1">
+                      Visits begin streaming once they hit the form page.
+                    </div>
+                  </div>
+                ) : (
+                  <div className="grid gap-3" style={{
+                    gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+                  }}>
+                    {Object.entries(liveVisits)
+                      .sort(([a], [b]) => parseInt(a, 10) - parseInt(b, 10))
+                      .map(([vid, v]) => {
+                        const ev = v.latest_event || {};
+                        const status = ev.status || v.status || 'running';
+                        const isExpanded = expandedVisit === vid;
+                        const borderColor =
+                          status === 'ok' ? 'border-emerald-500/60' :
+                          status === 'failed' ? 'border-rose-500/60' :
+                          'border-blue-500/60';
+                        const badgeColor =
+                          status === 'ok' ? 'bg-emerald-900/90 text-emerald-200' :
+                          status === 'failed' ? 'bg-rose-900/90 text-rose-200' :
+                          'bg-blue-900/90 text-blue-200';
+                        return (
+                          <div
+                            key={vid}
+                            className={`relative rounded-lg border-2 ${borderColor} bg-zinc-950 overflow-hidden cursor-pointer hover:border-blue-400 transition-colors ${isExpanded ? 'fixed inset-4 z-50 cursor-default' : ''}`}
+                            onClick={() => !isExpanded && setExpandedVisit(vid)}
+                            data-testid={`rut-visual-tile-${vid}`}
+                          >
+                            {/* Visit badge top-left */}
+                            <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded text-[10px] font-mono bg-zinc-900/90 text-white font-bold z-10">
+                              #{String(vid).padStart(3, "0")}
+                            </div>
+                            {/* Status badge top-right */}
+                            <div className={`absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded text-[10px] font-mono ${badgeColor} z-10`}>
+                              {status === 'running' ? '⏵ running' : status === 'ok' ? '✓ ok' : '✗ failed'}
+                            </div>
+                            {/* Live frame */}
+                            {v.latest_frame_b64 ? (
+                              <img
+                                src={v.latest_frame_b64}
+                                alt={`Visit ${vid}`}
+                                className="w-full h-auto block bg-black"
+                                style={{
+                                  maxHeight: isExpanded ? '70vh' : 200,
+                                  objectFit: 'contain',
+                                }}
+                              />
+                            ) : (
+                              <div className="w-full h-40 flex items-center justify-center text-zinc-500 text-xs">
+                                <Loader2 className="w-4 h-4 animate-spin mr-1" /> Waiting for first frame…
+                              </div>
+                            )}
+                            {/* Current step info — bottom overlay */}
+                            <div className="absolute bottom-0 left-0 right-0 bg-black/80 text-white px-2 py-1 text-[11px] font-mono">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="truncate">
+                                  step #{(ev.idx ?? 0) + 1} · {ev.action || '...'}
+                                  {ev.selector && (
+                                    <span className="text-zinc-400"> {ev.selector.slice(0, 30)}</span>
+                                  )}
+                                </span>
+                                {typeof ev.ms === 'number' && (
+                                  <span className="text-zinc-400 flex-shrink-0">{ev.ms}ms</span>
+                                )}
+                              </div>
+                              {status === 'failed' && ev.error && (
+                                <div className="text-rose-300 truncate text-[10px] mt-0.5" title={ev.error}>
+                                  ⚠ {ev.error.slice(0, 80)}
+                                </div>
+                              )}
+                            </div>
+                            {/* Expanded close button */}
+                            {isExpanded && (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setExpandedVisit(null); }}
+                                className="absolute top-2 right-12 px-2 py-1 rounded bg-black/80 text-white text-xs hover:bg-zinc-800 z-20"
+                                data-testid={`rut-visual-tile-collapse-${vid}`}
+                              >
+                                <X size={14} className="inline" /> Close
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

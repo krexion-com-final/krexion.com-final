@@ -5286,6 +5286,45 @@ async def run_real_user_traffic_job(
                                 # the visit because of a capture.
                                 pass
 
+                        # 2026-01 (additive): per-visit live activity feed.
+                        # Mirrors the Visual Recorder's live test feature so the
+                        # RUT job UI can show a real-time grid of all in-flight
+                        # visits (one tile per concurrency), each with the latest
+                        # browser frame + current step. Keeps a SINGLE-frame
+                        # state per visit (not a buffer) — UI just renders the
+                        # most recent state. Failures are swallowed.
+                        async def _visit_progress_cb(event: Dict[str, Any]) -> None:
+                            try:
+                                j_state = RUT_JOBS.get(job_id)
+                                if j_state is None:
+                                    return
+                                lv = j_state.setdefault("live_visits", {})
+                                vkey = str(i + 1)
+                                v = lv.setdefault(vkey, {
+                                    "visit_idx": i + 1,
+                                    "started_at": time.time(),
+                                    "events_count": 0,
+                                    "latest_event": None,
+                                    "latest_frame_b64": "",
+                                    "page_url": "",
+                                    "status": "running",
+                                })
+                                # Slim event copy (no heavy screenshot bytes)
+                                v["latest_event"] = {
+                                    k: ev_val for k, ev_val in event.items()
+                                    if k != "screenshot_b64"
+                                }
+                                if event.get("screenshot_b64"):
+                                    v["latest_frame_b64"] = event["screenshot_b64"]
+                                if event.get("page_url"):
+                                    v["page_url"] = event["page_url"]
+                                v["events_count"] = int(v.get("events_count", 0)) + 1
+                                if event.get("status") == "failed":
+                                    v["status"] = "failed"
+                                v["last_update"] = time.time()
+                            except Exception:
+                                pass
+
                         # Start a watchdog task that records a "stuck"
                         # event if the page URL hasn't changed for >25s
                         # while the automation script is running. The
@@ -5300,6 +5339,7 @@ async def run_real_user_traffic_job(
                                 self_heal=self_heal,
                                 on_screenshot=_on_user_capture,
                                 user_id=link_owner_id,   # enable self-healing aliases (2026-01)
+                                on_step_progress=_visit_progress_cb,  # 2026-01: real-time per-visit feed
                             )
                         )
 

@@ -6031,6 +6031,60 @@ async def rut_live_log(
     return _rut_get_live_steps(job_id, since=int(since or 0))
 
 
+# 2026-01: Per-visit live activity feed — mirrors the Visual Recorder's
+# live-test visual feed but for RUT visits. Returns a snapshot of the
+# `live_visits` dict so the UI can show a grid of concurrent visit
+# tiles, each with its latest browser frame + current step.
+@api_router.get("/real-user-traffic/jobs/{job_id}/live-visits")
+async def rut_live_visits(
+    job_id: str,
+    include_frames: bool = True,
+    user: dict = Depends(get_current_user),
+):
+    """Return current live-visits state for a running RUT job. Each
+    entry contains the latest browser screenshot (base64 JPEG) + the
+    most recent step event for that visit.
+
+    Args:
+        include_frames: when False, strips the (heavy) screenshot bytes
+            so the frontend can do a lightweight "are any visits still
+            updating" probe.
+    """
+    check_user_feature(user, "real_user_traffic")
+    j = _RUT_JOBS.get(job_id)
+    if j is None:
+        # Job not running OR not owned — DB fallback so we don't 404
+        # for completed jobs (UI can still show empty state).
+        db_job = await db.real_user_traffic_jobs.find_one(
+            {"job_id": job_id, "user_id": user["id"]}, {"_id": 0, "user_id": 1}
+        )
+        if not db_job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return {"visits": {}, "job_running": False}
+    if j.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Job not found")
+    live_visits = j.get("live_visits") or {}
+    if not include_frames:
+        # Slim copy without screenshot bytes
+        slim = {}
+        for k, v in live_visits.items():
+            slim[k] = {kk: vv for kk, vv in v.items() if kk != "latest_frame_b64"}
+        return {
+            "visits": slim,
+            "job_running": j.get("status") in ("running", "queued", "preparing"),
+            "concurrency": j.get("concurrency", 0),
+            "processed": j.get("processed", 0),
+            "total": j.get("total", 0),
+        }
+    return {
+        "visits": live_visits,
+        "job_running": j.get("status") in ("running", "queued", "preparing"),
+        "concurrency": j.get("concurrency", 0),
+        "processed": j.get("processed", 0),
+        "total": j.get("total", 0),
+    }
+
+
 @api_router.get("/real-user-traffic/jobs/{job_id}/screenshot/{filename}")
 async def rut_screenshot(
     job_id: str,
