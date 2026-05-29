@@ -5567,6 +5567,17 @@ async def run_real_user_traffic_job(
                     # best-effort so the customer can see WHAT the page
                     # looked like when the submit broke (often reveals
                     # validation errors, captcha, blank pages, etc.).
+                    #
+                    # 2026-01-29 FIX: These captures fire AFTER a step
+                    # failure, NOT after a real form submit — so they
+                    # must NOT carry the user's original capture name
+                    # verbatim (which earlier caused "FORM SUBMIT" to
+                    # appear in Live Activity even when the form was
+                    # never actually submitted). We now prefix the
+                    # name with "[POST-FAILURE DEBUG]" so the operator
+                    # can clearly distinguish a real submit capture
+                    # from a debug snapshot taken AFTER a mid-form
+                    # failure.
                     if (
                         step_res.get("status") == "failed"
                         and step_res.get("remaining_steps")
@@ -5581,7 +5592,12 @@ async def run_real_user_traffic_job(
                                     _png = await page.screenshot(
                                         type="png", timeout=8000, full_page=True
                                     )
-                                    _nm = str(_rem.get("name") or "post_failure").strip() or "post_failure"
+                                    _orig_nm = str(_rem.get("name") or "post_failure").strip() or "post_failure"
+                                    # Clear post-failure tag so the user
+                                    # knows the capture fired in DEBUG
+                                    # mode (their preceding step failed),
+                                    # not on a successful submit.
+                                    _nm = f"[POST-FAILURE DEBUG] {_orig_nm}"
                                     await _on_user_capture(0, _nm, _png)
                             except Exception:  # noqa: BLE001
                                 pass

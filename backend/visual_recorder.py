@@ -2110,6 +2110,24 @@ def move_step(sess: RecorderSession, index: int, direction: str) -> Dict[str, An
     return {"moved": True, "from": index, "to": target}
 
 
+def move_step_to(sess: RecorderSession, from_index: int, to_index: int) -> Dict[str, Any]:
+    """2026-01 (additive): drag-and-drop reorder. Removes the step at
+    `from_index` and re-inserts it at `to_index`. Both indices are
+    clamped to the current array length. Returns updated total + new
+    position, or no-op if from == to."""
+    sess.touch()
+    n = len(sess.steps)
+    if not (0 <= from_index < n):
+        return {"moved": False, "reason": f"from_index {from_index} out of range (have {n} steps)"}
+    # Clamp to_index (drag-drop UI may overshoot by 1 when dropping at end)
+    to_idx = max(0, min(int(to_index), n - 1))
+    if from_index == to_idx:
+        return {"moved": False, "reason": "from == to"}
+    step = sess.steps.pop(from_index)
+    sess.steps.insert(to_idx, step)
+    return {"moved": True, "from": from_index, "to": to_idx, "total": len(sess.steps)}
+
+
 def duplicate_step(sess: RecorderSession, index: int) -> Dict[str, Any]:
     """Insert a deep copy of the step at `index` right after it."""
     sess.touch()

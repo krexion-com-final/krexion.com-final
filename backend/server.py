@@ -14677,6 +14677,26 @@ async def vr_duplicate_step(session_id: str, index: int, user: dict = Depends(ge
     return vr.duplicate_step(sess, index)
 
 
+# 2026-01: Drag-and-drop reorder — move a step from any index to any other.
+class _VRMoveToReq(BaseModel):
+    from_index: int
+    to_index: int
+
+
+@api_router.post("/visual-recorder/{session_id}/step/move-to")
+async def vr_move_step_to(session_id: str, req: _VRMoveToReq,
+                           user: dict = Depends(get_current_user)):
+    """Drag-and-drop reorder. Removes the step at from_index and
+    re-inserts it at to_index (clamped to array bounds)."""
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return vr.move_step_to(sess, req.from_index, req.to_index)
+
+
 @api_router.patch("/visual-recorder/{session_id}/step/{index}/rename")
 async def vr_rename_step(session_id: str, index: int, req: _VRRenameReq, user: dict = Depends(get_current_user)):
     if vr is None:

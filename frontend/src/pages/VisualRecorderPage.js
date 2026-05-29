@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
 import {
   Camera,
@@ -1011,6 +1011,92 @@ export default function VisualRecorderPage() {
       });
       refreshState();
     } catch {}
+  };
+
+  // 2026-01: Drag-and-drop reorder — move any step to any index
+  const moveStepTo = async (fromIndex, toIndex) => {
+    if (!sessionId) return;
+    if (fromIndex === toIndex) return;
+    try {
+      await fetch(`${API_URL}/api/visual-recorder/${sessionId}/step/move-to`, {
+        method: "POST",
+        headers: authH(),
+        body: JSON.stringify({ from_index: fromIndex, to_index: toIndex }),
+      });
+      refreshState();
+    } catch (e) {
+      toast.error(e.message || "Move failed");
+    }
+  };
+
+  // 2026-01: Drag-and-drop state — `dragSrc` is the index currently being dragged
+  const [dragSrc, setDragSrc] = useState(null);
+  const [dragOver, setDragOver] = useState(null);
+
+  // 2026-01: Insert a new step at a SPECIFIC index (between two existing steps).
+  // Prompts the user to pick action type, then opens the existing modal.
+  const insertStepAt = async (position) => {
+    if (!sessionId) return;
+    const action = window.prompt(
+      "Step action to insert? Options: click, fill, type, select, check, uncheck, wait, wait_for_selector, wait_for_text, wait_for_url, press, scroll, screenshot, hover, dismiss_popups, extract",
+      "wait"
+    );
+    if (!action || !action.trim()) return;
+    const cleanAction = action.trim().toLowerCase();
+    let stepDraft = { action: cleanAction };
+    // Action-specific prompts
+    if (["click", "fill", "type", "select", "check", "uncheck", "hover", "wait_for_selector"].includes(cleanAction)) {
+      const sel = window.prompt("CSS selector (or XPath e.g. //input[@name='x']):", "");
+      if (!sel || !sel.trim()) return;
+      stepDraft.selector = sel.trim();
+      if (["fill", "type", "select"].includes(cleanAction)) {
+        const val = window.prompt("Value to fill/type/select (use {{var}} for row data):", "");
+        if (val !== null) stepDraft.value = val;
+      }
+    } else if (cleanAction === "wait") {
+      const ms = window.prompt("Wait time in milliseconds:", "1000");
+      stepDraft.ms = Math.max(0, Number(ms) || 1000);
+    } else if (cleanAction === "wait_for_text") {
+      const text = window.prompt("Text to wait for (e.g. 'Thank you'):", "");
+      if (!text || !text.trim()) return;
+      stepDraft.text = text.trim();
+      stepDraft.timeout = 15000;
+    } else if (cleanAction === "wait_for_url") {
+      const contains = window.prompt("URL must contain:", "");
+      if (!contains || !contains.trim()) return;
+      stepDraft.contains = contains.trim();
+      stepDraft.timeout = 15000;
+    } else if (cleanAction === "press") {
+      const key = window.prompt("Key to press (e.g. Enter, Tab, Escape):", "Enter");
+      stepDraft.key = key || "Enter";
+    } else if (cleanAction === "scroll") {
+      stepDraft.value = window.prompt("Scroll amount (px, e.g. 500 or 'bottom'):", "500") || "500";
+    } else if (cleanAction === "screenshot") {
+      stepDraft.name = window.prompt("Screenshot label (e.g. 'After Submit'):", "Capture") || "Capture";
+    } else if (cleanAction === "extract") {
+      const sel = window.prompt("CSS selector to extract from:", "");
+      if (!sel) return;
+      stepDraft.selector = sel.trim();
+      const key = window.prompt("Variable name to store value as (use later via {{var}}):", "");
+      if (!key) return;
+      stepDraft.store_key = key.trim();
+    }
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/manual-step`, {
+        method: "POST",
+        headers: authH(),
+        body: JSON.stringify({ step: stepDraft, position }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.added) {
+        toast.error(d.reason || d.detail || "Insert failed");
+        return;
+      }
+      toast.success(`Step inserted at position #${(d.index ?? position) + 1}`);
+      refreshState();
+    } catch (e) {
+      toast.error(e.message || "Insert failed");
+    }
   };
 
   // Duplicate step
@@ -2882,8 +2968,66 @@ export default function VisualRecorderPage() {
                     auto_continue_survey: { icon: "🔄", color: "text-violet-400", bg: "bg-violet-700/30 border-violet-500/30" },
                   };
                   const sm = stepIconMap[s.action] || { icon: "•", color: "text-zinc-400", bg: "bg-zinc-700/30 border-zinc-500/30" };
+                  const isDragSrc = dragSrc === i;
+                  const isDragOver = dragOver === i;
                   return (
-                  <div key={i} className="flex items-start gap-1 p-2 rounded bg-zinc-950 border border-zinc-800 text-xs hover:border-zinc-700 transition-colors group">
+                  <React.Fragment key={i}>
+                    {/* 2026-01: Insert-here button (appears between steps on hover) */}
+                    <div
+                      className="relative h-1 group/insert"
+                      data-testid={`vr-step-insert-zone-${i}`}
+                    >
+                      <button
+                        onClick={() => insertStepAt(i)}
+                        title={`Insert a new step BEFORE step #${i + 1}`}
+                        className="absolute left-1/2 -translate-x-1/2 -top-1.5 px-1.5 py-0.5 rounded-full bg-emerald-600 hover:bg-emerald-500 text-white text-[9px] font-bold opacity-0 group-hover/insert:opacity-100 transition-opacity z-10 leading-none"
+                        data-testid={`vr-step-insert-before-${i}`}
+                      >
+                        + insert here
+                      </button>
+                    </div>
+                  <div
+                    className={`flex items-start gap-1 p-2 rounded bg-zinc-950 border text-xs hover:border-zinc-700 transition-all group ${
+                      isDragSrc ? 'opacity-40 border-emerald-500' :
+                      isDragOver ? 'border-emerald-500 bg-emerald-950/30' :
+                      'border-zinc-800'
+                    }`}
+                    draggable
+                    onDragStart={(e) => {
+                      setDragSrc(i);
+                      try { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(i)); } catch {}
+                    }}
+                    onDragEnd={() => { setDragSrc(null); setDragOver(null); }}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      try { e.dataTransfer.dropEffect = "move"; } catch {}
+                      if (dragOver !== i) setDragOver(i);
+                    }}
+                    onDragLeave={(e) => {
+                      // Only clear if leaving the entire element (not entering a child)
+                      if (e.currentTarget.contains(e.relatedTarget)) return;
+                      if (dragOver === i) setDragOver(null);
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      let src = dragSrc;
+                      try {
+                        const dt = parseInt(e.dataTransfer.getData("text/plain"), 10);
+                        if (!Number.isNaN(dt)) src = dt;
+                      } catch {}
+                      setDragOver(null);
+                      setDragSrc(null);
+                      if (src !== null && src !== i) {
+                        moveStepTo(src, i);
+                      }
+                    }}
+                    data-testid={`vr-step-${i}`}
+                  >
+                    <span
+                      className="text-zinc-600 hover:text-zinc-300 cursor-grab active:cursor-grabbing select-none pt-0.5 text-[10px]"
+                      title="Drag to reorder"
+                      data-testid={`vr-step-drag-${i}`}
+                    >⋮⋮</span>
                     <span className="text-emerald-400 font-mono pt-0.5 text-[10px]">#{i + 1}</span>
                     <span
                       className={`px-1.5 py-0.5 rounded border ${sm.bg} ${sm.color} text-[10px] font-medium flex-shrink-0`}
@@ -2964,8 +3108,22 @@ export default function VisualRecorderPage() {
                       </button>
                     </div>
                   </div>
+                  </React.Fragment>
                   );
                 })}
+                {/* 2026-01: Final "insert at end" button (always visible) */}
+                {steps.length > 0 && (
+                  <div className="relative h-1 group/insert" data-testid="vr-step-insert-zone-end">
+                    <button
+                      onClick={() => insertStepAt(steps.length)}
+                      title="Insert a new step at the END"
+                      className="absolute left-1/2 -translate-x-1/2 -top-1.5 px-1.5 py-0.5 rounded-full bg-emerald-600 hover:bg-emerald-500 text-white text-[9px] font-bold opacity-0 group-hover/insert:opacity-100 transition-opacity z-10 leading-none"
+                      data-testid="vr-step-insert-end"
+                    >
+                      + insert step
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* Action buttons */}
