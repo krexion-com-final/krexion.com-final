@@ -257,14 +257,29 @@ export default function VisualRecorderPage() {
           return;
         }
         setEditTemplate(found);
-        // Pre-fill the Offer URL from the first {action:"goto"} step.
+        // Pre-fill the Offer URL from the first step that mentions a
+        // URL. Recorder JSONs USUALLY start with `goto`, but a lot of
+        // older / hand-crafted templates start with `wait_for_load` and
+        // rely on the RUT job to inject the URL at run-time. We search
+        // multiple step shapes so we catch as many as possible:
+        //   • {action:"goto", url:"…"}
+        //   • {action:"navigate", url:"…"}        (alias used by some recorders)
+        //   • {action:"wait_for_url", url:"…"}    (sometimes a substring)
+        // If none match, we LEAVE the field blank — the user can
+        // either type one in OR just click Start Editing (we now
+        // accept blank URL in edit-mode and the recorder opens
+        // about:blank so the step-list UI is still fully usable).
         try {
           const parsedSteps = JSON.parse(found.automation_json || "[]");
-          const firstGoto = Array.isArray(parsedSteps)
-            ? parsedSteps.find((s) => s && s.action === "goto" && s.url)
-            : null;
-          if (firstGoto && firstGoto.url) {
-            setUrl(firstGoto.url);
+          if (Array.isArray(parsedSteps)) {
+            const urlStep = parsedSteps.find((s) => {
+              if (!s || typeof s !== "object") return false;
+              if (typeof s.url !== "string") return false;
+              return ["goto", "navigate", "wait_for_url"].includes(s.action);
+            });
+            if (urlStep && urlStep.url) {
+              setUrl(urlStep.url);
+            }
           }
         } catch (_pe) {
           // bad JSON — user will see error if they try to import. Don't
@@ -395,7 +410,17 @@ export default function VisualRecorderPage() {
 
   // ── Recording session ─────────────────────────────────────────────
   const startRecording = async () => {
-    if (!url.trim()) {
+    // ── 2026-05: In edit-mode the URL field is OPTIONAL ──
+    // The user is editing an existing step list. They can fully use
+    // the step-management UI (reorder / delete / rename / edit-step
+    // modal / append manual-step / save) without ever needing a live
+    // browser page. If they DO want to add new recorded clicks, they
+    // can navigate the recorder browser to any URL via the existing
+    // Navigate textbox after the session is ready. We default to
+    // about:blank so the recorder still has a target — Chromium opens
+    // a blank tab instantly, no proxy slowdown.
+    const effectiveUrl = url.trim() || (editUploadId ? "about:blank" : "");
+    if (!effectiveUrl) {
       toast.error("URL required");
       return;
     }
@@ -406,7 +431,7 @@ export default function VisualRecorderPage() {
         method: "POST",
         headers: authH(),
         body: JSON.stringify({
-          url: url.trim(),
+          url: effectiveUrl,
           proxy: proxy.trim() || null,
           user_agent: ua.trim() || null,
           headers: headers,
@@ -2492,13 +2517,21 @@ export default function VisualRecorderPage() {
               )}
               <button
                 onClick={startRecording}
-                disabled={busy || !url.trim() || (editUploadId && !editTemplate)}
+                disabled={busy || (editUploadId ? !editTemplate : !url.trim())}
                 className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white font-medium text-base transition-colors shadow-lg shadow-emerald-900/30"
                 data-testid="vr-start-btn"
               >
                 {busy ? <Loader2 className="w-5 h-5 animate-spin" /> : <Play className="w-5 h-5" />}
                 {editUploadId ? "Start Editing (loads existing steps)" : "Start Recording"}
               </button>
+              {editUploadId && !url.trim() && (
+                <p className="text-[11px] text-zinc-500 max-w-md text-center mt-1">
+                  No URL — recorder will open <code className="text-zinc-400">about:blank</code>.
+                  You can still reorder / edit / delete / append steps. To add
+                  new <em>recorded clicks</em>, type the offer URL above or
+                  use the Navigate box after the session starts.
+                </p>
+              )}
             </div>
           </div>
           </div>
