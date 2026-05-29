@@ -8290,8 +8290,21 @@ async def _execute_automation_steps(
                         "ms": int((_time_mod.perf_counter() - _t_step_start) * 1000),
                         "optional": optional,
                     })
-                # 2026-01: emit "ok" progress event
+                # 2026-01: emit "ok" progress event + live screenshot
                 if on_step_progress is not None:
+                    # Capture a small JPEG of the current viewport so
+                    # the frontend Live Activity panel can show a real
+                    # "what is the page doing right now" image. Best-
+                    # effort — failures don't break the automation.
+                    _live_b64 = ""
+                    try:
+                        import base64 as _b64
+                        _shot = await page.screenshot(
+                            type="jpeg", quality=55, full_page=False, timeout=2500,
+                        )
+                        _live_b64 = "data:image/jpeg;base64," + _b64.b64encode(_shot).decode("ascii")
+                    except Exception:
+                        pass
                     try:
                         await on_step_progress({
                             "idx": idx,
@@ -8301,6 +8314,8 @@ async def _execute_automation_steps(
                             "status": "ok",
                             "ms": int((_time_mod.perf_counter() - _t_step_start) * 1000),
                             "timestamp_ms": int(_time_mod.time() * 1000),
+                            "screenshot_b64": _live_b64,
+                            "page_url": (page.url or "")[:300] if hasattr(page, "url") else "",
                         })
                     except Exception:
                         pass
@@ -8427,8 +8442,17 @@ async def _execute_automation_steps(
                 _err_msg = f"Step {idx+1} ({action}) failed: {str(e)[:200]}"
                 if _hint:
                     _err_msg = f"{_err_msg} | Hint: {_hint}"
-                # 2026-01: emit "failed" progress event
+                # 2026-01: emit "failed" progress event + final screenshot
                 if on_step_progress is not None:
+                    _live_b64 = ""
+                    try:
+                        import base64 as _b64
+                        _shot = await page.screenshot(
+                            type="jpeg", quality=55, full_page=False, timeout=2500,
+                        )
+                        _live_b64 = "data:image/jpeg;base64," + _b64.b64encode(_shot).decode("ascii")
+                    except Exception:
+                        pass
                     try:
                         await on_step_progress({
                             "idx": idx,
@@ -8440,6 +8464,8 @@ async def _execute_automation_steps(
                             "friendly_hint": _hint,
                             "ms": int((_time_mod.perf_counter() - _t_step_start) * 1000),
                             "timestamp_ms": int(_time_mod.time() * 1000),
+                            "screenshot_b64": _live_b64,
+                            "page_url": (page.url or "")[:300] if hasattr(page, "url") else "",
                         })
                     except Exception:
                         pass

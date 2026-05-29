@@ -177,6 +177,10 @@ export default function VisualRecorderPage() {
   // Populated by polling /live-progress endpoint every ~400ms while
   // a test is running. Cleared at the start of each run.
   const [liveProgress, setLiveProgress] = useState([]);
+  // 2026-01: Latest live browser screenshot (data:image/jpeg;base64,...)
+  // from the most recent step event. Updated as steps execute.
+  const [liveFrame, setLiveFrame] = useState(null);
+  const [liveFrameMeta, setLiveFrameMeta] = useState(null);
   const [showDiagnostics, setShowDiagnostics] = useState(true);
   // ── 2026-05: Auto-fix history + auto-retest toggle ──
   // Persisted across the session so the user can: 1) Auto-fix all,
@@ -1479,6 +1483,8 @@ export default function VisualRecorderPage() {
     setLiveTestResult(null);
     // 2026-01: real-time progress feed — clear & start polling
     setLiveProgress([]);
+    setLiveFrame(null);
+    setLiveFrameMeta(null);
     let sinceIdx = 0;
     const pollProgress = async () => {
       try {
@@ -1490,7 +1496,32 @@ export default function VisualRecorderPage() {
         const d = await r.json();
         if (Array.isArray(d.events) && d.events.length > 0) {
           sinceIdx = d.total_events;
-          setLiveProgress((prev) => [...prev, ...d.events].slice(-200));
+          // 2026-01: pick most recent event that has a screenshot
+          // (most actions emit one; some lightweight events skip it)
+          for (let i = d.events.length - 1; i >= 0; i--) {
+            const e = d.events[i];
+            if (e && e.screenshot_b64) {
+              setLiveFrame(e.screenshot_b64);
+              setLiveFrameMeta({
+                idx: e.idx,
+                action: e.action,
+                selector: e.selector,
+                status: e.status,
+                page_url: e.page_url,
+                ms: e.ms,
+              });
+              break;
+            }
+          }
+          // Strip screenshot_b64 from the array before keeping in
+          // memory to avoid bloating React state.
+          const lite = d.events.map((e) => {
+            if (!e || !e.screenshot_b64) return e;
+            // eslint-disable-next-line no-unused-vars
+            const { screenshot_b64, ...rest } = e;
+            return rest;
+          });
+          setLiveProgress((prev) => [...prev, ...lite].slice(-200));
         }
         return d.running;
       } catch {
@@ -3015,6 +3046,46 @@ export default function VisualRecorderPage() {
                       </div>
                     );
                   })()}
+
+                  {/* 2026-01: LIVE BROWSER SCREENSHOT — see the page state at the latest completed step */}
+                  {liveFrame && (
+                    <div className="mb-1.5 relative rounded overflow-hidden border border-zinc-800" data-testid="vr-live-frame">
+                      <img
+                        src={liveFrame}
+                        alt="Live browser view"
+                        className="w-full h-auto block"
+                        style={{ maxHeight: 320, objectFit: "contain", background: "#000" }}
+                      />
+                      {liveFrameMeta && (
+                        <div className="absolute top-1 left-1 right-1 flex items-center justify-between gap-1 pointer-events-none">
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${
+                            liveFrameMeta.status === 'ok' ? 'bg-emerald-900/90 text-emerald-200' :
+                            liveFrameMeta.status === 'failed' ? 'bg-rose-900/90 text-rose-200' :
+                            'bg-blue-900/90 text-blue-200'
+                          }`}>
+                            #{(liveFrameMeta.idx ?? 0) + 1} {liveFrameMeta.action}
+                            {liveFrameMeta.selector ? ` ${liveFrameMeta.selector.slice(0, 30)}` : ''}
+                          </span>
+                          {typeof liveFrameMeta.ms === 'number' && (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-zinc-900/90 text-zinc-200">
+                              {liveFrameMeta.ms}ms
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      {liveTesting && (
+                        <div className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-rose-700/90 text-[10px] text-white font-medium animate-pulse">
+                          ● LIVE
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {!liveFrame && liveTesting && (
+                    <div className="mb-1.5 p-3 rounded border border-zinc-800 bg-zinc-900/50 text-center text-[10px] text-zinc-500" data-testid="vr-live-frame-empty">
+                      <Loader2 className="w-4 h-4 animate-spin inline-block mr-1" /> Waiting for first browser frame…
+                    </div>
+                  )}
+
                   {/* Event log — most recent first, max 12 visible */}
                   <div
                     className="max-h-48 overflow-y-auto space-y-0.5 text-[10px] font-mono"

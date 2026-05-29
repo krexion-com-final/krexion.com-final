@@ -1216,9 +1216,17 @@ async def live_test(
                     event["idx"] = int(event["idx"]) + start_index
                 except (TypeError, ValueError):
                     pass
-            # Cap memory — keep the most recent 500 events. A live_test
-            # of 50 steps produces ~100-150 events, so 500 is plenty.
             sess.live_progress.append(event)
+            # 2026-01: memory optimization — drop heavy screenshot_b64
+            # payload from all but the most recent 8 events. UI only
+            # ever shows the LATEST frame in the live view, so older
+            # screenshots are dead weight. Keeps memory bounded
+            # regardless of automation length.
+            if len(sess.live_progress) > 8:
+                for old in sess.live_progress[:-8]:
+                    if old.get("screenshot_b64"):
+                        old["screenshot_b64"] = ""  # strip image bytes
+            # Cap event count — keep last 500 events.
             if len(sess.live_progress) > 500:
                 sess.live_progress = sess.live_progress[-500:]
         except Exception:
