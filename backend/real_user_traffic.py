@@ -7053,6 +7053,165 @@ def _substitute(template: str, row: Dict[str, Any]) -> str:
     return re.sub(r"\{\{\s*([^}]+?)\s*\}\}", repl, template)
 
 
+# ── 2026-05: Field-type-aware selector aliases for form inputs ──
+# Why this exists:
+#   `_smart_wait_for_selector` already derives generic id/name/token
+#   fallbacks (e.g. `#phone` → `[name="phone"]` → `[name*="phone" i]`).
+#   That handles RENAMED ids/names — but doesn't help when the page
+#   uses a completely different mechanism for the field. Real example
+#   from a customer's offer page: the recorded selector `#phone` no
+#   longer matches because the page now ONLY exposes the phone input as
+#   `<input type="tel" autocomplete="tel">` (no id, no name="phone").
+#   Result in RUT replay: phone fill silently skipped (step had
+#   `optional: true` set by the recorder) → next step (`select #birth_month`)
+#   hits a form whose phone validation hasn't been satisfied → month
+#   dropdown never enables → visit fails at step #16.
+#   Visual Recorder live-test never hit this because at recording time
+#   the user clicked the actual element and the recorder captured its
+#   live state. Replay-time DOM divergence is exactly what this map fixes.
+#
+# Returns a list of CSS selector candidates given a recorded selector's
+# "key" (the field name/id substring). Each candidate is a robust
+# attribute-based match that doesn't depend on the page's id/name
+# choices — they cover `type`, `autocomplete`, `name*=`, `id*=`,
+# `placeholder*=`, `aria-label*=` so even fully-renamed pages match.
+def _field_type_alts_for(selector: str) -> List[str]:
+    """Return field-type-aware fallback selectors for a recorded form
+    selector (e.g. `#phone` → tel/mobile aliases, `#email` → email
+    type/autocomplete aliases, etc.). Empty list if the selector
+    doesn't look like a common form field."""
+    import re as _re_local
+    if not selector:
+        return []
+    sel = selector.strip()
+    key = ""
+    m = _re_local.match(r"^#([\w\-]+)$", sel)
+    if m:
+        key = m.group(1)
+    else:
+        m = _re_local.search(r"\[(?:name|id)\s*=\s*[\"']([^\"']+)[\"']\]", sel)
+        if m:
+            key = m.group(1)
+        else:
+            m = _re_local.search(r"\[name\s*=\s*([^\]\s]+)\]", sel)
+            if m:
+                key = m.group(1).strip("\"'")
+    if not key:
+        return []
+    kl = key.lower()
+    # Group-specific aliases. Each group covers all common HTML5 type
+    # attributes, autocomplete values, AND wildcard name/id/placeholder
+    # matches so we never miss a renamed-but-semantically-identical field.
+    if any(p in kl for p in ("phonenumber", "phone_number", "phone", "mobile", "tel", "cell", "contactnumber", "contact_number", "contactphone")):
+        return [
+            'input[type="tel"]',
+            'input[autocomplete="tel"]',
+            'input[autocomplete*="phone" i]',
+            'input[autocomplete*="tel" i]',
+            'input[name*="phone" i]',
+            'input[name*="tel" i]',
+            'input[name*="mobile" i]',
+            'input[name*="cell" i]',
+            'input[id*="phone" i]',
+            'input[id*="tel" i]',
+            'input[id*="mobile" i]',
+            'input[placeholder*="phone" i]',
+            'input[placeholder*="mobile" i]',
+            'input[aria-label*="phone" i]',
+            'input[aria-label*="mobile" i]',
+        ]
+    if any(p in kl for p in ("emailaddress", "email_address", "email", "e_mail", "mail")):
+        return [
+            'input[type="email"]',
+            'input[autocomplete="email"]',
+            'input[autocomplete*="email" i]',
+            'input[name*="email" i]',
+            'input[name*="mail" i]',
+            'input[id*="email" i]',
+            'input[id*="mail" i]',
+            'input[placeholder*="email" i]',
+            'input[aria-label*="email" i]',
+        ]
+    if any(p in kl for p in ("firstname", "first_name", "fname", "first", "givenname", "given")):
+        return [
+            'input[autocomplete="given-name"]',
+            'input[name*="first" i]',
+            'input[name*="fname" i]',
+            'input[name*="given" i]',
+            'input[id*="first" i]',
+            'input[id*="fname" i]',
+            'input[placeholder*="first" i]',
+        ]
+    if any(p in kl for p in ("lastname", "last_name", "lname", "last", "surname", "familyname", "family")):
+        return [
+            'input[autocomplete="family-name"]',
+            'input[name*="last" i]',
+            'input[name*="lname" i]',
+            'input[name*="surname" i]',
+            'input[name*="family" i]',
+            'input[id*="last" i]',
+            'input[id*="lname" i]',
+            'input[placeholder*="last" i]',
+        ]
+    if any(p in kl for p in ("zipcode", "zip_code", "postal", "postcode", "zip", "post_code")):
+        return [
+            'input[autocomplete="postal-code"]',
+            'input[name*="zip" i]',
+            'input[name*="postal" i]',
+            'input[name*="postcode" i]',
+            'input[id*="zip" i]',
+            'input[id*="postal" i]',
+            'input[placeholder*="zip" i]',
+            'input[placeholder*="postal" i]',
+        ]
+    if any(p in kl for p in ("city", "town", "locality")):
+        return [
+            'input[autocomplete="address-level2"]',
+            'input[name*="city" i]',
+            'input[name*="town" i]',
+            'input[id*="city" i]',
+        ]
+    if any(p in kl for p in ("state", "region", "province", "addresslevel1")):
+        return [
+            'input[autocomplete="address-level1"]',
+            'select[autocomplete="address-level1"]',
+            'input[name*="state" i]',
+            'select[name*="state" i]',
+            'input[name*="region" i]',
+        ]
+    if any(p in kl for p in ("streetaddress", "street_address", "address", "street", "addr", "addressline")):
+        return [
+            'input[autocomplete="street-address"]',
+            'input[autocomplete="address-line1"]',
+            'input[name*="address" i]',
+            'input[name*="street" i]',
+            'input[name*="addr" i]',
+            'input[id*="address" i]',
+            'input[id*="street" i]',
+            'input[placeholder*="address" i]',
+            'input[placeholder*="street" i]',
+        ]
+    if any(p in kl for p in ("dob", "birth", "birthday", "birthdate", "dateofbirth")):
+        # Birth-date container/composite; specific month/day/year handled below
+        return [
+            'input[autocomplete*="bday" i]',
+            'select[autocomplete*="bday" i]',
+            'input[name*="dob" i]',
+            'input[name*="birth" i]',
+            'select[name*="birth" i]',
+            'input[id*="birth" i]',
+            'select[id*="birth" i]',
+        ]
+    if any(p in kl for p in ("ssn", "social", "socialsecurity")):
+        return [
+            'input[name*="ssn" i]',
+            'input[name*="social" i]',
+            'input[id*="ssn" i]',
+            'input[placeholder*="ssn" i]',
+        ]
+    return []
+
+
 # ── 2026-05: Robust wait_for_selector with state + selector fallbacks ──
 # Why this exists:
 #   Visual Recorder dropdown-binding emits a `wait_for_selector` step
@@ -7785,15 +7944,46 @@ async def _execute_automation_steps(
                     # 25s-timeout bug. Other actions still require true
                     # visibility (user-perceived presence).
                     if action in ("select", "check", "uncheck"):
-                        await _smart_wait_for_selector(
+                        resolved_sel = await _smart_wait_for_selector(
                             page, selector, state="attached", timeout=timeout,
-                            extra_alts=_alias_alts_for(selector),
+                            extra_alts=(_alias_alts_for(selector) + _field_type_alts_for(selector)),
                         )
                     else:
-                        await _wait_for_actionable_selector(
-                            page, selector, timeout, visible=True,
-                            extra_alts=_alias_alts_for(selector),
+                        # ── 2026-05: Parity with Visual Recorder live-test for fill/click/type ──
+                        # Previously fill/click/type used `_wait_for_actionable_selector`
+                        # which only honoured USER-SAVED selector aliases — token-based
+                        # and field-type fallbacks were NOT tried, so a `#phone` recorded
+                        # against an offer page that later renders `<input type="tel">`
+                        # only would silently skip (with `optional: true` from the
+                        # recorder), then the NEXT step (select #birth_month) failed
+                        # against an un-validated form. Customer symptom: visit stuck
+                        # at step #16 with phone field still blank in the live grid.
+                        # Switching fill/click/type to the same `_smart_wait_for_selector`
+                        # used by select/check (with field-type aliases ADDED) means:
+                        #   • exact selector still tried first (fast path, no regression)
+                        #   • renamed ids / names rescued by token-based fallbacks
+                        #   • completely-different attributes (type=tel, autocomplete=email)
+                        #     rescued by field-type aliases
+                        #   • the WORKING selector is returned and substituted below,
+                        #     so the actual fill/click hits the SAME element we
+                        #     confirmed (no second 25s timeout).
+                        resolved_sel = await _smart_wait_for_selector(
+                            page, selector, state="visible", timeout=timeout,
+                            extra_alts=(_alias_alts_for(selector) + _field_type_alts_for(selector)),
                         )
+                    # If the smart wait found the element via a fallback,
+                    # rewrite `selector` so the downstream action below
+                    # (page.fill / page.click / etc.) targets the SAME
+                    # element we just confirmed. Without this rewrite the
+                    # action would still use the original (now-broken)
+                    # selector and either time out again OR raise strict-
+                    # mode "selector resolved to N elements".
+                    if resolved_sel and resolved_sel != selector:
+                        logger.info(
+                            f"[selector-fallback] step #{idx+1} ({action}) "
+                            f"'{selector}' → '{resolved_sel}' (rescued)"
+                        )
+                        selector = resolved_sel
                 except Exception as _wfa:
                     # Selector never became actionable within the
                     # per-step budget. If the step is optional, fall
