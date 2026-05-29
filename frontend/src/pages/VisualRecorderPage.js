@@ -894,6 +894,104 @@ export default function VisualRecorderPage() {
     }
   };
 
+  // 2026-01: New step types — Wait for Text / Wait for URL / Extract / Dismiss Popups
+  const addWaitForText = async () => {
+    if (!sessionId) return;
+    const text = window.prompt("Wait until this text appears on the page (e.g. 'Thank you', 'Order confirmed'):", "");
+    if (!text || !text.trim()) return;
+    const tout = window.prompt("Max wait time in ms (default 15000):", "15000");
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/add-wait-text`, {
+        method: "POST", headers: authH(),
+        body: JSON.stringify({
+          text: text.trim(),
+          timeout: Math.max(1000, Number(tout) || 15000),
+          case_insensitive: true,
+          optional: false,
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.recorded) { toast.error(d.error || d.detail || "Failed"); return; }
+      toast.success(`Wait for text "${text.slice(0, 30)}" added`);
+      refreshState();
+    } catch (e) { toast.error(e.message || "Failed"); }
+  };
+
+  const addWaitForUrl = async () => {
+    if (!sessionId) return;
+    const contains = window.prompt("Wait until URL contains (e.g. '/thank-you', '/success'):", "");
+    if (!contains || !contains.trim()) return;
+    const tout = window.prompt("Max wait time in ms (default 15000):", "15000");
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/add-wait-url`, {
+        method: "POST", headers: authH(),
+        body: JSON.stringify({
+          contains: contains.trim(),
+          timeout: Math.max(1000, Number(tout) || 15000),
+          optional: false,
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.recorded) { toast.error(d.error || d.detail || "Failed"); return; }
+      toast.success(`Wait for URL ~ "${contains}" added`);
+      refreshState();
+    } catch (e) { toast.error(e.message || "Failed"); }
+  };
+
+  const addExtract = async () => {
+    if (!sessionId) return;
+    const sel = window.prompt("CSS selector to extract text from (e.g. '#order-id', '.confirmation .code'):", "");
+    if (!sel || !sel.trim()) return;
+    const key = window.prompt("Variable name to store the value (e.g. 'order_id'). Use later as {{order_id}}:", "");
+    if (!key || !key.trim()) return;
+    const attr = window.prompt("(Optional) attribute name to read instead of text (e.g. 'href', 'data-id'). Leave blank for text:", "");
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/add-extract`, {
+        method: "POST", headers: authH(),
+        body: JSON.stringify({
+          selector: sel.trim(),
+          store_key: key.trim(),
+          attribute: (attr || "").trim() || null,
+          timeout: 10000,
+          optional: false,
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.recorded) { toast.error(d.error || d.detail || "Failed"); return; }
+      toast.success(`Extract → {{${key}}} added`);
+      refreshState();
+    } catch (e) { toast.error(e.message || "Failed"); }
+  };
+
+  const addDismissPopups = async () => {
+    if (!sessionId) return;
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/add-dismiss-popups`, {
+        method: "POST", headers: authH(),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.recorded) { toast.error(d.error || d.detail || "Failed"); return; }
+      toast.success("Dismiss popups step added");
+      refreshState();
+    } catch (e) { toast.error(e.message || "Failed"); }
+  };
+
+  // Pre-flight lint
+  const [lintResult, setLintResult] = useState(null);
+  const [showLintPanel, setShowLintPanel] = useState(false);
+  const runLint = async () => {
+    if (!sessionId) return;
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/lint`, { headers: authH() });
+      const d = await r.json();
+      setLintResult(d);
+      setShowLintPanel(true);
+      const summary = d.summary || {};
+      if (d.ok) toast.success(`Lint passed (${summary.warnings || 0} warnings, ${summary.infos || 0} info)`);
+      else toast.error(`Lint found ${summary.errors || 0} error(s)`);
+    } catch (e) { toast.error(e.message || "Lint failed"); }
+  };
+
   // Move step up or down
   const moveStep = async (idx, direction) => {
     if (!sessionId) return;
@@ -2544,6 +2642,42 @@ export default function VisualRecorderPage() {
                   >
                     ⏳ Wait for selector
                   </button>
+                  <button
+                    onClick={addWaitForText}
+                    disabled={sessionState !== "ready"}
+                    title="Wait until specific text appears on the page (e.g. 'Thank you')"
+                    className="px-2 py-1 rounded bg-zinc-800 hover:bg-emerald-700/40 border border-zinc-700 hover:border-emerald-500/40 text-zinc-300 text-[10px] disabled:opacity-40"
+                    data-testid="vr-wait-text-btn"
+                  >
+                    💬 Wait for text
+                  </button>
+                  <button
+                    onClick={addWaitForUrl}
+                    disabled={sessionState !== "ready"}
+                    title="Wait until URL contains a pattern (e.g. '/thank-you')"
+                    className="px-2 py-1 rounded bg-zinc-800 hover:bg-cyan-700/40 border border-zinc-700 hover:border-cyan-500/40 text-zinc-300 text-[10px] disabled:opacity-40"
+                    data-testid="vr-wait-url-btn"
+                  >
+                    🔗 Wait for URL
+                  </button>
+                  <button
+                    onClick={addExtract}
+                    disabled={sessionState !== "ready"}
+                    title="Extract text/attribute into a variable usable later with {{var_name}}"
+                    className="px-2 py-1 rounded bg-zinc-800 hover:bg-purple-700/40 border border-zinc-700 hover:border-purple-500/40 text-zinc-300 text-[10px] disabled:opacity-40"
+                    data-testid="vr-extract-btn"
+                  >
+                    📋 Extract var
+                  </button>
+                  <button
+                    onClick={addDismissPopups}
+                    disabled={sessionState !== "ready"}
+                    title="Auto-dismiss cookie/GDPR banners and popups"
+                    className="px-2 py-1 rounded bg-zinc-800 hover:bg-amber-700/40 border border-zinc-700 hover:border-amber-500/40 text-zinc-300 text-[10px] disabled:opacity-40"
+                    data-testid="vr-dismiss-popups-btn"
+                  >
+                    🍪 Dismiss popups
+                  </button>
                 </div>
               </div>
             </div>
@@ -2559,6 +2693,14 @@ export default function VisualRecorderPage() {
                   </span>
                 </h3>
                 <div className="flex items-center gap-1">
+                  <button
+                    onClick={runLint}
+                    title="Pre-flight lint — checks for missing selectors, invalid actions, hard-waits >30s, etc."
+                    className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md bg-zinc-800 hover:bg-emerald-700/40 border border-zinc-700 hover:border-emerald-500/40 text-zinc-300 hover:text-emerald-200 transition-colors"
+                    data-testid="vr-lint-btn"
+                  >
+                    ✓ Lint
+                  </button>
                   <button
                     onClick={openAliasesPanel}
                     title="View self-healing selector aliases (saved automatically when you fix wrong selectors)"
@@ -2588,13 +2730,98 @@ export default function VisualRecorderPage() {
                 </div>
               </div>
 
+              {/* 2026-01: Lint Result Panel */}
+              {showLintPanel && lintResult && (
+                <div
+                  className={`mb-2 p-2 rounded border text-[11px] ${
+                    lintResult.ok
+                      ? 'bg-emerald-950/30 border-emerald-500/30'
+                      : 'bg-rose-950/30 border-rose-500/30'
+                  }`}
+                  data-testid="vr-lint-panel"
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span className={`font-medium ${lintResult.ok ? 'text-emerald-300' : 'text-rose-300'}`}>
+                      {lintResult.ok ? '✓ Lint passed' : '⚠ Lint found issues'}
+                      <span className="text-zinc-500 ml-2">
+                        ({lintResult.summary?.errors || 0} errors,
+                        {' '}{lintResult.summary?.warnings || 0} warnings,
+                        {' '}{lintResult.summary?.infos || 0} info)
+                      </span>
+                    </span>
+                    <button
+                      onClick={() => setShowLintPanel(false)}
+                      className="text-zinc-500 hover:text-zinc-300 px-1"
+                      data-testid="vr-lint-close"
+                    >×</button>
+                  </div>
+                  {(lintResult.issues || []).length > 0 && (
+                    <ul className="space-y-0.5 max-h-32 overflow-y-auto">
+                      {lintResult.issues.map((issue, idx) => (
+                        <li
+                          key={idx}
+                          className={`flex items-start gap-1 ${
+                            issue.level === 'error'
+                              ? 'text-rose-300'
+                              : issue.level === 'warn'
+                              ? 'text-amber-300'
+                              : 'text-zinc-400'
+                          }`}
+                          data-testid={`vr-lint-issue-${idx}`}
+                        >
+                          <span className="flex-shrink-0 font-mono">
+                            {issue.level === 'error' ? '✗' : issue.level === 'warn' ? '⚠' : 'ℹ'}
+                          </span>
+                          <span>{issue.message}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
               <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
                 {steps.length === 0 && (
                   <div className="text-zinc-600 text-xs text-center py-4">No steps yet — click on the preview to record</div>
                 )}
-                {steps.map((s, i) => (
+                {steps.map((s, i) => {
+                  // 2026-01: Step icon + color coding for quick visual scan
+                  const stepIconMap = {
+                    click: { icon: "👆", color: "text-emerald-400", bg: "bg-emerald-700/30 border-emerald-500/30" },
+                    fill: { icon: "✏️", color: "text-sky-400", bg: "bg-sky-700/30 border-sky-500/30" },
+                    type: { icon: "⌨️", color: "text-sky-400", bg: "bg-sky-700/30 border-sky-500/30" },
+                    select: { icon: "▾", color: "text-purple-400", bg: "bg-purple-700/30 border-purple-500/30" },
+                    check: { icon: "☑", color: "text-emerald-400", bg: "bg-emerald-700/30 border-emerald-500/30" },
+                    uncheck: { icon: "☐", color: "text-zinc-400", bg: "bg-zinc-700/30 border-zinc-500/30" },
+                    wait: { icon: "⏱", color: "text-zinc-400", bg: "bg-zinc-700/30 border-zinc-500/30" },
+                    wait_for_selector: { icon: "⏳", color: "text-sky-400", bg: "bg-sky-700/30 border-sky-500/30" },
+                    wait_for_load: { icon: "⏳", color: "text-sky-400", bg: "bg-sky-700/30 border-sky-500/30" },
+                    wait_for_navigation: { icon: "⏳", color: "text-sky-400", bg: "bg-sky-700/30 border-sky-500/30" },
+                    wait_for_networkidle: { icon: "⏳", color: "text-sky-400", bg: "bg-sky-700/30 border-sky-500/30" },
+                    wait_for_text: { icon: "💬", color: "text-emerald-400", bg: "bg-emerald-700/30 border-emerald-500/30" },
+                    wait_for_url: { icon: "🔗", color: "text-cyan-400", bg: "bg-cyan-700/30 border-cyan-500/30" },
+                    extract: { icon: "📋", color: "text-purple-400", bg: "bg-purple-700/30 border-purple-500/30" },
+                    dismiss_popups: { icon: "🍪", color: "text-amber-400", bg: "bg-amber-700/30 border-amber-500/30" },
+                    screenshot: { icon: "📷", color: "text-amber-400", bg: "bg-amber-700/30 border-amber-500/30" },
+                    scroll: { icon: "⇅", color: "text-zinc-400", bg: "bg-zinc-700/30 border-zinc-500/30" },
+                    navigate: { icon: "🌐", color: "text-cyan-400", bg: "bg-cyan-700/30 border-cyan-500/30" },
+                    goto: { icon: "🌐", color: "text-cyan-400", bg: "bg-cyan-700/30 border-cyan-500/30" },
+                    press: { icon: "🔘", color: "text-zinc-400", bg: "bg-zinc-700/30 border-zinc-500/30" },
+                    hover: { icon: "🖱", color: "text-zinc-400", bg: "bg-zinc-700/30 border-zinc-500/30" },
+                    evaluate: { icon: "⚡", color: "text-yellow-400", bg: "bg-yellow-700/30 border-yellow-500/30" },
+                    auto_continue: { icon: "🔄", color: "text-violet-400", bg: "bg-violet-700/30 border-violet-500/30" },
+                    auto_continue_survey: { icon: "🔄", color: "text-violet-400", bg: "bg-violet-700/30 border-violet-500/30" },
+                  };
+                  const sm = stepIconMap[s.action] || { icon: "•", color: "text-zinc-400", bg: "bg-zinc-700/30 border-zinc-500/30" };
+                  return (
                   <div key={i} className="flex items-start gap-1 p-2 rounded bg-zinc-950 border border-zinc-800 text-xs hover:border-zinc-700 transition-colors group">
-                    <span className="text-emerald-400 font-mono pt-0.5">#{i + 1}</span>
+                    <span className="text-emerald-400 font-mono pt-0.5 text-[10px]">#{i + 1}</span>
+                    <span
+                      className={`px-1.5 py-0.5 rounded border ${sm.bg} ${sm.color} text-[10px] font-medium flex-shrink-0`}
+                      title={s.action}
+                    >
+                      {sm.icon}
+                    </span>
                     <div className="flex-1 min-w-0">
                       {/* Inline-editable name (click to edit) */}
                       <input
@@ -2638,6 +2865,13 @@ export default function VisualRecorderPage() {
                         data-testid={`vr-step-down-${i}`}
                       >▼</button>
                       <button
+                        onClick={() => runLiveTest({ startIndex: i })}
+                        title={`Test from this step onwards (skips previous ${i} steps, uses current page state)`}
+                        disabled={i === 0 || liveTesting || busy}
+                        className="p-0.5 text-zinc-600 hover:text-fuchsia-400 disabled:opacity-30 disabled:cursor-not-allowed text-[10px]"
+                        data-testid={`vr-step-test-from-${i}`}
+                      >⏵</button>
+                      <button
                         onClick={() => duplicateStep(i)}
                         title="Duplicate"
                         className="p-0.5 text-zinc-600 hover:text-sky-400 text-[10px]"
@@ -2661,7 +2895,8 @@ export default function VisualRecorderPage() {
                       </button>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
 
               {/* Action buttons */}
@@ -2796,6 +3031,15 @@ export default function VisualRecorderPage() {
                           <AlertCircle className="inline w-3.5 h-3.5 mr-1" />
                           {liveTestResult.error}
                         </div>
+                        {/* 2026-01: Friendly hint (Roman-Urdu/English plain-language explanation) */}
+                        {liveTestResult.friendly_hint && (
+                          <div
+                            className="p-2 rounded bg-amber-950/30 border border-amber-700/30 text-xs text-amber-100"
+                            data-testid="vr-friendly-hint"
+                          >
+                            💡 <span className="font-medium">Hint:</span> {liveTestResult.friendly_hint}
+                          </div>
+                        )}
                         {/* Smart suggestion */}
                         {fix && (
                           <div

@@ -2093,6 +2093,12 @@ def rename_step(sess: RecorderSession, index: int, name: str) -> Dict[str, Any]:
 _EDITABLE_STEP_FIELDS = {
     "selector", "value", "timeout", "key", "ms",
     "state", "delay", "match_by", "humanize", "name",
+    # 2026-01 additive — new step type fields
+    "text", "contains", "equals", "pattern",
+    "store_key", "var", "attribute", "regex",
+    "retry", "retry_delay", "if_exists", "if_exists_timeout",
+    "case_insensitive", "wait_nav", "optional",
+    "max_iterations", "iteration_wait_ms", "stop_on_host",
 }
 
 
@@ -2185,6 +2191,9 @@ _MANUAL_STEP_ACTIONS = {
     "wait_for_selector", "click", "fill", "type", "select", "press",
     "wait", "wait_for_load", "wait_for_navigation", "wait_for_networkidle",
     "hover", "check", "uncheck", "screenshot",
+    # 2026-01 additive — new step types from automation_extensions
+    "wait_for_text", "wait_for_url", "extract", "dismiss_popups",
+    "auto_continue", "auto_continue_survey",
 }
 
 
@@ -2211,11 +2220,17 @@ def add_manual_step(sess: RecorderSession, step: Dict[str, Any], position: Optio
 
     # Build a clean step dict — only keep known fields, normalise types.
     clean: Dict[str, Any] = {"action": action}
-    for k in ("selector", "value", "key", "state", "match_by", "name"):
+    for k in ("selector", "value", "key", "state", "match_by", "name",
+              # 2026-01 additive — new step type fields
+              "text", "contains", "equals", "pattern",
+              "store_key", "var", "attribute", "regex"):
         v = step.get(k)
         if v is not None and str(v).strip() != "":
             clean[k] = str(v).strip()
-    for k in ("timeout", "ms", "delay"):
+    for k in ("timeout", "ms", "delay",
+              # 2026-01 additive — retry config + per-iteration tunables
+              "retry", "retry_delay", "if_exists_timeout",
+              "max_iterations", "iteration_wait_ms"):
         v = step.get(k)
         if v is not None:
             try:
@@ -2224,6 +2239,14 @@ def add_manual_step(sess: RecorderSession, step: Dict[str, Any], position: Optio
                 pass
     if "humanize" in step:
         clean["humanize"] = bool(step["humanize"])
+    if "if_exists" in step:
+        clean["if_exists"] = bool(step["if_exists"])
+    if "case_insensitive" in step:
+        clean["case_insensitive"] = bool(step["case_insensitive"])
+    if "wait_nav" in step:
+        clean["wait_nav"] = bool(step["wait_nav"])
+    if "optional" in step:
+        clean["optional"] = bool(step["optional"])
     # Tag this step so the UI can show a small "manual" badge — purely
     # cosmetic, doesn't affect replay.
     clean["source"] = "manual"
@@ -2233,6 +2256,8 @@ def add_manual_step(sess: RecorderSession, step: Dict[str, Any], position: Optio
         clean["timeout"] = 8000
     if action == "wait" and "ms" not in clean:
         clean["ms"] = 1000
+    if action in ("wait_for_text", "wait_for_url", "extract") and "timeout" not in clean:
+        clean["timeout"] = 15000
 
     # Insert at position (clamped to valid range) or append.
     n = len(sess.steps)
@@ -2565,6 +2590,111 @@ async def wait_for_selector(
 
 def get_steps(sess: RecorderSession) -> List[Dict[str, Any]]:
     return sess.steps
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 2026-01: Pre-flight lint + quick step builders
+# ─────────────────────────────────────────────────────────────────────
+def lint_session(sess: RecorderSession) -> Dict[str, Any]:
+    """Pre-flight lint on the current session's steps. Returns:
+        {
+          ok: bool,                      # True iff no `error` issues
+          issues: [
+            {level, at_step, code, message}, ...
+          ],
+          summary: {errors: N, warnings: N, infos: N}
+        }
+    """
+    sess.touch()
+    try:
+        from automation_extensions import lint_steps
+        issues = lint_steps(sess.steps)
+    except Exception as e:  # pragma: no cover
+        return {"ok": False, "issues": [{"level": "error", "at_step": -1,
+                "code": "lint_unavailable", "message": str(e)}],
+                "summary": {"errors": 1, "warnings": 0, "infos": 0}}
+    errors = sum(1 for i in issues if i.get("level") == "error")
+    warnings = sum(1 for i in issues if i.get("level") == "warn")
+    infos = sum(1 for i in issues if i.get("level") == "info")
+    return {
+        "ok": errors == 0,
+        "issues": issues,
+        "summary": {"errors": errors, "warnings": warnings, "infos": infos},
+    }
+
+
+def add_wait_for_text_step(sess: RecorderSession, text: str,
+                           timeout: int = 15000,
+                           case_insensitive: bool = True,
+                           optional: bool = False) -> Dict[str, Any]:
+    """Append a `wait_for_text` step (e.g. wait for "Thank you")."""
+    sess.touch()
+    if not text:
+        return {"recorded": False, "error": "text required"}
+    step = {
+        "action": "wait_for_text",
+        "text": str(text),
+        "timeout": max(1000, int(timeout)),
+        "case_insensitive": bool(case_insensitive),
+    }
+    if optional:
+        step["optional"] = True
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+def add_wait_for_url_step(sess: RecorderSession,
+                          contains: Optional[str] = None,
+                          equals: Optional[str] = None,
+                          pattern: Optional[str] = None,
+                          timeout: int = 15000,
+                          optional: bool = False) -> Dict[str, Any]:
+    """Append a `wait_for_url` step (e.g. wait until URL contains '/success')."""
+    sess.touch()
+    if not (contains or equals or pattern):
+        return {"recorded": False, "error": "contains/equals/pattern required"}
+    step = {
+        "action": "wait_for_url",
+        "timeout": max(1000, int(timeout)),
+    }
+    if contains: step["contains"] = str(contains)
+    if equals:   step["equals"]   = str(equals)
+    if pattern:  step["pattern"]  = str(pattern)
+    if optional: step["optional"] = True
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+def add_extract_step(sess: RecorderSession,
+                     selector: str, store_key: str,
+                     attribute: Optional[str] = None,
+                     regex: Optional[str] = None,
+                     timeout: int = 10000,
+                     optional: bool = False) -> Dict[str, Any]:
+    """Append an `extract` step — captures text/attribute from a selector
+    into a variable usable in subsequent steps via `{{store_key}}`."""
+    sess.touch()
+    if not selector or not store_key:
+        return {"recorded": False, "error": "selector + store_key required"}
+    step = {
+        "action": "extract",
+        "selector": str(selector),
+        "store_key": str(store_key),
+        "timeout": max(1000, int(timeout)),
+    }
+    if attribute: step["attribute"] = str(attribute)
+    if regex:     step["regex"]     = str(regex)
+    if optional:  step["optional"]  = True
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+def add_dismiss_popups_step(sess: RecorderSession) -> Dict[str, Any]:
+    """Append a `dismiss_popups` step (auto-clicks cookie/GDPR banners)."""
+    sess.touch()
+    step = {"action": "dismiss_popups", "optional": True}
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
 
 
 async def finalize(sess: RecorderSession) -> Dict[str, Any]:

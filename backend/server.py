@@ -14906,6 +14906,129 @@ async def vr_get_target_screenshot(session_id: str, user: dict = Depends(get_cur
     return FileResponse(str(path), media_type="image/png")
 
 
+# ─────────────────────────────────────────────────────────────────────
+# 2026-01 (additive): New step types — wait_for_text, wait_for_url,
+# extract, dismiss_popups + pre-flight lint endpoint.
+# ─────────────────────────────────────────────────────────────────────
+class VRWaitTextReq(BaseModel):
+    text: str
+    timeout: int = 15000
+    case_insensitive: bool = True
+    optional: bool = False
+
+
+@api_router.post("/visual-recorder/{session_id}/add-wait-text")
+async def vr_add_wait_text(session_id: str, req: VRWaitTextReq,
+                            user: dict = Depends(get_current_user)):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return vr.add_wait_for_text_step(
+        sess, text=req.text, timeout=req.timeout,
+        case_insensitive=req.case_insensitive, optional=req.optional,
+    )
+
+
+class VRWaitUrlReq(BaseModel):
+    contains: Optional[str] = None
+    equals: Optional[str] = None
+    pattern: Optional[str] = None
+    timeout: int = 15000
+    optional: bool = False
+
+
+@api_router.post("/visual-recorder/{session_id}/add-wait-url")
+async def vr_add_wait_url(session_id: str, req: VRWaitUrlReq,
+                          user: dict = Depends(get_current_user)):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return vr.add_wait_for_url_step(
+        sess, contains=req.contains, equals=req.equals, pattern=req.pattern,
+        timeout=req.timeout, optional=req.optional,
+    )
+
+
+class VRExtractReq(BaseModel):
+    selector: str
+    store_key: str
+    attribute: Optional[str] = None
+    regex: Optional[str] = None
+    timeout: int = 10000
+    optional: bool = False
+
+
+@api_router.post("/visual-recorder/{session_id}/add-extract")
+async def vr_add_extract(session_id: str, req: VRExtractReq,
+                         user: dict = Depends(get_current_user)):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return vr.add_extract_step(
+        sess, selector=req.selector, store_key=req.store_key,
+        attribute=req.attribute, regex=req.regex,
+        timeout=req.timeout, optional=req.optional,
+    )
+
+
+@api_router.post("/visual-recorder/{session_id}/add-dismiss-popups")
+async def vr_add_dismiss_popups(session_id: str,
+                                 user: dict = Depends(get_current_user)):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return vr.add_dismiss_popups_step(sess)
+
+
+@api_router.get("/visual-recorder/{session_id}/lint")
+async def vr_lint(session_id: str, user: dict = Depends(get_current_user)):
+    """Pre-flight lint — catches obvious issues (missing selectors,
+    invalid actions, hard waits >30s) BEFORE the automation is run."""
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return vr.lint_session(sess)
+
+
+# Also expose a `lint` endpoint that accepts arbitrary steps (no
+# session) — useful for the frontend when the user wants to validate a
+# pasted JSON before importing it.
+class VRLintStepsReq(BaseModel):
+    steps: List[Dict[str, Any]]
+
+
+@api_router.post("/visual-recorder/lint-steps")
+async def vr_lint_steps(req: VRLintStepsReq, user: dict = Depends(get_current_user)):
+    try:
+        from automation_extensions import lint_steps as _lint
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"lint unavailable: {e}")
+    issues = _lint(req.steps or [])
+    errors = sum(1 for i in issues if i.get("level") == "error")
+    warnings = sum(1 for i in issues if i.get("level") == "warn")
+    infos = sum(1 for i in issues if i.get("level") == "info")
+    return {
+        "ok": errors == 0,
+        "issues": issues,
+        "summary": {"errors": errors, "warnings": warnings, "infos": infos},
+    }
+
+
 app.include_router(api_router)
 
 # ─────────────────────────────────────────────────────────────────────

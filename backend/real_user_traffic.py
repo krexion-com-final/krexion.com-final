@@ -452,6 +452,31 @@ from form_filler import (
     _tick_consent_checkboxes,
 )
 
+# 2026-01: New additive automation extensions (iframe-aware lookup,
+# cookie-banner auto-dismiss, bot-block detection, extract variables,
+# wait_for_text / wait_for_url, formatter pipeline, retry, friendly errors,
+# lint). Pure helpers — when a step does not opt-in to these, behaviour
+# is unchanged.
+try:
+    from automation_extensions import (
+        auto_dismiss_cookie_banners as _ext_dismiss_cookies,
+        detect_bot_block as _ext_detect_bot,
+        find_frame_with_selector as _ext_find_frame,
+        selector_exists_in_shadow as _ext_in_shadow,
+        extract_to_row as _ext_extract,
+        wait_for_text as _ext_wait_text,
+        wait_for_url as _ext_wait_url,
+        apply_formatters as _ext_apply_formatters,
+        split_placeholder_pipeline as _ext_split_pipeline,
+        friendly_error as _ext_friendly_error,
+        run_with_retry as _ext_run_with_retry,
+        latest_popup_page as _ext_latest_popup,
+    )
+    _EXT_LOADED = True
+except Exception as _ext_err:  # pragma: no cover
+    _EXT_LOADED = False
+    logging.getLogger(__name__).warning(f"automation_extensions failed to load: {_ext_err}")
+
 logger = logging.getLogger(__name__)
 
 RESULTS_ROOT = Path("/app/backend/real_user_traffic_results")
@@ -6900,57 +6925,75 @@ def _substitute(template: str, row: Dict[str, Any]) -> str:
             row_norm[nk] = v
 
     def repl(m):
-        key = m.group(1).strip()
-        if key.lower().startswith("row."):
-            key = key[4:]
-        if key.lower().startswith("random."):
-            try:
-                n = int(key.split(".", 1)[1])
-                return "".join(random.choice("0123456789") for _ in range(max(1, n)))
-            except Exception:
-                return ""
-        if key.lower().startswith("randomletters."):
-            try:
-                n = int(key.split(".", 1)[1])
-                import string
-                return "".join(random.choice(string.ascii_lowercase) for _ in range(max(1, n)))
-            except Exception:
-                return ""
-        # 1. Exact case-insensitive row lookup (legacy behaviour preserved)
-        for k, v in row.items():
-            if str(k).strip().lower() == key.lower():
+        raw_inside = m.group(1).strip()
+        # 2026-01: formatter pipeline — split `{{key|fmt1|fmt2:arg}}` into
+        # key + pipeline. Pipeline is applied AFTER key resolution. When
+        # pipeline is empty (legacy `{{key}}`), behaviour unchanged.
+        if _EXT_LOADED and "|" in raw_inside:
+            key, pipeline = _ext_split_pipeline(raw_inside)
+        else:
+            key, pipeline = raw_inside, ""
+
+        def _resolve(key: str) -> str:
+            if key.lower().startswith("row."):
+                key = key[4:]
+            if key.lower().startswith("random."):
+                try:
+                    n = int(key.split(".", 1)[1])
+                    return "".join(random.choice("0123456789") for _ in range(max(1, n)))
+                except Exception:
+                    return ""
+            if key.lower().startswith("randomletters."):
+                try:
+                    n = int(key.split(".", 1)[1])
+                    import string
+                    return "".join(random.choice(string.ascii_lowercase) for _ in range(max(1, n)))
+                except Exception:
+                    return ""
+            # 1. Exact case-insensitive row lookup (legacy behaviour preserved)
+            for k, v in row.items():
+                if str(k).strip().lower() == key.lower():
+                    return "" if v is None else str(v)
+            # 2. 2026-01 synonym fallback — common field aliases so
+            # `{{cellphone}}` resolves when the data file has `phone`, etc.
+            norm_key = key.strip().lower().replace("-", "_").replace(" ", "_")
+            # 2a. Direct normalised match (handles hyphen/space differences)
+            if norm_key in row_norm:
+                v = row_norm[norm_key]
                 return "" if v is None else str(v)
-        # 2. 2026-01 synonym fallback — common field aliases so
-        # `{{cellphone}}` resolves when the data file has `phone`, etc.
-        norm_key = key.strip().lower().replace("-", "_").replace(" ", "_")
-        # 2a. Direct normalised match (handles hyphen/space differences)
-        if norm_key in row_norm:
-            v = row_norm[norm_key]
-            return "" if v is None else str(v)
-        # 2b. Stripped-underscore variant (e.g. "first_name" -> "firstname")
-        collapsed = norm_key.replace("_", "")
-        for cand_key in row_norm:
-            if cand_key.replace("_", "") == collapsed:
-                v = row_norm[cand_key]
-                return "" if v is None else str(v)
-        # 2c. Synonym list lookup
-        for syn in _PLACEHOLDER_SYNONYMS.get(norm_key, []):
-            if syn in row_norm:
-                v = row_norm[syn]
-                return "" if v is None else str(v)
-            # Try collapsed variant of each synonym too
-            syn_col = syn.replace("_", "")
+            # 2b. Stripped-underscore variant (e.g. "first_name" -> "firstname")
+            collapsed = norm_key.replace("_", "")
             for cand_key in row_norm:
-                if cand_key.replace("_", "") == syn_col:
+                if cand_key.replace("_", "") == collapsed:
                     v = row_norm[cand_key]
                     return "" if v is None else str(v)
-        # 2d. Substring match — last resort (e.g. "homephone" → "phone")
-        if len(norm_key) >= 4:
-            for cand_key in row_norm:
-                if norm_key in cand_key or cand_key in norm_key:
-                    v = row_norm[cand_key]
+            # 2c. Synonym list lookup
+            for syn in _PLACEHOLDER_SYNONYMS.get(norm_key, []):
+                if syn in row_norm:
+                    v = row_norm[syn]
                     return "" if v is None else str(v)
-        return ""
+                # Try collapsed variant of each synonym too
+                syn_col = syn.replace("_", "")
+                for cand_key in row_norm:
+                    if cand_key.replace("_", "") == syn_col:
+                        v = row_norm[cand_key]
+                        return "" if v is None else str(v)
+            # 2d. Substring match — last resort (e.g. "homephone" → "phone")
+            if len(norm_key) >= 4:
+                for cand_key in row_norm:
+                    if norm_key in cand_key or cand_key in norm_key:
+                        v = row_norm[cand_key]
+                        return "" if v is None else str(v)
+            return ""
+
+        resolved = _resolve(key)
+        # Apply formatter pipeline if present (e.g. `|upper|first:5`)
+        if pipeline and _EXT_LOADED:
+            try:
+                resolved = _ext_apply_formatters(resolved, pipeline)
+            except Exception:
+                pass
+        return resolved
     return re.sub(r"\{\{\s*([^}]+?)\s*\}\}", repl, template)
 
 
@@ -7497,6 +7540,18 @@ async def _execute_automation_steps(
             return []
         return list(aliases_for_domain.get(sel.strip(), []))
 
+    # 2026-01 (additive): One-shot cookie/GDPR banner auto-dismiss at
+    # the start of the automation. Many lead-gen pages show OneTrust /
+    # Cookiebot / Quantcast banners that block clicks until the user
+    # accepts — bots get stuck on the first click. We dismiss BEFORE
+    # step 0 so the rest of the recorded automation runs on a clean
+    # page. Safe — failures swallowed.
+    if _EXT_LOADED:
+        try:
+            await _ext_dismiss_cookies(page, log_label="pre-automation")
+        except Exception:
+            pass
+
     try:
         for idx, step in enumerate(steps or []):
             if not isinstance(step, dict):
@@ -7553,6 +7608,31 @@ async def _execute_automation_steps(
                 "fill", "click", "type", "select",
                 "check", "uncheck", "press", "hover",
             }
+            # ── 2026-01 (additive): if_exists pre-check ──
+            # When a step has `if_exists: true` (and it has a selector),
+            # we quickly probe the DOM. If the selector is NOT present
+            # within `if_exists_timeout` ms (default 2000), we SOFT-SKIP
+            # the step without raising. Useful for cookie/upsell popups
+            # that only appear randomly.
+            if step.get("if_exists") and selector and action in _PRE_WAIT_ACTIONS:
+                _ie_timeout = int(step.get("if_exists_timeout") or 2000)
+                try:
+                    await page.wait_for_selector(selector, timeout=_ie_timeout, state="attached")
+                except Exception:
+                    # Element absent — skip this step quietly.
+                    executed += 1
+                    if collect_timings:
+                        step_results.append({
+                            "idx": idx, "action": action,
+                            "selector": (selector or "")[:200],
+                            "ok": True,
+                            "error": "(skipped — if_exists check failed)",
+                            "ms": int((_time_mod.perf_counter() - _t_step_start) * 1000),
+                            "optional": True,
+                            "if_exists_skipped": True,
+                        })
+                    continue
+
             if action in _PRE_WAIT_ACTIONS and selector:
                 try:
                     # 2026-05: For `select` (and check/uncheck which often
@@ -7928,12 +8008,68 @@ async def _execute_automation_steps(
                                 pass
                     except Exception:
                         pass
+                elif action == "wait_for_text":
+                    # 2026-01 (additive): wait until visible body text
+                    # contains a substring. Useful for conversion
+                    # detection ("Thank you", "Order confirmed").
+                    if _EXT_LOADED:
+                        _txt = _substitute(step.get("text") or "", row)
+                        _ci = bool(step.get("case_insensitive", True))
+                        _ok = await _ext_wait_text(page, _txt, timeout_ms=timeout, case_insensitive=_ci)
+                        if not _ok and not optional:
+                            raise Exception(f"wait_for_text: '{_txt[:60]}' not found in {timeout}ms")
+                elif action == "wait_for_url":
+                    # 2026-01 (additive): wait until URL matches a
+                    # predicate (contains / equals / regex pattern).
+                    if _EXT_LOADED:
+                        _ok = await _ext_wait_url(
+                            page,
+                            contains=_substitute(step.get("contains") or "", row) or None,
+                            equals=_substitute(step.get("equals") or "", row) or None,
+                            pattern=step.get("pattern") or None,
+                            timeout_ms=timeout,
+                        )
+                        if not _ok and not optional:
+                            raise Exception(
+                                f"wait_for_url: predicate not met in {timeout}ms "
+                                f"(contains={step.get('contains')}, equals={step.get('equals')}, pattern={step.get('pattern')})"
+                            )
+                elif action == "extract":
+                    # 2026-01 (additive): extract text from a selector
+                    # into row[store_key] so subsequent steps can use it
+                    # via `{{store_key}}` substitution.
+                    if _EXT_LOADED:
+                        store_key = str(step.get("store_key") or step.get("var") or "").strip()
+                        if not store_key:
+                            if not optional:
+                                raise Exception("extract: store_key (variable name) required")
+                        else:
+                            _ok, _val = await _ext_extract(
+                                page, selector, store_key, row,
+                                attribute=step.get("attribute"),
+                                regex=step.get("regex"),
+                                timeout_ms=timeout,
+                            )
+                            if not _ok and not optional:
+                                raise Exception(f"extract: {_val}")
+                            logger.info(f"[extract] {store_key} = '{(_val or '')[:80]}'")
+                elif action == "dismiss_popups":
+                    # 2026-01 (additive): explicit cookie/popup banner
+                    # dismissal step. Safe — failures swallowed.
+                    if _EXT_LOADED:
+                        try:
+                            await _ext_dismiss_cookies(page, log_label=f"step-{idx+1}")
+                        except Exception:
+                            pass
+                        try:
+                            await _dismiss_popups(page)
+                        except Exception:
+                            pass
                 elif action == "screenshot":
                     # User-defined intermediate capture — take a real
                     # PNG and forward it to the on_screenshot callback
                     # so the live-activity panel can surface it as
                     # visible visit progress.
-                    #
                     # ── 2026-05 (mandatory capture) ──
                     # User requirement: "jahan capture lagaya hai json
                     # mein wo lazmi ss ay" — screenshot steps MUST
@@ -8133,6 +8269,56 @@ async def _execute_automation_steps(
                         "optional": optional,
                     })
             except Exception as e:
+                # 2026-01 (additive): per-step retry. When the step
+                # carries `retry: N`, attempt the SAME step up to N more
+                # times with `retry_delay` ms between attempts BEFORE
+                # falling through to optional-skip / self-heal. Defaults
+                # to 0 so existing recordings are unchanged.
+                _retry_count = int(step.get("retry") or 0)
+                _retry_delay_ms = int(step.get("retry_delay") or 1000)
+                if _retry_count > 0:
+                    _retry_step = dict(step)
+                    _retry_step["retry"] = 0  # prevent infinite recursion
+                    _retry_step["optional"] = False
+                    _retry_last_err = e
+                    _retry_recovered = False
+                    for _rn in range(_retry_count):
+                        try:
+                            await asyncio.sleep(_retry_delay_ms / 1000.0)
+                        except Exception:
+                            pass
+                        try:
+                            _sub = await _execute_automation_steps(
+                                page, row, [_retry_step],
+                                skip_captcha=skip_captcha,
+                                self_heal=False,
+                                user_id=alias_user_id,
+                            )
+                            if _sub.get("status") == "ok":
+                                _retry_recovered = True
+                                logger.info(
+                                    f"[retry] step #{idx+1} ({action}) recovered on attempt {_rn+2}/{_retry_count+1}"
+                                )
+                                break
+                            _retry_last_err = Exception(_sub.get("error") or "retry failed")
+                        except Exception as _re:
+                            _retry_last_err = _re
+                    if _retry_recovered:
+                        executed += 1
+                        if collect_timings:
+                            step_results.append({
+                                "idx": idx, "action": action,
+                                "selector": (selector or "")[:200],
+                                "ok": True,
+                                "error": f"(retry-recovered) {str(e)[:120]}",
+                                "ms": int((_time_mod.perf_counter() - _t_step_start) * 1000),
+                                "optional": False,
+                                "retry_recovered": True,
+                            })
+                        continue
+                    # All retries exhausted — fall through with the last
+                    # error so optional / self-heal still get a chance.
+                    e = _retry_last_err
                 if optional:
                     executed += 1
                     if collect_timings:
@@ -8198,9 +8384,16 @@ async def _execute_automation_steps(
                         "ok": False, "error": str(e)[:200],
                         "ms": int((_time_mod.perf_counter() - _t_step_start) * 1000),
                         "optional": False,
+                        # 2026-01: friendly Roman-Urdu/English hint
+                        "friendly_hint": (_ext_friendly_error(str(e)) if _EXT_LOADED else ""),
                     })
-                return {"status": "failed", "error": f"Step {idx+1} ({action}) failed: {str(e)[:200]}", "executed_steps": executed,
+                _hint = _ext_friendly_error(str(e)) if _EXT_LOADED else ""
+                _err_msg = f"Step {idx+1} ({action}) failed: {str(e)[:200]}"
+                if _hint:
+                    _err_msg = f"{_err_msg} | Hint: {_hint}"
+                return {"status": "failed", "error": _err_msg, "executed_steps": executed,
                         "failed_at_idx": idx, "remaining_steps": list(steps[idx+1:]),
+                        "friendly_hint": _hint,
                         **({"step_results": step_results} if collect_timings else {})}
         return {"status": "ok", "executed_steps": executed,
                 **({"step_results": step_results, "total_ms": int((_time_mod.perf_counter() - _t_total_start) * 1000)} if collect_timings else {})}
@@ -8241,6 +8434,34 @@ async def _wait_for_actionable_selector(
         await page.wait_for_selector(selector, timeout=timeout, state=state)
         return True
     except Exception as primary_err:
+        # 2026-01 (additive): iframe-aware fallback. Many forms today
+        # live inside iframes (Stripe Checkout, embedded widgets,
+        # third-party lead-gen forms). If the selector did not match
+        # on the main page, scan all frames for it. Detection only —
+        # the actual interaction will still happen on the original
+        # page (Playwright's strict selector mode requires it). For
+        # iframe-internal interactions users should record again
+        # AFTER switching to the iframe — but at minimum detecting
+        # presence here lets the actionable wait succeed instead of
+        # raising a misleading "selector not found" error which
+        # would abandon an otherwise-recoverable visit.
+        if _EXT_LOADED:
+            try:
+                frame_hit = await _ext_find_frame(page, selector, timeout_ms=min(3000, timeout))
+                if frame_hit is not None:
+                    # Probe the frame with the requested visibility
+                    # state. If it passes, we treat the selector as
+                    # actionable — and the downstream click/fill will
+                    # naturally route to the frame via Playwright's
+                    # locator-by-frame resolver.
+                    try:
+                        await frame_hit.wait_for_selector(selector, timeout=min(3000, timeout), state=state)
+                        logger.info(f"[iframe-fallback] '{selector[:60]}' located inside iframe — treating as actionable.")
+                        return True
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         # If user has saved aliases for this selector, try them — they
         # were proven correct by the user via the Edit modal, so they
         # deserve a real attempt before we give up.
