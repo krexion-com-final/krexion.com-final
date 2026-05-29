@@ -167,6 +167,24 @@ export default function VisualRecorderPage() {
   const [pjCountry, setPjCountry] = useState("US");
   const [saving, setSaving] = useState(false);
   const [savedToLibraryId, setSavedToLibraryId] = useState(null);
+
+  // ── 2026-05: Edit-an-existing-template mode ─────────────────────
+  // When the user clicks the "Open in Visual Recorder" (camera) icon
+  // on the Uploaded Things → Automation JSON tab, the page is loaded
+  // with `?edit_upload_id=X` in the URL. We then:
+  //   1. Fetch that upload via /api/uploads, extract the saved
+  //      automation_json + name + description + first goto.url.
+  //   2. Pre-fill the Offer URL field so the user just clicks Start.
+  //   3. After the recording session is ready, POST the saved steps
+  //      to /visual-recorder/{sid}/import-steps — so the recorder
+  //      session is seeded with the existing recording.
+  //   4. When the user clicks Save-to-Library, we PATCH the original
+  //      upload_id instead of POSTing a new one (preserves every
+  //      RUT campaign preset that already references this template).
+  // editTemplate holds the loaded upload object once /uploads returns;
+  // editUploadId is the live URL-param (truthy = edit mode is active).
+  const [editUploadId, setEditUploadId] = useState(null);
+  const [editTemplate, setEditTemplate] = useState(null);   // {id, name, description, automation_json}
   // JSON editor state (2026-01) — when truthy, the Preview JSON block
   // turns into an editable textarea on the Recording Complete screen.
   const [editingJson, setEditingJson] = useState(false);
@@ -206,6 +224,61 @@ export default function VisualRecorderPage() {
       const raw = localStorage.getItem(LS_RECENT_KEY);
       if (raw) setRecentRecordings(JSON.parse(raw));
     } catch {}
+  }, []);
+
+  // ── 2026-05: Edit-existing-template mode bootstrap ─────────────
+  // When the user lands on /visual-recorder?edit_upload_id=X (from
+  // Uploaded Things → Edit-in-Recorder camera icon), fetch the saved
+  // template so we can:
+  //   • pre-fill the Offer URL field (extracted from the first goto
+  //     step) so the user doesn't have to retype it,
+  //   • show an "Editing template …" banner above the Start button,
+  //   • remember the upload_id so Save-to-Library PATCHes the same
+  //     row instead of creating a new one.
+  // Listening on `window.location.search` (no react-router-dom dep
+  // change) keeps this drop-in.
+  useEffect(() => {
+    const sp = new URLSearchParams(window.location.search);
+    const id = sp.get("edit_upload_id");
+    if (!id) return;
+    setEditUploadId(id);
+    (async () => {
+      try {
+        const r = await fetch(`${API_URL}/api/uploads?type=automation_json`, {
+          headers: authH(),
+        });
+        const list = await r.json();
+        if (!r.ok) throw new Error(list?.detail || `HTTP ${r.status}`);
+        const found = Array.isArray(list)
+          ? list.find((u) => u.id === id)
+          : null;
+        if (!found) {
+          toast.error("Template not found — it may have been deleted.");
+          return;
+        }
+        setEditTemplate(found);
+        // Pre-fill the Offer URL from the first {action:"goto"} step.
+        try {
+          const parsedSteps = JSON.parse(found.automation_json || "[]");
+          const firstGoto = Array.isArray(parsedSteps)
+            ? parsedSteps.find((s) => s && s.action === "goto" && s.url)
+            : null;
+          if (firstGoto && firstGoto.url) {
+            setUrl(firstGoto.url);
+          }
+        } catch (_pe) {
+          // bad JSON — user will see error if they try to import. Don't
+          // surface here to avoid spurious toasts on page load.
+        }
+        toast.info(
+          `🔧 Editing template: ${found.name} — start recording to load existing steps`,
+          { duration: 6000 },
+        );
+      } catch (e) {
+        toast.error(`Could not load template: ${e.message || e}`);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const pushRecent = (item) => {
@@ -365,6 +438,36 @@ export default function VisualRecorderPage() {
       setConnectElapsed(0);
       setSetupStage("recording");
       toast.success("Recording session created — connecting…");
+      // ── 2026-05: Edit-mode — auto-import the saved steps so the user
+      // can continue from where the original recording left off. The
+      // session is "starting" at this point; the import-steps endpoint
+      // does NOT need a ready page (it just appends to sess.steps).
+      // After session reaches "ready" the user can immediately reorder,
+      // re-record over, delete, or append new steps.
+      if (editUploadId && editTemplate?.automation_json) {
+        try {
+          let parsedSteps = JSON.parse(editTemplate.automation_json);
+          if (!Array.isArray(parsedSteps)) parsedSteps = [];
+          const importRes = await fetch(
+            `${API_URL}/api/visual-recorder/${d.session_id}/import-steps`,
+            {
+              method: "POST",
+              headers: authH(),
+              body: JSON.stringify({ steps: parsedSteps }),
+            },
+          );
+          if (!importRes.ok) {
+            const ie = await importRes.json().catch(() => ({}));
+            throw new Error(ie.detail || `HTTP ${importRes.status}`);
+          }
+          toast.success(
+            `✓ Loaded ${parsedSteps.length} step${parsedSteps.length === 1 ? "" : "s"} from "${editTemplate.name}" — edit freely, Save to update`,
+            { duration: 6000 },
+          );
+        } catch (impErr) {
+          toast.error(`Could not load existing steps: ${impErr.message || impErr}`);
+        }
+      }
       // Save to recent recordings (localStorage) for one-click re-use
       pushRecent({
         url: url.trim(),
@@ -1784,6 +1887,43 @@ export default function VisualRecorderPage() {
 
   const saveToLibrary = async () => {
     if (!finalBundle) return;
+    // ── 2026-05: Edit-mode → PATCH the original upload instead of
+    // POSTing a new one. Preserves upload_id (every RUT campaign that
+    // already references this template keeps working) and updates the
+    // step_count badge automatically.
+    if (editUploadId && editTemplate) {
+      if (!window.confirm(
+        `Update existing template "${editTemplate.name}" with the edited recording?\n\n` +
+        `Step count will go from ${editTemplate.item_count || 0} → ${finalBundle.step_count}. ` +
+        `Every saved RUT campaign that references this template will use the new version on its next run.`,
+      )) return;
+      setSaving(true);
+      try {
+        const fd = new FormData();
+        fd.append("name", editTemplate.name);
+        fd.append("automation_json", JSON.stringify(finalBundle.automation_json));
+        if (editTemplate.description) {
+          fd.append("description", editTemplate.description);
+        }
+        const r = await fetch(
+          `${API_URL}/api/uploads/automation-json/${editUploadId}`,
+          {
+            method: "PATCH",
+            headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
+            body: fd,
+          },
+        );
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+        setSavedToLibraryId(d.id || editUploadId);
+        toast.success(`Updated "${editTemplate.name}" — every campaign using this template will pick up the new version automatically.`);
+      } catch (e) {
+        toast.error(`Update failed: ${e.message || e}`);
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
     const defaultName = `Recording-${new Date().toISOString().slice(0, 16).replace("T", " ")}`;
     const name = window.prompt("Save as template — name?", defaultName);
     if (!name) return;
@@ -2325,15 +2465,39 @@ export default function VisualRecorderPage() {
               )}
             </div>
 
-            <div className="md:col-span-2 flex justify-center">
+            <div className="md:col-span-2 flex flex-col items-center gap-3">
+              {/* 2026-05: Edit-mode banner — visible whenever the page
+                  was opened via `?edit_upload_id=X`. Tells the user
+                  EXACTLY what will happen when they click Start. */}
+              {editUploadId && (
+                <div
+                  className="w-full max-w-2xl rounded-xl border border-indigo-500/40 bg-indigo-500/10 px-4 py-3 text-sm text-indigo-200 flex items-start gap-3"
+                  data-testid="vr-edit-mode-banner"
+                >
+                  <Pencil className="w-5 h-5 shrink-0 mt-0.5 text-indigo-300" />
+                  <div className="flex-1">
+                    <div className="font-semibold mb-0.5 text-indigo-100">
+                      Editing template: {editTemplate?.name || "(loading…)"}
+                    </div>
+                    <div className="text-xs text-indigo-200/80 leading-relaxed">
+                      Click <b>Start Recording</b> below — your existing{" "}
+                      <b>{editTemplate?.item_count ?? "…"} steps</b> will load
+                      automatically. You can re-record over them, reorder, fix
+                      selectors live, delete, or append new steps. Saving will
+                      update this SAME template (upload ID preserved → every
+                      RUT campaign using it keeps working).
+                    </div>
+                  </div>
+                </div>
+              )}
               <button
                 onClick={startRecording}
-                disabled={busy || !url.trim()}
+                disabled={busy || !url.trim() || (editUploadId && !editTemplate)}
                 className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white font-medium text-base transition-colors shadow-lg shadow-emerald-900/30"
                 data-testid="vr-start-btn"
               >
                 {busy ? <Loader2 className="w-5 h-5 animate-spin" /> : <Play className="w-5 h-5" />}
-                Start Recording
+                {editUploadId ? "Start Editing (loads existing steps)" : "Start Recording"}
               </button>
             </div>
           </div>
@@ -3784,10 +3948,16 @@ export default function VisualRecorderPage() {
                 disabled={saving}
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-700/40 hover:bg-indigo-700/60 border border-indigo-500/40 text-indigo-100 text-sm font-medium disabled:opacity-60 transition-colors"
                 data-testid="vr-save-library-btn"
-                title="Save as reusable template in Uploaded Things library"
+                title={editUploadId
+                  ? `Update existing template "${editTemplate?.name || ''}" (upload ID preserved)`
+                  : "Save as reusable template in Uploaded Things library"}
               >
                 {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : savedToLibraryId ? <CheckCircle2 className="w-4 h-4" /> : <Save className="w-4 h-4" />}
-                {savedToLibraryId ? "Saved (re-save to update)" : "Save to Library"}
+                {savedToLibraryId
+                  ? (editUploadId ? "Updated ✓ (re-save to push more edits)" : "Saved (re-save to update)")
+                  : (editUploadId
+                      ? `Update "${editTemplate?.name || 'template'}"`
+                      : "Save to Library")}
               </button>
               {finalBundle.target_screenshot_path && (
                 <button

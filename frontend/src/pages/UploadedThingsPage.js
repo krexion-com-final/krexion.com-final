@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import { toast } from "sonner";
-import { Package, Smartphone, Server, FileSpreadsheet, Trash2, Plus, RefreshCw, FileCode, ExternalLink, Pencil } from "lucide-react";
+import { Package, Smartphone, Server, FileSpreadsheet, Trash2, Plus, RefreshCw, FileCode, ExternalLink, Pencil, Camera } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
@@ -220,6 +221,7 @@ function ConsumptionPill({ u, unit = "items" }) {
 
 export default function UploadedThingsPage() {
   const token = localStorage.getItem("token");
+  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState("user_agents");
   const [uploads, setUploads] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -1159,9 +1161,19 @@ export default function UploadedThingsPage() {
                     <Button
                       variant="ghost"
                       size="icon"
+                      onClick={() => navigate(`/visual-recorder?edit_upload_id=${u.id}`)}
+                      className="text-emerald-400 hover:text-emerald-300 hover:bg-emerald-900/20"
+                      title="Open in Visual Recorder — edit with full features (re-record, reorder, fix selectors live)"
+                      data-testid={`ut-recorder-edit-${u.id}`}
+                    >
+                      <Camera size={16} />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
                       onClick={() => openEditAJ(u)}
                       className="text-indigo-400 hover:text-indigo-300 hover:bg-indigo-900/20"
-                      title="Edit this template"
+                      title="Quick edit raw JSON (name / description / step text)"
                       data-testid={`ut-edit-${u.id}`}
                     >
                       <Pencil size={16} />
