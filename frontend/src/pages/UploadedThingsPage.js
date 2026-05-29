@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
 import { toast } from "sonner";
-import { Package, Smartphone, Server, FileSpreadsheet, Trash2, Plus, RefreshCw, FileCode, ExternalLink } from "lucide-react";
+import { Package, Smartphone, Server, FileSpreadsheet, Trash2, Plus, RefreshCw, FileCode, ExternalLink, Pencil } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Textarea } from "../components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "../components/ui/dialog";
 import GSheetTabPicker from "../components/GSheetTabPicker";
 import useVisibleInterval from "../hooks/useVisibleInterval";
 
@@ -257,6 +258,47 @@ export default function UploadedThingsPage() {
   const [ajDesc, setAjDesc] = useState("");
   const [ajJson, setAjJson] = useState("");
   const [ajSaving, setAjSaving] = useState(false);
+
+  // ── Edit modal for saved Automation-JSON templates ─────────────
+  // Lets the user fix typos / add+remove steps / update selectors
+  // WITHOUT deleting the upload — so every RUT job that already
+  // references this template keeps working after the edit.
+  const [editAJ, setEditAJ] = useState(null);   // {id, name, description, automation_json} | null
+  const [editAJSaving, setEditAJSaving] = useState(false);
+
+  const openEditAJ = (u) => {
+    setEditAJ({
+      id: u.id,
+      name: u.name || "",
+      description: u.description || "",
+      automation_json: u.automation_json || "",
+    });
+  };
+
+  const saveEditAJ = async () => {
+    if (!editAJ) return;
+    if (!editAJ.name.trim()) return toast.error("Template name cannot be empty");
+    if (!editAJ.automation_json.trim()) return toast.error("Automation JSON cannot be empty");
+    try { JSON.parse(editAJ.automation_json); }
+    catch (e) { return toast.error("Invalid JSON: " + e.message); }
+    setEditAJSaving(true);
+    try {
+      const fd = new FormData();
+      fd.append("name", editAJ.name);
+      fd.append("description", editAJ.description || "");
+      fd.append("automation_json", editAJ.automation_json);
+      await axios.patch(`${API}/uploads/automation-json/${editAJ.id}`, fd, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      toast.success("Template updated");
+      setEditAJ(null);
+      await fetchUploads();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Update failed");
+    } finally {
+      setEditAJSaving(false);
+    }
+  };
 
   const fetchUploads = useCallback(async ({ silent = false } = {}) => {
     if (!silent) setLoading(true);
@@ -1113,21 +1155,108 @@ export default function UploadedThingsPage() {
                       {new Date(u.created_at).toLocaleString()}
                     </div>
                   </div>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => deleteUpload(u.id, u.name)}
-                    className="text-red-400 hover:text-red-300 hover:bg-red-900/20"
-                    data-testid={`ut-del-${u.id}`}
-                  >
-                    <Trash2 size={16} />
-                  </Button>
+                  <div className="flex flex-col gap-1">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => openEditAJ(u)}
+                      className="text-indigo-400 hover:text-indigo-300 hover:bg-indigo-900/20"
+                      title="Edit this template"
+                      data-testid={`ut-edit-${u.id}`}
+                    >
+                      <Pencil size={16} />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => deleteUpload(u.id, u.name)}
+                      className="text-red-400 hover:text-red-300 hover:bg-red-900/20"
+                      title="Delete this template"
+                      data-testid={`ut-del-${u.id}`}
+                    >
+                      <Trash2 size={16} />
+                    </Button>
+                  </div>
                 </CardContent>
               </Card>
             ))}
           </div>
         </div>
       )}
+
+      {/* ─── Edit Automation-JSON Template modal ───────────────────────
+           Opens when user clicks the pencil icon on a saved automation
+           template. Lets them rename / re-describe / edit the full step
+           list in-place. The upload_id is preserved so any RUT campaign
+           preset that already references this template keeps working. */}
+      <Dialog open={!!editAJ} onOpenChange={(open) => { if (!open) setEditAJ(null); }}>
+        <DialogContent
+          className="max-w-3xl w-full bg-zinc-900 border-zinc-800 max-h-[90vh] overflow-y-auto"
+          data-testid="ut-aj-edit-dialog"
+        >
+          <DialogHeader>
+            <DialogTitle className="text-zinc-100 flex items-center gap-2">
+              <Pencil size={16} className="text-indigo-400" /> Edit automation template
+            </DialogTitle>
+            <DialogDescription className="text-zinc-400 text-xs">
+              Add / remove / fix steps without losing the upload ID — every campaign that already
+              references this template will keep working after you save.
+            </DialogDescription>
+          </DialogHeader>
+          {editAJ && (
+            <div className="space-y-3 mt-2">
+              <div>
+                <Label className="text-zinc-300">Template name</Label>
+                <Input
+                  value={editAJ.name}
+                  onChange={(e) => setEditAJ({ ...editAJ, name: e.target.value })}
+                  className={inputClass}
+                  data-testid="ut-aj-edit-name"
+                />
+              </div>
+              <div>
+                <Label className="text-zinc-300">Description (optional)</Label>
+                <Input
+                  value={editAJ.description}
+                  onChange={(e) => setEditAJ({ ...editAJ, description: e.target.value })}
+                  className={inputClass}
+                  data-testid="ut-aj-edit-desc"
+                />
+              </div>
+              <div>
+                <Label className="text-zinc-300">Automation JSON (step-list array)</Label>
+                <Textarea
+                  value={editAJ.automation_json}
+                  onChange={(e) => setEditAJ({ ...editAJ, automation_json: e.target.value })}
+                  className={`${inputClass} font-mono text-xs min-h-[360px]`}
+                  data-testid="ut-aj-edit-json"
+                />
+                <div className="text-xs text-zinc-500 mt-1">
+                  Valid JSON only. Step count is recomputed on save.
+                </div>
+              </div>
+            </div>
+          )}
+          <DialogFooter className="gap-2 mt-3">
+            <Button
+              variant="outline"
+              onClick={() => setEditAJ(null)}
+              disabled={editAJSaving}
+              data-testid="ut-aj-edit-cancel"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={saveEditAJ}
+              disabled={editAJSaving}
+              style={{ backgroundColor: "var(--brand-primary)" }}
+              data-testid="ut-aj-edit-save"
+            >
+              {editAJSaving ? "Saving..." : "Save changes"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

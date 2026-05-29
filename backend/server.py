@@ -13575,6 +13575,85 @@ async def delete_upload(
     return {"ok": True, "deleted_id": upload_id}
 
 
+# ── 2026-05: Edit an existing saved Automation-JSON template ─────────
+# Why this endpoint exists:
+#   The user maintains a LIBRARY of automation templates (saved in the
+#   Uploads → Automation JSON tab). When the offer page changes its
+#   form (renamed fields, added/removed steps, new dropdown values, etc.)
+#   the user previously had to delete the template + re-paste a fresh
+#   copy. That re-paste path is error-prone (loses description, breaks
+#   any RUT job that still references the old upload_id, forces re-pick
+#   in every saved campaign preset). This endpoint lets the user edit
+#   the template IN-PLACE — the upload_id stays the same, every campaign
+#   that references it keeps working, and `item_count` is recomputed
+#   from the new step array so the UI badge stays accurate.
+#
+# All fields are optional — frontend can update just `name`, just
+# `description`, just `automation_json`, or any combination.
+@api_router.patch("/uploads/automation-json/{upload_id}", response_model=UploadedResourceResponse)
+async def update_automation_json(
+    upload_id: str,
+    name: Optional[str] = Form(None),
+    automation_json: Optional[str] = Form(None),
+    description: Optional[str] = Form(None),
+    current_user: dict = Depends(get_current_user_with_fresh_data),
+):
+    """Edit an existing automation_json template in-place. Preserves
+    upload_id so any RUT campaign referencing this template keeps
+    working after the edit."""
+    check_user_feature(current_user, "real_user_traffic")
+    user_db = get_user_db(current_user["id"])
+    doc = await user_db["uploaded_resources"].find_one(
+        {"id": upload_id, "user_id": current_user["id"], "type": "automation_json"},
+        {"_id": 0},
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Automation template not found")
+
+    updates: Dict[str, Any] = {}
+
+    if name is not None:
+        nm = name.strip()
+        if not nm:
+            raise HTTPException(status_code=400, detail="Template name cannot be empty")
+        updates["name"] = nm
+
+    if description is not None:
+        # Allow clearing description by sending empty string
+        updates["description"] = description.strip() or None
+
+    if automation_json is not None:
+        txt = (automation_json or "").strip()
+        if not txt:
+            raise HTTPException(status_code=400, detail="Automation JSON cannot be empty")
+        try:
+            parsed = json.loads(txt)
+            if not isinstance(parsed, list):
+                raise ValueError("Automation JSON must be a top-level JSON array of steps")
+            step_count = len(parsed)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+        updates["automation_json"] = txt
+        # Recompute step count so the UI badge stays in sync.
+        # NOTE: we intentionally update BOTH counters — original_item_count
+        # and item_count — because automation templates do not deplete,
+        # so `original` should always equal `current` for this type.
+        updates["item_count"] = step_count
+        updates["original_item_count"] = step_count
+
+    if not updates:
+        # Nothing to update — return the existing doc unchanged.
+        return _upload_doc_to_response(doc)
+
+    updates["updated_at"] = datetime.now(timezone.utc)
+    await user_db["uploaded_resources"].update_one(
+        {"id": upload_id, "user_id": current_user["id"], "type": "automation_json"},
+        {"$set": updates},
+    )
+    doc.update(updates)
+    return _upload_doc_to_response(doc)
+
+
 async def _load_upload_items(user_id: str, upload_id: str, expected_type: str) -> List[str]:
     """Internal helper: load text items (UAs / proxy lines) from an uploaded
     batch. Returns [] if missing or wrong type.

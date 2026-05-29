@@ -7234,18 +7234,63 @@ async def _smart_select_with_fallback(page, selector: str, value: Any,
     val = "" if value is None else str(value)
     match_by = (match_by or "label").lower().strip()
 
-    # ── Build match-strategy attempts (label / value / index) ──
-    if match_by == "value":
-        strategies: List[Tuple[str, Any]] = [
-            ("value", val), ("label", val), ("label", val.strip()),
-        ]
+    # ── 2026-05 (RUT vs Visual-Recorder parity fix) ─────────────────────
+    # Build value-variants the same way the Visual Recorder live-test
+    # path does (visual_recorder._smart_select_option). Symptom this
+    # fixes: a JSON recorded with `#birth_month` value="6" works during
+    # the recorder's own live test (because the recorder tries "6" →
+    # "06" → "June" → "Jun"), but RUT replay used to try ONLY "6" and
+    # the offer page's dropdown only has `<option>June</option>` labels
+    # (no numeric `value=` attribute) — so step #16 (select #birth_month)
+    # times out and the whole visit fails. By mirroring the recorder's
+    # candidate list here, RUT now succeeds on the SAME JSON the user
+    # tested in the recorder.
+    _MONTHS_FULL = (
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+    )
+    val_variants: List[str] = []
+    _seen_v: set = set()
+    def _add_v(x: str) -> None:
+        if x and x not in _seen_v:
+            _seen_v.add(x)
+            val_variants.append(x)
+    _add_v(val)
+    _add_v(val.strip())
+    if val.strip().isdigit():
+        _n = int(val.strip())
+        _add_v(f"{_n:02d}")     # zero-padded ("6"  → "06")
+        _add_v(str(_n))          # un-padded   ("06" → "6")
+        if 1 <= _n <= 12:        # month-number → month-name
+            _full = _MONTHS_FULL[_n - 1]
+            _abbrev = _full[:3]
+            for _v in (_full, _abbrev, _full.lower(), _abbrev.lower(),
+                       _full.upper(), _abbrev.upper()):
+                _add_v(_v)
     else:
-        strategies = [
-            ("label", val), ("label", val.strip()), ("value", val),
-        ]
+        _lv = val.strip().lower()
+        for _i, _m in enumerate(_MONTHS_FULL, start=1):
+            if _lv == _m.lower() or _lv == _m.lower()[:3]:
+                _add_v(str(_i))
+                _add_v(f"{_i:02d}")
+                break
+
+    # ── Build match-strategy attempts (label / value / index) ──
+    # We iterate every value-variant × (label, value) so date / month /
+    # number dropdowns with EITHER raw "6" data OR human "June" data
+    # connect to options that store EITHER value="6" / value="06" OR
+    # only label="June". Order honours `match_by` user preference.
+    strategies: List[Tuple[str, Any]] = []
+    if match_by == "value":
+        _modes = ("value", "label")
+    else:
+        _modes = ("label", "value")
+    for _cand in val_variants:
+        for _m in _modes:
+            strategies.append((_m, _cand))
     # Also try numeric index as last resort (e.g. value "0", "1", "2")
-    if val.isdigit():
-        strategies.append(("index", int(val)))
+    if val.strip().isdigit():
+        strategies.append(("index", int(val.strip())))
 
     # ── Build selector candidates ──
     selectors_to_try: List[str] = [selector] if selector else []
@@ -7319,7 +7364,7 @@ async def _smart_select_with_fallback(page, selector: str, value: Any,
     _js_set_select = """
     (function(args) {
         var selectors = args.selectors;
-        var raw = args.raw;
+        var rawList = args.rawList && args.rawList.length ? args.rawList : [args.raw];
         var byLabel = args.byLabel;
         function findOpt(el, raw, byLabel) {
             const want = String(raw);
@@ -7350,18 +7395,31 @@ async def _smart_select_with_fallback(page, selector: str, value: Any,
                 const t = (o.text || '').trim().toLowerCase();
                 if (t && wantTrim && (t === wantTrim || t.indexOf(wantTrim) === 0)) return o;
             }
-            // Index fallback for numeric raw
-            if (/^\\d+$/.test(want)) {
-                const idx = parseInt(want, 10);
-                if (idx >= 0 && idx < el.options.length) return el.options[idx];
-            }
             return null;
         }
         for (let s = 0; s < selectors.length; s++) {
             let el = null;
             try { el = document.querySelector(selectors[s]); } catch (e) { continue; }
             if (!el || el.tagName !== 'SELECT') continue;
-            let opt = findOpt(el, raw, byLabel);
+            // Try EACH value-variant in turn against this element.
+            // The first hit wins. We DON'T fall back to index-by-number
+            // across variants because a numeric variant like "6" could
+            // bind to options[6] (placeholder + 5 months off-by-one) —
+            // recorder parity is the goal, so only exact / substring /
+            // label / value matches are accepted here. (RUT's PHASE 2
+            // Playwright fallback still includes the index strategy.)
+            let opt = null;
+            for (let r = 0; r < rawList.length && !opt; r++) {
+                opt = findOpt(el, rawList[r], byLabel);
+            }
+            if (!opt) {
+                // Per-element index fallback (last resort, single value only)
+                const first = String(rawList[0] || '');
+                if (/^\\d+$/.test(first)) {
+                    const idx = parseInt(first, 10);
+                    if (idx >= 0 && idx < el.options.length) opt = el.options[idx];
+                }
+            }
             if (!opt) continue;
             el.value = opt.value;
             try { el.dispatchEvent(new Event('input',  {bubbles: true})); } catch (e) {}
@@ -7382,7 +7440,12 @@ async def _smart_select_with_fallback(page, selector: str, value: Any,
         js_result = await asyncio.wait_for(
             page.evaluate(
                 _js_set_select,
-                {"selectors": uniq_selectors, "raw": val, "byLabel": (match_by == "label")},
+                {
+                    "selectors": uniq_selectors,
+                    "raw": val,
+                    "rawList": val_variants,
+                    "byLabel": (match_by == "label"),
+                },
             ),
             timeout=4.0,
         )
