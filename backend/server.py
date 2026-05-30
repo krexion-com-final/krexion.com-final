@@ -12548,48 +12548,65 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     
     # Check for duplicate clicks - IPv4 ONLY
     ip_conditions = []
-    
+
+    # 2026-05 BUGFIX — placeholder values like "unknown" / "Unknown" /
+    # "no-ipv4-detected" / "" / None used to leak into the duplicate
+    # MongoDB query (e.g. `{"ip_address": "unknown"}`). Combined with
+    # the same placeholder being STORED on past click rows when IPv4
+    # detection failed, this caused the "Duplicate IP — IP: unknown"
+    # false-positive block on RUT traffic. We now strictly require a
+    # real IPv4 string before adding any condition.
+    _INVALID_DUP_IPS = {"unknown", "Unknown", "no-ipv4-detected", ""}
+
+    def _is_valid_dup_ipv4(_ip):
+        return (
+            isinstance(_ip, str)
+            and _ip
+            and _ip not in _INVALID_DUP_IPS
+            and ":" not in _ip  # exclude IPv6
+        )
+
     # Check primary IP (IPv4 only)
-    if client_ip and ":" not in client_ip:
+    if _is_valid_dup_ipv4(client_ip):
         ip_conditions.append({"ip_address": client_ip})
         ip_conditions.append({"ipv4": client_ip})
         ip_conditions.append({"detected_ip": client_ip})
         ip_conditions.append({"all_ips": client_ip})
         ip_conditions.append({"proxy_ips": client_ip})
-    
+
     # Check IPv4 specifically
-    if ipv4 and ipv4 != client_ip and ":" not in ipv4:
+    if _is_valid_dup_ipv4(ipv4) and ipv4 != client_ip:
         ip_conditions.append({"ip_address": ipv4})
         ip_conditions.append({"ipv4": ipv4})
         ip_conditions.append({"detected_ip": ipv4})
         ip_conditions.append({"all_ips": ipv4})
         ip_conditions.append({"proxy_ips": ipv4})
-    
+
     # SKIP IPv6 completely
-    
+
     # Check all proxy IPs from headers (only IPv4)
     for pip in proxy_ips:
-        if pip and pip not in [client_ip, ipv4] and ":" not in pip:
+        if _is_valid_dup_ipv4(pip) and pip not in [client_ip, ipv4]:
             ip_conditions.append({"ip_address": pip})
             ip_conditions.append({"ipv4": pip})
             ip_conditions.append({"detected_ip": pip})
             ip_conditions.append({"all_ips": pip})
             ip_conditions.append({"proxy_ips": pip})
-    
+
     # Check all_ips array (only IPv4)
     for ip in all_ips:
-        if ip and ip not in [client_ip, ipv4] and ":" not in ip:
+        if _is_valid_dup_ipv4(ip) and ip not in [client_ip, ipv4]:
             ip_conditions.append({"ip_address": ip})
             ip_conditions.append({"all_ips": ip})
-    
-    # If no IPv4 conditions found, use a fallback
-    if not ip_conditions:
-        if ipv4:
-            ip_conditions.append({"ipv4": ipv4})
-        elif client_ip and ":" not in client_ip:
-            ip_conditions.append({"ip_address": client_ip})
-        else:
-            ip_conditions.append({"ip_address": "no-ipv4-detected"})
+
+    # 2026-05 BUGFIX — earlier the fallback added a sentinel
+    # `{"ip_address": "no-ipv4-detected"}` here, which matched any old
+    # click row that had stored the same sentinel and caused a false
+    # duplicate-block. If we genuinely have NO real IPv4 to check, the
+    # only safe behaviour is to SKIP the duplicate-check entirely —
+    # `ip_conditions` stays empty, `existing_click` stays None below,
+    # and the click is allowed through (it cannot be matched against
+    # anything anyway).
     
     # STRICT GLOBAL DUPLICATE CHECK - One IP can only pass ONCE across ALL links
     # If IP was seen on ANY link by ANY user, it's blocked everywhere
@@ -12601,6 +12618,15 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     # campaigns / smoke-test links where the owner WANTS the same
     # device to be allowed to click multiple times.
     if not link.get("strict_duplicate_check", True):
+        existing_click = None
+    elif not ip_conditions:
+        # 2026-05 BUGFIX — no real IPv4 was detected for this visitor
+        # (e.g. visitor came in over IPv6-only or behind a CDN that
+        # stripped the client IP). With nothing concrete to match
+        # against, running the duplicate check would either error
+        # (`{"$or": []}` is invalid) or — worse, the legacy behaviour —
+        # match a placeholder like "unknown" and falsely block. Safest
+        # behaviour: skip the duplicate check and let the click pass.
         existing_click = None
     else:
         duplicate_query = {"$or": ip_conditions}  # No link_id filter - global check
@@ -13176,7 +13202,23 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     
     # For storing clicks, use IPv4 as the primary IP address
     # This ensures consistency with duplicate checking which ignores IPv6
-    primary_ip_for_storage = ipv4 or client_ip
+    # 2026-05 BUGFIX — when no IPv4 could be detected `client_ip` is the
+    # literal string "unknown" (see get_all_client_ips). Storing
+    # "unknown" in `ip_address` used to poison the duplicate-IP check
+    # for every subsequent visitor whose IPv4 also failed to detect
+    # (they'd all match each other on the literal "unknown" string and
+    # get the false "Duplicate IP — IP: unknown" block). We now store
+    # `None` in that case — frontend display already falls back to
+    # "Unknown" via `.get("ip_address", "unknown")` so the UX is
+    # unchanged, and the duplicate check (also fixed above) skips
+    # placeholder strings.
+    _PLACEHOLDER_IPS = ("unknown", "Unknown", "no-ipv4-detected", "")
+    if ipv4 and ipv4 not in _PLACEHOLDER_IPS:
+        primary_ip_for_storage = ipv4
+    elif client_ip and client_ip not in _PLACEHOLDER_IPS:
+        primary_ip_for_storage = client_ip
+    else:
+        primary_ip_for_storage = None
     
     # Get all URL parameters for referrer detection
     url_params = dict(request.query_params)
