@@ -2465,6 +2465,11 @@ _EDITABLE_STEP_FIELDS = {
     "retry", "retry_delay", "if_exists", "if_exists_timeout",
     "case_insensitive", "wait_nav", "optional",
     "max_iterations", "iteration_wait_ms", "stop_on_host",
+    # 2026-05 — manual fallback editor. Lets the user paste xpath / text
+    # / attrs onto an existing step so RUT replay has rescue paths even
+    # when the original recording captured only a brittle CSS selector.
+    # See visual_recorder._build_fallbacks for the schema.
+    "fallbacks",
 }
 
 
@@ -2517,6 +2522,48 @@ def update_step(sess: RecorderSession, index: int, patch: Dict[str, Any]) -> Dic
         elif k == "humanize":
             step[k] = bool(v)
             applied[k] = step[k]
+        elif k == "fallbacks":
+            # 2026-05 — manual fallback editor support.
+            # Accept ONLY a dict; sanitise to the schema produced by
+            # `_build_fallbacks` (recorder side) + extra string/list
+            # safety so the user can't inject 100KB blobs through the
+            # UI. If user sends None or {} we DELETE the key so the
+            # step doesn't carry an empty fallbacks dict.
+            if v is None or (isinstance(v, dict) and not v):
+                if "fallbacks" in step:
+                    del step["fallbacks"]
+                applied[k] = None
+                continue
+            if not isinstance(v, dict):
+                continue
+            clean: Dict[str, Any] = {}
+            for fk in ("xpath", "xpath_abs", "text", "tag"):
+                fv = v.get(fk)
+                if isinstance(fv, str):
+                    fv = fv.strip()
+                    if fv and len(fv) <= 500:
+                        clean[fk] = fv
+            nth_in = v.get("nth")
+            if isinstance(nth_in, int) and 1 <= nth_in <= 9999:
+                clean["nth"] = nth_in
+            attrs_in = v.get("attrs")
+            if isinstance(attrs_in, dict):
+                a_clean: Dict[str, str] = {}
+                for ak, av in attrs_in.items():
+                    if not isinstance(ak, str) or len(ak) > 64:
+                        continue
+                    if isinstance(av, str) and av and len(av) <= 200:
+                        a_clean[ak] = av
+                if a_clean:
+                    clean["attrs"] = a_clean
+            if clean:
+                step["fallbacks"] = clean
+                applied[k] = clean
+            else:
+                # All fields stripped out — treat as a clear.
+                if "fallbacks" in step:
+                    del step["fallbacks"]
+                applied[k] = None
         else:
             step[k] = v
             applied[k] = v

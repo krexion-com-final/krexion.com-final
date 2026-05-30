@@ -129,3 +129,51 @@ At RUT replay, the new `_step_fallbacks(step)` helper expands these into Playwri
 - Existing `_alias_alts_for`, `_field_type_alts_for` — fallbacks are PREPENDED, not replacing.
 - Visual recorder JSON schema versioning / export format — adding a new optional key.
 - Any frontend page — recorder JSON is generated server-side, UI doesn't need changes.
+
+---
+
+## Iteration 4 — 2026-05-30: Pre-flight Smoke Test + Manual Fallback Editor
+
+### User ask (Roman Urdu)
+> "Pre-flight Smoke Test ye kr do — jab user '1000 visits' k liye paisa kharchne wala ho system pehle 1 visit chala k bataye recording sahi hai ya nahi. Or visual recorder mein edit mein add kro like koi b selector, text, xpath etc manually b add kr sakein. Or random selection mein b esa ho jo random option select kiye hun on mein b ye sab option hun."
+
+### Features built
+
+#### Feature A — Pre-flight Smoke Test
+**Before** committing budget to a 1000-visit job, user can click **"Pre-flight Smoke Test (1 visit) — Recommended"** (new amber button, right above the big red Start). Same form, same backend, but `smoke_test=true` flag forces `total_clicks=1, concurrency=1`. Existing live-step polling shows pass/fail per step. After the 1-visit run completes, an inline result banner shows:
+- **Pass** (green) → "Start Full Job (N clicks)" button → re-fires `onStart()` without smoke_test=true
+- **Fail** (red) → "Retry Smoke Test" + "Force-start Full Job anyway" (with confirm prompt) — so user can fix the recording first
+
+Backend forced limits happen AFTER validation so users can submit huge `total_clicks` values for the eventual full run but smoke test still costs only 1 proxy + 1 lead. `smoke_test=True` is persisted on the job document so the frontend's result panel renders.
+
+#### Feature B — Manual Fallback Editor in Visual Recorder
+The "Edit Step" modal in Visual Recorder now has a collapsible **"Fallback Strategies"** section (sky-blue, expanded automatically if step already has fallbacks). User can paste/edit:
+- **XPath** — e.g. `//button[@id='submit']`
+- **Visible Text** — e.g. "Continue"
+- **Tag** — e.g. `button` (scopes text match so a stray `<div>` doesn't accidentally win)
+- **Attributes** — multi-line `key: value` textarea (id, name, data-testid, aria-label, placeholder, role, type, autocomplete, etc.)
+
+Saving updates `step.fallbacks` via the existing PATCH endpoint (`/visual-recorder/{sid}/step/{idx}`). Backend `update_step` now accepts and sanitises a `fallbacks` dict: rejects oversized strings, filters attribute keys > 64 chars, drops the whole key if cleared. Hidden for actions that don't have a selector (`wait`, `goto`, `scroll`, `wait_for_load`, `screenshot`, `close`, `dismiss_popups`, `evaluate`/random-pick — see note below).
+
+RUT replay reads these exactly like auto-captured fallbacks via `_step_fallbacks(step)` (added in iteration 3) — same priority pipeline: xpath_stable → xpath_abs → attribute combos → tag-scoped text → `text=` engine.
+
+### Files changed (4, +388 / −2 lines)
+- `backend/server.py` — `smoke_test: bool = Form(False)` parameter on `/real-user-traffic/jobs`, validation override (force total=1, concurrency=1, target_mode=clicks), persisted on `job_doc["smoke_test"]` + in `params_dict`.
+- `backend/visual_recorder.py` — `fallbacks` added to `_EDITABLE_STEP_FIELDS` whitelist + dedicated dict-validation branch in `update_step` (sanitises xpath/text/tag/nth + attrs, supports `None`/`{}` to clear).
+- `frontend/src/pages/RealUserTrafficPage.js` — `onStart(opts)` accepts `{ smokeTest: true }`, sends `smoke_test=true`, new Pre-flight Smoke Test button above the big red one, smoke-test result banner inside Live Run panel with Start Full / Retry / Force-start buttons.
+- `frontend/src/pages/VisualRecorderPage.js` — `openEditStep` now hydrates `fb_xpath`/`fb_text`/`fb_tag`/`fb_attrs_text` from existing `step.fallbacks`, `saveEditStep` builds the dict and sends `patch.fallbacks` (or `null` to clear) only if user touched any fb_* field, new collapsible "Fallback Strategies" panel in the Edit modal.
+
+### Tests run (all pass)
+- **Backend unit (6 cases)** for `update_step({fallbacks: …})`: add full dict ✓, reject huge values & cleared ✓, clear via `{}` ✓, clear via `null` ✓, reject non-dict ✓, attrs sanitisation (long keys skipped) ✓
+- **Backend endpoint live**: POST `/real-user-traffic/jobs` with `smoke_test=true` accepted (no 422), proper 404 on fake link_id, no schema rejection ✓
+- **Frontend compile**: bundle contains all 10 new test-ids — `rut-smoke-test-btn`, `rut-smoke-test-result`, `rut-smoke-test-start-full-btn`, `rut-smoke-test-retry-btn`, `rut-smoke-test-force-full-btn`, `vr-edit-fb-xpath`, `vr-edit-fb-text`, `vr-edit-fb-tag`, `vr-edit-fb-attrs`, `vr-edit-fb-clear` ✓
+
+### Random selection note (deliberate scope choice)
+Random-pick steps use `action: "evaluate"` with embedded JavaScript that already matches by visible-text contains (case-insensitive). They don't have a `selector` field, so the fallback dict wouldn't be read at replay. The Edit modal hides Fallback Strategies for `evaluate` actions to avoid confusing users. A proper fix would require restructuring the random-pick step to record `[{text, xpath, attrs}, ...]` per option + extending the embedded JS to try xpath/attrs per option — a larger separate iteration. The Smoke Test (Feature A) WILL catch broken random-pick steps at validation time, which addresses the user's core concern.
+
+### What was NOT touched
+- Existing `_smart_wait_for_selector` / `_smart_select_with_fallback` / `_smart_check_with_fallback` internals
+- Existing job creation flow, validation rules, params_dict consumers, `_rut_prepare_and_run`
+- Random-pick recording / replay (see above)
+- Old recordings without `fallbacks` (pipeline collapses to legacy behaviour — pure additive)
+

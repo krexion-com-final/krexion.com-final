@@ -5788,6 +5788,14 @@ async def rut_create_job(
     use_proxyjet_auto: bool = Form(False),
     proxyjet_country: str = Form("US"),
     proxyjet_state: str = Form(""),
+    # ── 2026-05: Pre-flight Smoke Test ──────────────────────────────────
+    # When True, the runner is forced to total_clicks=1, concurrency=1
+    # and target_mode="clicks" so the user can validate their recording
+    # + proxy chain on ONE visit BEFORE committing budget to a 1000-visit
+    # full run. The job row carries `smoke_test: True` so the frontend
+    # can render the result panel with "All steps OK → Start Full Job"
+    # vs "Step #N failed → fix recording".
+    smoke_test: bool = Form(False),
     user: dict = Depends(get_current_user_with_fresh_data),
     _cloud_gate: bool = Depends(require_local_mode),
 ):
@@ -5822,6 +5830,19 @@ async def rut_create_job(
     target_mode = (target_mode or "clicks").strip().lower()
     if target_mode not in ("clicks", "conversions"):
         raise HTTPException(status_code=400, detail="target_mode must be 'clicks' or 'conversions'")
+
+    # 2026-05 — Smoke-test override. Force everything to a single visit
+    # so the user can validate their recording + proxy chain BEFORE
+    # committing budget to a full run. We coerce here AFTER the validation
+    # block so user-supplied limits (which may be enormous for the real
+    # run) are accepted by validation but then narrowed to 1.
+    if smoke_test:
+        total_clicks = 1
+        concurrency = 1
+        duration_minutes = 0
+        target_mode = "clicks"
+        target_conversions = 0
+        max_attempts = 0
     if target_mode == "conversions":
         if target_conversions < 1 or target_conversions > 10000:
             raise HTTPException(status_code=400, detail="target_conversions must be 1..10000 when target_mode='conversions'")
@@ -5962,6 +5983,7 @@ async def rut_create_job(
         "proxyjet_state": (proxyjet_state or "").strip().upper() or None,
         "paste_proxy_lines": paste_proxy_lines,
         "paste_ua_lines": paste_ua_lines,
+        "smoke_test": bool(smoke_test),
     }
     # A job is auto-resumable on backend restart only if it has no in-memory
     # bytes attached (Mongo can't store huge UploadFile blobs efficiently
@@ -6046,6 +6068,10 @@ async def rut_create_job(
             "is_resumable": is_resumable,
             "submit_params": persisted_params if is_resumable else None,
             "restart_count": 0,
+            # 2026-05 — Smoke-test marker (used by the frontend to render
+            # the validation result panel instead of the regular full-job
+            # report).
+            "smoke_test": bool(smoke_test),
         }},
         upsert=True,
     )

@@ -1357,6 +1357,14 @@ export default function VisualRecorderPage() {
     if (idx < 0 || idx >= steps.length) return;
     const s = steps[idx] || {};
     setSelectorSuggest({ loading: false, items: null, error: "" });
+    // 2026-05 — Pre-populate fallback editor fields from the existing
+    // `fallbacks` dict (if any). Serialize `attrs` to a "key: value"
+    // per-line textarea format that's friendlier to manual editing
+    // than raw JSON.
+    const fb = (s.fallbacks && typeof s.fallbacks === "object") ? s.fallbacks : {};
+    const fbAttrsText = (fb.attrs && typeof fb.attrs === "object")
+      ? Object.entries(fb.attrs).map(([k, v]) => `${k}: ${v}`).join("\n")
+      : "";
     setEditingStep({
       index: idx,
       draft: {
@@ -1371,6 +1379,12 @@ export default function VisualRecorderPage() {
         match_by: s.match_by || "",
         humanize: s.humanize !== false,   // default true (existing behaviour)
         name: s.name || "",
+        // Manual fallback editor fields (mirror of step.fallbacks)
+        fb_xpath: fb.xpath || "",
+        fb_text: fb.text || "",
+        fb_tag: fb.tag || "",
+        fb_attrs_text: fbAttrsText,
+        fallbacksEdited: false,  // flipped to true the moment user touches any fb_* field
       },
     });
   };
@@ -1703,6 +1717,35 @@ export default function VisualRecorderPage() {
       // Fallback — pass through whatever non-empty fields the user touched.
       if (draft.value) patch.value = draft.value;
       if (draft.timeout !== "") patch.timeout = Number(draft.timeout);
+    }
+
+    // 2026-05 — Manual fallback editor.
+    // If the user touched the fallback fields, build a clean dict and
+    // send it. Empty dict / no fields touched → SEND null to clear
+    // (so user can deliberately remove a bad fallbacks block).
+    if (draft.fallbacksEdited === true) {
+      const fb = {};
+      const xp = (draft.fb_xpath || "").trim();
+      const txt = (draft.fb_text || "").trim();
+      const tg = (draft.fb_tag || "").trim().toLowerCase();
+      if (xp) fb.xpath = xp;
+      if (txt) fb.text = txt;
+      if (tg) fb.tag = tg;
+      // Parse attrs textarea (key: value per line)
+      const attrsRaw = (draft.fb_attrs_text || "").trim();
+      if (attrsRaw) {
+        const attrs = {};
+        attrsRaw.split("\n").forEach((line) => {
+          const eq = line.indexOf(":");
+          if (eq > 0) {
+            const k = line.slice(0, eq).trim();
+            const v = line.slice(eq + 1).trim();
+            if (k && v) attrs[k] = v;
+          }
+        });
+        if (Object.keys(attrs).length > 0) fb.attrs = attrs;
+      }
+      patch.fallbacks = Object.keys(fb).length > 0 ? fb : null;
     }
 
     try {
@@ -4628,6 +4671,147 @@ export default function VisualRecorderPage() {
                     </div>
                   </label>
                 </div>
+              )}
+
+              {/* ── 2026-05: Manual Fallback Strategies editor ─────────
+                  When the recording captured only a brittle CSS selector
+                  (or no fallbacks at all), user can paste xpath / text /
+                  attrs here. RUT replay will then try ALL of these in
+                  order if the primary selector misses — same rescue
+                  pipeline the auto-capture path uses. Surfaces ONLY
+                  for element-targeted actions; hidden on action types
+                  that have no selector (wait/goto/scroll) or that use
+                  pure JavaScript matching (evaluate/random-pick). */}
+              {!["wait", "goto", "wait_for_load", "scroll", "evaluate", "screenshot", "close", "dismiss_popups"].includes(
+                (editingStep.draft.action || "").toLowerCase()
+              ) && (
+                <details
+                  className="rounded border border-sky-900/60 bg-sky-950/20 group"
+                  open={!!(editingStep.draft.fb_xpath || editingStep.draft.fb_text || editingStep.draft.fb_tag || editingStep.draft.fb_attrs_text)}
+                  data-testid="vr-edit-fallbacks-details"
+                >
+                  <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-sky-200 hover:bg-sky-900/30 transition-colors">
+                    <span className="inline-flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5" />
+                      Fallback Strategies
+                      <span className="text-[10px] text-sky-400/70 font-normal">
+                        (xpath · text · attrs — RUT tries these when selector misses)
+                      </span>
+                    </span>
+                  </summary>
+                  <div className="px-3 pb-3 pt-1 space-y-2.5">
+                    <div className="text-[11px] text-zinc-400 leading-relaxed">
+                      Agar selector kabhi miss ho jaye ya page id/name change kar de, RUT in fallbacks ko try karega: xpath → attrs → text. Sab optional hain — jo bharo wahi use hoga.
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-zinc-400 mb-1">
+                        XPath{" "}
+                        <span className="text-zinc-600">(e.g. <code>{`//button[@id='submit']`}</code>)</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={editingStep.draft.fb_xpath}
+                        onChange={(e) =>
+                          setEditingStep({
+                            ...editingStep,
+                            draft: { ...editingStep.draft, fb_xpath: e.target.value, fallbacksEdited: true },
+                          })
+                        }
+                        placeholder="//button[@id='submit']  OR  //*[@data-testid='cta']"
+                        className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-sky-500 text-zinc-200 text-xs font-mono outline-none"
+                        data-testid="vr-edit-fb-xpath"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-zinc-400 mb-1">
+                        Visible Text{" "}
+                        <span className="text-zinc-600">(button label / link text)</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={editingStep.draft.fb_text}
+                        onChange={(e) =>
+                          setEditingStep({
+                            ...editingStep,
+                            draft: { ...editingStep.draft, fb_text: e.target.value, fallbacksEdited: true },
+                          })
+                        }
+                        placeholder="Continue  /  Submit  /  Next →"
+                        className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-sky-500 text-zinc-200 text-xs outline-none"
+                        data-testid="vr-edit-fb-text"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[11px] text-zinc-400 mb-1">
+                          Tag <span className="text-zinc-600">(scopes text match)</span>
+                        </label>
+                        <input
+                          type="text"
+                          value={editingStep.draft.fb_tag}
+                          onChange={(e) =>
+                            setEditingStep({
+                              ...editingStep,
+                              draft: { ...editingStep.draft, fb_tag: e.target.value, fallbacksEdited: true },
+                            })
+                          }
+                          placeholder="button / input / a / select"
+                          className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-sky-500 text-zinc-200 text-xs font-mono outline-none lowercase"
+                          data-testid="vr-edit-fb-tag"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-zinc-400 mb-1">
+                        Attributes{" "}
+                        <span className="text-zinc-600">(one per line, <code>key: value</code>)</span>
+                      </label>
+                      <textarea
+                        value={editingStep.draft.fb_attrs_text}
+                        onChange={(e) =>
+                          setEditingStep({
+                            ...editingStep,
+                            draft: { ...editingStep.draft, fb_attrs_text: e.target.value, fallbacksEdited: true },
+                          })
+                        }
+                        placeholder={`id: submit-btn\nname: submit\ndata-testid: cta\naria-label: Continue to next step`}
+                        rows={4}
+                        className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-sky-500 text-zinc-200 text-xs font-mono outline-none resize-y"
+                        data-testid="vr-edit-fb-attrs"
+                      />
+                      <div className="text-[10px] text-zinc-500 mt-1">
+                        Useful keys: <code>id</code>, <code>name</code>, <code>data-testid</code>, <code>aria-label</code>, <code>placeholder</code>, <code>role</code>, <code>type</code>, <code>autocomplete</code>, <code>title</code>
+                      </div>
+                    </div>
+                    {editingStep.draft.fallbacksEdited && (
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-sky-300/80">
+                          ✓ Fallbacks will be saved when you click "Save"
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setEditingStep({
+                              ...editingStep,
+                              draft: {
+                                ...editingStep.draft,
+                                fb_xpath: "",
+                                fb_text: "",
+                                fb_tag: "",
+                                fb_attrs_text: "",
+                                fallbacksEdited: true,
+                              },
+                            })
+                          }
+                          className="text-[10px] text-rose-300 hover:text-rose-200 hover:underline"
+                          data-testid="vr-edit-fb-clear"
+                        >
+                          Clear all fallbacks
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </details>
               )}
             </div>
             <div className="flex items-center justify-end gap-2 p-4 border-t border-zinc-800">

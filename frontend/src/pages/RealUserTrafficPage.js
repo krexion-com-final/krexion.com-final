@@ -851,7 +851,12 @@ export default function RealUserTrafficPage() {
     }
   };
 
-  const onStart = async () => {
+  const onStart = async (opts = {}) => {
+    // 2026-05 — Pre-flight smoke test mode. Same form, same backend, but
+    // forces total=1/concurrency=1 and tags the job so the result panel
+    // renders pass/fail per step instead of the normal report. User can
+    // then click "Start Full Job" to launch the real run.
+    const isSmokeTest = !!opts.smokeTest;
     if (!linkId) return toast.error("Select a tracker link");
     // Validation: either paste OR uploaded batch OR ProxyJet Auto must be present
     if (!useProxyJetAuto && !useStoredProxies && !selectedUploadProxyId && !proxies.trim()) {
@@ -1072,6 +1077,13 @@ export default function RealUserTrafficPage() {
         fd.append("self_heal", String(selfHeal));
         fd.append("pure_json_mode", String(pureJsonMode));
         fd.append("auto_resume_enabled", String(autoResumeEnabled));
+      }
+
+      // 2026-05 — Smoke test override (forces total=1, concurrency=1 on
+      // the backend so user can validate the recording before spending
+      // budget on a 1000-visit run).
+      if (isSmokeTest) {
+        fd.append("smoke_test", "true");
       }
 
       // Snapshot of the latest job-id BEFORE posting, used by the
@@ -2770,10 +2782,34 @@ export default function RealUserTrafficPage() {
         )}
       </Card>
 
+      {/* ═══ 2026-05: Pre-flight Smoke Test button ═══ */}
+      {/* User ask (Roman Urdu): "Jab user 'Start RUT Job' daba k 1000
+          visits k liye paisa kharchne wala ho, system pehle 1 visit ka
+          smoke test chala k bataye recording sahi hai ya nahi". This
+          button reuses the SAME form/backend with smoke_test=true. */}
+      <Button
+        data-testid="rut-smoke-test-btn"
+        onClick={() => onStart({ smokeTest: true })}
+        disabled={submitting}
+        title="Run ONE validation visit first to catch broken recordings before spending your full budget"
+        className="w-full h-11 mb-2 text-sm font-medium bg-amber-700 hover:bg-amber-600 text-white border border-amber-600/70"
+      >
+        {submitting ? (
+          <>
+            <RefreshCw className="animate-spin mr-2" size={16} /> Starting smoke test…
+          </>
+        ) : (
+          <>
+            <ClipboardCheck className="mr-2" size={16} />
+            Pre-flight Smoke Test (1 visit) — Recommended
+          </>
+        )}
+      </Button>
+
       {/* ═══ Big red START button ═══ */}
       <Button
         data-testid="rut-start-btn"
-        onClick={onStart}
+        onClick={() => onStart()}
         disabled={submitting}
         className="w-full h-14 text-lg font-semibold bg-red-600 hover:bg-red-700 text-white border border-red-500"
       >
@@ -2803,6 +2839,99 @@ export default function RealUserTrafficPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
+            {/* 2026-05 — Smoke-test result banner. Renders when activeJob
+                was started via the Pre-flight Smoke Test button. Three
+                states: running (1 visit in progress), passed, failed.
+                On pass, surfaces a "Start Full Job" button that calls
+                onStart() again with the user's ORIGINAL totalClicks. */}
+            {activeJob.smoke_test && (
+              <div
+                data-testid="rut-smoke-test-result"
+                className={`mb-4 rounded-lg border px-4 py-3 ${
+                  activeJob.status === "completed"
+                    ? "border-emerald-900/60 bg-emerald-950/40"
+                    : activeJob.status === "failed" || activeJob.status === "stopped"
+                    ? "border-rose-900/60 bg-rose-950/40"
+                    : "border-amber-900/60 bg-amber-950/30"
+                }`}
+              >
+                <div className="flex items-start gap-3">
+                  <ClipboardCheck className={`w-5 h-5 mt-0.5 flex-shrink-0 ${
+                    activeJob.status === "completed" ? "text-emerald-300" :
+                    activeJob.status === "failed" || activeJob.status === "stopped" ? "text-rose-300" :
+                    "text-amber-300"
+                  }`} />
+                  <div className="flex-1 min-w-0">
+                    <div className={`text-sm font-semibold ${
+                      activeJob.status === "completed" ? "text-emerald-100" :
+                      activeJob.status === "failed" || activeJob.status === "stopped" ? "text-rose-100" :
+                      "text-amber-100"
+                    }`}>
+                      {activeJob.status === "completed"
+                        ? "Smoke test PASSED — recording, proxies and form-fill all look good."
+                        : activeJob.status === "failed" || activeJob.status === "stopped"
+                        ? `Smoke test FAILED${activeJob.processed > 0 ? " — visit completed but didn't reach conversion page" : " — visit could not finish"}.`
+                        : "Smoke test running — validating 1 visit before full job…"}
+                    </div>
+                    <div className="text-xs text-zinc-400 mt-1">
+                      {activeJob.status === "completed"
+                        ? `Click below to launch your full run with the original settings (${totalClicks} ${formFillEnabled ? "visits" : "clicks"}, concurrency ${concurrency}).`
+                        : activeJob.status === "failed" || activeJob.status === "stopped"
+                        ? "Fix the failing step (see Live Activity below) BEFORE running the full job — this saves the proxies + leads you would have wasted on 1000 broken visits."
+                        : "This validation visit costs only 1 proxy + 1 lead. Full job spawns only on your confirmation."}
+                    </div>
+                    {(activeJob.status === "completed" || activeJob.status === "failed" || activeJob.status === "stopped") && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {activeJob.status === "completed" && (
+                          <Button
+                            data-testid="rut-smoke-test-start-full-btn"
+                            size="sm"
+                            onClick={() => onStart()}
+                            disabled={submitting}
+                            className="bg-emerald-700 hover:bg-emerald-600 text-white"
+                          >
+                            <Play className="mr-1.5" size={14} />
+                            Start Full Job ({targetMode === "conversions" ? `${targetConversions} conv` : `${totalClicks} clicks`})
+                          </Button>
+                        )}
+                        {(activeJob.status === "failed" || activeJob.status === "stopped") && (
+                          <>
+                            <Button
+                              data-testid="rut-smoke-test-retry-btn"
+                              size="sm"
+                              onClick={() => onStart({ smokeTest: true })}
+                              disabled={submitting}
+                              className="bg-amber-700 hover:bg-amber-600 text-white"
+                            >
+                              <RefreshCw className="mr-1.5" size={14} />
+                              Retry Smoke Test
+                            </Button>
+                            <Button
+                              data-testid="rut-smoke-test-force-full-btn"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                if (window.confirm(
+                                  "Smoke test failed. Are you SURE you want to run the full job anyway? " +
+                                  "Most of the visits will likely fail in the same way."
+                                )) {
+                                  onStart();
+                                }
+                              }}
+                              disabled={submitting}
+                              className="bg-transparent text-rose-200 border-rose-800/60 hover:bg-rose-900/30"
+                            >
+                              Force-start Full Job anyway
+                            </Button>
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Prep-step indicator — shows what the BG task is currently
                 doing while the job is in queued/preparing state. Without
                 this, users stare at "queued" with zero feedback during
