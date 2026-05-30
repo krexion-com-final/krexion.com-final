@@ -4061,6 +4061,31 @@ async def run_real_user_traffic_job(
                 # don't both pick the same IP from concurrent probes.
                 if duplicate_ip_set is not None:
                     duplicate_ip_set.add(exit_ip)
+                # ── 2026-01 fix: CROSS-JOB persistence ────────────────
+                # Without this, the in-memory `duplicate_ip_set` is lost
+                # when the job ends, and the next job can pick the same
+                # exit IP again from ProxyJet's pool (because clicks-DB
+                # writes only happen on a successful click — a visit that
+                # never reached a click would leak its IP back into the
+                # pool for the next run). Persisting every picked exit
+                # IP to `rut_burnt_ips` means EVERY future job loads it
+                # into its `duplicate_ip_set` at startup → ProxyJet pool
+                # IPs we've handed out are NEVER picked twice across runs.
+                # Fire-and-forget so the request stays fast.
+                try:
+                    _spawn_live(_persist_burnt_ip(
+                        db,
+                        ip=exit_ip,
+                        reason="proxyjet_picked",
+                        user_id=engine_user_id or "",
+                        offer_url=target_url or "",
+                        state=row_state_code or "",
+                        job_id=job_id or "",
+                    ))
+                except Exception:
+                    # Never let persistence failure block the visit —
+                    # in-memory set still protects within this job.
+                    pass
                 chosen_proxy = parsed
                 chosen_geo = _geo
                 break

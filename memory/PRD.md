@@ -43,3 +43,20 @@ User has a public GitHub repo (`krexion.com`) with auto-deploy to VPS. They want
 - Stop-all-my-sessions button (bulk action)
 - Per-session "rename" so user can label sessions
 - Persistence: rebuild sessions list across pod restarts (currently in-memory)
+
+## Bug Fix (2026-01-30, second iteration)
+
+### ProxyJet Duplicate IP — Cross-job persistence
+**Bug**: Every time a RUT job started, `duplicate_ip_set` was rebuilt from `clicks` collection + `rut_burnt_ips`. But ProxyJet exit IPs that were picked for visits which never resulted in a recorded click (e.g. browser launch failed, captcha, or visit aborted) were ONLY tracked in the in-memory set, which died with the job. Next job → same IP could come back from ProxyJet pool → "duplicate IP" issue kept recurring.
+
+**Fix** (`backend/real_user_traffic.py`, +25 lines, 0 deletions):
+- When the on-demand ProxyJet retry loop picks a unique exit IP (line ~4063), persist it to `rut_burnt_ips` with `reason="proxyjet_picked"` via the existing `_persist_burnt_ip` helper
+- Fire-and-forget (`_spawn_live(...)`) so the request stays fast
+- Idempotent upsert (existing rut_burnt_ips schema) — re-picking the same IP just bumps `hit_count`
+- Failure-safe: any exception in persistence falls back silently to in-memory set behavior
+
+**Verified**:
+- ✓ IP correctly persisted (hit_count = 1)
+- ✓ Re-persist same IP increments hit_count to 2 and merges job_ids
+- ✓ Next job's blocklist load (`db.rut_burnt_ips.find({},...)`) picks up the persisted IP
+- ✓ No regressions (pure additive, only 25 lines added)
