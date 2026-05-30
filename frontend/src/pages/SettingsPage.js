@@ -20,6 +20,31 @@ import {
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 
+// ── 2026-01: Full sub-user permission catalogue ─────────────────────
+// Mirrors backend's `SUB_USER_PERMISSION_MAP` so the main user can
+// grant a sub-user the SAME breadth of access an admin can grant a
+// main user. `parentFeatKey` is the feature key on the PARENT user
+// that must be ON for the permission to take effect — backend caps
+// the effective feature to (granted AND parent_has), and the UI
+// disables toggles for capabilities the parent doesn't own so the
+// main user gets immediate visual feedback.
+const ALL_SUB_USER_PERMISSIONS = [
+  { key: "view_links",        label: "View Links",         parentFeatKey: "links" },
+  { key: "view_clicks",       label: "View Clicks",        parentFeatKey: "clicks" },
+  { key: "view_conversions",  label: "View Conversions",   parentFeatKey: "conversions" },
+  { key: "view_proxies",      label: "View Proxies",       parentFeatKey: "proxies" },
+  { key: "import_data",       label: "Import Data",        parentFeatKey: "import_data" },
+  { key: "import_traffic",    label: "Import Traffic",     parentFeatKey: "import_traffic" },
+  { key: "real_traffic",      label: "Real Traffic",       parentFeatKey: "real_traffic" },
+  { key: "ua_generator",      label: "UA Generator",       parentFeatKey: "ua_generator" },
+  { key: "email_checker",     label: "Email Checker",      parentFeatKey: "email_checker" },
+  { key: "separate_data",     label: "Separate Data",      parentFeatKey: "separate_data" },
+  { key: "form_filler",       label: "Form Filler",        parentFeatKey: "form_filler" },
+  { key: "real_user_traffic", label: "Real User Traffic",  parentFeatKey: "real_user_traffic" },
+  { key: "profile_builder",   label: "Profile Builder",    parentFeatKey: "profile_builder" },
+  { key: "settings",          label: "Settings Access",    parentFeatKey: "settings" },
+];
+
 export default function SettingsPage() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -710,26 +735,67 @@ export default function SettingsPage() {
                         />
                       </div>
                       <div className="space-y-3">
-                        <Label>Permissions</Label>
-                        <div className="bg-[var(--brand-card)] p-4 rounded-lg space-y-3">
-                          {[
-                            { key: "view_clicks", label: "View Clicks" },
-                            { key: "view_links", label: "View Links" },
-                            { key: "view_proxies", label: "View Proxies" },
-                            { key: "edit", label: "Edit Data" }
-                          ].map(({ key, label }) => (
-                            <div key={key} className="flex items-center justify-between">
-                              <span className="text-sm">{label}</span>
-                              <Switch
-                                checked={subUserForm.permissions[key] || false}
-                                onCheckedChange={(checked) => setSubUserForm({
-                                  ...subUserForm,
-                                  permissions: { ...subUserForm.permissions, [key]: checked }
-                                })}
-                                data-testid={`permission-${key}`}
-                              />
-                            </div>
-                          ))}
+                        <div className="flex items-center justify-between">
+                          <Label>Permissions</Label>
+                          {/* 2026-01: Quick "All Features" toggle — mirrors the
+                              admin "give user all features" workflow so the main
+                              user can delegate the same breadth of access to a
+                              sub-user with one click. Only enables the features
+                              the parent ACTUALLY owns (backend caps it anyway). */}
+                          <div className="flex gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const all = {};
+                                ALL_SUB_USER_PERMISSIONS.forEach(({ key }) => { all[key] = true; });
+                                setSubUserForm({ ...subUserForm, permissions: all });
+                              }}
+                              className="text-[11px] px-2 py-1 rounded bg-emerald-700/40 hover:bg-emerald-600/60 border border-emerald-500/40 text-emerald-200 font-medium"
+                              data-testid="subuser-grant-all-btn"
+                              title="Grant every permission the parent account has"
+                            >
+                              Grant all
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const none = {};
+                                ALL_SUB_USER_PERMISSIONS.forEach(({ key }) => { none[key] = false; });
+                                setSubUserForm({ ...subUserForm, permissions: none });
+                              }}
+                              className="text-[11px] px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 font-medium"
+                              data-testid="subuser-revoke-all-btn"
+                              title="Revoke every permission"
+                            >
+                              Revoke all
+                            </button>
+                          </div>
+                        </div>
+                        <div className="bg-[var(--brand-card)] p-4 rounded-lg space-y-3 max-h-[320px] overflow-y-auto">
+                          {ALL_SUB_USER_PERMISSIONS.map(({ key, label, parentFeatKey }) => {
+                            // Disable toggle if parent doesn't own this feature
+                            // (backend caps it anyway but the UI hint is useful).
+                            const parentHas = parentFeatKey
+                              ? (user?.features?.[parentFeatKey] !== false)
+                              : true;
+                            return (
+                              <div key={key} className={`flex items-center justify-between ${parentHas ? "" : "opacity-50"}`} title={parentHas ? "" : "Parent account doesn't own this feature"}>
+                                <span className="text-sm">
+                                  {label}
+                                  {!parentHas && <span className="ml-1 text-[10px] text-amber-400">(not owned by parent)</span>}
+                                </span>
+                                <Switch
+                                  checked={subUserForm.permissions[key] || false}
+                                  disabled={!parentHas}
+                                  onCheckedChange={(checked) => setSubUserForm({
+                                    ...subUserForm,
+                                    permissions: { ...subUserForm.permissions, [key]: checked }
+                                  })}
+                                  data-testid={`permission-${key}`}
+                                />
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
                       <Button type="submit" className="w-full" data-testid="submit-subuser-button">
@@ -774,19 +840,40 @@ export default function SettingsPage() {
                           </div>
                         </TableCell>
                         <TableCell>
-                          <div className="flex gap-1 flex-wrap">
-                            {subUser.permissions?.view_clicks && (
-                              <Badge variant="outline" className="text-xs border-[#22C55E] text-[#22C55E]">Clicks</Badge>
-                            )}
-                            {subUser.permissions?.view_links && (
-                              <Badge variant="outline" className="text-xs border-[#3B82F6] text-[#3B82F6]">Links</Badge>
-                            )}
-                            {subUser.permissions?.view_proxies && (
-                              <Badge variant="outline" className="text-xs border-[#8B5CF6] text-[#8B5CF6]">Proxies</Badge>
-                            )}
-                            {subUser.permissions?.edit && (
-                              <Badge variant="outline" className="text-xs border-[#F59E0B] text-[#F59E0B]">Edit</Badge>
-                            )}
+                          <div className="flex gap-1 flex-wrap max-w-[280px]">
+                            {(() => {
+                              // 2026-01: Show a compact badge for every
+                              // permission granted (previously hard-coded
+                              // to only 4). If user has 4+ grants we just
+                              // show a "+N more" tally so the row height
+                              // stays compact.
+                              const granted = ALL_SUB_USER_PERMISSIONS.filter(
+                                ({ key }) => subUser.permissions?.[key]
+                              );
+                              if (!granted.length) {
+                                return <span className="text-xs text-muted-foreground">No permissions</span>;
+                              }
+                              const visible = granted.slice(0, 4);
+                              const overflow = granted.length - visible.length;
+                              return (
+                                <>
+                                  {visible.map(({ key, label }) => (
+                                    <Badge
+                                      key={key}
+                                      variant="outline"
+                                      className="text-xs border-[#22C55E] text-[#22C55E]"
+                                    >
+                                      {label.replace(/^View /, "")}
+                                    </Badge>
+                                  ))}
+                                  {overflow > 0 && (
+                                    <Badge variant="outline" className="text-xs border-zinc-600 text-zinc-400" title={granted.slice(4).map((g) => g.label).join(", ")}>
+                                      +{overflow} more
+                                    </Badge>
+                                  )}
+                                </>
+                              );
+                            })()}
                           </div>
                         </TableCell>
                         <TableCell>

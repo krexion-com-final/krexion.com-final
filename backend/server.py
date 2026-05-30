@@ -55,11 +55,20 @@ db = main_db  # Alias for backward compatibility - will be refactored for per-us
 # Cache for click IPs - refreshes every 60 seconds (2026-05 — lowered
 # from 5 min so newly-burnt IPs from rut_burnt_ips get picked up by
 # the next RUT job within ~1 minute instead of up to 5 minutes).
-_click_ips_cache = {
-    "ips": set(),
-    "last_updated": 0,
-    "ttl": 60  # 60 seconds cache
+# 2026-01 update — cache is now keyed by user_id (or "__all__" for the
+# legacy "scan every DB" caller). This is THE critical fix for the
+# "false-positive duplicate IP" bug: previously the dup-IP set
+# included clicks from OTHER users' databases too, so user A's RUT
+# job would flag IPs that only user B had ever used. Now each user's
+# RUT job only checks their OWN per-tenant DB (sub-users share the
+# parent's DB automatically via get_db_for_user, so sub-user clicks
+# correctly count against the parent's duplicate set — and ONLY the
+# parent's).
+_click_ips_cache: dict = {
+    # legacy global key for the old "scan all DBs" callers
+    "__all__": {"ips": set(), "last_updated": 0, "ttl": 60},
 }
+_CLICK_IPS_CACHE_TTL = 60  # seconds
 
 # Link cache for high traffic - refreshes every 60 seconds
 _link_cache = {}
@@ -161,38 +170,61 @@ async def ensure_user_db_indexes(user_id: str) -> None:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"ensure_user_db_indexes failed for {user_id}: {e}")
 
-async def get_all_click_ips_from_entire_database(force_refresh=False):
+async def get_all_click_ips_from_entire_database(
+    force_refresh: bool = False,
+    user_id: Optional[str] = None,
+):
+    """Collect click IPs used for duplicate detection.
+
+    2026-01 — `user_id` parameter (CRITICAL FIX):
+        When `user_id` is provided (the normal case for any RUT job /
+        proxy upload / proxy refresh), we ONLY scan THAT user's own
+        per-tenant database (`krexion_user_<id>`). Sub-users share
+        the parent's DB by design (see `get_db_for_user`), so a
+        sub-user's clicks correctly count against the parent's
+        duplicate set — and only the parent's.
+
+        Before this fix the function scanned EVERY `krexion_user_*`
+        database and merged their IPs into one global set. That meant
+        user A's RUT job got "duplicate IP" rejections for IPs that
+        only user B had ever clicked from — completely cross-polluting
+        the duplicate detection between tenants. The user reported
+        this as "offer-side duplicate" but it was actually our own
+        panel's check, fed a poisoned set.
+
+        When `user_id` is None (only the legacy admin debug endpoint
+        and the global proxy refresh keep using this path), the old
+        "scan all DBs" behavior is preserved.
+
+    Also loads the persistent `rut_burnt_ips` blocklist. When scoped
+    to a user, only rows whose `user_ids` array contains this user
+    are loaded (see `_persist_burnt_ip` which writes that field).
     """
-    Collect ALL IPs from CLICKS in ENTIRE database (all users).
-    Uses caching to avoid slow queries on every request.
-    
-    IMPORTANT: This checks ALL IP fields to match the link redirect duplicate detection:
-    - ip_address, ipv4, ipv6 (main IPs)
-    - proxy_ips, all_ips (array fields containing intermediate/proxy IPs)
-    
-    This ensures proxy test duplicate check matches exactly with link redirect duplicate check.
-    """
-    global _click_ips_cache
-    
+    cache_key = user_id or "__all__"
     current_time = time.time()
-    
-    # Return cached data if still valid and not forcing refresh
-    if not force_refresh and _click_ips_cache["ips"] and (current_time - _click_ips_cache["last_updated"]) < _click_ips_cache["ttl"]:
-        logger.info(f"Using cached IPs: {len(_click_ips_cache['ips'])} IPs (cached {int(current_time - _click_ips_cache['last_updated'])}s ago)")
-        return _click_ips_cache["ips"]
-    
-    logger.info("Refreshing click IPs cache (checking ALL IP fields)...")
-    all_click_ips = set()
-    
+    cached = _click_ips_cache.get(cache_key)
+
+    if (not force_refresh
+            and cached
+            and cached["ips"]
+            and (current_time - cached["last_updated"]) < _CLICK_IPS_CACHE_TTL):
+        logger.info(
+            f"Using cached IPs for {cache_key}: {len(cached['ips'])} IPs "
+            f"(cached {int(current_time - cached['last_updated'])}s ago)"
+        )
+        return cached["ips"]
+
+    logger.info(f"Refreshing click IPs cache for {cache_key}…")
+    all_click_ips: set = set()
+
     # Fields to check - MUST match link redirect duplicate check fields
     single_ip_fields = ["ip_address", "ipv4", "detected_ip"]
     array_ip_fields = ["proxy_ips", "all_ips"]
-    
+
     async def extract_ips_from_db(database, db_name=""):
         """Extract all IPs from a database's clicks collection"""
         extracted = set()
         try:
-            # Get distinct values from single-value IP fields
             for field in single_ip_fields:
                 try:
                     distinct_ips = await database.clicks.distinct(field)
@@ -201,13 +233,11 @@ async def get_all_click_ips_from_entire_database(force_refresh=False):
                             extracted.add(ip)
                 except Exception:
                     pass
-            
-            # Get IPs from array fields (proxy_ips, all_ips)
+
             for field in array_ip_fields:
                 try:
-                    # Use aggregation to unwind and get distinct IPs from arrays
                     pipeline = [
-                        {"$match": {field: {"$exists": True, "$ne": None, "$ne": []}}},
+                        {"$match": {field: {"$exists": True, "$nin": [None, []]}}},
                         {"$unwind": f"${field}"},
                         {"$group": {"_id": f"${field}"}}
                     ]
@@ -221,54 +251,103 @@ async def get_all_click_ips_from_entire_database(force_refresh=False):
             if db_name:
                 logger.warning(f"Error extracting IPs from {db_name}: {e}")
         return extracted
-    
-    # 1. Get ALL IPs from main_db.clicks
-    try:
-        main_ips = await extract_ips_from_db(db, "main_db")
-        all_click_ips.update(main_ips)
-    except Exception as e:
-        logger.error(f"Error fetching IPs from main_db: {e}")
-    
-    # 2. Get ALL IPs from ALL user-specific databases
-    try:
-        db_names = await client.list_database_names()
-        user_dbs = [name for name in db_names if name.startswith("krexion_user_")]
-        
-        for db_name in user_dbs[:20]:  # Process max 20 user databases
-            try:
-                user_db_instance = client[db_name]
-                user_ips = await extract_ips_from_db(user_db_instance, db_name)
-                all_click_ips.update(user_ips)
-            except Exception as e:
-                logger.warning(f"Error fetching IPs from {db_name}: {e}")
-    except Exception as e:
-        logger.warning(f"Could not list user databases: {e}")
 
-    # 3. 2026-05 — Also load persistent RUT "burnt IP" block-list.
-    # `rut_burnt_ips` is written by real_user_traffic.py whenever an
-    # offer landing page rejects an exit-IP as duplicate or VPN. Those
-    # IPs may never have entered the `clicks` collection (the visit
-    # failed before a click could be recorded), so without this extra
-    # load every NEW job would keep pulling the same dirty IPs from
-    # ProxyJet. Loading them here means future jobs skip them at the
-    # on-demand probe stage.
-    try:
-        burnt_count = 0
-        async for doc in db.rut_burnt_ips.find({}, {"ip": 1, "_id": 0}):
-            ip = doc.get("ip")
-            if ip and isinstance(ip, str):
-                all_click_ips.add(ip.strip())
-                burnt_count += 1
-        if burnt_count:
-            logger.info(f"Loaded {burnt_count} burnt IPs from rut_burnt_ips block-list")
-    except Exception as e:
-        logger.warning(f"Could not load rut_burnt_ips: {e}")
+    if user_id:
+        # ── Per-user (CORRECT for any RUT/proxy duplicate check) ──
+        try:
+            user_db_instance = get_user_db(user_id)
+            user_ips = await extract_ips_from_db(
+                user_db_instance, f"krexion_user_{user_id}"
+            )
+            all_click_ips.update(user_ips)
+        except Exception as e:
+            logger.error(f"Error fetching IPs from user DB {user_id}: {e}")
 
-    # Update cache
-    _click_ips_cache["ips"] = all_click_ips
-    _click_ips_cache["last_updated"] = current_time
-    
-    logger.info(f"Cached {len(all_click_ips)} unique IPs from all clicks (all IP fields)")
+        # Also peek at MAIN db.clicks because VERY old accounts may
+        # still have content there (pre-per-tenant migration). Scoped
+        # by user_id so we don't pick up other users' rows.
+        try:
+            legacy_links = await db.links.find(
+                {"user_id": user_id}, {"_id": 0, "id": 1},
+            ).to_list(100000)
+            legacy_link_ids = [l["id"] for l in legacy_links if l.get("id")]
+            if legacy_link_ids:
+                for field in single_ip_fields:
+                    try:
+                        cursor = db.clicks.find(
+                            {"link_id": {"$in": legacy_link_ids}, field: {"$exists": True}},
+                            {"_id": 0, field: 1},
+                        )
+                        async for doc in cursor:
+                            ip = doc.get(field)
+                            if ip and ip != "unknown" and isinstance(ip, str):
+                                all_click_ips.add(ip)
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning(f"Legacy main-db scan failed for {user_id}: {e}")
+
+        # Per-user rut_burnt_ips: only rows this user actually
+        # contributed to (or rows that have NO user_ids attached —
+        # global burns from very old jobs we still want to honor).
+        try:
+            burnt_count = 0
+            burnt_query = {
+                "$or": [
+                    {"user_ids": user_id},
+                    {"user_ids": {"$exists": False}},
+                    {"user_ids": []},
+                ]
+            }
+            async for doc in db.rut_burnt_ips.find(burnt_query, {"ip": 1, "_id": 0}):
+                ip = doc.get("ip")
+                if ip and isinstance(ip, str):
+                    all_click_ips.add(ip.strip())
+                    burnt_count += 1
+            if burnt_count:
+                logger.info(f"Loaded {burnt_count} burnt IPs for user {user_id}")
+        except Exception as e:
+            logger.warning(f"Could not load rut_burnt_ips for {user_id}: {e}")
+    else:
+        # ── Legacy "all users" path (kept for debug + global refresh) ──
+        try:
+            main_ips = await extract_ips_from_db(db, "main_db")
+            all_click_ips.update(main_ips)
+        except Exception as e:
+            logger.error(f"Error fetching IPs from main_db: {e}")
+
+        try:
+            db_names = await client.list_database_names()
+            user_dbs = [name for name in db_names if name.startswith("krexion_user_")]
+            for db_name in user_dbs[:20]:
+                try:
+                    user_db_instance = client[db_name]
+                    user_ips = await extract_ips_from_db(user_db_instance, db_name)
+                    all_click_ips.update(user_ips)
+                except Exception as e:
+                    logger.warning(f"Error fetching IPs from {db_name}: {e}")
+        except Exception as e:
+            logger.warning(f"Could not list user databases: {e}")
+
+        try:
+            burnt_count = 0
+            async for doc in db.rut_burnt_ips.find({}, {"ip": 1, "_id": 0}):
+                ip = doc.get("ip")
+                if ip and isinstance(ip, str):
+                    all_click_ips.add(ip.strip())
+                    burnt_count += 1
+            if burnt_count:
+                logger.info(f"Loaded {burnt_count} burnt IPs (global)")
+        except Exception as e:
+            logger.warning(f"Could not load rut_burnt_ips: {e}")
+
+    # Update cache (per-key)
+    _click_ips_cache[cache_key] = {
+        "ips": all_click_ips,
+        "last_updated": current_time,
+    }
+
+    logger.info(f"Cached {len(all_click_ips)} unique IPs for {cache_key}")
     return all_click_ips
 
 app = FastAPI(
@@ -845,6 +924,71 @@ DEFAULT_FEATURES = {
     "max_sub_users": 0
 }
 
+# ── Sub-user permissions ↔ features mapping (2026-01) ─────────────────
+# Mirrors every grant-able feature on the admin → main-user side so the
+# main user can give a sub-user the SAME breadth of access an admin
+# gives a main user. Each entry maps a `permissions[<key>]` boolean
+# (what the parent UI sends) → the corresponding `features[<key>]`
+# the rest of the app already checks via `check_user_feature(...)`.
+#
+# Sub-user effective feature = (sub-user permission == True) AND
+# (parent user actually owns that feature). This is enforced in
+# `_build_sub_user_features` below so a sub-user can NEVER have more
+# than the parent has — the parent can only DELEGATE, not promote.
+SUB_USER_PERMISSION_MAP = {
+    # permission key      → feature key
+    "view_links":           "links",
+    "view_clicks":          "clicks",
+    "view_conversions":     "conversions",
+    "view_proxies":         "proxies",
+    "import_data":          "import_data",
+    "import_traffic":       "import_traffic",
+    "real_traffic":         "real_traffic",
+    "ua_generator":         "ua_generator",
+    "email_checker":        "email_checker",
+    "separate_data":        "separate_data",
+    "form_filler":          "form_filler",
+    "real_user_traffic":    "real_user_traffic",
+    "profile_builder":      "profile_builder",
+    "settings":             "settings",
+}
+
+
+def _build_sub_user_features(sub_user_perms: dict, parent_features: dict) -> dict:
+    """Compute the effective features dict for a sub-user given its
+    permissions doc + the parent user's features. The result is a
+    standard features dict the rest of the app can check via
+    `check_user_feature(...)` — no other code needs to know the user
+    is a sub-user.
+
+    Parent's `max_links` / `max_clicks` are inherited as-is (they
+    represent quotas, not capabilities). `max_sub_users` is always
+    forced to 0 — sub-users cannot create their own sub-users.
+    """
+    parent_features = parent_features or {}
+    sub_user_perms = sub_user_perms or {}
+    out: dict = {}
+
+    # Backwards-compat: very old sub-users were created with only
+    # view_links / view_clicks defaulting to True. Keep that default
+    # for those two keys; everything else defaults to False (must be
+    # explicitly granted by parent).
+    _legacy_defaults = {"view_links": True, "view_clicks": True}
+
+    for perm_key, feat_key in SUB_USER_PERMISSION_MAP.items():
+        # 1. Did parent grant this permission to the sub-user?
+        granted = sub_user_perms.get(perm_key, _legacy_defaults.get(perm_key, False))
+        # 2. Does the parent actually own this feature?
+        parent_has = bool(parent_features.get(feat_key, False))
+        # Sub-user effective = both must be True.
+        out[feat_key] = bool(granted) and parent_has
+
+    # Inherit quotas (not capabilities).
+    out["max_links"] = parent_features.get("max_links", 100)
+    out["max_clicks"] = parent_features.get("max_clicks", 100000)
+    out["max_sub_users"] = 0  # Sub-users cannot create sub-users.
+    return out
+
 # Default branding settings
 DEFAULT_BRANDING = {
     "app_name": "Krexion",
@@ -1265,16 +1409,10 @@ async def get_current_user(request: Request):
             "parent_user_id": parent_user_id,
             "status": parent_user.get("status", "active"),
             "permissions": sub_user.get("permissions", {}),
-            "features": {
-                "links": sub_user.get("permissions", {}).get("view_links", True),
-                "clicks": sub_user.get("permissions", {}).get("view_clicks", True),
-                "conversions": sub_user.get("permissions", {}).get("view_conversions", False),
-                "proxies": sub_user.get("permissions", {}).get("view_proxies", False),
-                "import_data": sub_user.get("permissions", {}).get("import_data", False),
-                "max_links": parent_user.get("features", {}).get("max_links", 100),
-                "max_clicks": parent_user.get("features", {}).get("max_clicks", 100000),
-                "max_sub_users": 0
-            }
+            "features": _build_sub_user_features(
+                sub_user.get("permissions", {}),
+                parent_user.get("features", {}),
+            ),
         }
     
     # Handle main user authentication
@@ -2290,17 +2428,11 @@ async def get_current_user_with_fresh_data(request: Request) -> dict:
         parent_user["sub_user_email"] = sub_user["email"]
         parent_user["sub_user_permissions"] = sub_user.get("permissions", {})
         
-        # Map sub-user permissions to features
-        parent_user["features"] = {
-            "links": sub_user.get("permissions", {}).get("view_links", True),
-            "clicks": sub_user.get("permissions", {}).get("view_clicks", True),
-            "conversions": sub_user.get("permissions", {}).get("view_conversions", False),
-            "proxies": sub_user.get("permissions", {}).get("view_proxies", False),
-            "import_data": sub_user.get("permissions", {}).get("import_data", False),
-            "max_links": parent_user.get("features", {}).get("max_links", 100),
-            "max_clicks": parent_user.get("features", {}).get("max_clicks", 100000),
-            "max_sub_users": 0
-        }
+        # Map sub-user permissions to features (cap by parent's owned features)
+        parent_user["features"] = _build_sub_user_features(
+            sub_user.get("permissions", {}),
+            parent_user.get("features", {}),
+        )
         return parent_user
     
     user = await main_db.users.find_one({"email": email}, {"_id": 0, "password_hash": 0})
@@ -2431,16 +2563,10 @@ async def login(user: UserLogin):
             "parent_name": parent_user["name"],
             "status": parent_user.get("status", "active"),
             # Map sub-user permissions to features for frontend compatibility
-            "features": {
-                "links": sub_user.get("permissions", {}).get("view_links", True),
-                "clicks": sub_user.get("permissions", {}).get("view_clicks", True),
-                "conversions": sub_user.get("permissions", {}).get("view_conversions", False),
-                "proxies": sub_user.get("permissions", {}).get("view_proxies", False),
-                "import_data": sub_user.get("permissions", {}).get("import_data", False),
-                "max_links": parent_user.get("features", {}).get("max_links", 100),
-                "max_clicks": parent_user.get("features", {}).get("max_clicks", 100000),
-                "max_sub_users": 0  # Sub-users can't create sub-users
-            },
+            "features": _build_sub_user_features(
+                sub_user.get("permissions", {}),
+                parent_user.get("features", {}),
+            ),
             "subscription_type": parent_user.get("subscription_type", "free")
         }
         return {"access_token": access_token, "token_type": "bearer", "user": user_response}
@@ -2901,7 +3027,14 @@ async def sub_user_login(credentials: UserLogin):
             "name": sub_user["name"],
             "permissions": sub_user.get("permissions", {}),
             "is_sub_user": True,
-            "parent_user_id": sub_user["parent_user_id"]
+            "parent_user_id": sub_user["parent_user_id"],
+            # 2026-01: include effective features so the frontend can
+            # show/hide pages based on parent's grants (mirrors what
+            # `/auth/me` returns for main users).
+            "features": _build_sub_user_features(
+                sub_user.get("permissions", {}),
+                parent_user.get("features", {}),
+            ),
         }
     }
 
@@ -4603,19 +4736,27 @@ def _rut_build_target_url(request: Request, link: dict, explicit_target: Optiona
 _DUP_IP_CACHE_LOCK = asyncio.Lock()
 
 
-async def _get_dup_ip_set_safe(force_refresh: bool = False) -> set:
+async def _get_dup_ip_set_safe(
+    force_refresh: bool = False,
+    user_id: Optional[str] = None,
+) -> set:
     """Concurrent-safe wrapper around get_all_click_ips_from_entire_database().
     Returns an empty set on any failure so the BG task never crashes here.
 
     2026-05: When `force_refresh=True` the cache is bypassed and a fresh
     scan of all `clicks` collections + the persistent `rut_burnt_ips`
-    block-list is performed. RUT prep passes True so each job starts
-    with the absolute latest burnt-IP set (critical when the user runs
-    many jobs back-to-back and the same dirty ProxyJet IPs keep coming
-    back from the pool)."""
+    block-list is performed.
+
+    2026-01: `user_id` parameter — scopes the scan to that user's
+    per-tenant DB only (sub-users share parent's DB, see
+    get_db_for_user). Eliminates cross-tenant false-positive
+    duplicates.
+    """
     try:
         async with _DUP_IP_CACHE_LOCK:
-            return await get_all_click_ips_from_entire_database(force_refresh=force_refresh)
+            return await get_all_click_ips_from_entire_database(
+                force_refresh=force_refresh, user_id=user_id,
+            )
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Could not load duplicate IP set: {e}")
         return set()
@@ -4911,7 +5052,15 @@ async def _rut_prepare_and_run(
             # jobs started within the 60s cache window would share the
             # same stale set and re-use dirty IPs the FIRST job just
             # burned.
-            dup_ip_task = asyncio.create_task(_get_dup_ip_set_safe(force_refresh=True))
+            # 2026-01 — scope to the MAIN user's tenant DB (sub-users
+            # automatically inherit via get_db_for_user). Eliminates
+            # the false-positive "duplicate IP" rejections that were
+            # bleeding from other tenants' click history into this
+            # job's exclusion set.
+            _dup_user_id = user.get("parent_user_id") or user["id"]
+            dup_ip_task = asyncio.create_task(
+                _get_dup_ip_set_safe(force_refresh=True, user_id=_dup_user_id)
+            )
 
         # ── 1. Proxies ────────────────────────────────────────────────
         upload_proxy_id = params.get("upload_proxy_id")
@@ -5256,7 +5405,7 @@ async def _rut_prepare_and_run(
         if params.get("skip_duplicate_ip"):
             await _set_step("Loading duplicate-IP blocklist…")
             try:
-                dup_ip_set = await dup_ip_task if dup_ip_task else await _get_dup_ip_set_safe()
+                dup_ip_set = await dup_ip_task if dup_ip_task else await _get_dup_ip_set_safe(user_id=(user.get("parent_user_id") or user["id"]))
             except Exception as e:
                 logger.warning(f"dup-IP fetch failed (continuing without): {e}")
                 dup_ip_set = None
@@ -11203,7 +11352,10 @@ async def upload_proxies(proxy_upload: ProxyUpload, user: dict = Depends(get_cur
     # This prevents timeout when uploading many proxies
     
     # However, we do a quick check against the cached IPs for immediate feedback
-    all_click_ips = await get_all_click_ips_from_entire_database()
+    # 2026-01 — scoped to MAIN user (sub-users share parent DB).
+    # Prevents cross-tenant false-positive "duplicate" warnings.
+    _dup_scope_uid = user.get("parent_user_id") or user["id"]
+    all_click_ips = await get_all_click_ips_from_entire_database(user_id=_dup_scope_uid)
     
     for proxy_string in proxy_upload.proxy_list:
         cleaned_proxy = proxy_string.strip()
@@ -11586,7 +11738,7 @@ async def bulk_test_proxies(
                         ips_to_check.add(dip)
                 
                 for ip in ips_to_check:
-                    is_dup, found_db = await is_ip_duplicate_in_any_database(ip, user_db)
+                    is_dup, found_db = await is_ip_duplicate_in_any_database(ip, user_db, owner_user_id=main_user_id)
                     if is_dup:
                         is_duplicate_click = True
                         duplicate_matched_ip = ip
@@ -11707,22 +11859,27 @@ async def get_bulk_test_progress(user: dict = Depends(get_current_user_with_fres
 
 # CORE FUNCTION: Check if IP is duplicate - USED BY BOTH PROXY TEST AND LINK REDIRECT
 # ONLY CHECKS IPv4 - IPv6 is completely ignored
-async def is_ip_duplicate_in_any_database(ip_to_check: str, user_db) -> tuple:
-    """
-    Check if an IP exists in ANY database.
-    Returns (is_duplicate: bool, found_in: str or None)
-    
-    IMPORTANT: ONLY checks IPv4 addresses. IPv6 is completely ignored.
-    This ensures proxy test (which only gets IPv4) matches link redirect behavior.
+async def is_ip_duplicate_in_any_database(
+    ip_to_check: str, user_db, owner_user_id: Optional[str] = None,
+) -> tuple:
+    """Check if an IP exists in the OWNER user's DB (per-tenant scope).
+
+    2026-01 — was previously cross-tenant: scanned every
+    `krexion_user_*` DB and would return True for an IP that any
+    other user had ever clicked from. That caused the "false-positive
+    duplicate" rejections users complained about. Now strictly scoped
+    to the link/proxy owner's per-tenant DB + a legacy fallback that
+    is itself scoped by `user_id`/`link_id`.
+
+    Returns (is_duplicate: bool, found_in: str or None).
     """
     if not ip_to_check:
         return False, None
-    
+
     # Skip IPv6 addresses completely
     if ":" in ip_to_check:
         return False, None
-    
-    # ONLY check IPv4 fields - NO IPv6
+
     ip_conditions = [
         {"ip_address": ip_to_check},
         {"ipv4": ip_to_check},
@@ -11731,39 +11888,38 @@ async def is_ip_duplicate_in_any_database(ip_to_check: str, user_db) -> tuple:
         {"proxy_ips": ip_to_check}
     ]
     duplicate_query = {"$or": ip_conditions}
-    
-    # 1. Check user's own database
+
+    # 1. Check owner's per-tenant DB (the source of truth for this
+    #    tenant's clicks — already includes sub-users).
     try:
         existing = await user_db.clicks.find_one(duplicate_query, {"_id": 0, "id": 1})
         if existing:
             return True, "user_db"
-    except:
+    except Exception:
         pass
-    
-    # 2. Check main database
-    try:
-        existing = await db.clicks.find_one(duplicate_query, {"_id": 0, "id": 1})
-        if existing:
-            return True, "main_db"
-    except:
-        pass
-    
-    # 3. Check ALL other user databases
-    try:
-        all_db_names = await client.list_database_names()
-        user_databases = [name for name in all_db_names if name.startswith("krexion_user_")]
-        
-        for other_db_name in user_databases:
-            try:
-                other_db = client[other_db_name]
-                existing = await other_db.clicks.find_one(duplicate_query, {"_id": 0, "id": 1})
+
+    # 2. Legacy fallback — VERY old accounts may still have data in
+    #    main db.clicks. Scope by the owner's link_ids so we only see
+    #    this tenant's history.
+    if owner_user_id:
+        try:
+            legacy_links = await db.links.find(
+                {"user_id": owner_user_id}, {"_id": 0, "id": 1},
+            ).to_list(100000)
+            legacy_link_ids = [l["id"] for l in legacy_links if l.get("id")]
+            if legacy_link_ids:
+                scoped_q = {
+                    "$and": [
+                        duplicate_query,
+                        {"link_id": {"$in": legacy_link_ids}},
+                    ]
+                }
+                existing = await db.clicks.find_one(scoped_q, {"_id": 0, "id": 1})
                 if existing:
-                    return True, other_db_name
-            except:
-                continue
-    except:
-        pass
-    
+                    return True, "main_db_legacy"
+        except Exception:
+            pass
+
     return False, None
 
 @api_router.post("/proxies/{proxy_id}/test")
@@ -11898,7 +12054,7 @@ async def test_proxy(
     found_in_db = None
     
     for ip_to_check in all_ips_to_check:
-        is_dup, found_db = await is_ip_duplicate_in_any_database(ip_to_check, user_db)
+        is_dup, found_db = await is_ip_duplicate_in_any_database(ip_to_check, user_db, owner_user_id=main_user_id)
         if is_dup:
             is_duplicate_click = True
             duplicate_matched_ip = ip_to_check
@@ -12041,11 +12197,13 @@ async def refresh_proxy_status(user: dict = Depends(get_current_user_with_fresh_
     if not all_proxies:
         return {"message": "No proxies to refresh", "updated": 0}
     
-    # Collect ALL used IPs from ENTIRE DATABASE (all users, all user databases)
-    # This ensures proxy duplicate check matches link redirect duplicate check
-    all_used_ips = await get_all_click_ips_from_entire_database()
-    
-    logger.info(f"Refresh: Checking against {len(all_used_ips)} IPs from entire database (all users)")
+    # Collect ALL used IPs from THIS USER's DB (and sub-users which
+    # share the parent DB). 2026-01 — was previously scanning every
+    # tenant's clicks, causing false-positive duplicate flags.
+    _dup_scope_uid = user.get("parent_user_id") or user["id"]
+    all_used_ips = await get_all_click_ips_from_entire_database(user_id=_dup_scope_uid)
+
+    logger.info(f"Refresh: Checking against {len(all_used_ips)} IPs from {_dup_scope_uid}'s tenant DB")
     
     # Update each proxy's duplicate status
     updated_count = 0
@@ -12451,33 +12609,41 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
 
         existing_click = None
 
-        # 1. Check user's own database first (fastest)
+        # 2026-01 FIX — scope duplicate detection to the link OWNER's
+        # tenant (sub-users share parent's DB by design). Previously
+        # this scanned EVERY `krexion_user_*` database — meaning a
+        # click from IP X on user A's link got rejected as duplicate
+        # if user B (a completely unrelated tenant) had ever clicked
+        # from X. User reported this as "offer-side duplicate" but it
+        # was actually our own panel's check, fed by cross-tenant
+        # pollution.
+
+        # 1. Check the link OWNER's per-tenant DB (this is where the
+        #    real click history lives — and it correctly includes
+        #    sub-users because they save into the parent's DB).
         try:
             existing_click = await user_db.clicks.find_one(duplicate_query, {"_id": 0, "ip_address": 1, "link_id": 1})
         except Exception:
             pass
 
-        # 2. Check main database (legacy data)
+        # 2. Legacy fallback — VERY old accounts may still have data
+        #    in main db.clicks. Scope by link_id so we only see THIS
+        #    user's links' clicks (no cross-tenant bleed).
         if not existing_click:
             try:
-                existing_click = await db.clicks.find_one(duplicate_query, {"_id": 0, "ip_address": 1, "link_id": 1})
-            except Exception:
-                pass
-
-        # 3. Check ALL other user databases for complete global duplicate blocking
-        if not existing_click:
-            try:
-                all_db_names = await client.list_database_names()
-                user_databases = [name for name in all_db_names if name.startswith("krexion_user_")]
-
-                for other_db_name in user_databases:
-                    if existing_click:
-                        break
-                    try:
-                        other_db = client[other_db_name]
-                        existing_click = await other_db.clicks.find_one(duplicate_query, {"_id": 0, "ip_address": 1, "link_id": 1})
-                    except Exception:
-                        continue
+                legacy_links = await db.links.find(
+                    {"user_id": link.get("user_id")},
+                    {"_id": 0, "id": 1},
+                ).to_list(100000)
+                legacy_link_ids = [l["id"] for l in legacy_links if l.get("id")]
+                if legacy_link_ids:
+                    scoped_q = {
+                        "$and": [
+                            duplicate_query,
+                            {"link_id": {"$in": legacy_link_ids}},
+                        ]
+                    }
+                    existing_click = await db.clicks.find_one(scoped_q, {"_id": 0, "ip_address": 1, "link_id": 1})
             except Exception:
                 pass
     
