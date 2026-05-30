@@ -42,3 +42,39 @@ FastAPI (backend/server.py 17k lines + 23 sub-modules) + React 18 (CRA + Tailwin
 Working tree has exactly 1 modified file: `backend/server.py`. `.env` files are gitignored. Ready for user to click "Save to GitHub" → pushes to `origin/main` without conflict.
 
 ## Backlog / next items (none currently open)
+
+---
+
+## Iteration 2 — 2026-05-30: Per-visit manual kill button in Live Visual Grid
+
+### User ask (Roman Urdu)
+> "rut job mein agr kisi profile mein koi issue ai to os ko manualy close krne ka option ho ta k mazeed os pr time waste na ho or next profile pr kam ho sake — like aik concurrent pr kaam ni thk hoa koi masla aya to os ko band kr ne ka option ho ta k next pr ja sake"
+
+### What was built
+A **"kill" button** on every tile of the Live Visual Grid that lets the user abort ONE stuck/problematic in-flight visit (e.g. "User ineligible" page loop) without stopping the whole job. The concurrency slot frees instantly so the dispatcher spawns the next pending visit into it.
+
+### Files changed (3, +207 / -1 lines)
+1. **backend/real_user_traffic.py** — Added per-visit task registry (`_visit_tasks` dict on `RUT_JOBS[job_id]`) plus `cancel_visit(job_id, visit_index)` helper. Hooked the registry into all 3 task-spawn points (conversions dispatcher, legacy fixed-size gather, clicks budget dispatcher) so every visit is trackable.
+2. **backend/server.py** — New endpoint `POST /api/real-user-traffic/jobs/{job_id}/visits/{visit_index}/cancel` with proper user-feature & ownership checks. Returns clean 404/400 on edge cases.
+3. **frontend/src/pages/RealUserTrafficPage.js** — Added `cancelOneVisit()` handler with optimistic UI flip + toast feedback. Each tile now renders a small red "kill" button (top-right, just below the status badge) ONLY while the visit is in `running` state. Cancelled tiles show a `⊘ cancelled` badge. `data-testid="rut-visual-tile-kill-{vid}"`.
+
+### How it works under the hood
+- User clicks "kill" → POST to the new endpoint → `cancel_visit()` calls `asyncio.Task.cancel()` on the registered task → CancelledError propagates through `worker()` / `process_one()` at the next await → Playwright context cleans up via existing `try/finally` & `async with` patterns → `in_flight` set shrinks → dispatcher's spawn loop replenishes the slot with the next visit.
+- `live_visits[vid].status` is flipped to `"cancelled"` immediately so the 800ms-poll UI reflects the kill within one frame.
+- `push_live_step()` records a `manual_cancel` audit entry in the Live Activity modal.
+
+### Tests run (all pass)
+- Module-level `cancel_visit()` end-to-end: task gets cancelled, raises CancelledError, registry cleaned up, live_visits flipped to "cancelled" with stage="manual_cancel" ✓
+- Double-cancel returns `already_done` ✓
+- Cancel non-existent visit → `visit_not_found_or_already_done` ✓
+- Cancel non-existent job → `job_not_found` ✓
+- Cancel on stopped/completed job → `job_not_running` ✓
+- New endpoint reachable via API, returns proper 404/400 with auth ✓
+- Frontend compiles cleanly, kill button test-id present in bundle, login page renders without errors ✓
+
+### What was NOT touched
+- `process_one()` / `worker()` internal logic — only the outer wrapper registers tasks
+- `cancel_event` / `target_drain_event` (job-wide cancel) — totally untouched, kill button is additive
+- Visit/click DB schema
+- Any existing endpoint behaviour
+- Any other React page or component

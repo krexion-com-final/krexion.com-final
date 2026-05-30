@@ -3492,6 +3492,31 @@ async def run_real_user_traffic_job(
     target_drain_event = asyncio.Event()
     RUT_JOBS[job_id]["_target_drain_event"] = target_drain_event
 
+    # ── 2026-05 — Per-visit manual cancel registry ──────────────────
+    # User ask: agar koi single visit stuck/error pe ruk gaya ho (e.g.
+    # "User ineligible" page baar baar load ho rahi ho), to UI se us
+    # tile par "kill" button daba ke us ek visit ko abort kar sakein
+    # bina pura job rokne ke — taki concurrency slot free ho aur next
+    # visit start ho jaye.
+    #
+    # Mechanism: every spawn of a `worker()` task registers itself
+    # here under its 1-based visit_index. The new endpoint
+    # POST /api/real-user-traffic/jobs/{job_id}/visits/{vid}/cancel
+    # looks up the task and calls .cancel() on it. asyncio cleanly
+    # raises CancelledError at the next await inside the visit,
+    # Playwright contexts get closed via existing try/finally /
+    # `async with` blocks, and the slot in `in_flight` is freed so
+    # the dispatcher's spawn loop replenishes it.
+    visit_tasks: Dict[str, asyncio.Task] = {}
+    RUT_JOBS[job_id]["_visit_tasks"] = visit_tasks
+
+    def _register_visit_task(i_zero_based: int, t: asyncio.Task) -> None:
+        vid = str(i_zero_based + 1)
+        visit_tasks[vid] = t
+        def _cleanup(_task: asyncio.Task) -> None:
+            visit_tasks.pop(vid, None)
+        t.add_done_callback(_cleanup)
+
     # ── Per-use immediate deletion (real-time pruning) ──────────────
     # User asked: "ek line use hoe wo sath he delete ho jay" — so as soon
     # as a proxy / UA / row gets consumed in a visit we $pull it from the
@@ -6369,6 +6394,7 @@ async def run_real_user_traffic_job(
                     t = asyncio.create_task(worker(attempt_counter, shared_browser))
                     in_flight.add(t)
                     t.add_done_callback(in_flight.discard)
+                    _register_visit_task(attempt_counter, t)  # 2026-05 manual-kill registry
                     attempt_counter += 1
                     # Re-compute effective attempts inside the spawn loop
                     # too — otherwise we'd over-spawn when a burst of
@@ -6425,6 +6451,9 @@ async def run_real_user_traffic_job(
             # Legacy fixed-size gather — unchanged behaviour for jobs
             # that don't use ProxyJet Auto (uploaded-proxy mode etc.).
             tasks = [asyncio.create_task(worker(i, shared_browser)) for i in range(total)]
+            # 2026-05 — manual-kill registry (legacy fixed-size gather path)
+            for _i, _t in enumerate(tasks):
+                _register_visit_task(_i, _t)
             try:
                 await asyncio.gather(*tasks, return_exceptions=True)
             except Exception as e:
@@ -6504,6 +6533,7 @@ async def run_real_user_traffic_job(
                         t = asyncio.create_task(worker(attempt_counter, shared_browser))
                         in_flight.add(t)
                         t.add_done_callback(in_flight.discard)
+                        _register_visit_task(attempt_counter, t)  # 2026-05 manual-kill registry
                         attempt_counter += 1
                     if not in_flight:
                         await asyncio.sleep(0.2)
@@ -9992,3 +10022,66 @@ def get_live_steps(job_id: str, since: int = 0) -> Dict[str, Any]:
         "processed": j.get("processed", 0),
         "total": j.get("total", 0),
     }
+
+
+def cancel_visit(job_id: str, visit_index: int) -> Dict[str, Any]:
+    """2026-05 — Manually abort ONE in-flight visit without stopping
+    the whole job.
+
+    Called by the per-tile "kill" button in the Live Visual Grid UI.
+    The dispatcher's spawn loop will automatically replenish the freed
+    concurrency slot with the next pending visit.
+
+    Returns a small status dict — never raises.
+    """
+    j = RUT_JOBS.get(job_id)
+    if j is None:
+        return {"ok": False, "reason": "job_not_found"}
+    if j.get("status") not in ("running", "queued", "preparing"):
+        return {"ok": False, "reason": "job_not_running"}
+
+    vid = str(int(visit_index))
+    visit_tasks = j.get("_visit_tasks") or {}
+    t = visit_tasks.get(vid)
+    if t is None:
+        return {"ok": False, "reason": "visit_not_found_or_already_done"}
+    if t.done():
+        return {"ok": False, "reason": "already_done"}
+
+    try:
+        t.cancel()
+    except Exception as _e:  # noqa: BLE001
+        return {"ok": False, "reason": f"cancel_failed: {_e}"}
+
+    # Mirror into live_visits so the UI sees the tile flip to "cancelled"
+    # on the next 800 ms poll, even if process_one's finally-block has
+    # not yet finished cleaning up the Playwright context.
+    #
+    # Order matters here: push_live_step writes to the same dict and
+    # would overwrite v["status"] = "cancelled" with "failed" because
+    # of its built-in `if status == "failed": v["status"] = "failed"`
+    # branch. We therefore call push_live_step FIRST and stamp the
+    # "cancelled" status LAST so it wins.
+    try:
+        push_live_step(
+            job_id, int(visit_index), "manual_cancel", "failed",
+            "Visit cancelled by user — slot freed for next visit",
+        )
+    except Exception:
+        pass
+
+    try:
+        lv = j.setdefault("live_visits", {})
+        v = lv.setdefault(vid, {})
+        v["status"] = "cancelled"
+        v["latest_event"] = {
+            "stage": "manual_cancel",
+            "status": "failed",
+            "detail": "Cancelled by user from Live Visual Grid",
+            "timestamp_ms": int(time.time() * 1000),
+        }
+        v["last_update"] = time.time()
+    except Exception:
+        pass
+
+    return {"ok": True, "visit_index": int(visit_index)}

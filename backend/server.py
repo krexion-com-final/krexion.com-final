@@ -6447,6 +6447,36 @@ async def rut_live_visits(
     }
 
 
+@api_router.post("/real-user-traffic/jobs/{job_id}/visits/{visit_index}/cancel")
+async def rut_cancel_visit(
+    job_id: str,
+    visit_index: int,
+    user: dict = Depends(get_current_user),
+):
+    """2026-05 — Manually kill ONE in-flight visit in the Live Visual
+    Grid without stopping the whole job. The concurrency slot is freed
+    automatically so the dispatcher spawns the next pending visit.
+
+    Used by the per-tile "kill" button when a profile is stuck on an
+    ineligible / error page and the user wants to skip it instead of
+    waiting out the timeout.
+    """
+    check_user_feature(user, "real_user_traffic")
+    j = _RUT_JOBS.get(job_id)
+    if j is None:
+        raise HTTPException(status_code=404, detail="Job not found or not running")
+    if j.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Job not found")
+    try:
+        from real_user_traffic import cancel_visit as _cancel_visit
+        result = _cancel_visit(job_id, visit_index)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"cancel_failed: {e}")
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("reason") or "cancel_failed")
+    return result
+
+
 @api_router.get("/real-user-traffic/jobs/{job_id}/screenshot/{filename}")
 async def rut_screenshot(
     job_id: str,

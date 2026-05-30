@@ -655,6 +655,59 @@ export default function RealUserTrafficPage() {
     }
   };
 
+  // ─── 2026-05: Manually kill ONE in-flight visit (per-tile button) ──
+  // User ask (Roman Urdu): "agar kisi profile mein koi issue ai to os
+  // ko manualy close krne ka option ho ta k mazeed os pr time waste na
+  // ho or next profile pr kam ho sake".
+  const [cancellingVisits, setCancellingVisits] = useState({});
+  const cancelOneVisit = async (vid) => {
+    if (!activeJob?.job_id || !vid) return;
+    if (cancellingVisits[vid]) return; // debounce double-clicks
+    setCancellingVisits((p) => ({ ...p, [vid]: true }));
+    try {
+      const r = await fetch(
+        `${API_URL}/api/real-user-traffic/jobs/${activeJob.job_id}/visits/${vid}/cancel`,
+        { method: "POST", headers: authH() }
+      );
+      if (r.ok) {
+        toast.success(`Visit #${String(vid).padStart(3, "0")} cancelled — next visit will spawn into this slot.`);
+        // Optimistic UI flip — server will confirm on next 800 ms poll
+        setLiveVisits((prev) => {
+          const next = { ...prev };
+          if (next[vid]) {
+            next[vid] = {
+              ...next[vid],
+              status: "cancelled",
+              latest_event: {
+                ...(next[vid].latest_event || {}),
+                status: "failed",
+                stage: "manual_cancel",
+                detail: "Cancelled by user",
+              },
+            };
+          }
+          return next;
+        });
+        if (expandedVisit === vid) setExpandedVisit(null);
+      } else {
+        const txt = await r.text().catch(() => "");
+        toast.error(`Cancel failed: ${txt.slice(0, 120) || r.status}`);
+      }
+    } catch (e) {
+      toast.error(`Cancel failed: ${e.message || e}`);
+    } finally {
+      // Clear the in-flight flag after a short delay so user can see
+      // the spinner if backend takes >1 frame.
+      setTimeout(() => {
+        setCancellingVisits((p) => {
+          const c = { ...p };
+          delete c[vid];
+          return c;
+        });
+      }, 800);
+    }
+  };
+
   useEffect(() => {
     fetchLinks();
     fetchJobs();
@@ -3273,12 +3326,15 @@ export default function RealUserTrafficPage() {
                       .map(([vid, v]) => {
                         const ev = v.latest_event || {};
                         const status = ev.status || v.status || 'running';
+                        const isCancelled = v.status === 'cancelled' || ev.stage === 'manual_cancel';
                         const isExpanded = expandedVisit === vid;
                         const borderColor =
+                          isCancelled ? 'border-zinc-600/60' :
                           status === 'ok' ? 'border-emerald-500/60' :
                           status === 'failed' ? 'border-rose-500/60' :
                           'border-blue-500/60';
                         const badgeColor =
+                          isCancelled ? 'bg-zinc-800/90 text-zinc-300' :
                           status === 'ok' ? 'bg-emerald-900/90 text-emerald-200' :
                           status === 'failed' ? 'bg-rose-900/90 text-rose-200' :
                           'bg-blue-900/90 text-blue-200';
@@ -3290,6 +3346,8 @@ export default function RealUserTrafficPage() {
                           : ev.stage
                           ? `${ev.stage} · ${(ev.detail || '').slice(0, 50)}`
                           : 'starting…';
+                        const isRunningTile = !isCancelled && status === 'running';
+                        const isCancelling = !!cancellingVisits[vid];
                         return (
                           <div
                             key={vid}
@@ -3303,8 +3361,33 @@ export default function RealUserTrafficPage() {
                             </div>
                             {/* Status badge top-right */}
                             <div className={`absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded text-[10px] font-mono ${badgeColor} z-10`}>
-                              {status === 'running' ? '⏵ running' : status === 'ok' ? '✓ ok' : '✗ failed'}
+                              {isCancelled ? '⊘ cancelled' : status === 'running' ? '⏵ running' : status === 'ok' ? '✓ ok' : '✗ failed'}
                             </div>
+                            {/* 2026-05 — Per-visit manual kill button.
+                                Shows only while the visit is still running
+                                (so users can rescue a stuck tile without
+                                stopping the whole job). Sits just below the
+                                status badge so it never overlaps. */}
+                            {isRunningTile && (
+                              <button
+                                type="button"
+                                onClick={(e) => { e.stopPropagation(); cancelOneVisit(vid); }}
+                                disabled={isCancelling}
+                                title="Cancel this visit only — next visit will take its slot"
+                                aria-label={`Cancel visit #${String(vid).padStart(3, "0")}`}
+                                data-testid={`rut-visual-tile-kill-${vid}`}
+                                className={`absolute z-20 flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold transition-colors
+                                  ${isCancelling
+                                    ? 'bg-zinc-700/90 text-zinc-300 cursor-wait'
+                                    : 'bg-rose-900/90 text-rose-100 hover:bg-rose-700 hover:text-white cursor-pointer'
+                                  } ${isExpanded ? 'top-2 right-24' : 'top-7 right-1.5'}`}
+                              >
+                                {isCancelling
+                                  ? (<><Loader2 size={10} className="animate-spin" /> cancelling…</>)
+                                  : (<><X size={10} /> kill</>)
+                                }
+                              </button>
+                            )}
                             {/* Live frame */}
                             {v.latest_frame_b64 ? (
                               <img
