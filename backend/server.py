@@ -14412,6 +14412,29 @@ def _vr_require_ready(sess) -> None:
     raise HTTPException(status_code=409, detail=f"Session not ready (state={sess.state})")
 
 
+# ── List all active sessions for current user ──────────────────────────
+# Powers the "Active Sessions" panel on the Visual Recorder setup screen.
+# The user can see every recorder currently running under their account,
+# switch to any one of them, or stop the ones they no longer need — so
+# the MAX_CONCURRENT_SESSIONS=5 cap is never hit silently.
+@api_router.get("/visual-recorder/sessions")
+async def vr_list_sessions(user: dict = Depends(get_current_user)):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        items = vr.list_user_sessions(user["id"])
+        stats = vr.get_global_session_stats()
+    except Exception as e:
+        logger.exception("vr_list_sessions failed")
+        raise HTTPException(status_code=500, detail=f"Failed to list sessions: {e}")
+    return {
+        "sessions": items,
+        "user_session_count": len(items),
+        "total_running": stats["total_running"],
+        "max_concurrent": stats["max_concurrent"],
+    }
+
+
 @api_router.get("/visual-recorder/{session_id}/screenshot")
 async def vr_screenshot(
     session_id: str,

@@ -162,6 +162,12 @@ export default function VisualRecorderPage() {
   const [showHelp, setShowHelp] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [recentRecordings, setRecentRecordings] = useState([]);
+  // ── 2026-01 (new) — Active sessions panel ─────────────────────────
+  // Shows every recorder currently running under this user's account
+  // so they can SEE the 5/5 cap, switch between sessions, or stop the
+  // ones they don't need. Polled every 3s while on the setup screen.
+  const [activeSessions, setActiveSessions] = useState([]);
+  const [activeSessionStats, setActiveSessionStats] = useState({ user_session_count: 0, total_running: 0, max_concurrent: 5 });
   const [devicePreset, setDevicePreset] = useState("mobile");
   const [pjAvailable, setPjAvailable] = useState(false);
   const [pjCountry, setPjCountry] = useState("US");
@@ -295,6 +301,63 @@ export default function VisualRecorderPage() {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ── 2026-01 (new) — Active sessions list (poll while on setup) ────
+  const refreshActiveSessions = useCallback(async () => {
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/sessions`, {
+        headers: authH(),
+      });
+      if (!r.ok) return;
+      const d = await r.json();
+      setActiveSessions(Array.isArray(d.sessions) ? d.sessions : []);
+      setActiveSessionStats({
+        user_session_count: d.user_session_count || 0,
+        total_running: d.total_running || 0,
+        max_concurrent: d.max_concurrent || 5,
+      });
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    if (setupStage !== "setup") return;
+    refreshActiveSessions();
+    const t = setInterval(refreshActiveSessions, 3000);
+    return () => clearInterval(t);
+  }, [setupStage, refreshActiveSessions]);
+
+  // Switch to an existing session (minimize/restore flow). Does NOT
+  // stop the current session — just hops the UI over to render the
+  // other one. The original session continues running in the
+  // background; the user can come back any time via the same panel.
+  const switchToSession = useCallback((sess) => {
+    if (!sess || !sess.session_id) return;
+    setSessionId(sess.session_id);
+    setViewport(sess.viewport || { width: 412, height: 914 });
+    setSessionState(sess.state || "starting");
+    setSessionError(sess.error_message || "");
+    setShotTick(0);
+    setShotErrorCount(0);
+    setSteps([]);  // refreshState will repopulate
+    setSetupStage("recording");
+    toast.success(`Switched to recorder · ${(() => { try { return new URL(sess.current_url || sess.url).hostname; } catch { return (sess.url || "").slice(0, 30); } })()}`);
+  }, []);
+
+  // Stop a specific session from the list (without leaving setup stage).
+  const stopSessionById = useCallback(async (sid, hostnameLabel) => {
+    if (!sid) return;
+    if (!window.confirm(`Stop this recorder session?${hostnameLabel ? `\n\n${hostnameLabel}` : ""}\n\nAny unsaved steps in this session will be lost.`)) return;
+    try {
+      await fetch(`${API_URL}/api/visual-recorder/${sid}`, {
+        method: "DELETE",
+        headers: authH(),
+      });
+      toast.success("Session stopped");
+      refreshActiveSessions();
+    } catch (e) {
+      toast.error(`Failed to stop: ${e?.message || e}`);
+    }
+  }, [refreshActiveSessions]);
 
   const pushRecent = (item) => {
     try {
@@ -2268,6 +2331,26 @@ export default function VisualRecorderPage() {
                   <Activity className="w-3 h-3" />
                   {steps.length} step{steps.length === 1 ? "" : "s"}
                 </div>
+                {/* ── 2026-01: Minimize button ──────────────────────
+                    Keeps the recorder ALIVE in the background and
+                    returns the user to the setup screen, where they
+                    can start a 2nd / 3rd recorder OR switch to any
+                    other running session via the Active Sessions
+                    panel. Standard "minimize to background" flow. */}
+                {sessionId && (
+                  <button
+                    onClick={() => {
+                      setSetupStage("setup");
+                      toast.success("Recorder minimized — still running in background. Reopen from \"Active recorder sessions\" panel.", { duration: 4500 });
+                    }}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 hover:text-emerald-300 transition-colors"
+                    data-testid="vr-minimize-btn"
+                    title="Minimize (keeps session alive in background, lets you start another)"
+                  >
+                    <ArrowLeft className="w-3 h-3" />
+                    Minimize
+                  </button>
+                )}
               </>
             )}
             <button
@@ -2337,6 +2420,112 @@ export default function VisualRecorderPage() {
         {/* SETUP stage */}
         {setupStage === "setup" && (
           <div className="space-y-5">
+            {/* ── 2026-01: Active Sessions panel ────────────────────
+                Shows every recorder this user has running right now
+                so the 5-concurrent cap is never a mystery. Each row
+                lets the user OPEN (switch to / minimize current) or
+                STOP a session. */}
+            {activeSessions.length > 0 && (
+              <div className="p-4 rounded-xl bg-emerald-950/20 border border-emerald-700/30" data-testid="vr-active-sessions-panel">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2 text-sm font-medium text-emerald-200">
+                    <Activity className="w-4 h-4 text-emerald-400 animate-pulse" />
+                    Active recorder sessions
+                    <span
+                      className={`ml-1 text-[11px] px-1.5 py-0.5 rounded ${
+                        activeSessionStats.user_session_count >= activeSessionStats.max_concurrent
+                          ? "bg-rose-700/40 border border-rose-500/40 text-rose-200"
+                          : "bg-emerald-700/40 border border-emerald-500/40 text-emerald-200"
+                      }`}
+                      data-testid="vr-active-count"
+                    >
+                      {activeSessionStats.user_session_count}/{activeSessionStats.max_concurrent} in use
+                    </span>
+                  </div>
+                  <button
+                    onClick={refreshActiveSessions}
+                    className="text-[11px] text-zinc-500 hover:text-emerald-300 inline-flex items-center gap-1"
+                    data-testid="vr-active-refresh"
+                    title="Refresh list"
+                  >
+                    <RefreshCw className="w-3 h-3" /> refresh
+                  </button>
+                </div>
+                <div className="space-y-2">
+                  {activeSessions.map((s) => {
+                    const hostname = (() => {
+                      try { return new URL(s.current_url || s.url).hostname; } catch { return (s.url || "").slice(0, 40); }
+                    })();
+                    const stateColor =
+                      s.state === "ready"
+                        ? "bg-emerald-700/40 border-emerald-500/40 text-emerald-200"
+                        : s.state === "error"
+                        ? "bg-rose-700/40 border-rose-500/40 text-rose-200"
+                        : "bg-amber-700/40 border-amber-500/40 text-amber-200";
+                    const stateLabel =
+                      s.state === "ready" ? "REC" :
+                      s.state === "error" ? "ERROR" :
+                      s.state === "starting" ? "CONNECTING" :
+                      String(s.state || "").toUpperCase();
+                    const mins = Math.floor((s.elapsed_seconds || 0) / 60);
+                    const secs = (s.elapsed_seconds || 0) % 60;
+                    const elapsedStr = `${String(mins).padStart(2,"0")}:${String(secs).padStart(2,"0")}`;
+                    return (
+                      <div
+                        key={s.session_id}
+                        className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-zinc-900/70 border border-zinc-800 hover:border-emerald-600/40 transition-colors"
+                        data-testid={`vr-active-session-${s.session_id}`}
+                      >
+                        <div className={`flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-semibold border ${stateColor} shrink-0`}>
+                          <span className={`w-1.5 h-1.5 rounded-full ${s.state === "ready" ? "bg-emerald-400 animate-pulse" : s.state === "error" ? "bg-rose-400" : "bg-amber-400 animate-pulse"}`} />
+                          {stateLabel}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm text-zinc-200 truncate font-medium" title={s.current_url || s.url}>
+                            <Globe className="w-3 h-3 inline mr-1 text-emerald-400" />
+                            {hostname}
+                          </div>
+                          <div className="text-[10px] text-zinc-500 flex items-center gap-2 mt-0.5">
+                            <span title="Recording elapsed time"><Clock className="w-2.5 h-2.5 inline mr-0.5" />{elapsedStr}</span>
+                            <span>·</span>
+                            <span>{s.step_count} step{s.step_count === 1 ? "" : "s"}</span>
+                            <span>·</span>
+                            <span className="font-mono text-[9px] text-zinc-600" title="Session ID">{(s.session_id || "").slice(0, 8)}</span>
+                          </div>
+                          {s.state === "error" && s.error_message && (
+                            <div className="text-[10px] text-rose-400/80 mt-0.5 truncate" title={s.error_message}>
+                              {s.error_message.split("\n")[0].slice(0, 90)}
+                            </div>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => switchToSession(s)}
+                          className="px-2.5 py-1 rounded-md bg-emerald-700/40 hover:bg-emerald-600/60 border border-emerald-500/40 text-emerald-200 text-xs font-medium inline-flex items-center gap-1 transition-colors shrink-0"
+                          data-testid={`vr-active-open-${s.session_id}`}
+                          title="Switch to this session"
+                        >
+                          <Play className="w-3 h-3" /> Open
+                        </button>
+                        <button
+                          onClick={() => stopSessionById(s.session_id, hostname)}
+                          className="px-2.5 py-1 rounded-md bg-rose-700/40 hover:bg-rose-600/60 border border-rose-500/40 text-rose-200 text-xs font-medium inline-flex items-center gap-1 transition-colors shrink-0"
+                          data-testid={`vr-active-stop-${s.session_id}`}
+                          title="Stop this session (frees a slot)"
+                        >
+                          <Square className="w-3 h-3" /> Stop
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+                {activeSessionStats.user_session_count >= activeSessionStats.max_concurrent && (
+                  <div className="mt-3 text-[11px] text-amber-300 bg-amber-950/30 border border-amber-700/40 rounded-md px-3 py-2">
+                    ⚠️ You've hit the max ({activeSessionStats.max_concurrent}) concurrent recorders. Stop one above to start a new recording, or click <b>Open</b> to continue an existing one.
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Recent recordings — quick re-use (last 5) */}
             {recentRecordings.length > 0 && (
               <div className="p-4 rounded-xl bg-zinc-900/40 border border-zinc-800" data-testid="vr-recent-panel">

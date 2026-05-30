@@ -606,6 +606,52 @@ def get_session(session_id: str, user_id: str) -> RecorderSession:
     return sess
 
 
+def list_user_sessions(user_id: str) -> List[Dict[str, Any]]:
+    """Return metadata for all active sessions belonging to this user.
+    Used by the UI to render the "Active Sessions" panel so the user can
+    see which recorders are running, switch between them, or stop the
+    ones they no longer need (frees up slots toward the
+    MAX_CONCURRENT_SESSIONS=5 cap).
+    """
+    now = time.time()
+    out: List[Dict[str, Any]] = []
+    for sid, s in _SESSIONS.items():
+        if s.user_id != user_id:
+            continue
+        # Try to read current page url (cheap, no awaits). Falls back to
+        # the initial session URL if the live page isn't available yet.
+        page_url = ""
+        page_title = ""
+        try:
+            if s.page is not None:
+                page_url = s.page.url or ""
+        except Exception:
+            page_url = ""
+        out.append({
+            "session_id": sid,
+            "url": s.url,
+            "current_url": page_url or s.url,
+            "title": page_title,
+            "state": s.state,
+            "error_message": s.error_message or "",
+            "step_count": len(s.steps),
+            "elapsed_seconds": int(now - s.created_at),
+            "idle_seconds": int(now - s.last_activity),
+            "viewport": {"width": s.viewport[0], "height": s.viewport[1]},
+        })
+    # Newest first so the most recent session is on top.
+    out.sort(key=lambda x: x["elapsed_seconds"])
+    return out
+
+
+def get_global_session_stats() -> Dict[str, int]:
+    """Lightweight global counters so the UI can show "X/5 in use"."""
+    return {
+        "total_running": len(_SESSIONS),
+        "max_concurrent": MAX_CONCURRENT_SESSIONS,
+    }
+
+
 # ── Idle reaper ─────────────────────────────────────────────────────────
 def _ensure_reaper():
     global _REAPER_TASK
