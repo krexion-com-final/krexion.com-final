@@ -287,19 +287,17 @@ async def get_all_click_ips_from_entire_database(
         except Exception as e:
             logger.warning(f"Legacy main-db scan failed for {user_id}: {e}")
 
-        # Per-user rut_burnt_ips: only rows this user actually
-        # contributed to (or rows that have NO user_ids attached —
-        # global burns from very old jobs we still want to honor).
+        # Per-user rut_burnt_ips: STRICTLY only rows this user
+        # contributed to. Earlier this query also included rows with
+        # missing/empty `user_ids` as a "legacy compatibility" path —
+        # but those rows (left over from before user-scoping was
+        # introduced) get loaded for EVERY user, re-introducing the
+        # exact cross-tenant pollution the user reported as
+        # "duplicates with no data". Strict scoping is the only
+        # correct behavior.
         try:
             burnt_count = 0
-            burnt_query = {
-                "$or": [
-                    {"user_ids": user_id},
-                    {"user_ids": {"$exists": False}},
-                    {"user_ids": []},
-                ]
-            }
-            async for doc in db.rut_burnt_ips.find(burnt_query, {"ip": 1, "_id": 0}):
+            async for doc in db.rut_burnt_ips.find({"user_ids": user_id}, {"ip": 1, "_id": 0}):
                 ip = doc.get("ip")
                 if ip and isinstance(ip, str):
                     all_click_ips.add(ip.strip())
@@ -12653,8 +12651,29 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     
     if existing_click:
         # Found duplicate - STRICTLY BLOCK - NO ACCESS AT ALL
-        matched_ip = existing_click.get("ip_address", "Unknown")
+        # 2026-01 — pull the MATCHED IP from the stored click record
+        # and ALSO show the visitor's current IP separately. Earlier
+        # the page only displayed `client_ip`, which is often
+        # "unknown" when the visitor is behind certain proxies/CDNs.
+        # Now the user always sees which IP triggered the match.
+        matched_ip = existing_click.get("ip_address") or existing_click.get("ipv4") or existing_click.get("detected_ip") or "unknown"
         matched_link = existing_click.get("link_id", "Unknown")
+        display_ip = matched_ip if matched_ip and matched_ip != "unknown" else (client_ip or "unknown")
+        # Compose a single human-readable line so both pieces of info
+        # are visible: matched-IP (the row in DB) and request-IP (what
+        # the browser is presenting right now). If they're identical
+        # we just show one.
+        if client_ip and client_ip != "unknown" and client_ip != matched_ip and matched_ip != "unknown":
+            ip_display_line = f"IP: {matched_ip} (your IP: {client_ip})"
+        else:
+            ip_display_line = f"IP: {display_ip}"
+        try:
+            logger.info(
+                f"[duplicate-block] short_code={short_code} matched_ip={matched_ip} "
+                f"client_ip={client_ip} matched_link={matched_link}"
+            )
+        except Exception:
+            pass
         
         # Timer controls auto-close behavior
         # Timer ON = page auto-closes after X seconds
@@ -12732,7 +12751,7 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         <div class="icon">⛔</div>
         <h1>Duplicate IP</h1>
         <p class="message">This IP address has already been used.<br>Access denied.</p>
-        <div class="ip-info">IP: {client_ip}</div>
+        <div class="ip-info">{ip_display_line}</div>
         <p class="countdown">Closing in <span id="countdown">{timer_seconds}</span> seconds...</p>
     </div>
 </body>
@@ -12773,7 +12792,7 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         <div class="icon">⛔</div>
         <h1>Duplicate IP</h1>
         <p class="message">This IP address has already been used.<br>Access denied.</p>
-        <div class="ip-info">IP: {client_ip}</div>
+        <div class="ip-info">{ip_display_line}</div>
     </div>
 </body>
 </html>""",
@@ -12781,8 +12800,11 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
                 status_code=403
             )
     
-    # Also check against ALL proxies in the ENTIRE database (not just user's)
-    # This ensures an IP used as proxy by ANY user is marked as duplicate
+    # Also check against proxies registered by THIS link's owner only.
+    # 2026-01 — was previously also scanning `db.proxies` (main DB)
+    # which is shared across every tenant, causing the SAME "false-
+    # positive duplicate" issue as the clicks check. Strict per-
+    # tenant scope now: only the link owner's own proxies count.
     proxy_ip_conditions = []
     for ip in [client_ip, ipv4] + proxy_ips + all_ips:
         if ip:
@@ -12792,20 +12814,51 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
             proxy_ip_conditions.append({"all_ips": ip})
             proxy_ip_conditions.append({"proxy_ips": ip})
             proxy_ip_conditions.append({"proxy_string": {"$regex": ip}})
-    
+
     if proxy_ip_conditions:
-        # Check user's proxies
+        # Check ONLY the link owner's proxies (sub-users share the
+        # parent's user_db via get_user_db(main_user_id) above).
         existing_proxy = await user_db.proxies.find_one({"$or": proxy_ip_conditions})
-        
-        # Check ALL proxies in main database
+
+        # Legacy fallback — scope by main_user_id so we don't pick
+        # up other tenants' proxies from the pre-tenant migration era.
         if not existing_proxy:
-            existing_proxy = await db.proxies.find_one({"$or": proxy_ip_conditions})
+            try:
+                existing_proxy = await db.proxies.find_one({
+                    "$and": [
+                        {"$or": proxy_ip_conditions},
+                        {"user_id": main_user_id},
+                    ]
+                })
+            except Exception:
+                existing_proxy = None
     else:
         existing_proxy = None
     
     is_duplicate_proxy = existing_proxy is not None
     if is_duplicate_proxy:
-        # print(f"DEBUG: IP matches existing proxy in database - proxy_id: {existing_proxy.get('id', 'unknown')}")
+        # 2026-01 — surface the actual matching IP from the proxy
+        # record so the user knows WHICH IP triggered the block
+        # instead of seeing "unknown" when the visitor's request
+        # IP can't be resolved.
+        matched_proxy_ip = (
+            existing_proxy.get("ip_address")
+            or existing_proxy.get("detected_ip")
+            or existing_proxy.get("ipv4")
+            or "unknown"
+        )
+        if client_ip and client_ip != "unknown" and client_ip != matched_proxy_ip and matched_proxy_ip != "unknown":
+            proxy_ip_display = f"IP: {matched_proxy_ip} (your IP: {client_ip})"
+        else:
+            proxy_ip_display = f"IP: {matched_proxy_ip if matched_proxy_ip != 'unknown' else (client_ip or 'unknown')}"
+        try:
+            logger.info(
+                f"[duplicate-proxy-block] short_code={short_code} "
+                f"matched_proxy_ip={matched_proxy_ip} client_ip={client_ip} "
+                f"proxy_id={existing_proxy.get('id', 'unknown')}"
+            )
+        except Exception:
+            pass
         # STRICTLY BLOCK - IP matches a known proxy
         return Response(
             content=f"""<!DOCTYPE html>
@@ -12860,7 +12913,7 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         <div class="icon">🚫</div>
         <h1>Proxy Detected</h1>
         <p class="message">This IP matches a known proxy.<br>Access denied.</p>
-        <div class="ip-info">IP: {client_ip}</div>
+        <div class="ip-info">{proxy_ip_display}</div>
     </div>
 </body>
 </html>""",

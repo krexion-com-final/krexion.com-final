@@ -113,3 +113,34 @@ User has a public GitHub repo (`krexion.com`) with auto-deploy to VPS. They want
 2. `frontend/src/pages/SettingsPage.js` — all 14 permission toggles + Grant-all/Revoke-all buttons + smart badges
 
 No deletions in either file. Only additive/refactoring.
+
+## Bug Fixes (2026-01-30, fourth iteration)
+
+User reported: "data b itna ni hai phr b duplicate a rha hai or jo duplicate ip ata hai os pr ip b ana chahye abi ip unknow k msg a rha hai"
+("Even with minimal data duplicates are coming, and when a duplicate IP comes the actual IP should be shown — currently 'IP unknown' is shown")
+
+### Bug A — Legacy `rut_burnt_ips` entries (no user_ids) still leaking across tenants ✅
+**Root cause**: Previous fix kept a backward-compat `$or` clause that included `{user_ids: {$exists: False}}` and `{user_ids: []}` so old burnt-IP records (from before user-scoping was added) would still apply. But those old records exist for EVERY user — so each user's RUT job loaded the same global blocklist, re-introducing the cross-tenant pollution the user was seeing.
+**Fix** (`backend/server.py`): Removed the legacy `$or` clauses from the rut_burnt_ips query. Now `{"user_ids": user_id}` strict scope only.
+
+### Bug B — Cross-tenant proxy duplicate detection ✅
+**Root cause**: Link-redirect endpoint had a SECOND cross-tenant check at line ~12802: after checking clicks, it scanned ALL proxies in `db.proxies` (main DB shared across every tenant). If user X had a proxy with IP Y registered, then user Z's link visited from IP Y would get blocked as "Proxy Detected" — even though it was a totally different tenant's proxy.
+**Fix**: Removed the global `db.proxies` scan. Now only the link OWNER's per-tenant `user_db.proxies` is checked, with a legacy fallback to `db.proxies` scoped by `user_id: main_user_id`.
+
+### Bug C — Duplicate page showed "IP unknown" instead of the actual matched IP ✅
+**Root cause**: The duplicate-IP HTML page rendered `IP: {client_ip}`, where `client_ip` defaults to "unknown" when no IPv4 can be extracted from request headers (CDN/proxy edge cases). The user couldn't tell WHICH IP triggered the block.
+**Fix**: Pull the matched IP from the stored click/proxy record (`existing_click.get("ip_address") or .ipv4 or .detected_ip`). The page now displays:
+- `IP: 203.0.113.55` when the matched IP is known
+- `IP: 203.0.113.55 (your IP: 198.51.100.1)` when client IP is different from matched IP (helpful for debugging proxy chains)
+- Same for the "Proxy Detected" page.
+- Both blocks now also log to server log: `[duplicate-block] short_code=X matched_ip=Y client_ip=Z matched_link=W` so user can grep logs for exact triggers.
+
+### Verified end-to-end (no playwright needed, raw HTTP):
+**Test 1**: User A's link `dupiptest` from IP 203.0.113.55 (which exists in User A's DB) → HTTP 403, page shows `IP: 203.0.113.55` ✅
+**Test 2**: User B's link `isolated` from SAME IP 203.0.113.55 → HTTP 302 (redirect normally, NO duplicate) — proves cross-tenant isolation ✅
+**Test 3**: User A's link from different IP 198.51.100.77 → HTTP 200 (allowed) ✅
+
+### Files Modified (fourth iteration)
+- `backend/server.py` — 4 fixes, all additive/scoping (+76/-23 lines)
+
+No deletions of existing logic. No frontend changes (this iteration is all backend-side).
