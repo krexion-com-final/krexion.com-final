@@ -3470,8 +3470,16 @@ export default function RealUserTrafficPage() {
                         // 2026-01: support BOTH event shapes:
                         //  (a) automation_steps callback → action, selector, idx, ms
                         //  (b) push_live_step mirror     → stage, status, detail
+                        // 2026-05 — append elapsed-s suffix from the
+                        // heartbeat. Shows "step #13 · wait (18s)" so the
+                        // operator can see live progress instead of a
+                        // frozen-looking tile during slow steps.
+                        const _elap = ev.elapsed_s;
+                        const _elap_suffix = (typeof _elap === 'number' && _elap >= 6)
+                          ? ` (${_elap}s)`
+                          : '';
                         const descr = ev.action
-                          ? `step #${(ev.idx ?? 0) + 1} · ${ev.action}${ev.selector ? ' ' + ev.selector.slice(0, 30) : ''}`
+                          ? `step #${(ev.idx ?? 0) + 1} · ${ev.action}${ev.selector ? ' ' + ev.selector.slice(0, 30) : ''}${_elap_suffix}`
                           : ev.stage
                           ? `${ev.stage} · ${(ev.detail || '').slice(0, 50)}`
                           : 'starting…';

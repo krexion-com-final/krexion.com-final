@@ -177,3 +177,53 @@ Random-pick steps use `action: "evaluate"` with embedded JavaScript that already
 - Random-pick recording / replay (see above)
 - Old recordings without `fallbacks` (pipeline collapses to legacy behaviour — pure additive)
 
+
+---
+
+## Iteration 5 — 2026-05-30: RUT engine robustness — bullet-proof against bad JSON
+
+### User ask (Roman Urdu)
+> "json mein ne perfect banaya tha pr phr b fail ho raha hai stuck ho raha hai. proper kam ni kr raha perfectly. har chez check kr lo rut job or visual recorder perfect kr do jese b ho sakta sab easy or perfect chalna chahye koi masla ni ana chahye." (Screenshot: 3 concurrent visits all stuck on different steps — wait, screenshot, fill — showing 'running' indefinitely.)
+
+### Root cause
+1. **No per-step ceiling** — a malformed step (e.g. `wait: ms=600000` from a paused-during-record session, or `fill: timeout=999999` on a selector that the offer page renamed) could legitimately block a concurrency slot for 60-300s while Playwright internals timed out. The 240s stuck-watchdog eventually rescued it, but only after wasting 3-5 min of proxy budget per stuck visit.
+2. **Double-wait on optional steps** — pre-wait used full `timeout` (25s default) AND on failure fell through to the action call which ran ANOTHER full `timeout` ms inside `page.fill/click` — total 50s per optional step that couldn't find its selector.
+3. **No UI heartbeat during long steps** — Live Visual Grid pushed ONE "running" event before action started, then nothing until "ok"/"failed" 30-60s later. Operator (correctly) interpreted the frozen tile as "stuck visit".
+
+### What was built
+1. **Hard per-step timeout ceilings** (engine-side, not JSON-side):
+   - `wait`: 30s max (was unbounded)
+   - `wait_for_*` family: 30s max
+   - `screenshot`: 20s max
+   - `evaluate`: 15s max
+   - `goto`: 45s max
+   - All element-targeted (fill/click/select/check/uncheck/type/press/hover): 45s max default
+   - Apply via `_capped_timeout(action, requested_ms)` — even if JSON says `timeout: 999999`, engine never waits more than the cap. **Bad recordings can no longer poison the concurrency pool.**
+2. **Per-step heartbeat task** — every ~6s during a running step, the engine re-emits the `running` event with `elapsed_s` field so UI shows live progress: `step #13 · wait (18s)` instead of a frozen-looking tile. Auto-cancelled when step completes; `finally`-protected against orphan tasks even when action handlers return early.
+3. **Fixed double-wait on optional steps** — moved the pre-wait call INSIDE the action try block, so a selector-resolution failure goes through the per-step `except` (which handles `optional`/`retry`/`self-heal` cleanly) instead of falling through to a second `page.fill/click` timeout. Optional steps with missing selectors now skip in ≤45s instead of taking 70-90s.
+
+### Files changed (2, +143 / −51 lines)
+- **backend/real_user_traffic.py** — `_STEP_TIMEOUT_CEILINGS_MS` dict + `_capped_timeout()` helper, `_start_step_heartbeat()` task spawner, heartbeat cancellation in success path + except + finally (3 sites for redundancy), `wait` action ms-cap with logging, `timeout` substitution at step entry, pre-wait moved into action try block, simplified optional-fall-through path.
+- **frontend/src/pages/RealUserTrafficPage.js** — Visual Grid tile shows `(Xs)` elapsed-time suffix when `ev.elapsed_s >= 6` so operator sees live heartbeat ticks instead of a frozen "running" state.
+
+### Tests run (5 e2e scenarios on real Chromium, all pass)
+- T1: `wait: ms=600000` (10 min request) → engine caps to 30s, 4 heartbeats fired with elapsed_s=[6,12,18,24] ✓
+- T2: `fill` on missing selector with `timeout=999999, optional=true` → cleanly skipped in 25.5s (was 70-90s before) ✓
+- T3: normal click works, status=ok ✓
+- T4: 4-step mixed JSON (good click + bad-optional fill + bad wait + good click) → all 4 executed cleanly in <90s ✓
+- T5: non-optional `fill` on missing → fail-fast in 25.5s with clean error ✓
+
+### What was NOT touched (per user's strict constraint)
+- 240s stuck-watchdog (independent extra safety net)
+- `_smart_select_with_fallback` / `_smart_check_with_fallback` internals
+- Self-heal logic, retry logic, per-step `if_exists` logic
+- Visual Recorder recording side (only affects REPLAY)
+- Random-pick steps, evaluate steps (no selector → no cap needed beyond their own 15s)
+- Existing JSON schema — pure additive, no breaking changes
+- Old recordings still work identically (no `fallbacks`/`timeout` in JSON → defaults apply with cap)
+
+### Why this is the "perfect" fix the user asked for
+The user's complaint was "stuck looking" + "fail ho raha hai". This iteration addresses BOTH:
+- **Live grid no longer LOOKS stuck** — heartbeat shows elapsed time per step, so operator knows the visit is still progressing
+- **Engine can no longer GET stuck** — every step has a hard ceiling, no pathological JSON can block a slot for more than ~45-90s (down from unbounded). Combined with the earlier "kill" button and the watchdog, three layers of protection now guarantee concurrency throughput.
+

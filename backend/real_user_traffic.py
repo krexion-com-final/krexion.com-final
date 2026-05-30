@@ -7981,6 +7981,77 @@ async def _execute_automation_steps(
         except Exception:
             pass
 
+    # ── 2026-05: Hard per-step timeout ceilings ─────────────────────
+    # User report: "JSON perfect banaya pr phr b fail/stuck ho raha hai".
+    # Root cause investigation showed that a single malformed step
+    # (e.g. `wait: ms=600000` from a paused-during-record session, or a
+    # `fill` whose selector never matches on production HTML) would
+    # block the visit's concurrency slot for 60-180s while waiting on
+    # internal Playwright timeouts. The job-wide 240s stuck-watchdog
+    # would eventually rescue it, but by then 3-5 minutes of proxy
+    # budget had been wasted on a dead visit. These ceilings GUARANTEE
+    # no single step can hold a slot for more than the cap below,
+    # regardless of what the JSON says — bad recordings can no longer
+    # poison the whole concurrency pool.
+    _STEP_TIMEOUT_CEILINGS_MS: Dict[str, int] = {
+        "wait": 30_000,                  # explicit sleeps capped at 30s
+        "wait_for_load": 30_000,
+        "wait_for_networkidle": 30_000,
+        "wait_for_navigation": 30_000,
+        "wait_for_selector": 30_000,
+        "wait_for_text": 30_000,
+        "screenshot": 20_000,
+        "evaluate": 15_000,              # custom JS shouldn't run long
+        "goto": 45_000,                  # navigation can be slow
+        # All element-targeted actions (fill/click/select/check/uncheck
+        # /type/press/hover/scroll_into_view) share the default 45s cap.
+        "_default": 45_000,
+    }
+
+    def _capped_timeout(_action: str, requested_ms: int) -> int:
+        cap = _STEP_TIMEOUT_CEILINGS_MS.get(_action, _STEP_TIMEOUT_CEILINGS_MS["_default"])
+        if requested_ms is None or requested_ms <= 0:
+            return cap
+        return min(int(requested_ms), cap)
+
+    # ── 2026-05: Per-step heartbeat task ────────────────────────────
+    # While a step is awaiting Playwright (e.g. smart-pre-wait for a
+    # selector for up to 30s), the Live Visual Grid would otherwise
+    # show the SAME "step #N running" event with no update for 30
+    # seconds — which user (correctly) interpreted as "stuck". We now
+    # spawn a tiny task that re-emits the running event every 6
+    # seconds with an elapsed-time field, so the UI shows live
+    # progress: "step #13 wait — running 18s". Cancels itself when
+    # the step's main awaitable returns.
+    async def _start_step_heartbeat(_idx: int, _action: str, _selector: str, _val_preview: str) -> Optional[asyncio.Task]:
+        if on_step_progress is None:
+            return None
+        _start_ts = _time_mod.time()
+
+        async def _beat():
+            try:
+                while True:
+                    await asyncio.sleep(6.0)
+                    elapsed_s = int(_time_mod.time() - _start_ts)
+                    try:
+                        await on_step_progress({
+                            "idx": _idx,
+                            "action": _action,
+                            "selector": (_selector or "")[:200],
+                            "value_preview": (_val_preview or "")[:80],
+                            "total_steps": len(steps or []),
+                            "status": "running",
+                            "elapsed_s": elapsed_s,   # NEW: UI shows "(18s)"
+                            "timestamp_ms": int(_time_mod.time() * 1000),
+                            "heartbeat": True,         # mark so UI can dedupe
+                        })
+                    except Exception:
+                        pass
+            except asyncio.CancelledError:
+                return
+
+        return asyncio.create_task(_beat())
+
     try:
         for idx, step in enumerate(steps or []):
             if not isinstance(step, dict):
@@ -8004,7 +8075,7 @@ async def _execute_automation_steps(
             # actionable-pre-wait helper added below makes most
             # steps return as SOON as the selector is ready, so
             # this larger ceiling only kicks in on slow pages.
-            timeout = int(step.get("timeout") or 25000)
+            timeout = _capped_timeout(action, int(step.get("timeout") or 25000))
             optional = bool(step.get("optional") or False)
             wait_nav = bool(step.get("wait_nav") or False)
 
@@ -8028,6 +8099,12 @@ async def _execute_automation_steps(
                     })
                 except Exception:
                     pass
+
+            # 2026-05 — start the heartbeat so the UI sees live elapsed
+            # time during long steps (the Visual Grid otherwise looks
+            # frozen for ~30s on slow `fill`/`wait`/`wait_for_load`
+            # steps and users assume the visit is stuck).
+            _hb_task = await _start_step_heartbeat(idx, action, selector, str(value) if value else "")
 
             if skip_captcha and action not in ("wait", "screenshot", "evaluate"):
                 if await _page_has_captcha(page):
@@ -8083,71 +8160,34 @@ async def _execute_automation_steps(
                         })
                     continue
 
-            if action in _PRE_WAIT_ACTIONS and selector:
-                try:
-                    # 2026-05: For `select` (and check/uncheck which often
-                    # target CSS-hidden checkboxes), use the smart helper
-                    # that falls back to state="attached" + selector
-                    # variants. The downstream smart_select / smart_check
-                    # can drive hidden elements via JS, so requiring
-                    # visibility here is wrong and causes the dropdown
-                    # 25s-timeout bug. Other actions still require true
-                    # visibility (user-perceived presence).
+            # 2026-05 — Pre-wait WAS in its own try block but that meant
+            # selector-not-found errors propagated to the outer "Automation
+            # crashed" handler instead of the per-step except below
+            # (skipping the optional/retry/self-heal logic). The pre-wait
+            # call now lives INSIDE the action try block, so any
+            # selector-resolution failure is handled identically to a
+            # plain Playwright timeout from page.fill/click — keeping
+            # the per-step ceiling intact (no double-wait of pre-wait
+            # 45s + action 45s = 90s) while preserving optional skip.
+            try:
+                if action in _PRE_WAIT_ACTIONS and selector:
                     if action in ("select", "check", "uncheck"):
                         resolved_sel = await _smart_wait_for_selector(
                             page, selector, state="attached", timeout=timeout,
                             extra_alts=(_step_fallbacks(step) + _alias_alts_for(selector) + _field_type_alts_for(selector)),
                         )
                     else:
-                        # ── 2026-05: Parity with Visual Recorder live-test for fill/click/type ──
-                        # Previously fill/click/type used `_wait_for_actionable_selector`
-                        # which only honoured USER-SAVED selector aliases — token-based
-                        # and field-type fallbacks were NOT tried, so a `#phone` recorded
-                        # against an offer page that later renders `<input type="tel">`
-                        # only would silently skip (with `optional: true` from the
-                        # recorder), then the NEXT step (select #birth_month) failed
-                        # against an un-validated form. Customer symptom: visit stuck
-                        # at step #16 with phone field still blank in the live grid.
-                        # Switching fill/click/type to the same `_smart_wait_for_selector`
-                        # used by select/check (with field-type aliases ADDED) means:
-                        #   • exact selector still tried first (fast path, no regression)
-                        #   • renamed ids / names rescued by token-based fallbacks
-                        #   • completely-different attributes (type=tel, autocomplete=email)
-                        #     rescued by field-type aliases
-                        #   • the WORKING selector is returned and substituted below,
-                        #     so the actual fill/click hits the SAME element we
-                        #     confirmed (no second 25s timeout).
                         resolved_sel = await _smart_wait_for_selector(
                             page, selector, state="visible", timeout=timeout,
                             extra_alts=(_step_fallbacks(step) + _alias_alts_for(selector) + _field_type_alts_for(selector)),
                         )
-                    # If the smart wait found the element via a fallback,
-                    # rewrite `selector` so the downstream action below
-                    # (page.fill / page.click / etc.) targets the SAME
-                    # element we just confirmed. Without this rewrite the
-                    # action would still use the original (now-broken)
-                    # selector and either time out again OR raise strict-
-                    # mode "selector resolved to N elements".
                     if resolved_sel and resolved_sel != selector:
                         logger.info(
                             f"[selector-fallback] step #{idx+1} ({action}) "
                             f"'{selector}' → '{resolved_sel}' (rescued)"
                         )
                         selector = resolved_sel
-                except Exception as _wfa:
-                    # Selector never became actionable within the
-                    # per-step budget. If the step is optional, fall
-                    # through to the action call — Playwright's own
-                    # auto-wait will catch it again and the outer
-                    # except handles optional skip. If not optional,
-                    # re-raise via the action call itself (skipping
-                    # the pre-wait to avoid waiting twice).
-                    if not optional:
-                        # Surface the "step never reached" cause more
-                        # clearly than a generic timeout.
-                        raise
 
-            try:
                 if action == "goto":
                     await page.goto(value or selector, timeout=timeout, wait_until="domcontentloaded")
                 elif action == "click":
@@ -8269,7 +8309,18 @@ async def _execute_automation_steps(
                 elif action == "press":
                     await page.press(selector or "body", value or "Enter", timeout=timeout)
                 elif action == "wait":
-                    await page.wait_for_timeout(int(step.get("ms") or 1000))
+                    # 2026-05 — apply hard ceiling. Even if the JSON says
+                    # ms=600000 (10 minutes — usually a recording bug),
+                    # we never sleep more than the cap. Prevents one bad
+                    # step from blocking a concurrency slot forever.
+                    _wait_ms_req = int(step.get("ms") or 1000)
+                    _wait_ms = min(_wait_ms_req, _STEP_TIMEOUT_CEILINGS_MS["wait"])
+                    if _wait_ms < _wait_ms_req:
+                        logger.info(
+                            f"[step-cap] step #{idx+1} wait: requested {_wait_ms_req}ms "
+                            f"capped to {_wait_ms}ms (engine ceiling)"
+                        )
+                    await page.wait_for_timeout(_wait_ms)
                 elif action == "wait_for_selector":
                     # 2026-05: Use smart wait helper that handles hidden
                     # <select> behind custom dropdown UIs (state=attached
@@ -8823,6 +8874,16 @@ async def _execute_automation_steps(
                     })
                 # 2026-01: emit "ok" progress event + live screenshot
                 if on_step_progress is not None:
+                    # 2026-05 — stop heartbeat BEFORE we emit the final
+                    # ok event so the UI receives "running heartbeat"
+                    # last (a quick test would otherwise occasionally
+                    # show a heartbeat tick AFTER ok).
+                    if _hb_task is not None and not _hb_task.done():
+                        _hb_task.cancel()
+                        try:
+                            await _hb_task
+                        except (asyncio.CancelledError, Exception):
+                            pass
                     # Capture a small JPEG of the current viewport so
                     # the frontend Live Activity panel can show a real
                     # "what is the page doing right now" image. Best-
@@ -8851,6 +8912,15 @@ async def _execute_automation_steps(
                     except Exception:
                         pass
             except Exception as e:
+                # 2026-05 — stop the heartbeat the moment a step errors,
+                # otherwise the UI would keep showing "running 30s" while
+                # the retry/self-heal code paths do their work below.
+                if _hb_task is not None and not _hb_task.done():
+                    _hb_task.cancel()
+                    try:
+                        await _hb_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
                 # 2026-01 (additive): per-step retry. When the step
                 # carries `retry: N`, attempt the SAME step up to N more
                 # times with `retry_delay` ms between attempts BEFORE
@@ -9004,6 +9074,20 @@ async def _execute_automation_steps(
                         "failed_at_idx": idx, "remaining_steps": list(steps[idx+1:]),
                         "friendly_hint": _hint,
                         **({"step_results": step_results} if collect_timings else {})}
+            finally:
+                # 2026-05 — Belt-and-suspenders heartbeat cleanup.
+                # Some action branches inside the inner try block
+                # (close/auto_continue/etc.) `return` from the function
+                # before reaching the success-path cancellation above.
+                # This finally runs after EVERY step iteration (including
+                # those early returns) so no orphan heartbeat task is
+                # left writing into a closed Playwright page.
+                if _hb_task is not None and not _hb_task.done():
+                    _hb_task.cancel()
+                    try:
+                        await _hb_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
         return {"status": "ok", "executed_steps": executed,
                 **({"step_results": step_results, "total_ms": int((_time_mod.perf_counter() - _t_total_start) * 1000)} if collect_timings else {})}
     except Exception as e:
