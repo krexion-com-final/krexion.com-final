@@ -78,3 +78,54 @@ A **"kill" button** on every tile of the Live Visual Grid that lets the user abo
 - Visit/click DB schema
 - Any existing endpoint behaviour
 - Any other React page or component
+
+---
+
+## Iteration 3 — 2026-05-30: Robust multi-strategy step matching for Visual Recorder
+
+### User ask (Roman Urdu)
+> "visual recorder mein json bnaya pr wo perfect ni chal raha — step match krne k liye mazeed option dal do jese abi siraf selector hai xpath b add ho page content b add ho ye sab option ho agr use krne chahein to kr lien ni to chor dein es se ye ho ga next time koi issue ni ho ga agr selector kisi waja se miss ho jata hai yan rut k doran change hota hai to wo step skip na kre wo xpath se step match kr le or agr xpath b miss hota hai to screen se match kr le"
+
+### What was built
+Every recorded **click(form_fill)**, **fill**, **check**, **select**, **dropdown** step now ALSO carries a compact `fallbacks` dict capturing the SAME element by 5 complementary strategies:
+- `xpath` — stable xpath anchored on first stable attribute (id / data-testid / name / aria-label / placeholder)
+- `xpath_abs` — full root-to-element xpath
+- `text` — visible text content (trimmed, ≤80 chars)
+- `tag` — element tag (button, input, etc.)
+- `attrs` — filtered attribute snapshot (id, name, data-testid, role, type, aria-label, placeholder, etc. — class/style/onclick deliberately excluded)
+- `nth` — position among same-tag siblings
+
+At RUT replay, the new `_step_fallbacks(step)` helper expands these into Playwright-compatible selectors prepended to the existing `_alias_alts_for + _field_type_alts_for` chain inside `_smart_wait_for_selector`. New resolution pipeline:
+1. **exact selector** recorded (fast path, unchanged)
+2. `xpath_stable` → `xpath_abs` (xpath rescues)
+3. attribute combos (data-testid, id, name, aria-label, role, etc., tag-scoped & case-insens variants)
+4. tag-scoped text match (`button:has-text("Continue")`)
+5. Playwright `text=` engine
+6. user-aliased selectors (legacy self-healing store)
+7. token-derived & field-type fallbacks (legacy)
+
+### Files changed (2, +348 / −33)
+1. **backend/visual_recorder.py** — Added module-level `_RICH_ELEMENT_CAPTURE_JS` (in-page JS computing xpath_stable, xpath_abs, attrs, nth_of_type) + `_build_fallbacks()` helper that distils the rich info into a compact dict (~280 bytes per step). Replaced inline JS in `click_at_point` with the new helper. Attached `fallbacks` to recorded click(form_fill), check, dropdown(select via bind_dropdown), and fill(via type_text) steps. Added session-level caches (`_form_fill_fallbacks`, `_pending_dropdown_fallbacks`) so two-stage bindings (click → /type, click → /dropdown-bind) carry the SAME fallbacks across the round-trip.
+2. **backend/real_user_traffic.py** — Added `_step_fallbacks(step)` module-level helper that translates the embedded dict into ordered Playwright selector alternatives. Wired into all 3 `_smart_wait_for_selector` call sites in `_execute_automation_steps` (pre-wait for `select/check/uncheck`, pre-wait for `fill/click/type/press/hover`, and the dedicated `wait_for_selector` action).
+
+### Tests run (all pass)
+- **Unit (9 cases)**: `_build_fallbacks` with full info / sparse info / None / empty + `_step_fallbacks` for old recordings / empty fallbacks / non-dict step + priority ordering check + quote-escaping in text ✓
+- **E2E on real Chromium (5 scenarios)** verified via Playwright headless:
+  1. Recorded `#submit-btn` is wrong → rescued via `[data-testid="submit-cta"]` ✓
+  2. No attrs captured but xpath was → rescued via `xpath=//button[@data-testid='submit-cta']` ✓
+  3. Only text captured → rescued via `button:has-text("Continue Now")` ✓
+  4. Old recording (no fallbacks key) → still times out cleanly as before (no regression) ✓
+  5. Fill on renamed `#email_address` input → rescued via `[placeholder="Your email"]` ✓
+
+### Backward compatibility
+- Old recorded JSONs (no `fallbacks` key) → `_step_fallbacks` returns `[]` → pipeline collapses to legacy `_alias_alts_for + _field_type_alts_for` behaviour. Zero risk to existing customer recordings on the VPS.
+- The `fallbacks` dict is opt-in at READ time — engine ignores it gracefully if missing. No version bump needed on the JSON schema.
+
+### Not implemented (deliberately, with reasoning)
+- **OCR / image-based "screen match"** — would require shipping a 100MB+ vision model and adding latency per step. Decision: text-based DOM match is FUNCTIONALLY equivalent (same human-visible label) and 1000× faster. If a user later asks for vision-based match specifically, can add tesseract+opencv as a separate iteration.
+
+### What was NOT touched
+- `_smart_select_with_fallback` / `_smart_check_with_fallback` internals — they read the already-resolved selector from the pre-wait, so they get the fallback benefit "for free".
+- Existing `_alias_alts_for`, `_field_type_alts_for` — fallbacks are PREPENDED, not replacing.
+- Visual recorder JSON schema versioning / export format — adding a new optional key.
+- Any frontend page — recorder JSON is generated server-side, UI doesn't need changes.

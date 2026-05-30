@@ -7130,6 +7130,101 @@ def _substitute(template: str, row: Dict[str, Any]) -> str:
 # attribute-based match that doesn't depend on the page's id/name
 # choices — they cover `type`, `autocomplete`, `name*=`, `id*=`,
 # `placeholder*=`, `aria-label*=` so even fully-renamed pages match.
+def _step_fallbacks(step: Any) -> List[str]:
+    """2026-05 — Read the `fallbacks` dict embedded in a Visual-Recorder
+    step (see visual_recorder._build_fallbacks) and produce a list of
+    Playwright-compatible selector alternatives, ordered most-specific
+    first.
+
+    Returns [] for steps without a `fallbacks` dict so callers can
+    unconditionally concatenate the result with the legacy alts —
+    this is what keeps OLD recordings (no fallbacks key) working
+    exactly as before. Pure additive, never replaces existing alts.
+
+    Strategy ordering (each entry is a Playwright selector string):
+      1. xpath_stable        — survives id/name renames if ANY stable
+                               attr was captured on the element or its
+                               ancestors.
+      2. xpath_abs           — survives selector renames when DOM tree
+                               shape matches recording.
+      3. attribute combos    — id, name, data-testid, placeholder,
+                               aria-label, role — exact + case-insens
+                               variants, tag-scoped + tag-free.
+      4. text-based scoped   — `button:has-text("Continue")` etc. for
+                               clickable/labelled tags.
+      5. text= engine match  — Playwright's built-in text engine
+                               (case-insensitive substring).
+
+    All entries returned here will be fed into `_smart_wait_for_selector`'s
+    `extra_alts` parameter and tried with `state="attached"` (since
+    custom-UI dropdowns hide the real <select>; "visible" would fail).
+    """
+    if not isinstance(step, dict):
+        return []
+    fb = step.get("fallbacks")
+    if not isinstance(fb, dict) or not fb:
+        return []
+    out: List[str] = []
+
+    # 1. xpath_stable
+    xs = (fb.get("xpath") or "").strip()
+    if xs:
+        out.append(f"xpath={xs}")
+
+    # 2. xpath_abs (only if it differs from xpath_stable)
+    xa = (fb.get("xpath_abs") or "").strip()
+    if xa and xa != xs:
+        out.append(f"xpath={xa}")
+
+    # 3. attribute combos
+    attrs = fb.get("attrs") or {}
+    tag = (fb.get("tag") or "").lower()
+    if isinstance(attrs, dict):
+        # Priority attribute list — data-testid/data-cy first because
+        # those are explicitly meant to survive refactors.
+        attr_priority = (
+            "data-testid", "data-test", "data-cy", "data-qa", "data-id",
+            "id", "name", "aria-label", "placeholder", "for",
+            "role", "type", "autocomplete", "title", "alt",
+        )
+        for k in attr_priority:
+            v = attrs.get(k)
+            if not isinstance(v, str) or not v:
+                continue
+            # Escape any embedded double-quote
+            v_esc = v.replace('"', '\\"')
+            # Exact match (tag-free + tag-scoped)
+            out.append(f'[{k}="{v_esc}"]')
+            if tag:
+                out.append(f'{tag}[{k}="{v_esc}"]')
+            # Case-insensitive substring (rescues partial renames)
+            if k in ("id", "name", "placeholder", "aria-label", "title"):
+                out.append(f'[{k}*="{v_esc}" i]')
+                if tag:
+                    out.append(f'{tag}[{k}*="{v_esc}" i]')
+
+    # 4 + 5. Text-based fallbacks (only for clickable / labelled tags;
+    # text on a wrapper <div> tends to be too broad and matches the
+    # wrong element).
+    txt = (fb.get("text") or "").strip()
+    if txt and 3 <= len(txt) <= 80:
+        # Escape backslashes + double-quotes for Playwright string
+        txt_esc = txt.replace('\\', '\\\\').replace('"', '\\"')
+        if tag in ("button", "a", "label", "input", "span"):
+            out.append(f'{tag}:has-text("{txt_esc}")')
+        # Generic text= engine (case-insensitive substring match)
+        out.append(f'text="{txt_esc}"')
+
+    # Dedup while preserving order
+    seen: set = set()
+    uniq: List[str] = []
+    for s in out:
+        if s and s not in seen:
+            seen.add(s)
+            uniq.append(s)
+    return uniq
+
+
 def _field_type_alts_for(selector: str) -> List[str]:
     """Return field-type-aware fallback selectors for a recorded form
     selector (e.g. `#phone` → tel/mobile aliases, `#email` → email
@@ -8001,7 +8096,7 @@ async def _execute_automation_steps(
                     if action in ("select", "check", "uncheck"):
                         resolved_sel = await _smart_wait_for_selector(
                             page, selector, state="attached", timeout=timeout,
-                            extra_alts=(_alias_alts_for(selector) + _field_type_alts_for(selector)),
+                            extra_alts=(_step_fallbacks(step) + _alias_alts_for(selector) + _field_type_alts_for(selector)),
                         )
                     else:
                         # ── 2026-05: Parity with Visual Recorder live-test for fill/click/type ──
@@ -8024,7 +8119,7 @@ async def _execute_automation_steps(
                         #     confirmed (no second 25s timeout).
                         resolved_sel = await _smart_wait_for_selector(
                             page, selector, state="visible", timeout=timeout,
-                            extra_alts=(_alias_alts_for(selector) + _field_type_alts_for(selector)),
+                            extra_alts=(_step_fallbacks(step) + _alias_alts_for(selector) + _field_type_alts_for(selector)),
                         )
                     # If the smart wait found the element via a fallback,
                     # rewrite `selector` so the downstream action below
@@ -8189,7 +8284,7 @@ async def _execute_automation_steps(
                         page, selector,
                         state=step.get("state") or "visible",
                         timeout=timeout,
-                        extra_alts=_alias_alts_for(selector),
+                        extra_alts=(_step_fallbacks(step) + _alias_alts_for(selector)),
                     )
                 elif action in ("wait_for_navigation", "wait_for_load", "wait_for_networkidle"):
                     # 2026-01 — Smart load wait for SPA-friendly pages.

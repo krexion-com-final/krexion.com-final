@@ -100,6 +100,195 @@ def _parse_proxy_for_playwright(raw: Optional[str]) -> Optional[Dict[str, Any]]:
     return out
 
 
+
+# ── 2026-05: Rich element metadata capture for robust replay ────────────
+# Every recorded step that targets a specific element (click form_fill,
+# check, select, fill) now ALSO embeds a `fallbacks` dict describing the
+# element by multiple complementary strategies:
+#   • xpath_stable — xpath using stable attrs (id, name) where available,
+#                    so a sibling reorder elsewhere on the page can't
+#                    break it.
+#   • xpath_abs    — full root-to-element xpath (fragile but precise
+#                    when the page structure is identical to recording).
+#   • text         — visible text content (trimmed, ≤80 chars).
+#   • tag          — element tag (button, input, etc.) — used to scope
+#                    text-based fallbacks so we don't accidentally
+#                    match a stray <div> with the same words.
+#   • attrs        — {id, name, type, placeholder, aria-label, role,
+#                    data-testid, autocomplete, …} all surviving attrs.
+#
+# At REPLAY time, real_user_traffic.py's `_step_fallbacks(step)` reads
+# this dict and FEEDS each strategy as an additional selector
+# alternative into `_smart_wait_for_selector`. So the resolution
+# pipeline becomes:
+#   1. exact selector (recorded)
+#   2. step.fallbacks.xpath_stable
+#   3. step.fallbacks.xpath_abs
+#   4. attribute-derived combos
+#   5. text-based scoped to tag
+#   6. user-aliased selectors (self-healing store)
+#   7. token-derived & field-type fallbacks (legacy)
+#
+# Existing recordings WITHOUT a `fallbacks` dict keep working exactly
+# as before — pure additive, zero-risk to old JSONs.
+_RICH_ELEMENT_CAPTURE_JS = r"""
+([x,y]) => {
+  var el = document.elementFromPoint(x, y);
+  if (!el) return null;
+
+  // Walk up to find a meaningful clickable ancestor (same heuristic
+  // as the legacy capture so behavior is identical to before).
+  var depth = 0;
+  while (el && el.parentElement && el.parentElement.tagName !== 'BODY' && depth < 5) {
+    var txt = ((el.innerText || el.textContent || el.value || '') + '').trim();
+    var isInteractive = /^(A|BUTTON|INPUT|SELECT|TEXTAREA|LABEL)$/.test(el.tagName);
+    if (isInteractive || (txt.length > 0 && txt.length < 400)) break;
+    el = el.parentElement;
+    depth++;
+  }
+
+  var r = el.getBoundingClientRect();
+  var text = ((el.innerText || el.textContent || el.value || '') + '').replace(/\s+/g, ' ').trim().slice(0, 200);
+
+  // Capture ALL attributes so the replay can try [data-testid=x],
+  // [role=button], etc. without us hardcoding a whitelist that misses
+  // tomorrow's custom-attr. Values capped at 120 chars.
+  var attrs = {};
+  if (el.attributes) {
+    for (var i = 0; i < el.attributes.length; i++) {
+      var a = el.attributes[i];
+      if (a && a.name) {
+        var v = (a.value || '') + '';
+        if (v.length > 120) v = v.slice(0, 120);
+        attrs[a.name] = v;
+      }
+    }
+  }
+
+  // Absolute xpath
+  function absXPath(e) {
+    if (e.nodeType !== 1) return '';
+    var parts = [];
+    while (e && e.nodeType === 1 && e.tagName !== 'HTML') {
+      var idx = 1, sib = e.previousElementSibling;
+      while (sib) {
+        if (sib.tagName === e.tagName) idx++;
+        sib = sib.previousElementSibling;
+      }
+      parts.unshift(e.tagName.toLowerCase() + '[' + idx + ']');
+      e = e.parentElement;
+    }
+    return '/html/' + parts.join('/');
+  }
+
+  // Stable xpath — anchors on the FIRST stable attribute encountered
+  // walking from the element toward <html>. Falls back to '' if none.
+  function stableXPath(e) {
+    if (e.nodeType !== 1) return '';
+    var STABLE_ATTRS = ['id', 'data-testid', 'name', 'aria-label', 'placeholder'];
+    var node = e;
+    var suffix = '';
+    while (node && node.nodeType === 1 && node.tagName !== 'HTML') {
+      for (var k = 0; k < STABLE_ATTRS.length; k++) {
+        var att = STABLE_ATTRS[k];
+        var val = node.getAttribute && node.getAttribute(att);
+        if (val) {
+          val = val.replace(/'/g, "&apos;");
+          var head = '//' + node.tagName.toLowerCase() + "[@" + att + "='" + val + "']";
+          return head + suffix;
+        }
+      }
+      var idx = 1, sib = node.previousElementSibling;
+      while (sib) {
+        if (sib.tagName === node.tagName) idx++;
+        sib = sib.previousElementSibling;
+      }
+      suffix = '/' + node.tagName.toLowerCase() + '[' + idx + ']' + suffix;
+      node = node.parentElement;
+    }
+    return '';
+  }
+
+  function siblingIndex(e) {
+    var idx = 1, sib = e.previousElementSibling;
+    while (sib) {
+      if (sib.tagName === e.tagName) idx++;
+      sib = sib.previousElementSibling;
+    }
+    return idx;
+  }
+
+  return {
+    tag: el.tagName,
+    text: text,
+    placeholder: el.getAttribute && el.getAttribute('placeholder'),
+    name: el.getAttribute && el.getAttribute('name'),
+    id: el.id || '',
+    type: el.type || '',
+    aria: el.getAttribute && el.getAttribute('aria-label'),
+    x: r.left + r.width / 2,
+    y: r.top + r.height / 2,
+    xpath_abs: absXPath(el),
+    xpath_stable: stableXPath(el),
+    attrs: attrs,
+    nth_of_type: siblingIndex(el),
+    tag_lower: el.tagName.toLowerCase(),
+  };
+}
+"""
+
+
+def _build_fallbacks(info: Dict[str, Any]) -> Dict[str, Any]:
+    """Distil rich element-capture `info` into a compact `fallbacks`
+    dict that the replay engine reads via `_step_fallbacks()`.
+
+    Keep it tight (≤ ~600 bytes typical) so JSON exports stay readable.
+    Returns `{}` if `info` is missing or has no usable fields — the
+    caller can attach it unconditionally (RUT engine treats empty dict
+    same as absent).
+    """
+    if not isinstance(info, dict):
+        return {}
+    fb: Dict[str, Any] = {}
+
+    xs = (info.get("xpath_stable") or "").strip()
+    xa = (info.get("xpath_abs") or "").strip()
+    if xs:
+        fb["xpath"] = xs
+    if xa and xa != xs:
+        fb["xpath_abs"] = xa
+
+    txt = (info.get("text") or "").strip()
+    if txt and 3 <= len(txt) <= 80:
+        fb["text"] = txt
+
+    tag = (info.get("tag") or "").lower()
+    if tag:
+        fb["tag"] = tag
+
+    nth = info.get("nth_of_type")
+    if isinstance(nth, int) and nth > 0:
+        fb["nth"] = nth
+
+    attrs_in = info.get("attrs") or {}
+    if isinstance(attrs_in, dict) and attrs_in:
+        keep_keys = (
+            "id", "name", "data-testid", "data-test", "data-cy",
+            "data-qa", "data-id", "placeholder", "aria-label",
+            "aria-describedby", "role", "type", "autocomplete",
+            "for", "href", "title", "alt",
+        )
+        a: Dict[str, str] = {}
+        for k in keep_keys:
+            v = attrs_in.get(k)
+            if isinstance(v, str) and v and len(v) <= 120:
+                a[k] = v
+        if a:
+            fb["attrs"] = a
+
+    return fb
+
+
 # ── Step builders ───────────────────────────────────────────────────────
 def _build_text_click_evaluate(text: str) -> Dict[str, Any]:
     """JS that finds an element by visible text and clicks it.
@@ -743,37 +932,15 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
     """
     sess.touch()
     async with sess.lock:
-        # Find element at point + extract a robust label/selector
-        # 2026-01: enhanced text capture — also reads input.value (for
-        # <input type=submit value="CONTINUE">), walks up the DOM for
-        # any tag (not just SPAN) when current el has no text, and
-        # captures up to 200 chars so multi-sentence consent labels
-        # aren't truncated mid-sentence (which broke text-match clicks).
+        # 2026-05 — Use the shared `_RICH_ELEMENT_CAPTURE_JS` so click,
+        # form_fill, dropdown and check all get the same xpath_stable /
+        # xpath_abs / attrs / nth_of_type / tag metadata. The
+        # `_build_fallbacks(info)` helper turns this into the
+        # backward-compatible `fallbacks` dict that the RUT replay
+        # engine reads (older recordings without `fallbacks` keep
+        # working — `_step_fallbacks` returns [] for them).
         info = await sess.page.evaluate(
-            """([x,y])=>{
-                var el = document.elementFromPoint(x, y);
-                if(!el) return null;
-                // Walk up to find a meaningful clickable ancestor:
-                // any element whose direct text or value yields a
-                // usable label, OR a known interactive tag.
-                var depth = 0;
-                while(el && el.parentElement && el.parentElement.tagName!=='BODY' && depth < 5){
-                    var txt = ((el.innerText||el.textContent||el.value||'')+'').trim();
-                    var isInteractive = /^(A|BUTTON|INPUT|SELECT|TEXTAREA|LABEL)$/.test(el.tagName);
-                    if(isInteractive || (txt.length>0 && txt.length<400)) break;
-                    el = el.parentElement; depth++;
-                }
-                var r = el.getBoundingClientRect();
-                // Capture text from innerText, textContent, and value (for input[type=submit])
-                var text = ((el.innerText || el.textContent || el.value || '') + '').replace(/\\s+/g,' ').trim().slice(0, 200);
-                var ph = el.getAttribute && el.getAttribute('placeholder');
-                var name = el.getAttribute && el.getAttribute('name');
-                var id = el.id || '';
-                var tag = el.tagName;
-                var type = el.type || '';
-                var aria = el.getAttribute && el.getAttribute('aria-label');
-                return {tag, text, placeholder: ph, name, id, type, aria, x: r.left + r.width/2, y: r.top + r.height/2};
-            }""",
+            _RICH_ELEMENT_CAPTURE_JS,
             [int(x), int(y)],
         )
         if not info:
@@ -1031,6 +1198,21 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
                 "value": "{{" + header_name + "}}",
                 "optional": True,
             }
+            # 2026-05 — attach rich fallbacks so RUT replay can rescue
+            # this fill if `sel` stops matching (renamed id/name, etc.)
+            _fb = _build_fallbacks(info)
+            if _fb:
+                step["fallbacks"] = _fb
+            # 2026-05 — also stash the fallbacks under this selector so
+            # the subsequent /type call (which doesn't re-capture rich
+            # metadata) can attach the SAME fallbacks to its fill step.
+            try:
+                if not hasattr(sess, "_form_fill_fallbacks"):
+                    sess._form_fill_fallbacks = {}  # type: ignore[attr-defined]
+                if _fb:
+                    sess._form_fill_fallbacks[sel] = _fb  # type: ignore[attr-defined]
+            except Exception:
+                pass
             # During recording, also fill the live browser with the
             # sample value so the page sees a populated field.
             if sample_val is not None:
@@ -1066,6 +1248,17 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
         extra["options"] = dropdown_options
         if dropdown_wrapper_kind:
             extra["wrapper_kind"] = dropdown_wrapper_kind
+        # 2026-05 — stash fallbacks for the upcoming /dropdown-bind call
+        # so the recorded `select` step gets attribute/xpath/text rescue
+        # paths same as click & check do.
+        try:
+            _fb_dd = _build_fallbacks(info)
+            if _fb_dd:
+                if not hasattr(sess, "_pending_dropdown_fallbacks"):
+                    sess._pending_dropdown_fallbacks = {}  # type: ignore[attr-defined]
+                sess._pending_dropdown_fallbacks[extra["selector"]] = _fb_dd  # type: ignore[attr-defined]
+        except Exception:
+            pass
         if dropdown_is_hidden:
             extra["is_hidden_select"] = True
             # Stash on the session so /dropdown-bind picks it up
@@ -1119,6 +1312,11 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
                 "timeout": 8000,
                 "optional": True,
             }
+            # 2026-05 — attach rich fallbacks so check step survives
+            # selector drift between recording and replay.
+            _fb_chk = _build_fallbacks(info)
+            if _fb_chk:
+                step["fallbacks"] = _fb_chk
     elif mode == "final":
         # Captured separately by /mark-final endpoint
         step = None
@@ -1764,6 +1962,17 @@ async def bind_dropdown(
         "value": chosen,
         "match_by": match_by_norm,
     }
+    # 2026-05 — attach fallbacks stashed by the dropdown click.
+    try:
+        _fb_map = getattr(sess, "_pending_dropdown_fallbacks", None)
+        if isinstance(_fb_map, dict):
+            _fb_sel = _fb_map.get(selector)
+            if _fb_sel:
+                step["fallbacks"] = _fb_sel
+            # one-shot — drop entry so the next dropdown starts clean
+            _fb_map.pop(selector, None)
+    except Exception:
+        pass
     # ── 2026-05: Carry custom-UI hints from the dropdown click ──
     # If the <select> is hidden behind Bootstrap-Select / Select2 / etc,
     # the recording-time click stashed metadata on the session. We copy
@@ -1956,6 +2165,17 @@ async def type_text(sess: RecorderSession, selector: str, value: str, header_nam
 
     template = f"{{{{{header_name}}}}}" if header_name else value
     step = _build_fill_step(selector, template)
+    # 2026-05 — attach fallbacks captured by the earlier form_fill click
+    # for THIS selector (if any). Without this, the second /type call
+    # would lose the rich rescue paths and skip on a renamed input.
+    try:
+        _fb_map = getattr(sess, "_form_fill_fallbacks", None)
+        if isinstance(_fb_map, dict):
+            _fb_sel = _fb_map.get(selector)
+            if _fb_sel:
+                step["fallbacks"] = _fb_sel
+    except Exception:
+        pass
     sess.steps.append(step)
     # 2026-01 — auto wait removed per user request (was wait(800) here).
     return {"recorded": True, "step": step, "header_name": header_name, **extra}
