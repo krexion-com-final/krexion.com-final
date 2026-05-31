@@ -3527,15 +3527,41 @@ export default function RealUserTrafficPage() {
                             )}
                             {/* Live frame */}
                             {v.latest_frame_b64 ? (
-                              <img
-                                src={v.latest_frame_b64}
-                                alt={`Visit ${vid}`}
-                                className="w-full h-auto block bg-black"
+                              // 2026-05 — Image is now a FULL-page
+                              // capture (was viewport-only). Wrap it
+                              // in a scrollable container so the
+                              // operator can scroll through long
+                              // offer / survey pages to see exactly
+                              // which step the visit is on. Expanded
+                              // mode gets 88vh + auto-scroll;
+                              // collapsed gets 220px with overflow
+                              // hidden but tile click expands.
+                              <div
+                                className="bg-black w-full overflow-y-auto overflow-x-hidden"
                                 style={{
-                                  maxHeight: isExpanded ? '70vh' : 200,
-                                  objectFit: 'contain',
+                                  height: isExpanded ? '88vh' : 220,
+                                  scrollbarWidth: 'thin',
                                 }}
-                              />
+                                // Stop propagation so scrolling
+                                // inside the expanded tile doesn't
+                                // accidentally close it.
+                                onClick={(e) => isExpanded && e.stopPropagation()}
+                                onWheel={(e) => isExpanded && e.stopPropagation()}
+                                data-testid={`rut-visual-tile-frame-${vid}`}
+                              >
+                                <img
+                                  src={v.latest_frame_b64}
+                                  alt={`Visit ${vid}`}
+                                  className="w-full block"
+                                  style={{
+                                    height: 'auto',
+                                    // No max-height — let the image
+                                    // be its natural tall size and
+                                    // let the parent scroll it.
+                                    display: 'block',
+                                  }}
+                                />
+                              </div>
                             ) : (
                               <div className="w-full h-40 flex items-center justify-center text-zinc-500 text-xs">
                                 <Loader2 className="w-4 h-4 animate-spin mr-1" /> Waiting for first frame…

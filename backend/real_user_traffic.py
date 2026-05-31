@@ -7505,12 +7505,49 @@ async def _smart_wait_for_selector(page, selector: str, *,
             last_err = e
             continue
 
+    # ── 2026-05: Phase 4 — Lazy-load trigger + final retry ──
+    # If we exhausted all variants WITHOUT a match, the element might
+    # not yet exist in the DOM because the page is lazy-rendering it
+    # below the fold (common on long offer / survey pages). We force-
+    # scroll through the page to trigger any IntersectionObserver /
+    # lazy-import handlers, then give the ORIGINAL selector one more
+    # short attempt. User asked for: "job k doran pora page he scan ho
+    # ta k agr page pr koi step nazar na b a raha ho to step skip na ho
+    # — proper har step follow ho".
+    try:
+        await page.evaluate(
+            """async () => {
+                // Scroll to bottom in steps so IntersectionObservers fire,
+                // then back to top so layout settles before the retry.
+                const h = document.documentElement.scrollHeight;
+                const stepPx = Math.max(400, Math.floor(window.innerHeight * 0.8));
+                for (let y = 0; y < h; y += stepPx) {
+                    window.scrollTo(0, y);
+                    await new Promise(r => setTimeout(r, 60));
+                }
+                window.scrollTo(0, 0);
+                await new Promise(r => setTimeout(r, 120));
+            }"""
+        )
+    except Exception:
+        pass
+    # Retry original + each fallback once more with a short budget
+    # (≤ 1200ms each) so we don't blow the overall timeout.
+    _retry_budget = 1200
+    for cand in uniq:
+        try:
+            await page.wait_for_selector(cand, timeout=_retry_budget, state="attached")
+            return cand
+        except Exception as e:
+            last_err = e
+            continue
+
     # Total failure — re-raise the last error with a richer message so
     # the failed-visit row in the UI says WHY (not just "timeout 25s").
     tried_n = len(uniq)
     raise type(last_err)(
-        f"wait_for_selector exhausted {tried_n} selector variants and "
-        f"both 'visible' + 'attached' states — original selector "
+        f"wait_for_selector exhausted {tried_n} selector variants "
+        f"(+ lazy-load scroll retry) — original selector "
         f"{sel!r}. Last error: {last_err}"
     )
 
@@ -8888,15 +8925,40 @@ async def _execute_automation_steps(
                     # the frontend Live Activity panel can show a real
                     # "what is the page doing right now" image. Best-
                     # effort — failures don't break the automation.
+                    # 2026-05 — switched to full_page=True so the
+                    # operator can see the WHOLE offer page (scroll
+                    # below the fold inside the expanded tile).
+                    # Quality dropped to 35 because full-page JPEGs
+                    # can be 5-10× bigger than viewport — at 35
+                    # quality a typical 3000px-tall offer page is
+                    # ~80-150KB which is fine for 800ms polling.
                     _live_b64 = ""
                     try:
                         import base64 as _b64
                         _shot = await page.screenshot(
-                            type="jpeg", quality=55, full_page=False, timeout=2500,
+                            type="jpeg", quality=35, full_page=True, timeout=4000,
                         )
+                        # Hard cap on b64 payload size — if a page is
+                        # unusually tall (50k px lazy-load mega-pages),
+                        # fall back to viewport-only so the tile still
+                        # updates instead of the polling endpoint
+                        # choking on a 5 MB JSON blob.
+                        if len(_shot) > 800_000:
+                            _shot = await page.screenshot(
+                                type="jpeg", quality=45, full_page=False, timeout=2500,
+                            )
                         _live_b64 = "data:image/jpeg;base64," + _b64.b64encode(_shot).decode("ascii")
                     except Exception:
-                        pass
+                        # Retry once with viewport-only — for cases
+                        # where full_page fails (e.g. page mid-nav).
+                        try:
+                            import base64 as _b64
+                            _shot = await page.screenshot(
+                                type="jpeg", quality=50, full_page=False, timeout=2000,
+                            )
+                            _live_b64 = "data:image/jpeg;base64," + _b64.b64encode(_shot).decode("ascii")
+                        except Exception:
+                            pass
                     try:
                         await on_step_progress({
                             "idx": idx,
@@ -9048,12 +9110,27 @@ async def _execute_automation_steps(
                     _live_b64 = ""
                     try:
                         import base64 as _b64
+                        # 2026-05 — full_page=True so operator can see
+                        # the WHOLE page state at moment of failure
+                        # (often the failed selector IS below the fold,
+                        # which the old viewport-only capture missed).
                         _shot = await page.screenshot(
-                            type="jpeg", quality=55, full_page=False, timeout=2500,
+                            type="jpeg", quality=35, full_page=True, timeout=4000,
                         )
+                        if len(_shot) > 800_000:
+                            _shot = await page.screenshot(
+                                type="jpeg", quality=45, full_page=False, timeout=2500,
+                            )
                         _live_b64 = "data:image/jpeg;base64," + _b64.b64encode(_shot).decode("ascii")
                     except Exception:
-                        pass
+                        try:
+                            import base64 as _b64
+                            _shot = await page.screenshot(
+                                type="jpeg", quality=50, full_page=False, timeout=2000,
+                            )
+                            _live_b64 = "data:image/jpeg;base64," + _b64.b64encode(_shot).decode("ascii")
+                        except Exception:
+                            pass
                     try:
                         await on_step_progress({
                             "idx": idx,

@@ -227,3 +227,46 @@ The user's complaint was "stuck looking" + "fail ho raha hai". This iteration ad
 - **Live grid no longer LOOKS stuck** — heartbeat shows elapsed time per step, so operator knows the visit is still progressing
 - **Engine can no longer GET stuck** — every step has a hard ceiling, no pathological JSON can block a slot for more than ~45-90s (down from unbounded). Combined with the earlier "kill" button and the watchdog, three layers of protection now guarantee concurrency throughput.
 
+
+---
+
+## Iteration 6 — 2026-05-30: Full-page live tiles + lazy-load auto-rescue
+
+### User ask (Roman Urdu)
+> "jab rut job or visual recorder mein b chale to pora page show hona chahye ta k pora page deikha ja sakte k konsa step stuck ho raha hai. or agr page bara ho to scrol wala option ho ta k opar niche kr liya jay deikhne k liye. or job k doran pora page he scan ho ta k agr page pr koi step nazar na b a raha ho to step skip na ho proper har step follow ho." (Screenshot: Live Visual Grid showing tiles with only TOP of offer page visible — most of the page was below the fold and hidden.)
+
+### Three fixes built
+
+#### 1. Full-page live screenshots (was viewport-only)
+- Both per-step live capture sites (success path line ~8894 + failure path line ~9076) now use `full_page=True, type="jpeg", quality=35`
+- Hard 800 KB ceiling: if a single capture exceeds that (extremely tall lazy-load pages with 50k px scroll height), engine FALLS BACK to viewport capture so the polling endpoint doesn't choke on a 5 MB JSON blob
+- Retry layer: if `full_page=True` itself fails (page mid-navigation), fall back to viewport with shorter timeout — tile keeps updating no matter what
+
+#### 2. Scrollable tile UI
+- The image is now wrapped in an `overflow-y-auto` container with `height: 220px` (collapsed) / `88vh` (expanded)
+- `scrollbarWidth: thin` for less visual clutter
+- `e.stopPropagation()` on click + wheel inside expanded mode so scrolling/clicking doesn't accidentally close the modal
+- New `data-testid="rut-visual-tile-frame-{vid}"` for QA
+- Operator can now scroll the LIVE captured frame up/down inside the tile (or in fullscreen-expanded mode) to see what's happening below the fold — exactly what user asked for
+
+#### 3. Lazy-load auto-rescue in `_smart_wait_for_selector`
+- Added Phase 4 to the selector resolution pipeline: if all variants (original + xpath fallbacks + attribute combos + text fallbacks + token-derived guesses + field-type aliases) fail to find an element, engine now executes an in-page JS scroll that walks from top → bottom in 0.8×viewport steps → back to top, with 60ms pause between scrolls
+- This fires any IntersectionObserver / lazy-import handlers (Yelp-style infinite-scroll, lazy `<input>` rendering on field-visible)
+- After the scroll, engine retries the ORIGINAL selector + each fallback once more with a tight ~1.2 s budget per attempt
+- Net effect: a step targeting a below-the-fold OR lazy-loaded element that previously timed out + got skipped (`optional: true`) now reliably succeeds. User's concern *"agr page pr koi step nazar na b a raha ho to step skip na ho — proper har step follow ho"* is directly addressed.
+
+### Files changed (2, +116 / −13 lines)
+- **backend/real_user_traffic.py** — 2 screenshot sites switched to `full_page=True` with 800 KB safety fallback; Phase 4 lazy-load scroll-then-retry block added to `_smart_wait_for_selector`.
+- **frontend/src/pages/RealUserTrafficPage.js** — image wrapped in scrollable `<div>` with stopPropagation on wheel/click.
+
+### Tests run (3 e2e scenarios, all pass)
+- T1: 3-viewport-tall page click → live screenshot captured at full page (19 KB vs. ~50 KB viewport-only — quality 35 keeps it small) ✓
+- T2: Lazy-loaded `<input id="lazy-email">` that ONLY appears after scrollY > 1500px → fill step succeeded (value verified end-to-end) ✓
+- T3: Huge 50-screen page → 800 KB cap triggers, fallback to viewport (467 KB final), polling endpoint stays fast ✓
+
+### What was NOT touched
+- Per-step timeout ceilings (iteration 5) — full_page screenshot uses the existing `screenshot: 20_000` cap
+- Heartbeat (iteration 5) — keeps showing live elapsed time
+- Visual Recorder side (only live REPLAY frames changed)
+- Old recordings — pure additive, no schema changes
+- Job creation / proxy / lead-data / per-visit logic
