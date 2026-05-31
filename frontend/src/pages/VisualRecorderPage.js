@@ -2837,17 +2837,94 @@ export default function VisualRecorderPage() {
                     </div>
                   </div>
                 ) : screenshotSrc ? (
-                  <img
-                    ref={imgRef}
-                    src={screenshotSrc}
-                    alt="Live preview"
-                    onClick={handleImgClick}
-                    onLoad={() => setShotErrorCount(0)}
-                    onError={() => setShotErrorCount((c) => c + 1)}
-                    className={`max-w-full h-auto cursor-${tool === "form_fill" ? "text" : tool === "final" ? "crosshair" : tool === "nav_only" ? "grab" : "pointer"} select-none`}
-                    style={{ aspectRatio: `${viewport.width}/${viewport.height}` }}
-                    data-testid="vr-preview-img"
-                  />
+                  <>
+                    <img
+                      ref={imgRef}
+                      src={screenshotSrc}
+                      alt="Live preview"
+                      onClick={handleImgClick}
+                      onLoad={() => setShotErrorCount(0)}
+                      onError={() => setShotErrorCount((c) => c + 1)}
+                      className={`max-w-full h-auto cursor-${tool === "form_fill" ? "text" : tool === "final" ? "crosshair" : tool === "nav_only" ? "grab" : "pointer"} select-none`}
+                      style={{ aspectRatio: `${viewport.width}/${viewport.height}` }}
+                      data-testid="vr-preview-img"
+                    />
+                    {/* ── 2026-05: chrome-error / page-load failure overlay ──
+                        User report: "Visual Recorder mein chrome-error://
+                        chromewebdata/ dikh raha hai blank white page —
+                        solve kar do". When backend reports `page_status
+                        !== "ok"`, overlay a clear message + Reload button
+                        instead of letting the operator stare at the blank
+                        Chromium error placeholder. */}
+                    {pageMeta.page_status && pageMeta.page_status !== "ok" && pageMeta.page_status !== "blank" && (
+                      <div
+                        className="absolute inset-0 bg-zinc-950/92 backdrop-blur-sm flex flex-col items-center justify-center text-center px-6 gap-3"
+                        data-testid="vr-page-load-error"
+                      >
+                        <AlertCircle className="w-12 h-12 text-amber-400" />
+                        <div className="text-amber-100 font-semibold">
+                          Page failed to load
+                        </div>
+                        <div className="text-xs text-zinc-300 max-w-sm leading-relaxed">
+                          {pageMeta.page_status_reason === "proxy_error" && "Chromium couldn't reach the page through the proxy — the gateway may be dead or your IP isn't whitelisted."}
+                          {pageMeta.page_status_reason === "dns_failure" && "The URL's DNS could not be resolved — check spelling or try a different DNS gateway."}
+                          {pageMeta.page_status_reason === "ssl_error" && "SSL/TLS handshake failed — the certificate may be invalid or the proxy is intercepting HTTPS."}
+                          {pageMeta.page_status_reason === "connection_refused" && "The server refused the connection — it may be down or blocking your proxy IP."}
+                          {pageMeta.page_status_reason === "timeout" && "Page took too long to respond — usually a slow / overloaded proxy."}
+                          {pageMeta.page_status_reason === "no_internet" && "Chromium reports no internet — the proxy may be offline."}
+                          {(!pageMeta.page_status_reason || pageMeta.page_status_reason === "unknown_load_error") && "Chromium landed on its error page (chrome-error://chromewebdata/). The target URL is unreachable through the current network/proxy."}
+                        </div>
+                        <div className="text-[11px] text-zinc-500 max-w-sm">
+                          Common fixes: swap to a fresh proxy, check the offer URL opens in your normal browser, or click Reload to retry.
+                        </div>
+                        <div className="flex gap-2 mt-2">
+                          <button
+                            onClick={async () => {
+                              try {
+                                setShotErrorCount(0);
+                                const r = await fetch(
+                                  `${API_URL}/api/visual-recorder/${sessionId}/reload`,
+                                  { method: "POST", headers: authH() }
+                                );
+                                const d = await r.json();
+                                if (d.ok) {
+                                  toast.success("Page reloaded successfully");
+                                } else {
+                                  toast.error(
+                                    d.error || `Reload failed (${d.page_status_reason || "unknown"})`
+                                  );
+                                }
+                                // Force a fresh state poll
+                                if (typeof refreshState === "function") refreshState();
+                                if (typeof refreshScreenshot === "function") refreshScreenshot();
+                              } catch (e) {
+                                toast.error(`Reload failed: ${e.message || e}`);
+                              }
+                            }}
+                            className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-medium transition-colors flex items-center gap-1.5"
+                            data-testid="vr-reload-page-btn"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" />
+                            Reload Page
+                          </button>
+                          <button
+                            onClick={async () => {
+                              try { await fetch(`${API_URL}/api/visual-recorder/${sessionId}`, { method: "DELETE", headers: authH() }); } catch {}
+                              setSessionId(null);
+                              setSessionState("starting");
+                              setSessionError("");
+                              setSetupStage("setup");
+                            }}
+                            className="px-4 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium transition-colors flex items-center gap-1.5"
+                            data-testid="vr-back-to-setup-btn"
+                          >
+                            <ArrowLeft className="w-3.5 h-3.5" />
+                            Change URL / Proxy
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </>
                 ) : (
                   <div className="aspect-[412/914] w-full flex items-center justify-center text-zinc-500 text-sm">
                     <Loader2 className="w-6 h-6 animate-spin mr-2" /> Loading first frame…

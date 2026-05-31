@@ -14917,6 +14917,23 @@ async def vr_screenshot(
     return _Resp(content=data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
+@api_router.post("/visual-recorder/{session_id}/reload")
+async def vr_reload(session_id: str, user: dict = Depends(get_current_user)):
+    """2026-05 — Reload the live page when stuck on chrome-error://.
+
+    Surfaced via the new error banner in the Visual Recorder UI when
+    `page_status != "ok"`. Re-issues `page.goto(sess.url)` with a 30s
+    timeout — keeps all recorded steps intact.
+    """
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return await vr.reload_page(sess)
+
+
 @api_router.get("/visual-recorder/{session_id}/state")
 async def vr_state(session_id: str, user: dict = Depends(get_current_user)):
     if vr is None:

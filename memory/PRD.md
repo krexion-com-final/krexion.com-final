@@ -308,3 +308,32 @@ The cleanup endpoint always wrote `cleanup_requested.flag` to `/data/`. The host
 - S2: Fresh watcher (`host_stats.json` mtime < 5 min) → click cleanup → flag IS written, host script will pick it up ✓
 - S3: Stale watcher (>5 min) + leftover flag → status endpoint AUTO-CLEARS stale flag on next poll → UI unblocks ✓
 
+
+---
+
+## Iteration 9 — 2026-05-30: Visual Recorder chrome-error://chromewebdata/ — fixed
+
+### User report
+Screenshots showed Visual Recorder URL bar stuck on `chrome-error://chromewebdata/` with a blank white preview area. No clear error message, no way to recover other than killing the session.
+
+### Root cause
+When Chromium fails to fetch the target URL (dead proxy, DNS failure, SSL handshake fail, connection refused), it navigates to its internal `chrome-error://chromewebdata/` placeholder. The recorder's session stays in `state="ready"` (because the browser IS running) and the live screenshot poller keeps capturing that blank error page. The frontend had no detection / no recovery UI.
+
+### Fix
+**backend/visual_recorder.py**: Enhanced `get_page_meta()` to classify the current URL into `ok` / `blank` / `load_error` with a `page_status_reason` (`dns_failure` / `proxy_error` / `ssl_error` / `connection_refused` / `timeout` / `no_internet` / `unknown_load_error`). Title-based heuristics map Chromium's error titles to specific reasons. Added `reload_page(sess)` helper that re-issues `page.goto(sess.url)` with 30s timeout — keeps recorded steps intact.
+
+**backend/server.py**: New `POST /api/visual-recorder/{session_id}/reload` endpoint.
+
+**frontend/src/pages/VisualRecorderPage.js**: When `pageMeta.page_status` is anything other than `ok` / `blank`, an overlay covers the (useless) blank preview with: a 12px amber alert icon, a human-readable explanation tailored to the `page_status_reason`, common fixes hint, **"Reload Page"** button (POSTs to the new endpoint), and **"Change URL / Proxy"** button (cleans up the session and returns to setup).
+
+### Tests run (9 e2e scenarios, all pass)
+- T1: legit data: URL → `ok` ✓
+- T2: `about:blank` → `blank` ✓
+- T3: chrome-error + DNS title → `dns_failure` ✓
+- T4: proxy title → `proxy_error` ✓
+- T5: SSL/CERT title → `ssl_error` ✓
+- T6: ERR_TIMED_OUT → `timeout` ✓
+- T7: ERR_CONNECTION_REFUSED → `connection_refused` ✓
+- T8: unknown chrome-error title → `unknown_load_error` ✓
+- T9: `reload_page()` recovers + page_status flips to `ok` ✓
+

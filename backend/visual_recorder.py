@@ -907,7 +907,7 @@ async def take_screenshot(sess: RecorderSession) -> bytes:
 async def get_page_meta(sess: RecorderSession) -> Dict[str, Any]:
     sess.touch()
     if sess.state != "ready" or sess.page is None:
-        return {"url": "", "title": "", "viewport": {"width": sess.viewport[0], "height": sess.viewport[1]}}
+        return {"url": "", "title": "", "viewport": {"width": sess.viewport[0], "height": sess.viewport[1]}, "page_status": "not_ready"}
     async with sess.lock:
         try:
             url = sess.page.url
@@ -915,7 +915,86 @@ async def get_page_meta(sess: RecorderSession) -> Dict[str, Any]:
             vp = sess.page.viewport_size or {"width": sess.viewport[0], "height": sess.viewport[1]}
         except Exception:
             url, title, vp = "", "", {"width": sess.viewport[0], "height": sess.viewport[1]}
-    return {"url": url, "title": title, "viewport": vp}
+
+    # ── 2026-05: Page-load error classification ─────────────────────
+    # User report: "Visual Recorder mein chrome-error://chromewebdata/
+    # dikh raha hai aur blank white page — solve kar do". This happens
+    # when Chromium can't fetch the target URL (dead proxy, DNS fail,
+    # SSL handshake fail, connection refused). We now return a
+    # structured `page_status` + `page_status_reason` so the frontend
+    # can render a clear error banner with a "Reload" button instead
+    # of showing a useless blank preview.
+    page_status = "ok"
+    page_status_reason = ""
+    try:
+        lu = (url or "").lower()
+        if lu.startswith("chrome-error://") or lu.startswith("chrome-error:"):
+            page_status = "load_error"
+            # Chromium puts the actual error code in the URL hash or
+            # in the document title — try to extract a meaningful hint.
+            t = (title or "").lower()
+            if "no internet" in t or "err_internet" in t:
+                page_status_reason = "no_internet"
+            elif "name_not_resolved" in t or "dns" in t:
+                page_status_reason = "dns_failure"
+            elif "proxy" in t or "tunnel" in t:
+                page_status_reason = "proxy_error"
+            elif "ssl" in t or "cert" in t or "https" in t:
+                page_status_reason = "ssl_error"
+            elif "refused" in t or "connection" in t:
+                page_status_reason = "connection_refused"
+            elif "timed_out" in t or "timeout" in t:
+                page_status_reason = "timeout"
+            else:
+                page_status_reason = "unknown_load_error"
+        elif lu.startswith("about:blank") or not lu:
+            page_status = "blank"
+            page_status_reason = "page_not_loaded_yet"
+    except Exception:
+        pass
+
+    return {
+        "url": url,
+        "title": title,
+        "viewport": vp,
+        "page_status": page_status,
+        "page_status_reason": page_status_reason,
+    }
+
+
+async def reload_page(sess: RecorderSession) -> Dict[str, Any]:
+    """2026-05 — Re-navigate the recorder's page to its original URL.
+
+    Used by the new "Reload" button surfaced when `page_status !=
+    "ok"`. Useful when a transient proxy failure / DNS hiccup made
+    Chromium land on `chrome-error://chromewebdata/`. The session
+    keeps its recorded steps and proxy config — only the live page
+    navigates again.
+
+    Returns `{ok, url, page_status, page_status_reason}`.
+    """
+    sess.touch()
+    if sess.state != "ready" or sess.page is None:
+        return {"ok": False, "error": "session_not_ready"}
+    async with sess.lock:
+        try:
+            # Best-effort: 30s timeout, wait for DOMContentLoaded —
+            # enough for slow offer pages but not so long we hang the
+            # whole UI poll cycle.
+            await sess.page.goto(sess.url, wait_until="domcontentloaded", timeout=30000)
+        except Exception as e:
+            return {
+                "ok": False,
+                "error": f"navigation_failed: {str(e)[:200]}",
+                "url": sess.url,
+            }
+    meta = await get_page_meta(sess)
+    return {
+        "ok": meta.get("page_status") == "ok",
+        "url": meta.get("url"),
+        "page_status": meta.get("page_status"),
+        "page_status_reason": meta.get("page_status_reason"),
+    }
 
 
 async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default", header_name: Optional[str] = None, group_id: Optional[str] = None) -> Dict[str, Any]:
