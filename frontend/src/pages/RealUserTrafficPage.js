@@ -660,6 +660,14 @@ export default function RealUserTrafficPage() {
   // ko manualy close krne ka option ho ta k mazeed os pr time waste na
   // ho or next profile pr kam ho sake".
   const [cancellingVisits, setCancellingVisits] = useState({});
+  // 2026-05 — "Show Step Markers" toggle. When ON, an SVG overlay is
+  // rendered on top of the full-page tile screenshot with one coloured
+  // dot per recorded step at the resolved element's bounding box
+  // (full-page coordinates from backend, scaled to the rendered <img>
+  // dimensions). Hover shows "step #N (action) selector" tooltip. Lets
+  // the operator instantly see WHERE every step landed on the page
+  // without scrolling step-by-step through the JSON.
+  const [showStepMarkers, setShowStepMarkers] = useState(true);
   const cancelOneVisit = async (vid) => {
     if (!activeJob?.job_id || !vid) return;
     if (cancellingVisits[vid]) return; // debounce double-clicks
@@ -3404,6 +3412,23 @@ export default function RealUserTrafficPage() {
                   </h3>
                 </div>
                 <div className="flex items-center gap-1">
+                  {/* 2026-05 — Show Step Markers toggle. When ON, the
+                      tile renders coloured dots at each step's target
+                      position on the full-page screenshot. */}
+                  <button
+                    onClick={() => setShowStepMarkers((v) => !v)}
+                    className={`px-2 py-1 text-xs rounded transition-colors mr-1 ${
+                      showStepMarkers
+                        ? 'bg-emerald-900/60 text-emerald-200 hover:bg-emerald-800/70'
+                        : 'text-zinc-400 hover:text-white hover:bg-zinc-800'
+                    }`}
+                    title={showStepMarkers
+                      ? 'Hide per-step marker dots overlaid on the page'
+                      : 'Show per-step marker dots overlaid on the page (coloured by step status)'}
+                    data-testid="rut-visual-grid-toggle-step-markers"
+                  >
+                    {showStepMarkers ? '⊙ Step Markers ON' : '⊙ Step Markers'}
+                  </button>
                   <button
                     onClick={() => setVisualGridMinimized(true)}
                     className="px-2 py-1 text-zinc-400 hover:text-white text-xs rounded hover:bg-zinc-800"
@@ -3527,40 +3552,116 @@ export default function RealUserTrafficPage() {
                             )}
                             {/* Live frame */}
                             {v.latest_frame_b64 ? (
-                              // 2026-05 — Image is now a FULL-page
-                              // capture (was viewport-only). Wrap it
-                              // in a scrollable container so the
-                              // operator can scroll through long
-                              // offer / survey pages to see exactly
-                              // which step the visit is on. Expanded
-                              // mode gets 88vh + auto-scroll;
-                              // collapsed gets 220px with overflow
-                              // hidden but tile click expands.
                               <div
-                                className="bg-black w-full overflow-y-auto overflow-x-hidden"
+                                className="bg-black w-full overflow-y-auto overflow-x-hidden relative"
                                 style={{
                                   height: isExpanded ? '88vh' : 220,
                                   scrollbarWidth: 'thin',
                                 }}
-                                // Stop propagation so scrolling
-                                // inside the expanded tile doesn't
-                                // accidentally close it.
                                 onClick={(e) => isExpanded && e.stopPropagation()}
                                 onWheel={(e) => isExpanded && e.stopPropagation()}
                                 data-testid={`rut-visual-tile-frame-${vid}`}
                               >
-                                <img
-                                  src={v.latest_frame_b64}
-                                  alt={`Visit ${vid}`}
-                                  className="w-full block"
-                                  style={{
-                                    height: 'auto',
-                                    // No max-height — let the image
-                                    // be its natural tall size and
-                                    // let the parent scroll it.
-                                    display: 'block',
-                                  }}
-                                />
+                                {/* Image-and-overlay wrapper so SVG
+                                    overlays in the SAME scrolling
+                                    region (otherwise dots would stay
+                                    fixed while the page scrolls). */}
+                                <div className="relative w-full">
+                                  <img
+                                    src={v.latest_frame_b64}
+                                    alt={`Visit ${vid}`}
+                                    className="w-full block"
+                                    style={{ height: 'auto', display: 'block' }}
+                                  />
+                                  {/* ── 2026-05: Step Markers SVG ──
+                                      One coloured dot per recorded step
+                                      at the resolved element's full-page
+                                      coords (scaled to rendered <img>
+                                      width). Position uses % so it
+                                      survives image rescale on window
+                                      resize. */}
+                                  {showStepMarkers && Array.isArray(v.step_markers)
+                                    && v.step_markers.length > 0
+                                    && v.doc_size && v.doc_size.w > 0 && v.doc_size.h > 0 && (
+                                    <svg
+                                      className="absolute inset-0 w-full h-full pointer-events-none"
+                                      style={{ overflow: 'visible' }}
+                                      viewBox={`0 0 ${v.doc_size.w} ${v.doc_size.h}`}
+                                      preserveAspectRatio="none"
+                                      data-testid={`rut-visual-tile-markers-${vid}`}
+                                    >
+                                      {v.step_markers.map((m, mi) => {
+                                        const box = m.box || {};
+                                        const cx = (box.x || 0) + (box.w || 0) / 2;
+                                        const cy = (box.y || 0) + (box.h || 0) / 2;
+                                        const isLatest = mi === v.step_markers.length - 1;
+                                        // Colour by action type for at-a-glance
+                                        // recognition: click=blue, fill=emerald,
+                                        // select=violet, check=amber, others=zinc.
+                                        const colourMap = {
+                                          click: '#3b82f6',
+                                          fill: '#10b981',
+                                          type: '#10b981',
+                                          select: '#a855f7',
+                                          check: '#f59e0b',
+                                          uncheck: '#f59e0b',
+                                          hover: '#06b6d4',
+                                          press: '#ec4899',
+                                        };
+                                        const fillC = colourMap[(m.action || '').toLowerCase()] || '#71717a';
+                                        const stroke = isLatest ? '#ffffff' : 'rgba(0,0,0,0.6)';
+                                        const r = isLatest ? 28 : 18;
+                                        return (
+                                          <g key={mi}>
+                                            {/* Hit-box rectangle for context */}
+                                            {(box.w > 0 && box.h > 0) && (
+                                              <rect
+                                                x={box.x} y={box.y}
+                                                width={box.w} height={box.h}
+                                                fill="none"
+                                                stroke={fillC}
+                                                strokeWidth={isLatest ? 4 : 2}
+                                                strokeOpacity={isLatest ? 0.9 : 0.55}
+                                                strokeDasharray={isLatest ? "0" : "8 4"}
+                                              />
+                                            )}
+                                            {/* Numbered dot at element centre */}
+                                            <circle
+                                              cx={cx} cy={cy} r={r}
+                                              fill={fillC}
+                                              fillOpacity={isLatest ? 0.95 : 0.75}
+                                              stroke={stroke}
+                                              strokeWidth={isLatest ? 4 : 2}
+                                            />
+                                            <text
+                                              x={cx} y={cy + r * 0.35}
+                                              textAnchor="middle"
+                                              fontSize={r * 1.0}
+                                              fontFamily="ui-monospace, Menlo, monospace"
+                                              fontWeight="700"
+                                              fill="#ffffff"
+                                            >
+                                              {(m.idx ?? mi) + 1}
+                                            </text>
+                                          </g>
+                                        );
+                                      })}
+                                    </svg>
+                                  )}
+                                </div>
+
+                                {/* Step-markers legend, only when toggle is ON
+                                    and there's something to mark. */}
+                                {showStepMarkers && Array.isArray(v.step_markers) && v.step_markers.length > 0 && (
+                                  <div className="sticky bottom-0 left-0 right-0 bg-zinc-950/85 backdrop-blur-sm border-t border-zinc-800 px-2 py-1 text-[10px] text-zinc-300 flex items-center gap-3 flex-wrap">
+                                    <span className="text-zinc-500">Markers ({v.step_markers.length}):</span>
+                                    <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-500 inline-block"/>click</span>
+                                    <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500 inline-block"/>fill/type</span>
+                                    <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-violet-500 inline-block"/>select</span>
+                                    <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-500 inline-block"/>check</span>
+                                    <span className="text-zinc-500 ml-auto">Solid ring = current step</span>
+                                  </div>
+                                )}
                               </div>
                             ) : (
                               <div className="w-full h-40 flex items-center justify-center text-zinc-500 text-xs">

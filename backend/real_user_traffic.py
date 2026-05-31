@@ -5368,6 +5368,29 @@ async def run_real_user_traffic_job(
                                     v["latest_frame_b64"] = event["screenshot_b64"]
                                 if event.get("page_url"):
                                     v["page_url"] = event["page_url"]
+                                # 2026-05 — Step-marker accumulator.
+                                # Each successful element-targeted step
+                                # arrives with `target_box` + `doc_size`;
+                                # we accumulate a history so the
+                                # frontend can overlay coloured dots on
+                                # the latest screenshot showing where
+                                # every step landed. Bounded at 50 markers
+                                # so the polling payload doesn't bloat
+                                # for very long recordings.
+                                if event.get("target_box") and event.get("status") == "ok":
+                                    markers = v.setdefault("step_markers", [])
+                                    markers.append({
+                                        "idx": event.get("idx"),
+                                        "action": event.get("action"),
+                                        "selector": (event.get("selector") or "")[:120],
+                                        "box": event["target_box"],
+                                        "status": "ok",
+                                        "ts": event.get("timestamp_ms"),
+                                    })
+                                    if len(markers) > 50:
+                                        del markers[: len(markers) - 50]
+                                if event.get("doc_size"):
+                                    v["doc_size"] = event["doc_size"]
                                 v["events_count"] = int(v.get("events_count", 0)) + 1
                                 if event.get("status") == "failed":
                                     v["status"] = "failed"
@@ -8959,6 +8982,73 @@ async def _execute_automation_steps(
                             _live_b64 = "data:image/jpeg;base64," + _b64.b64encode(_shot).decode("ascii")
                         except Exception:
                             pass
+
+                    # ── 2026-05: Step-marker bounding box capture ──
+                    # User ask: "Show Step Markers — har step ki target
+                    # location screenshot pe colored dots overlay ho".
+                    # We grab the resolved element's bounding box in
+                    # FULL-PAGE coordinates (post-scroll-offset) right
+                    # after a successful step so the frontend SVG
+                    # overlay can position a dot at the exact target.
+                    # Also includes `doc_size` so the frontend can
+                    # scale the dots to the rendered image dimensions.
+                    # Best-effort — failure leaves the keys absent so
+                    # the marker for this step just isn't drawn.
+                    _target_box = None
+                    _doc_size = None
+                    if selector and action in (
+                        "click", "fill", "type", "select", "check",
+                        "uncheck", "hover", "press",
+                    ):
+                        try:
+                            _box_data = await page.evaluate(
+                                """(sel) => {
+                                    let el = null;
+                                    if (sel.startsWith('xpath=')) {
+                                        const xp = sel.slice(6);
+                                        const r = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                                        el = r.singleNodeValue;
+                                    } else if (sel.startsWith('text=')) {
+                                        const t = sel.slice(5).replace(/^"|"$/g, '');
+                                        const all = document.querySelectorAll('button, a, input, label, span, div');
+                                        for (const e of all) {
+                                            if ((e.innerText || e.textContent || '').trim().includes(t)) {
+                                                el = e; break;
+                                            }
+                                        }
+                                    } else {
+                                        try { el = document.querySelector(sel); } catch(_) {}
+                                    }
+                                    const docW = Math.max(
+                                        document.documentElement.scrollWidth,
+                                        document.body ? document.body.scrollWidth : 0,
+                                    );
+                                    const docH = Math.max(
+                                        document.documentElement.scrollHeight,
+                                        document.body ? document.body.scrollHeight : 0,
+                                    );
+                                    if (!el || !el.getBoundingClientRect) return {doc: {w: docW, h: docH}};
+                                    const r = el.getBoundingClientRect();
+                                    return {
+                                        box: {
+                                            x: Math.round(r.left + window.scrollX),
+                                            y: Math.round(r.top + window.scrollY),
+                                            w: Math.round(r.width),
+                                            h: Math.round(r.height),
+                                        },
+                                        doc: {w: docW, h: docH},
+                                    };
+                                }""",
+                                selector,
+                            )
+                            if isinstance(_box_data, dict):
+                                if isinstance(_box_data.get("box"), dict):
+                                    _target_box = _box_data["box"]
+                                if isinstance(_box_data.get("doc"), dict):
+                                    _doc_size = _box_data["doc"]
+                        except Exception:
+                            pass
+
                     try:
                         await on_step_progress({
                             "idx": idx,
@@ -8970,6 +9060,9 @@ async def _execute_automation_steps(
                             "timestamp_ms": int(_time_mod.time() * 1000),
                             "screenshot_b64": _live_b64,
                             "page_url": (page.url or "")[:300] if hasattr(page, "url") else "",
+                            # 2026-05 Step-marker overlay payload
+                            **({"target_box": _target_box} if _target_box else {}),
+                            **({"doc_size": _doc_size} if _doc_size else {}),
                         })
                     except Exception:
                         pass

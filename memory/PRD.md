@@ -270,3 +270,17 @@ The user's complaint was "stuck looking" + "fail ho raha hai". This iteration ad
 - Visual Recorder side (only live REPLAY frames changed)
 - Old recordings — pure additive, no schema changes
 - Job creation / proxy / lead-data / per-visit logic
+
+---
+
+## Iteration 7 — 2026-05-30: Step Markers overlay on live tile screenshots
+
+### Feature
+Each step's target element bounding box is now captured (full-page coords + doc size) and overlaid on the live tile screenshot as numbered colour-coded dots + dashed hit-box rectangles. The latest step gets a solid white ring + bold rectangle so the operator instantly sees "you are here". Toggle in the visual grid header turns the overlay on/off.
+
+### Files changed (2, +219 / −25)
+- **backend/real_user_traffic.py** — `page.evaluate` after each successful element-targeted step extracts the resolved element's `getBoundingClientRect` + window.scrollX/Y → full-page `{x,y,w,h}` + `doc_size {w,h}`. Pushed via `on_step_progress` event. Live-visit accumulator stores up to 50 markers per visit.
+- **frontend/src/pages/RealUserTrafficPage.js** — `showStepMarkers` state, `⊙ Step Markers ON/OFF` toggle in grid header, SVG overlay using `viewBox=doc_size` + `preserveAspectRatio="none"` so dots scale 1:1 with the rendered image. Colour map per action (click=blue, fill=emerald, select=violet, check=amber, hover=cyan, press=pink). Latest step rendered with solid ring + bigger radius. Legend strip pinned to bottom of scroll container.
+
+### Tests run (real Chromium e2e, all pass)
+- 3-step recording (fill → select → click) on a 3000px-tall page → all 3 events carry exact `target_box` matching element positions (100,200) / (400,600) / (200,1500) and shared `doc_size: 1280×3000` ✓
