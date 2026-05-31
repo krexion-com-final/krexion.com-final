@@ -397,3 +397,52 @@ Screenshot: Step #2 EVALUATE (random-pick) Edit modal only showed Selector + Tim
 - ZERO backend changes — both tools use the existing `detect-clickables` + `random_pick` step pipeline. The new tool is purely a UX label.
 - Recorded steps are interchangeable — a step created via Random Click can be edited via the same Edit modal's per-option editor (iteration 10), and vice versa.
 - Old recordings unaffected.
+
+
+---
+
+## Iteration 12 — 2026-05-31: Random Click polish + Native click upgrade for SPA/iframe offer pages
+
+### User report (Roman Urdu)
+> "mein ne json bana k live test kia to thk chala pr jab rut job chalai to proper kam ni hoa … pehla step skip ho giya … sab step pehle he page pr complete ho gy pr hoa kuch ni"
+>
+> URL: `https://krexion.com/api/t/amazon750` → stacks.app / uplevelrewards Amazon $750 Christmas Program.
+
+### Root cause (verified end-to-end with Playwright reproduction)
+1. Destination offer page renders the 3 CTA buttons (`Super Low Prices` / `Trendy Styles` / `Free Returns`) inside an **iframe** (offer-wall pattern used by stacks.app, uplevelrewards, etc.) and binds click handlers via `addEventListener` (SPA / React pattern).
+2. Visual Recorder emits the random-pick step as `action: evaluate` with a synthetic JS that does `document.querySelectorAll('button,...')` — top-frame only. Iframe content is **never seen**.
+3. Even on top-frame matches, synthetic `el.click()` does NOT always fire framework-bound listeners.
+4. Result: random-pick step "ran" silently — no error, no URL change, page stayed on the question screen. Subsequent steps (`wait_for_selector #email optional`, `fill #email optional`, `evaluate Continue click`, `wait`, `screenshot`) all skipped or no-op'd, and the visit "completed" without doing anything.
+5. Live Test inside the Visual Recorder DID work because the user was clicking the live page through the recorder's own session (real mouse, real frame focus). RUT replay was the only failing path.
+
+### Fix (additive, backwards-compatible)
+**1. `backend/real_user_traffic.py` — engine-level native-click upgrade (+~200 lines)**
+- New helpers `_extract_random_pick_labels(script)` and `_extract_text_click_label(script)` parse legacy `var labels=[...]` / `var t='...'` out of any `action: evaluate` step.
+- New helper `async _native_click_by_text(page, text, timeout_ms)`:
+  - Walks `page.frames` (main + every sub-frame).
+  - Tries `get_by_role('button', name=...)` → `get_by_role('link', name=...)` → `get_by_text(...)`.
+  - Playwright `Locator.click()` simulates a real user (pointerdown → mousedown → mouseup → click).
+  - `scroll_into_view_if_needed` before clicking.
+- `evaluate` step handler pre-scans the script: if pattern matches, picks one label in Python and routes through native click. On success the original JS is **skipped**. On failure, falls back to the existing JS-eval path — nothing previously-working regresses.
+
+**2. `backend/visual_recorder.py`** — `click_at` now treats `random_click` mode same as `random` (no live-page click, just pool the label).
+
+**3. `backend/server.py`** — `/click` endpoint pools `random_click` mode for the legacy click-to-pool flow.
+
+**4. `frontend/src/pages/VisualRecorderPage.js`** — Panel heading is dynamic: "Random Click" when `tool === 'random_click'`, else "Random Pick".
+
+### Tests added (`backend/tests/test_evaluate_native_click.py`) — all 7 pass in 1.44s
+- 5 parser unit tests (random-pick / text-click / escapes / rejection paths)
+- 2 Playwright integration tests: iframe + React listener verification, and the failure-path that returns `(False, '', err)` so the caller can fall back.
+
+### Backwards-compatibility
+- Old recordings (saved JSON like the user's) are auto-upgraded at replay time — no re-recording needed.
+- JS path always runs as fallback if native click fails.
+- Native-click upgrade only triggers for scripts matching the very specific patterns emitted by the Visual Recorder's two builder functions — hand-edited `evaluate` scripts are untouched.
+
+### Files changed
+- `backend/real_user_traffic.py` — engine-level native-click upgrade
+- `backend/visual_recorder.py` — `random_click` mode parity
+- `backend/server.py` — `/click` endpoint `random_click` parity
+- `frontend/src/pages/VisualRecorderPage.js` — dynamic panel heading
+- `backend/tests/test_evaluate_native_click.py` — new regression file

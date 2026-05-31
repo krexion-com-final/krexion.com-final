@@ -7044,6 +7044,134 @@ _PLACEHOLDER_SYNONYMS: Dict[str, List[str]] = {
 }
 
 
+# ── 2026-06 — Legacy evaluate-script upgrade helpers ──────────────────
+# The Visual Recorder emits "click by text" / "random pick by text"
+# steps as `action: evaluate` containing a synthetic JS that does
+# `el.click()`. Under SPA frameworks (React, Vue) and iframe-based
+# offer walls (stacks.app, uplevelrewards, etc.) synthetic clicks
+# frequently fail silently — page doesn't navigate, subsequent
+# optional steps skip past, and the visit "completes" without
+# actually doing anything.
+#
+# These helpers parse the script's `labels=[...]` (random-pick) or
+# `t='...'` (single text click) arrays so the RUT engine can run
+# the click via Playwright's NATIVE locator API — which fires real
+# pointer/mouse events, walks all frames, and waits for actionable
+# state. Backwards-compatible: if extraction fails OR native click
+# fails, the engine falls back to running the original JS.
+
+def _extract_random_pick_labels(script: Any) -> Optional[List[str]]:
+    """Parse `var labels=['a','b','c']` from a legacy random-pick
+    evaluate script. Returns the list of labels or None if pattern
+    doesn't match. Handles JS-escaped quotes / backslashes.
+    """
+    import re as _re
+    if not isinstance(script, str):
+        return None
+    m = _re.search(r"var\s+labels\s*=\s*\[([^\]]*)\]", script)
+    if not m:
+        return None
+    body = m.group(1)
+    items = _re.findall(r"'((?:[^'\\]|\\.)*)'", body)
+    out: List[str] = []
+    for it in items:
+        t = it.replace("\\'", "'").replace("\\\\", "\\").strip()
+        if t:
+            out.append(t)
+    return out or None
+
+
+def _extract_text_click_label(script: Any) -> Optional[str]:
+    """Parse `var t='Continue'` from a legacy text-click evaluate
+    script. Returns the label or None. Only matches the simple
+    single-text-click builder, NOT the random-pick variant (which
+    uses `var labels=[...]`).
+    """
+    import re as _re
+    if not isinstance(script, str):
+        return None
+    # Bail out if this looks like a random-pick script.
+    if _re.search(r"var\s+labels\s*=\s*\[", script):
+        return None
+    m = _re.search(r"var\s+t\s*=\s*'((?:[^'\\]|\\.)*)'", script)
+    if not m:
+        return None
+    raw = m.group(1)
+    t = raw.replace("\\'", "'").replace("\\\\", "\\").strip()
+    return t or None
+
+
+async def _native_click_by_text(page: Any, text: str, timeout_ms: int = 8000) -> Tuple[bool, str, str]:
+    """Click an element by visible text using Playwright's native
+    locator API. Searches the main frame AND every sub-frame
+    (iframe / same-origin). Tries role-based locators first
+    (button / link → most reliable on SPA pages) then falls back
+    to plain `get_by_text`.
+
+    Returns:
+        (clicked: bool, frame_url: str, error: str)
+    """
+    if not isinstance(text, str):
+        return False, "", "non-string text"
+    text = text.strip()
+    if not text:
+        return False, "", "empty text"
+
+    last_err = ""
+    try:
+        frames = list(page.frames)
+    except Exception:
+        frames = []
+    if not frames:
+        try:
+            frames = [page.main_frame]
+        except Exception:
+            frames = []
+
+    for frame in frames:
+        try:
+            frame_url = getattr(frame, "url", "") or ""
+        except Exception:
+            frame_url = ""
+
+        # Strategy 1: role-based (button / link) — most reliable on SPA
+        for role in ("button", "link"):
+            try:
+                loc = frame.get_by_role(role, name=text).first
+                if await loc.count() > 0:
+                    try:
+                        await loc.scroll_into_view_if_needed(timeout=2000)
+                    except Exception:
+                        pass
+                    try:
+                        await loc.click(timeout=timeout_ms)
+                        return True, frame_url, ""
+                    except Exception as e:  # noqa: BLE001
+                        last_err = f"role={role}: {type(e).__name__}: {str(e)[:90]}"
+            except Exception as e:  # noqa: BLE001
+                last_err = f"role={role}: {type(e).__name__}: {str(e)[:90]}"
+
+        # Strategy 2: plain text locator (fuzzy)
+        try:
+            loc = frame.get_by_text(text, exact=False).first
+            if await loc.count() > 0:
+                try:
+                    await loc.scroll_into_view_if_needed(timeout=2000)
+                except Exception:
+                    pass
+                try:
+                    await loc.click(timeout=timeout_ms)
+                    return True, frame_url, ""
+                except Exception as e:  # noqa: BLE001
+                    last_err = f"text: {type(e).__name__}: {str(e)[:90]}"
+        except Exception as e:  # noqa: BLE001
+            last_err = f"text: {type(e).__name__}: {str(e)[:90]}"
+
+    return False, "", last_err or "no match in any frame"
+
+
+
+
 def _substitute(template: str, row: Dict[str, Any]) -> str:
     if not isinstance(template, str):
         return template
@@ -8512,6 +8640,68 @@ async def _execute_automation_steps(
                         pass
                 elif action == "evaluate":
                     js = _substitute(step.get("script") or step.get("js") or "", row)
+                    # ── 2026-06 native-click upgrade ──────────────────
+                    # The Visual Recorder emits "click by text" and
+                    # "random pick by text" steps as `action: evaluate`
+                    # containing a synthetic JS that does `el.click()`.
+                    # Under SPA frameworks (React, Vue) and iframe-based
+                    # offer walls (stacks.app, uplevelrewards, etc.)
+                    # synthetic clicks frequently fail silently — page
+                    # doesn't navigate, optional follow-up steps skip
+                    # past, visit "completes" without any work done.
+                    #
+                    # We pre-scan the script for known legacy patterns:
+                    #   • `var labels=[...]` → random-pick — pick one
+                    #     label here in Python so the choice is logged
+                    #     and the same label survives a retry loop.
+                    #   • `var t='...'`      → single text-click.
+                    # If matched, route through Playwright's native
+                    # locator (real mouse events, walks all frames,
+                    # waits for actionable state). On native success we
+                    # SKIP the original JS to avoid double-clicking.
+                    # On native failure we fall back to JS execution so
+                    # nothing previously-working regresses.
+                    _native_handled = False
+                    _native_picked: Optional[str] = None
+                    try:
+                        _rp_labels = _extract_random_pick_labels(js)
+                        if _rp_labels:
+                            import random as _rnd_pick
+                            _native_picked = _rnd_pick.choice(_rp_labels)
+                            _ok_n, _frame_url_n, _err_n = await _native_click_by_text(
+                                page, _native_picked, timeout_ms=8000
+                            )
+                            if _ok_n:
+                                logger.info(
+                                    f"[evaluate→native_click] random-pick='{_native_picked}' "
+                                    f"frame='{(_frame_url_n or '')[:60]}'"
+                                )
+                                _native_handled = True
+                            else:
+                                logger.warning(
+                                    f"[evaluate→native_click] random-pick='{_native_picked}' "
+                                    f"failed: {_err_n[:100]} — falling back to JS"
+                                )
+                        else:
+                            _tc_label = _extract_text_click_label(js)
+                            if _tc_label:
+                                _native_picked = _tc_label
+                                _ok_n, _frame_url_n, _err_n = await _native_click_by_text(
+                                    page, _tc_label, timeout_ms=8000
+                                )
+                                if _ok_n:
+                                    logger.info(
+                                        f"[evaluate→native_click] text-click='{_tc_label}' "
+                                        f"frame='{(_frame_url_n or '')[:60]}'"
+                                    )
+                                    _native_handled = True
+                                else:
+                                    logger.warning(
+                                        f"[evaluate→native_click] text-click='{_tc_label}' "
+                                        f"failed: {_err_n[:100]} — falling back to JS"
+                                    )
+                    except Exception as _pre_e:  # noqa: BLE001
+                        logger.warning(f"[evaluate→native_click] pre-processor error: {_pre_e}")
                     # ── 2026-05 fix ───────────────────────────────────────
                     # Visual Recorder emits `evaluate` steps that may
                     # trigger navigation (e.g. `el.click()` on a button
@@ -8545,31 +8735,32 @@ async def _execute_automation_steps(
                     # changed (proof of navigation), and continue
                     # normally to the next step. The downstream
                     # wait_for_load_state below handles the new page.
-                    try:
-                        await page.evaluate(js)
-                    except Exception as _ev_err:
-                        _ev_msg = str(_ev_err).lower()
-                        _navigated = False
+                    if not _native_handled:
                         try:
-                            _navigated = (page.url != _url_before)
-                        except Exception:
+                            await page.evaluate(js)
+                        except Exception as _ev_err:
+                            _ev_msg = str(_ev_err).lower()
                             _navigated = False
-                        # If the destroyed-context happened because of a
-                        # navigation (URL changed OR error explicitly
-                        # mentions navigation), treat as success.
-                        if (
-                            "execution context was destroyed" in _ev_msg
-                            or "execution context" in _ev_msg
-                            or "navigation" in _ev_msg
-                            or _navigated
-                        ):
-                            logger.info(
-                                f"[evaluate] context destroyed by navigation — treating as success "
-                                f"(was: {_url_before}, now: {page.url if _navigated else '?'})"
-                            )
-                        else:
-                            # Real script error (syntax, ReferenceError, etc.)
-                            raise
+                            try:
+                                _navigated = (page.url != _url_before)
+                            except Exception:
+                                _navigated = False
+                            # If the destroyed-context happened because of a
+                            # navigation (URL changed OR error explicitly
+                            # mentions navigation), treat as success.
+                            if (
+                                "execution context was destroyed" in _ev_msg
+                                or "execution context" in _ev_msg
+                                or "navigation" in _ev_msg
+                                or _navigated
+                            ):
+                                logger.info(
+                                    f"[evaluate] context destroyed by navigation — treating as success "
+                                    f"(was: {_url_before}, now: {page.url if _navigated else '?'})"
+                                )
+                            else:
+                                # Real script error (syntax, ReferenceError, etc.)
+                                raise
                     # Short polling window to detect navigation kicked
                     # off by the JS (location.assign / location.href /
                     # form.submit / el.click() on anchor or submit btn).
