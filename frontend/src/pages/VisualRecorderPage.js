@@ -10,6 +10,7 @@ import {
   Hand,
   Type,
   Shuffle,
+  MousePointerClick,
   Flag,
   Clock,
   ScrollText,
@@ -61,7 +62,8 @@ const TOOLS = [
   { id: "form_fill", icon: Type,        label: "Form Fill",   key: "2", help: "Click an input, then bind to Excel column" },
   { id: "dropdown",  icon: ChevronDown, label: "Dropdown",    key: "3", help: "Click a <select> dropdown to bind option / Excel column" },
   { id: "check",     icon: CheckSquare, label: "Check Box",   key: "4", help: "Click a checkbox (consent / agree / opt-in) — works on hidden CSS-styled boxes too" },
-  { id: "random",    icon: Shuffle,     label: "Random Pick", key: "5", help: "Auto-detect buttons on page → tick the ones to randomise each run" },
+  { id: "random",    icon: Shuffle,     label: "Random Pick", key: "5", help: "Auto-detect form-selection buttons (Yes/No/radio/checkbox groups) on page → tick the ones to randomise each run" },
+  { id: "random_click", icon: MousePointerClick, label: "Random Click", key: "0", help: "Auto-detect ALL clickable CTAs (buttons/links/ads) on the page → tick the ones to randomly click ONE per visit (for offer-flow A/B variants)" },
   { id: "capture",   icon: ImageIcon,   label: "Capture",     key: "6", help: "Insert a screenshot marker — shown in Live Activity" },
   { id: "final",     icon: Flag,        label: "Mark Final",  key: "7", help: "Capture this page as conversion target" },
   { id: "nav_only",  icon: ArrowRight,  label: "Move",        key: "8", help: "Click without recording — use to navigate past a Random Pick step" },
@@ -655,11 +657,11 @@ export default function VisualRecorderPage() {
         }
       }
       // 1-8 — switch tool (only when nothing has focus)
-      if (!editable && !ctrl && /^[1-8]$/.test(e.key)) {
+      if (!editable && !ctrl && /^[1-9]$/.test(e.key)) {
         const t = TOOLS[Number(e.key) - 1];
         if (t) {
           setTool(t.id);
-          if (t.id !== "random") {
+          if (t.id !== "random" && t.id !== "random_click") {
             setPendingRandom([]);
             setDetectedClickables([]);
             setSelectedRandomKeys(new Set());
@@ -837,7 +839,7 @@ export default function VisualRecorderPage() {
             );
           }
         }
-      } else if (tool === "random" && d.element) {
+      } else if ((tool === "random" || tool === "random_click") && d.element) {
         const txt = (d.element.text || "").trim();
         if (txt) {
           setPendingRandom((prev) => [...prev, txt]);
@@ -3055,15 +3057,15 @@ export default function VisualRecorderPage() {
                           return;
                         }
                         setTool(t.id);
-                        if (t.id !== "random") {
+                        if (t.id !== "random" && t.id !== "random_click") {
                           setPendingRandom([]);
                           setDetectedClickables([]);
                           setSelectedRandomKeys(new Set());
                         } else {
                           // 2026-01: auto-detect all clickables on the
                           // current page the moment the user picks
-                          // the Random Pick tool. No need to click each
-                          // button manually anymore.
+                          // the Random Pick / Random Click tool. No need
+                          // to click each button manually anymore.
                           detectClickables();
                         }
                       }}
@@ -3094,7 +3096,7 @@ export default function VisualRecorderPage() {
                   by /detect-clickables when the user selects the "Random
                   Pick" tool. User ticks the candidates they want in the
                   random pool, then clicks "Build Random Step". */}
-              {tool === "random" && (detectingClickables || detectedClickables.length > 0) && (
+              {(tool === "random" || tool === "random_click") && (detectingClickables || detectedClickables.length > 0) && (
                 <div
                   className="mt-3 p-3 rounded-lg bg-amber-950/40 border border-amber-700/40"
                   data-testid="vr-random-checklist-panel"
@@ -3194,7 +3196,7 @@ export default function VisualRecorderPage() {
               {/* Legacy click-to-pool flow — still works for users who
                   prefer clicking each candidate on the live page. Only
                   shown when the new checklist isn't being used. */}
-              {tool === "random" && detectedClickables.length === 0 && !detectingClickables && pendingRandom.length > 0 && (
+              {(tool === "random" || tool === "random_click") && detectedClickables.length === 0 && !detectingClickables && pendingRandom.length > 0 && (
                 <div className="mt-3 p-3 rounded-lg bg-amber-950/40 border border-amber-700/40">
                   <div className="text-xs text-amber-300 mb-2 font-medium">
                     Random pool ({pendingRandom.length}): click more to add, then "Build Random Step"

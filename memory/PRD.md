@@ -374,3 +374,26 @@ Screenshot: Step #2 EVALUATE (random-pick) Edit modal only showed Selector + Tim
 ### Files changed (2, +272 / −1, zero deletions, zero renames)
 - `backend/visual_recorder.py` (+131) — builder, parser, update_step branch, ordering fix
 - `frontend/src/pages/VisualRecorderPage.js` (+141) — hydration, save patch, modal panel
+
+---
+
+## Iteration 11 — 2026-05-30: Random Click tool alongside Random Pick
+
+### User report
+> "random pick k sath random click ka option b ho jahan random selection krni ho random selection ho jay jahan random click krna ho random click ho jay"
+
+### What was built
+- New toolbar entry **"Random Click"** with `MousePointerClick` icon and hotkey **0** (Random Pick keeps **5**).
+- Underlying flow + recorded step shape is identical to Random Pick (`action: evaluate` with the new advanced builder), but the toolbar gives the operator a CLEAR mental separation:
+  - **Random Pick** = randomize a form selection (Yes/No / radio / checkbox group)
+  - **Random Click** = randomly click ONE CTA from multiple page buttons / links / ads (offer-flow A/B variants)
+- Help tooltip updated for Random Pick to be more specific ("form-selection buttons"), Random Click tooltip clarifies "ALL clickable CTAs … to randomly click ONE per visit".
+- All `tool === "random"` checks in the page (keyboard hotkey 5, toolbar click handler, panel render, /click handler) expanded to also accept `tool === "random_click"`. Auto-detect-clickables flow kicks in for both modes.
+
+### Files changed (1, +14 / −4)
+- `frontend/src/pages/VisualRecorderPage.js` — `MousePointerClick` icon import, new TOOLS entry, 5 `tool === "random"` checks broadened to `(tool === "random" || tool === "random_click")`, keyboard regex `[1-8]` → `[1-9]` so new hotkey 0 is reachable.
+
+### Why minimal & low-risk
+- ZERO backend changes — both tools use the existing `detect-clickables` + `random_pick` step pipeline. The new tool is purely a UX label.
+- Recorded steps are interchangeable — a step created via Random Click can be edited via the same Edit modal's per-option editor (iteration 10), and vice versa.
+- Old recordings unaffected.
