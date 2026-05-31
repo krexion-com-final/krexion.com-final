@@ -3108,7 +3108,7 @@ export default function VisualRecorderPage() {
                           <Loader2 className="w-3 h-3 animate-spin" /> Detecting clickable elements on the page…
                         </span>
                       ) : (
-                        <>Random Pick — tick the buttons for the random pool ({selectedRandomKeys.size}/{detectedClickables.length} selected)</>
+                        <>{tool === "random_click" ? "Random Click" : "Random Pick"} — tick the buttons for the random pool ({selectedRandomKeys.size}/{detectedClickables.length} selected)</>
                       )}
                     </div>
                     <button
@@ -3199,7 +3199,7 @@ export default function VisualRecorderPage() {
               {(tool === "random" || tool === "random_click") && detectedClickables.length === 0 && !detectingClickables && pendingRandom.length > 0 && (
                 <div className="mt-3 p-3 rounded-lg bg-amber-950/40 border border-amber-700/40">
                   <div className="text-xs text-amber-300 mb-2 font-medium">
-                    Random pool ({pendingRandom.length}): click more to add, then "Build Random Step"
+                    {tool === "random_click" ? "Random Click" : "Random Pick"} pool ({pendingRandom.length}): click more to add, then "Build Random Step"
                   </div>
                   <div className="flex flex-wrap gap-1 mb-2">
                     {pendingRandom.map((t, i) => (

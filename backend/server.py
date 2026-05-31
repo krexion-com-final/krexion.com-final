@@ -14977,8 +14977,10 @@ async def vr_click(session_id: str, req: VRClickReq, user: dict = Depends(get_cu
         raise HTTPException(status_code=404, detail="Session not found")
     _vr_require_ready(sess)
     out = await vr.click_at(sess, req.x, req.y, mode=req.mode, header_name=req.header_name, group_id=req.group_id)
-    if req.mode == "random" and out.get("element"):
-        # Track for later /group-random call
+    if req.mode in ("random", "random_click") and out.get("element"):
+        # Track for later /group-random call (same pool serves both
+        # Random Pick and Random Click tools — they emit the same
+        # random-pick evaluate step).
         if not hasattr(sess, "_pending_random"):
             sess._pending_random = []
         txt = (out["element"].get("text") or "").strip()

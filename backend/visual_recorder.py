@@ -1135,7 +1135,7 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
         # JS below (label→checkbox walk) so the live page reflects the
         # actual toggled state — a blind mouse.click() at coords could
         # land on a hidden input and do nothing.
-        if mode not in ("random", "check"):
+        if mode not in ("random", "random_click", "check"):
             try:
                 await sess.page.mouse.click(info["x"], info["y"])
             except Exception:
@@ -1408,7 +1408,7 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
                 )
         else:
             step = {"action": "wait_for_selector", "selector": sel, "timeout": 8000, "optional": True}
-    elif mode == "random":
+    elif mode in ("random", "random_click"):
         # Don't add a step — caller will batch via /group-random
         extra["pending_random_text"] = text
         extra["group_id"] = group_id
