@@ -337,3 +337,40 @@ When Chromium fails to fetch the target URL (dead proxy, DNS failure, SSL handsh
 - T8: unknown chrome-error title → `unknown_load_error` ✓
 - T9: `reload_page()` recovers + page_status flips to `ok` ✓
 
+
+---
+
+## Iteration 10 — 2026-05-30: Random-pick options editable with per-option selector/xpath
+
+### User report
+Screenshot: Step #2 EVALUATE (random-pick) Edit modal only showed Selector + Timeout fields. User asked: "edit mein random jo selection ki har selection k selector or xpath wagera add krne ka b option ho yan random selection ko b bad mein edit krne ka option ho".
+
+### What was built
+**backend/visual_recorder.py**:
+- New `_build_random_pick_advanced(options)` — emits an `evaluate` script that picks one option at random, then tries CSS selector → XPath → text-contains per option. Stores the structured options as `step.pick_options` so the modal can re-edit later.
+- New `_parse_legacy_random_pick(script)` — extracts the `var labels=[...]` array from old recordings so the Edit modal can show them as editable rows even before any custom selectors are added.
+- `_EDITABLE_STEP_FIELDS` whitelist extended with `pick_options`.
+- `update_step` validates incoming `pick_options` as a list of dicts (sanitises huge values: text ≤200, selector/xpath ≤500), rebuilds the script via the advanced builder, and stores `pick_options` on the step. Empty list / non-list inputs are gracefully ignored (no orphan field).
+- Fixed an ordering bug where the generic-string branch would catch malformed `pick_options: "string"` and write it as-is — now skipped via `isinstance(v, str) and k not in ("pick_options", "fallbacks")`.
+
+**frontend/src/pages/VisualRecorderPage.js**:
+- `openEditStep` hydrates a `pickOptions` array from `step.pick_options` (new format) OR falls back to a JS regex parse of `var labels=[…]` in the script (legacy recordings).
+- `saveEditStep` sends `patch.pick_options` when the user touched any option field.
+- New collapsible **"Random-pick options"** panel (violet themed) in the Edit modal, shown ONLY for `evaluate` action AND when parseable options exist. Each option has:
+  - **Visible text** input (top row)
+  - **CSS selector** input (optional)
+  - **XPath** input (optional)
+  - **× remove** button
+- **+ Add option** button to grow the list, plus "Clear all" + change-indicator.
+
+### Tests run (6 backend cases, all pass)
+- T1: Legacy `var labels=[...]` parser extracts 3 options ✓
+- T2: `pick_options` patch rebuilds script with CSS + xpath + text strategies ✓
+- T3: Oversized text/selector/xpath truncated to 200/500/500 ✓
+- T4: Empty list clears `pick_options` field ✓
+- T5: String input rejected — no orphan field written ✓
+- T6: Dict input rejected ✓
+
+### Files changed (2, +272 / −1, zero deletions, zero renames)
+- `backend/visual_recorder.py` (+131) — builder, parser, update_step branch, ordering fix
+- `frontend/src/pages/VisualRecorderPage.js` (+141) — hydration, save patch, modal panel

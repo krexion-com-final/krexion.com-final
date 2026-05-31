@@ -364,6 +364,103 @@ def _build_text_click_evaluate(text: str) -> Dict[str, Any]:
     return {"action": "evaluate", "script": script}
 
 
+def _build_random_pick_advanced(options: List[Dict[str, str]]) -> Dict[str, Any]:
+    """2026-05 — Random-pick with PER-OPTION fallback strategies.
+
+    Each option is a dict {text, selector, xpath} (any/all may be empty).
+    The emitted JS picks one option at random then tries, in order:
+      1. CSS selector (if provided + matches something)
+      2. XPath (if provided + matches something)
+      3. Text-contains fallback (same heuristic as the legacy builder)
+
+    This addresses the user request: "edit mein random jo selection ki
+    har selection k selector or xpath wagera add krne ka b option ho".
+    Recorded as `action: random_pick_advanced` so old recordings keep
+    using `evaluate` and the engine treats the new shape identically
+    via this builder's emitted script.
+    """
+    safe_options = []
+    for o in options:
+        if not isinstance(o, dict):
+            continue
+        t = (o.get("text") or "").replace("\\", "\\\\").replace("'", "\\'").replace("\n", " ").strip()
+        s = (o.get("selector") or "").replace("\\", "\\\\").replace("'", "\\'").strip()
+        x = (o.get("xpath") or "").replace("\\", "\\\\").replace("'", "\\'").strip()
+        if not (t or s or x):
+            continue
+        safe_options.append({"t": t, "s": s, "x": x})
+    if not safe_options:
+        return {"action": "evaluate", "script": "(function(){})();", "pick_options": []}
+
+    opts_arr = "[" + ",".join(
+        "{t:'" + o["t"] + "',s:'" + o["s"] + "',x:'" + o["x"] + "'}"
+        for o in safe_options
+    ) + "]"
+    script = (
+        "(function(){var opts=" + opts_arr + ";"
+        "var pick=opts[Math.floor(Math.random()*opts.length)];"
+        "var el=null;"
+        # Strategy 1 — CSS selector
+        "if(pick.s){try{el=document.querySelector(pick.s);}catch(e){}}"
+        # Strategy 2 — XPath
+        "if(!el&&pick.x){try{var r=document.evaluate(pick.x,document,null,9,null);el=r.singleNodeValue;}catch(e){}}"
+        # Strategy 3 — Text contains (same as legacy)
+        "if(!el&&pick.t){var tp=pick.t.replace(/\\s+/g,' ').trim().toLowerCase();"
+        "var match=function(e){var st=window.getComputedStyle(e);"
+        "if(st.display==='none'||st.visibility==='hidden')return false;"
+        "var xt=((e.innerText||e.textContent||e.value||'')+'').replace(/\\s+/g,' ').trim().toLowerCase();"
+        "if(!xt)return false;if(xt===tp)return true;"
+        "if(tp.length>=12&&xt.indexOf(tp)!==-1)return true;"
+        "if(tp.length>=12&&xt.length>=8&&tp.indexOf(xt)!==-1)return true;"
+        "return false;};"
+        "var a=Array.from(document.querySelectorAll('a')).filter(match);"
+        "if(a.length)el=a[0];"
+        "if(!el){var b=Array.from(document.querySelectorAll('button,div,span,label,input,[role=button],[role=checkbox]')).filter(match);if(b.length)el=b[0];}}"
+        # Common click logic
+        "if(!el)return;el.scrollIntoView({block:'center'});"
+        "if(el.tagName==='A'&&el.href&&!el.target){window.location.assign(el.href);return;}"
+        "if(el.tagName==='LABEL'&&el.htmlFor){var c=document.getElementById(el.htmlFor);if(c){c.scrollIntoView({block:'center'});c.click();return;}}"
+        "var inner=el.querySelector&&el.querySelector('a[href]');"
+        "if(inner&&inner.href&&!inner.target){window.location.assign(inner.href);return;}"
+        "var box=el.querySelector&&el.querySelector('input[type=checkbox],input[type=radio]');"
+        "if(box&&!box.checked){box.click();return;}"
+        "el.click();"
+        "var isSubmit=(el.tagName==='INPUT'||el.tagName==='BUTTON')&&(el.type==='submit'||(el.getAttribute&&el.getAttribute('type')==='submit'));"
+        "if(isSubmit){var f=el.form||(el.closest&&el.closest('form'));"
+        "if(f){setTimeout(function(){try{if(!f._krx_submitted){f._krx_submitted=true;f.submit();}}catch(e){}},150);}}"
+        "})();"
+    )
+    return {
+        "action": "evaluate",
+        "script": script,
+        # Persist the structured options so the Edit modal can re-render
+        # them next time the user opens this step.
+        "pick_options": safe_options,
+    }
+
+
+def _parse_legacy_random_pick(script: str) -> List[Dict[str, str]]:
+    """Extract the `labels=[...]` array from an old random-pick evaluate
+    script so the Edit modal can show the picks as editable rows even
+    for recordings created BEFORE pick_options existed.
+    """
+    import re
+    if not isinstance(script, str):
+        return []
+    m = re.search(r"var\s+labels\s*=\s*\[([^\]]*)\]", script)
+    if not m:
+        return []
+    body = m.group(1)
+    items = re.findall(r"'((?:[^'\\]|\\.)*)'", body)
+    out = []
+    for it in items:
+        # Reverse JS-escape: \\' → ' , \\\\ → \\
+        t = it.replace("\\'", "'").replace("\\\\", "\\")
+        if t.strip():
+            out.append({"text": t.strip(), "selector": "", "xpath": ""})
+    return out
+
+
 def _build_random_pick_evaluate(texts: List[str]) -> Dict[str, Any]:
     """Pick one of N elements (by visible text) at random and click.
 
@@ -2549,6 +2646,10 @@ _EDITABLE_STEP_FIELDS = {
     # when the original recording captured only a brittle CSS selector.
     # See visual_recorder._build_fallbacks for the schema.
     "fallbacks",
+    # 2026-05 — random-pick advanced editor. Lets the operator edit
+    # an existing evaluate step to add per-option selector/xpath
+    # fallbacks. See _build_random_pick_advanced.
+    "pick_options",
 }
 
 
@@ -2580,7 +2681,11 @@ def update_step(sess: RecorderSession, index: int, patch: Dict[str, Any]) -> Dic
             continue
         # Normalise empty strings to None for optional text fields so the
         # downstream replay doesn't see "" and try to act on it.
-        if isinstance(v, str):
+        # 2026-05 — pick_options / fallbacks must NOT be caught by the
+        # generic string branch (a malformed string input would slip
+        # into `step[k]` untouched and break the replay engine). They
+        # have dedicated dict/list validators below.
+        if isinstance(v, str) and k not in ("pick_options", "fallbacks"):
             v_clean = v.strip()
             if k in ("value", "name", "match_by", "state"):
                 step[k] = v_clean or None
@@ -2643,6 +2748,31 @@ def update_step(sess: RecorderSession, index: int, patch: Dict[str, Any]) -> Dic
                 if "fallbacks" in step:
                     del step["fallbacks"]
                 applied[k] = None
+        elif k == "pick_options":
+            # 2026-05 — Random-pick advanced editor. Replaces script
+            # with freshly-built evaluate JS that tries CSS → xpath →
+            # text-contains per option.
+            if not isinstance(v, list):
+                continue
+            clean_opts = []
+            for o in v:
+                if not isinstance(o, dict):
+                    continue
+                t = (o.get("text") or "").strip()[:200]
+                s = (o.get("selector") or "").strip()[:500]
+                x = (o.get("xpath") or "").strip()[:500]
+                if t or s or x:
+                    clean_opts.append({"text": t, "selector": s, "xpath": x})
+            if clean_opts:
+                rebuilt = _build_random_pick_advanced(clean_opts)
+                step["action"] = "evaluate"
+                step["script"] = rebuilt["script"]
+                step["pick_options"] = clean_opts
+                applied[k] = clean_opts
+            else:
+                if "pick_options" in step:
+                    del step["pick_options"]
+                applied[k] = []
         else:
             step[k] = v
             applied[k] = v

@@ -1385,6 +1385,30 @@ export default function VisualRecorderPage() {
         fb_tag: fb.tag || "",
         fb_attrs_text: fbAttrsText,
         fallbacksEdited: false,  // flipped to true the moment user touches any fb_* field
+        // ── 2026-05: Random-pick advanced editor state ──
+        // Pre-populate from step.pick_options if present (new format),
+        // otherwise parse legacy `var labels=['x','y','z']` from script.
+        pickOptions: (() => {
+          if (Array.isArray(s.pick_options) && s.pick_options.length > 0) {
+            return s.pick_options.map(o => ({
+              text: o.text || "",
+              selector: o.selector || "",
+              xpath: o.xpath || "",
+            }));
+          }
+          // Legacy parsing — extract labels=['…','…',…] from JS
+          if ((s.action || "").toLowerCase() === "evaluate" && typeof s.script === "string") {
+            const m = s.script.match(/var\s+labels\s*=\s*\[([^\]]*)\]/);
+            if (m) {
+              const items = [...m[1].matchAll(/'((?:[^'\\]|\\.)*)'/g)].map(x =>
+                x[1].replace(/\\'/g, "'").replace(/\\\\/g, "\\")
+              );
+              return items.map(t => ({ text: t.trim(), selector: "", xpath: "" }));
+            }
+          }
+          return [];
+        })(),
+        pickOptionsEdited: false,
       },
     });
   };
@@ -1746,6 +1770,21 @@ export default function VisualRecorderPage() {
         if (Object.keys(attrs).length > 0) fb.attrs = attrs;
       }
       patch.fallbacks = Object.keys(fb).length > 0 ? fb : null;
+    }
+
+    // 2026-05 — Random-pick advanced editor.
+    // When user edited the per-option list, send pick_options patch.
+    // Backend rebuilds the evaluate script with CSS → xpath → text
+    // fallback per option.
+    if (draft.pickOptionsEdited === true) {
+      const cleaned = (draft.pickOptions || [])
+        .map(o => ({
+          text: (o.text || "").trim(),
+          selector: (o.selector || "").trim(),
+          xpath: (o.xpath || "").trim(),
+        }))
+        .filter(o => o.text || o.selector || o.xpath);
+      patch.pick_options = cleaned;
     }
 
     try {
@@ -4748,6 +4787,108 @@ export default function VisualRecorderPage() {
                     </div>
                   </label>
                 </div>
+              )}
+
+              {/* ── 2026-05: Random-pick advanced editor ─────────────
+                  Shows ONLY for `evaluate` steps that have parseable
+                  random-pick options (either step.pick_options or
+                  legacy `var labels=[...]` in script). Lets the operator
+                  add a CSS selector + XPath alongside each option's
+                  visible text — RUT replay tries them in order so
+                  random picks survive selector renames or text edits. */}
+              {(editingStep.draft.action || "").toLowerCase() === "evaluate"
+                && Array.isArray(editingStep.draft.pickOptions)
+                && editingStep.draft.pickOptions.length > 0 && (
+                <details
+                  className="rounded border border-violet-900/60 bg-violet-950/20"
+                  open={true}
+                  data-testid="vr-edit-pick-options-details"
+                >
+                  <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-violet-200 hover:bg-violet-900/30 transition-colors">
+                    <span className="inline-flex items-center gap-1.5">
+                      <Shuffle className="w-3.5 h-3.5" />
+                      Random-pick options ({editingStep.draft.pickOptions.length})
+                      <span className="text-[10px] text-violet-400/70 font-normal">
+                        — each option can have selector + xpath fallback
+                      </span>
+                    </span>
+                  </summary>
+                  <div className="px-3 pb-3 pt-1 space-y-2.5">
+                    <div className="text-[11px] text-zinc-400 leading-relaxed">
+                      Pick one at random per visit. For each option you can add a CSS selector + XPath — RUT tries selector → xpath → text-contains in order.
+                    </div>
+                    {editingStep.draft.pickOptions.map((opt, oi) => (
+                      <div key={oi} className="rounded border border-violet-900/40 bg-zinc-900/60 p-2 space-y-1.5">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-violet-300/70 font-mono">#{oi + 1}</span>
+                          <input
+                            type="text"
+                            value={opt.text}
+                            onChange={(e) => {
+                              const arr = [...editingStep.draft.pickOptions];
+                              arr[oi] = { ...arr[oi], text: e.target.value };
+                              setEditingStep({ ...editingStep, draft: { ...editingStep.draft, pickOptions: arr, pickOptionsEdited: true } });
+                            }}
+                            placeholder="Visible text (e.g. Yes / Continue / California)"
+                            className="flex-1 px-2 py-1 rounded bg-zinc-900 border border-zinc-700 focus:border-violet-500 text-zinc-200 text-xs outline-none"
+                            data-testid={`vr-edit-pickopt-text-${oi}`}
+                          />
+                          <button
+                            onClick={() => {
+                              const arr = editingStep.draft.pickOptions.filter((_, i) => i !== oi);
+                              setEditingStep({ ...editingStep, draft: { ...editingStep.draft, pickOptions: arr, pickOptionsEdited: true } });
+                            }}
+                            className="text-rose-400 hover:text-rose-200 text-xs px-1.5 py-0.5 rounded hover:bg-rose-900/30"
+                            title="Remove this option"
+                            data-testid={`vr-edit-pickopt-remove-${oi}`}
+                          >
+                            ×
+                          </button>
+                        </div>
+                        <input
+                          type="text"
+                          value={opt.selector}
+                          onChange={(e) => {
+                            const arr = [...editingStep.draft.pickOptions];
+                            arr[oi] = { ...arr[oi], selector: e.target.value };
+                            setEditingStep({ ...editingStep, draft: { ...editingStep.draft, pickOptions: arr, pickOptionsEdited: true } });
+                          }}
+                          placeholder="CSS selector (optional, e.g. #yes-btn or button.cta)"
+                          className="w-full px-2 py-1 rounded bg-zinc-900 border border-zinc-700 focus:border-violet-500 text-zinc-200 text-xs font-mono outline-none"
+                          data-testid={`vr-edit-pickopt-selector-${oi}`}
+                        />
+                        <input
+                          type="text"
+                          value={opt.xpath}
+                          onChange={(e) => {
+                            const arr = [...editingStep.draft.pickOptions];
+                            arr[oi] = { ...arr[oi], xpath: e.target.value };
+                            setEditingStep({ ...editingStep, draft: { ...editingStep.draft, pickOptions: arr, pickOptionsEdited: true } });
+                          }}
+                          placeholder="XPath (optional, e.g. //button[@data-value='yes'])"
+                          className="w-full px-2 py-1 rounded bg-zinc-900 border border-zinc-700 focus:border-violet-500 text-zinc-200 text-xs font-mono outline-none"
+                          data-testid={`vr-edit-pickopt-xpath-${oi}`}
+                        />
+                      </div>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const arr = [...editingStep.draft.pickOptions, { text: "", selector: "", xpath: "" }];
+                        setEditingStep({ ...editingStep, draft: { ...editingStep.draft, pickOptions: arr, pickOptionsEdited: true } });
+                      }}
+                      className="w-full py-1.5 rounded border border-dashed border-violet-700/50 text-violet-300 text-xs hover:bg-violet-900/30 hover:border-violet-500 transition-colors"
+                      data-testid="vr-edit-pickopt-add"
+                    >
+                      + Add option
+                    </button>
+                    {editingStep.draft.pickOptionsEdited && (
+                      <div className="text-[10px] text-violet-300/80">
+                        ✓ Options will be saved when you click "Save" — script will be rebuilt with new fallback chain.
+                      </div>
+                    )}
+                  </div>
+                </details>
               )}
 
               {/* ── 2026-05: Manual Fallback Strategies editor ─────────
