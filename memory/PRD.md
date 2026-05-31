@@ -446,3 +446,60 @@ Screenshot: Step #2 EVALUATE (random-pick) Edit modal only showed Selector + Tim
 - `backend/server.py` — `/click` endpoint `random_click` parity
 - `frontend/src/pages/VisualRecorderPage.js` — dynamic panel heading
 - `backend/tests/test_evaluate_native_click.py` — new regression file
+
+---
+
+## Iteration 13 — 2026-05-31: Health Check (Preflight Trace) feature
+
+### User ask (Roman Urdu)
+> "Aap chahain toh main aik 'Health Check' preview add kar du — RUT job start hone se pehle pehli visit ke har step ka short live trace dikhae (which selector matched, kis frame mein, kitna time laga)" — "kr do"
+
+### What was built
+A standalone preflight trace runner that validates a recording (automation_json + URL) on ONE browser BEFORE the operator spends real proxies + leads. Surfaces per-step trace: ms timing, native-click frame match, failure reason. Zero budget cost — no DB row, no job slot, no proxy/lead consumption.
+
+### Backend
+**1. `backend/real_user_traffic.py` — new `async run_health_check(target_url, automation_steps, sample_row?, proxy_line?, user_agent?, timeout_sec)` (+~150 lines)**
+- Launches a fresh Playwright browser (with optional proxy)
+- Navigates to target_url
+- Runs steps through `_execute_automation_steps(collect_timings=True, self_heal=False)` so the raw failures are surfaced (no AI auto-fix masking)
+- Returns `{ok, status, error, duration_ms, final_url, executed_steps, total_steps, failed_at_idx, step_results, proxy_used}`
+- Hard 90s ceiling (configurable up to 300s) so a stuck step doesn't hang the request
+
+**2. `backend/real_user_traffic.py` — `_step_note` field plumbed through `_execute_automation_steps` (+5 lines)**
+- Initialised at the top of each step iteration
+- `evaluate` handler sets it to `"native_click random-pick='X' frame='Y'"` or `"text='X' frame='Y'"` or `"... failed, fell back to JS"`
+- Appended to the success step_result so the trace shows WHICH text matched and WHICH frame URL it was found in
+- Optional — only populated for evaluate steps that match the native-click pre-processor patterns
+
+**3. `backend/server.py` — new `POST /api/real-user-traffic/health-check` (+~80 lines)**
+- Body: `{target_url, automation_json | upload_automation_json_id, sample_row?, proxy_line?, user_agent?, timeout_sec?}`
+- Parses JSON (either list or `{"steps":[...]}`), calls `run_health_check`, returns result.
+- Auth + `real_user_traffic` feature gated.
+
+### Frontend
+**`frontend/src/pages/RealUserTrafficPage.js` (+~200 lines)**
+- New state: `hcRunning`, `hcResult`, `hcModalOpen`.
+- New function `runHealthCheck()` — validates form (link selected, target URL, automation JSON present), posts to the endpoint, opens result modal.
+- New "🩺 Run Health Check" cyan button placed ABOVE the existing amber "Pre-flight Smoke Test" button (which uses a full RUT pipeline) so the operator gets the lightweight option first.
+- New Health Check result modal:
+  - Summary bar: pass/fail badge + step counts + total ms + final URL + proxy badge
+  - Per-step trace table: green ✓ / red ✗ icons, action label, selector preview, optional badge, ms timing, native-click `note` in cyan, error + friendly_hint for failed steps
+  - Footer: "Re-run" + "Close" actions
+
+### Tests (`backend/tests/test_health_check_endpoint.py`) — 3 tests, all pass in 28s
+- `test_health_check_happy_path` — 2 simple steps on example.com → ok=True, full trace.
+- `test_health_check_failure_path` — broken selector → ok=False, failed_at_idx=1, error surfaced.
+- `test_health_check_evaluate_note_field` — random-pick evaluate script on example.com → `note` field present and contains "native_click" string.
+
+**Overall test suite: 10 tests pass in 29.3s** (7 from iteration 12 + 3 new).
+
+### Why this matters
+Before: a stale recording silently failed 1000 visits → operator burned the proxy + lead budget for nothing.
+After: operator runs Health Check (10–30s, zero budget) → sees exactly which step is broken + WHY → fixes recording → runs full job once with confidence.
+
+### Files changed
+- `backend/real_user_traffic.py` — new `run_health_check` + `_step_note` plumbing
+- `backend/server.py` — new `POST /api/real-user-traffic/health-check` endpoint
+- `frontend/src/pages/RealUserTrafficPage.js` — button + modal + state + runner
+- `backend/tests/test_health_check_endpoint.py` — new regression test file (3 tests)
+

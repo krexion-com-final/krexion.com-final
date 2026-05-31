@@ -8248,6 +8248,11 @@ async def _execute_automation_steps(
             _t_step_start = _time_mod.perf_counter() if collect_timings else 0.0
             _step_ok = True
             _step_err: Optional[str] = None
+            # 2026-06 — per-step diagnostic note (e.g. native-click info
+            # for `evaluate` steps so the Health Check trace shows WHICH
+            # text matched, in WHICH frame). Picked up by the
+            # step_results.append below.
+            _step_note: str = ""
             selector = step.get("selector") or ""
             value = _substitute(step.get("value", ""), row)
             # ── 2026-05: longer default per-step timeout ──
@@ -8677,11 +8682,16 @@ async def _execute_automation_steps(
                                     f"frame='{(_frame_url_n or '')[:60]}'"
                                 )
                                 _native_handled = True
+                                _step_note = (
+                                    f"native_click random-pick='{_native_picked}'"
+                                    + (f" frame='{(_frame_url_n or '')[:80]}'" if _frame_url_n else "")
+                                )
                             else:
                                 logger.warning(
                                     f"[evaluate→native_click] random-pick='{_native_picked}' "
                                     f"failed: {_err_n[:100]} — falling back to JS"
                                 )
+                                _step_note = f"native_click random-pick failed ({_err_n[:60]}), fell back to JS"
                         else:
                             _tc_label = _extract_text_click_label(js)
                             if _tc_label:
@@ -8695,11 +8705,16 @@ async def _execute_automation_steps(
                                         f"frame='{(_frame_url_n or '')[:60]}'"
                                     )
                                     _native_handled = True
+                                    _step_note = (
+                                        f"native_click text='{_tc_label}'"
+                                        + (f" frame='{(_frame_url_n or '')[:80]}'" if _frame_url_n else "")
+                                    )
                                 else:
                                     logger.warning(
                                         f"[evaluate→native_click] text-click='{_tc_label}' "
                                         f"failed: {_err_n[:100]} — falling back to JS"
                                     )
+                                    _step_note = f"native_click text='{_tc_label}' failed ({_err_n[:60]}), fell back to JS"
                     except Exception as _pre_e:  # noqa: BLE001
                         logger.warning(f"[evaluate→native_click] pre-processor error: {_pre_e}")
                     # ── 2026-05 fix ───────────────────────────────────────
@@ -9116,13 +9131,16 @@ async def _execute_automation_steps(
                                 **({"step_results": step_results} if collect_timings else {})}
                 executed += 1
                 if collect_timings:
-                    step_results.append({
+                    _ok_entry: Dict[str, Any] = {
                         "idx": idx, "action": action,
                         "selector": (selector or "")[:200],
                         "ok": True, "error": None,
                         "ms": int((_time_mod.perf_counter() - _t_step_start) * 1000),
                         "optional": optional,
-                    })
+                    }
+                    if _step_note:
+                        _ok_entry["note"] = _step_note
+                    step_results.append(_ok_entry)
                 # 2026-01: emit "ok" progress event + live screenshot
                 if on_step_progress is not None:
                     # 2026-05 — stop heartbeat BEFORE we emit the final
@@ -10625,3 +10643,171 @@ def cancel_visit(job_id: str, visit_index: int) -> Dict[str, Any]:
         pass
 
     return {"ok": True, "visit_index": int(visit_index)}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 2026-06 — Health Check / Preflight Trace
+# ─────────────────────────────────────────────────────────────────────
+# Standalone "dry-run" of an automation JSON against the target URL,
+# returning a per-step trace (action, ok/fail, ms, native-click frame
+# match, error reason). Lets the operator verify a recording is still
+# valid BEFORE spending a full proxy/lead budget on 1000+ visits when
+# the offer page may have changed structure overnight.
+#
+# Differences vs. the existing `smoke_test=true` RUT path:
+#   • No DB writes, no job row, no proxy rotation, no lead consumption
+#     (operator passes ONE row of sample data).
+#   • Returns IMMEDIATELY when the steps finish (typically 10-30s) —
+#     no background polling loop.
+#   • Per-step trace surfaces native-click matches: which text was
+#     picked, in which frame URL it was found.
+
+async def run_health_check(
+    target_url: str,
+    automation_steps: List[Dict[str, Any]],
+    sample_row: Optional[Dict[str, Any]] = None,
+    proxy_line: Optional[str] = None,
+    user_agent: Optional[str] = None,
+    timeout_sec: int = 90,
+) -> Dict[str, Any]:
+    """Launch ONE Playwright browser, navigate to ``target_url``, run
+    ``automation_steps`` with ``collect_timings=True`` and return the
+    per-step trace. Closes the browser before returning.
+
+    Args:
+        target_url:        URL to navigate to before running steps.
+        automation_steps:  List of step dicts (Visual Recorder JSON).
+        sample_row:        First lead row (for {{header}} substitution).
+        proxy_line:        Optional "host:port:user:pass" or
+                           "http://user:pass@host:port".
+        user_agent:        Optional UA string override.
+        timeout_sec:       Hard ceiling on the whole run (default 90s).
+
+    Returns:
+        {
+          "ok": bool,
+          "status": str,                       # "ok" / "failed" / "timeout"
+          "error": Optional[str],
+          "duration_ms": int,
+          "final_url": str,
+          "executed_steps": int,
+          "total_steps": int,
+          "failed_at_idx": Optional[int],
+          "step_results": [...]               # per-step trace
+        }
+    """
+    import time as _tm
+    from playwright.async_api import async_playwright
+
+    _t0 = _tm.perf_counter()
+
+    if not isinstance(automation_steps, list) or not automation_steps:
+        return {
+            "ok": False, "status": "failed",
+            "error": "automation_steps is empty or not a list",
+            "duration_ms": 0, "final_url": "",
+            "executed_steps": 0, "total_steps": 0,
+            "failed_at_idx": None, "step_results": [],
+        }
+
+    row = dict(sample_row or {})
+    proxy_cfg: Optional[Dict[str, Any]] = None
+    if proxy_line:
+        proxy_cfg = _parse_proxy_line(proxy_line)
+
+    final_url = ""
+    step_results: List[Dict[str, Any]] = []
+    status = "failed"
+    error: Optional[str] = None
+    executed = 0
+    failed_at: Optional[int] = None
+
+    try:
+        await asyncio.wait_for(
+            _ensure_chromium_available(),
+            timeout=120,
+        )
+    except Exception:
+        pass
+
+    try:
+        async with async_playwright() as pw:
+            launch_args: Dict[str, Any] = {"headless": True}
+            if proxy_cfg:
+                launch_args["proxy"] = {
+                    k: v for k, v in proxy_cfg.items()
+                    if k in ("server", "username", "password")
+                }
+            browser = await pw.chromium.launch(**launch_args)
+            try:
+                ctx_args: Dict[str, Any] = {}
+                if user_agent:
+                    ctx_args["user_agent"] = user_agent
+                context = await browser.new_context(**ctx_args)
+                page = await context.new_page()
+                try:
+                    try:
+                        await page.goto(target_url, wait_until="domcontentloaded", timeout=45000)
+                    except Exception as ne:
+                        return {
+                            "ok": False, "status": "failed",
+                            "error": f"Navigation failed: {type(ne).__name__}: {str(ne)[:200]}",
+                            "duration_ms": int((_tm.perf_counter() - _t0) * 1000),
+                            "final_url": "", "executed_steps": 0,
+                            "total_steps": len(automation_steps),
+                            "failed_at_idx": None, "step_results": [],
+                        }
+
+                    try:
+                        res = await asyncio.wait_for(
+                            _execute_automation_steps(
+                                page=page,
+                                row=row,
+                                steps=automation_steps,
+                                skip_captcha=True,
+                                self_heal=False,
+                                collect_timings=True,
+                                user_id=None,
+                            ),
+                            timeout=max(30, int(timeout_sec)),
+                        )
+                        status = res.get("status") or "failed"
+                        error = res.get("error")
+                        executed = int(res.get("executed_steps") or 0)
+                        step_results = list(res.get("step_results") or [])
+                        failed_at = res.get("failed_at_idx")
+                    except asyncio.TimeoutError:
+                        status = "timeout"
+                        error = f"Health check exceeded {timeout_sec}s ceiling"
+
+                    try:
+                        final_url = page.url or ""
+                    except Exception:
+                        final_url = ""
+                finally:
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
+            finally:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+    except Exception as e:  # noqa: BLE001
+        error = f"{type(e).__name__}: {str(e)[:300]}"
+        status = "failed"
+
+    duration_ms = int((_tm.perf_counter() - _t0) * 1000)
+    return {
+        "ok": status == "ok",
+        "status": status,
+        "error": error,
+        "duration_ms": duration_ms,
+        "final_url": final_url,
+        "executed_steps": executed,
+        "total_steps": len(automation_steps),
+        "failed_at_idx": failed_at,
+        "step_results": step_results,
+        "proxy_used": bool(proxy_cfg),
+    }

@@ -6201,6 +6201,89 @@ async def rut_engine_status(user: dict = Depends(get_current_user)):
     }
 
 
+# ─────────────────────────────────────────────────────────────────────
+# 2026-06 — Health Check / Preflight Trace
+# ─────────────────────────────────────────────────────────────────────
+# Lightweight dry-run that validates a recording (automation_json + URL)
+# end-to-end on a single browser, returning a per-step trace (status, ms,
+# native-click frame match, error). Operator runs this BEFORE spending
+# a real proxy/lead budget on hundreds of visits when the offer page
+# may have changed structure overnight.
+
+class RUTHealthCheckReq(BaseModel):
+    target_url: str
+    automation_json: Optional[str] = None         # raw JSON text
+    upload_automation_json_id: Optional[str] = None  # saved template id
+    sample_row: Optional[Dict[str, Any]] = None   # first lead row for {{header}} substitution
+    proxy_line: Optional[str] = None              # "host:port:user:pass" — optional
+    user_agent: Optional[str] = None
+    timeout_sec: int = 90
+
+
+@api_router.post("/real-user-traffic/health-check")
+async def rut_health_check(req: RUTHealthCheckReq, user: dict = Depends(get_current_user)):
+    """Run ONE preflight trace visit against the target URL using the
+    given automation_json and return per-step results.
+
+    Body (JSON):
+        target_url:                 URL to navigate to
+        automation_json:            raw JSON text (list of steps OR {"steps": [...]})
+        upload_automation_json_id:  alt to automation_json — id of a saved template
+        sample_row:                 first lead row (for {{header}} placeholders)
+        proxy_line:                 optional "host:port:user:pass" or url
+        user_agent:                 optional UA override
+        timeout_sec:                hard ceiling on the run (default 90)
+    """
+    check_user_feature(user, "real_user_traffic")
+
+    target = (req.target_url or "").strip()
+    if not target.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="target_url must start with http:// or https://")
+
+    # Resolve automation JSON: prefer raw text, fall back to saved upload.
+    raw_json = (req.automation_json or "").strip()
+    if not raw_json and req.upload_automation_json_id:
+        loaded = await _load_upload_automation_json(user["id"], req.upload_automation_json_id)
+        if loaded:
+            raw_json = loaded.strip()
+
+    if not raw_json:
+        raise HTTPException(status_code=400, detail="automation_json (or upload_automation_json_id) is required")
+
+    # Parse: list of steps OR {"steps": [...]}
+    try:
+        parsed = json.loads(raw_json)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}") from e
+
+    if isinstance(parsed, dict) and isinstance(parsed.get("steps"), list):
+        steps = parsed["steps"]
+    elif isinstance(parsed, list):
+        steps = parsed
+    else:
+        raise HTTPException(status_code=400, detail='automation_json must be a list of steps or {"steps":[...]}')
+
+    if not steps:
+        raise HTTPException(status_code=400, detail="automation_json has no steps")
+
+    # Run the trace
+    try:
+        from real_user_traffic import run_health_check as _run_hc
+    except Exception as e:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"Engine not available: {e}") from e
+
+    timeout_sec = max(30, min(int(req.timeout_sec or 90), 300))
+    result = await _run_hc(
+        target_url=target,
+        automation_steps=steps,
+        sample_row=req.sample_row or None,
+        proxy_line=(req.proxy_line or "").strip() or None,
+        user_agent=(req.user_agent or "").strip() or None,
+        timeout_sec=timeout_sec,
+    )
+    return result
+
+
 
 @api_router.get("/real-user-traffic/ai-learning")
 async def rut_ai_learning_stats(

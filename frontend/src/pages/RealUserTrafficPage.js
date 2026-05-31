@@ -358,6 +358,18 @@ export default function RealUserTrafficPage() {
   // failed and the user clicks Retry manually. Predictable lifecycle.
   const [autoResumeEnabled, setAutoResumeEnabled] = useState(false);
 
+  // ── 2026-06: Health Check / Preflight Trace ──
+  // Lightweight dry-run that validates the recording + URL on ONE
+  // browser BEFORE committing budget to a full RUT job. Surfaces a
+  // per-step trace (ms timing, native-click frame match, error reason)
+  // so the operator catches a broken recording upfront — saves the
+  // proxies + leads that would have been wasted on hundreds of
+  // silent-failure visits when the offer page structure changed.
+  const [hcRunning, setHcRunning] = useState(false);
+  const [hcResult, setHcResult] = useState(null); // { ok, status, error, duration_ms, step_results, ... }
+  const [hcModalOpen, setHcModalOpen] = useState(false);
+
+
   // AI Automation Generator state
   const [aiGenOpen, setAiGenOpen] = useState(false);
   const [aiGenFiles, setAiGenFiles] = useState([]);
@@ -858,6 +870,72 @@ export default function RealUserTrafficPage() {
       setAiGenLoading(false);
     }
   };
+
+  // ── 2026-06: Run Health Check ───────────────────────────────────
+  // Lightweight preflight trace. Does NOT consume a job slot, does NOT
+  // write to DB, does NOT rotate proxies. Just opens ONE browser, runs
+  // the steps, returns per-step trace. Operator should run this BEFORE
+  // spending real budget on 1000-visit jobs.
+  const runHealthCheck = async () => {
+    if (!linkId && !targetUrlOverride.trim()) {
+      return toast.error("Select a tracker link OR enter a target URL override first");
+    }
+    // Build target URL the same way the live job does
+    let target = targetUrlOverride.trim();
+    if (!target) {
+      const link = (links || []).find((l) => l.id === linkId);
+      target = link?.offer_url || "";
+    }
+    if (!target.startsWith("http://") && !target.startsWith("https://")) {
+      return toast.error("Target URL must start with http:// or https://");
+    }
+    // Build automation JSON payload: prefer raw text, else uploaded id
+    const ajText = (automationJson || "").trim();
+    const ajId = selectedUploadAjId || "";
+    if (!ajText && !ajId) {
+      return toast.error("Paste automation JSON or pick a saved template before running Health Check");
+    }
+    if (ajText) {
+      try { JSON.parse(ajText); }
+      catch (e) { return toast.error(`Invalid JSON: ${e.message}`); }
+    }
+
+    setHcRunning(true);
+    setHcModalOpen(true);
+    setHcResult(null);
+    try {
+      const body = {
+        target_url: target,
+        timeout_sec: 90,
+      };
+      if (ajId) body.upload_automation_json_id = ajId;
+      else body.automation_json = ajText;
+
+      const r = await fetch(`${API_URL}/api/real-user-traffic/health-check`, {
+        method: "POST",
+        headers: { ...authH(), "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+      setHcResult(data);
+      if (data.ok) {
+        toast.success(`Health Check PASSED — all ${data.executed_steps} steps OK in ${(data.duration_ms / 1000).toFixed(1)}s`);
+      } else {
+        toast.error(`Health Check FAILED — step ${(data.failed_at_idx ?? -1) + 1}: ${(data.error || "").slice(0, 80)}`);
+      }
+    } catch (err) {
+      setHcResult({
+        ok: false, status: "failed",
+        error: err.message || String(err),
+        duration_ms: 0, step_results: [],
+      });
+      toast.error(`Health Check failed: ${err.message || err}`);
+    } finally {
+      setHcRunning(false);
+    }
+  };
+
 
   const onStart = async (opts = {}) => {
     // 2026-05 — Pre-flight smoke test mode. Same form, same backend, but
@@ -2790,6 +2868,31 @@ export default function RealUserTrafficPage() {
         )}
       </Card>
 
+      {/* ═══ 2026-06: Health Check (Preflight Trace) button ═══ */}
+      {/* User ask (Roman Urdu): RUT job se PEHLE pehli visit ke har
+          step ka short live trace — which selector matched, kis frame
+          mein, kitna time laga. So if page structure changed overnight
+          the operator catches it BEFORE wasting 200+ proxies/leads.
+          No DB write, no job slot used. */}
+      <Button
+        data-testid="rut-health-check-btn"
+        onClick={runHealthCheck}
+        disabled={hcRunning || submitting}
+        title="Validate the recording + URL on ONE browser. Returns per-step trace (timing, frame match, failure reason). Zero budget cost."
+        className="w-full h-11 mb-2 text-sm font-medium bg-cyan-800 hover:bg-cyan-700 text-white border border-cyan-700/70"
+      >
+        {hcRunning ? (
+          <>
+            <RefreshCw className="animate-spin mr-2" size={16} /> Running Health Check…
+          </>
+        ) : (
+          <>
+            <Activity className="mr-2" size={16} />
+            🩺 Run Health Check (per-step trace, no budget cost)
+          </>
+        )}
+      </Button>
+
       {/* ═══ 2026-05: Pre-flight Smoke Test button ═══ */}
       {/* User ask (Roman Urdu): "Jab user 'Start RUT Job' daba k 1000
           visits k liye paisa kharchne wala ho, system pehle 1 visit ka
@@ -3276,6 +3379,164 @@ export default function RealUserTrafficPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* ═══ 2026-06: Health Check Result Modal ═══ */}
+      {hcModalOpen && (
+        <div
+          className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          data-testid="rut-hc-modal"
+          onClick={(e) => { if (e.target === e.currentTarget && !hcRunning) setHcModalOpen(false); }}
+        >
+          <div className="bg-zinc-950 border border-cyan-900/60 rounded-xl w-full max-w-3xl max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between px-5 py-3 border-b border-zinc-800">
+              <div className="flex items-center gap-2">
+                <Activity size={18} className={hcRunning ? "text-cyan-400 animate-pulse" : (hcResult?.ok ? "text-emerald-400" : "text-rose-400")} />
+                <h3 className="text-white font-semibold">
+                  🩺 Health Check {hcRunning ? "— running…" : (hcResult ? (hcResult.ok ? "— PASSED" : "— FAILED") : "")}
+                </h3>
+              </div>
+              <button
+                onClick={() => !hcRunning && setHcModalOpen(false)}
+                disabled={hcRunning}
+                className="text-zinc-400 hover:text-white p-1 rounded disabled:opacity-30"
+                data-testid="rut-hc-modal-close"
+                aria-label="Close health check"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Summary bar */}
+            <div className={`px-5 py-3 border-b border-zinc-800 text-xs ${
+              hcRunning ? "bg-cyan-950/30" :
+              hcResult?.ok ? "bg-emerald-950/30" :
+              hcResult ? "bg-rose-950/30" : ""
+            }`}>
+              {hcRunning ? (
+                <div className="flex items-center gap-2 text-cyan-200">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Opening browser, running steps… (typically 10–60s).</span>
+                </div>
+              ) : hcResult ? (
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                  <span className={hcResult.ok ? "text-emerald-300 font-semibold" : "text-rose-300 font-semibold"}>
+                    {hcResult.ok ? "✓ All steps OK" : `✗ Step ${(hcResult.failed_at_idx ?? -1) + 1} failed`}
+                  </span>
+                  <span className="text-zinc-400">
+                    {hcResult.executed_steps}/{hcResult.total_steps} steps · {((hcResult.duration_ms || 0) / 1000).toFixed(1)}s
+                  </span>
+                  {hcResult.final_url && (
+                    <span className="text-zinc-500 truncate" title={hcResult.final_url}>
+                      final: <span className="font-mono text-zinc-300">{hcResult.final_url.slice(0, 60)}{hcResult.final_url.length > 60 ? "…" : ""}</span>
+                    </span>
+                  )}
+                  {hcResult.proxy_used && <span className="text-amber-300">⚡ via proxy</span>}
+                </div>
+              ) : null}
+              {hcResult?.error && (
+                <div className="mt-2 text-rose-300 text-[11px] font-mono whitespace-pre-wrap break-words">
+                  {hcResult.error.slice(0, 400)}
+                </div>
+              )}
+            </div>
+
+            {/* Step trace table */}
+            <div className="flex-1 overflow-y-auto p-3 text-xs" data-testid="rut-hc-modal-body">
+              {hcRunning && (!hcResult || !hcResult.step_results?.length) ? (
+                <div className="text-center text-zinc-500 py-10">
+                  Waiting for the first step result…
+                </div>
+              ) : !hcResult?.step_results?.length ? (
+                <div className="text-center text-zinc-500 py-10">No step results.</div>
+              ) : (
+                <div className="space-y-1.5">
+                  {hcResult.step_results.map((s, i) => {
+                    const ok = s.ok !== false;
+                    const isFail = s.ok === false;
+                    return (
+                      <div
+                        key={i}
+                        className={`rounded-md border px-3 py-2 ${
+                          isFail
+                            ? "border-rose-800/60 bg-rose-950/30"
+                            : "border-zinc-800 bg-zinc-900/50"
+                        }`}
+                        data-testid={`rut-hc-step-${i}`}
+                      >
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className={`inline-flex items-center justify-center w-5 h-5 rounded-full text-[10px] font-bold ${
+                            isFail ? "bg-rose-700 text-rose-50" : "bg-emerald-700 text-emerald-50"
+                          }`}>
+                            {ok && !isFail ? "✓" : "✗"}
+                          </span>
+                          <span className="text-zinc-200 font-mono font-medium">
+                            #{(s.idx ?? i) + 1} {s.action}
+                          </span>
+                          {s.selector && (
+                            <span className="text-zinc-500 font-mono text-[10px] truncate max-w-[300px]" title={s.selector}>
+                              {s.selector}
+                            </span>
+                          )}
+                          {s.optional && (
+                            <span className="text-amber-300/80 text-[9px] uppercase tracking-wide">optional</span>
+                          )}
+                          <span className="ml-auto text-zinc-400 font-mono text-[10px]">
+                            {s.ms != null ? `${s.ms} ms` : ""}
+                          </span>
+                        </div>
+                        {s.note && (
+                          <div className="mt-1 ml-7 text-cyan-300/90 text-[11px] break-words">
+                            {s.note}
+                          </div>
+                        )}
+                        {isFail && s.error && (
+                          <div className="mt-1 ml-7 text-rose-300 text-[11px] font-mono whitespace-pre-wrap break-words">
+                            {String(s.error).slice(0, 300)}
+                          </div>
+                        )}
+                        {isFail && s.friendly_hint && (
+                          <div className="mt-1 ml-7 text-amber-300 text-[11px]">
+                            💡 {s.friendly_hint}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Footer actions */}
+            <div className="px-5 py-3 border-t border-zinc-800 flex items-center justify-between gap-2 flex-wrap">
+              <div className="text-[11px] text-zinc-500">
+                Zero budget cost — no DB row, no proxy used (unless overridden), no leads consumed.
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={runHealthCheck}
+                  disabled={hcRunning}
+                  className="text-cyan-200 border-cyan-800/60 hover:bg-cyan-900/30"
+                  data-testid="rut-hc-rerun-btn"
+                >
+                  <RefreshCw className={`mr-1.5 ${hcRunning ? "animate-spin" : ""}`} size={13} />
+                  Re-run
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={() => setHcModalOpen(false)}
+                  disabled={hcRunning}
+                  className="bg-zinc-800 hover:bg-zinc-700 text-white"
+                  data-testid="rut-hc-close-btn"
+                >
+                  Close
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ═══ Live Activity Modal ═══ */}
       {liveModalOpen && (
