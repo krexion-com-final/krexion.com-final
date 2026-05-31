@@ -299,6 +299,16 @@ export default function SystemMaintenancePage() {
                   Cleanup queued — host watcher will run within ~60 seconds.
                 </div>
               )}
+              {/* 2026-05 — Surface the in-container result line even
+                  when the host watcher isn't installed, so the operator
+                  knows the click DID do something (free Python caches,
+                  Playwright temps, app logs) instead of looking dead. */}
+              {!status.pending && status.last_result && status.host_watcher_configured === false && (
+                <div className="mt-3 text-emerald-300 text-xs flex items-center gap-2" data-testid="cleanup-incontainer-note">
+                  <CheckCircle2 size={12} />
+                  Last run freed <strong className="font-semibold">{Math.round((status.last_result.mb_freed || 0) * 10) / 10} MB</strong> via in-container cleanup. Host-level cleanup (Docker prune, journal vacuum, APT cache) requires the host watcher — install it for an extra few GB of savings.
+                </div>
+              )}
             </div>
             <button
               onClick={() => setShowConfirm(true)}

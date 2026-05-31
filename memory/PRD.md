@@ -284,3 +284,27 @@ Each step's target element bounding box is now captured (full-page coords + doc 
 
 ### Tests run (real Chromium e2e, all pass)
 - 3-step recording (fill → select → click) on a 3000px-tall page → all 3 events carry exact `target_box` matching element positions (100,200) / (400,600) / (200,1500) and shared `doc_size: 1280×3000` ✓
+
+---
+
+## Iteration 8 — 2026-05-30: VPS Cleanup "stuck at Pending…" — fixed
+
+### User report
+> "kafi bar try kia par shayed ye kaam ni kr raha yahin stuck rehta hai es ko proper solve kr do" — screenshots showed `Clean VPS Now` → "Pending…" → stays there forever.
+
+### Root cause
+The cleanup endpoint always wrote `cleanup_requested.flag` to `/data/`. The host-side `vps-cleanup-watcher.sh` is supposed to read & clear this flag, but on VPSs WITHOUT that script installed nothing ever cleared it. The `cleanup-status` endpoint read `flag.exists() → pending=True` and the UI button stayed disabled on "Pending…" forever.
+
+### Fix (backend `server.py`)
+1. **`admin_request_cleanup`** — added a "watcher liveness" check: `host_stats.json` must exist AND mtime < 5 min. Only THEN write the flag (because only a live watcher will clear it). If watcher isn't alive, skip flag-write AND proactively remove any leftover flag from a previous attempt. In-container cleanup still runs immediately and the result is persisted.
+2. **`admin_cleanup_status`** — same liveness rule. If a leftover flag exists but the watcher hasn't pinged in >5 min, the status endpoint auto-clears the stale flag. This means even existing stuck installs auto-recover on next poll.
+3. Response now includes `host_watcher_active: bool` + `finished_at` ISO timestamp on the saved result, so the frontend can render an accurate "Last Cleanup" panel.
+
+### Fix (frontend `SystemMaintenancePage.js`)
+- Added a 2nd info line below the action button: when watcher is NOT installed but a `last_result` exists, surface `"Last run freed X MB via in-container cleanup. Host-level cleanup (Docker prune, journal vacuum, APT cache) requires the host watcher — install it for an extra few GB."` — so the operator knows the click DID do something even without the watcher.
+
+### Tests run (3 e2e scenarios, all pass)
+- S1: No watcher → click cleanup → `pending: False`, in-container ran (1.9 MB freed), button unblocked ✓
+- S2: Fresh watcher (`host_stats.json` mtime < 5 min) → click cleanup → flag IS written, host script will pick it up ✓
+- S3: Stale watcher (>5 min) + leftover flag → status endpoint AUTO-CLEARS stale flag on next poll → UI unblocks ✓
+

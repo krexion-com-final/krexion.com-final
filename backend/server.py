@@ -3924,24 +3924,60 @@ async def admin_request_cleanup(admin: dict = Depends(get_current_admin)):
         f"{len(in_container_result['actions'])} actions"
     )
 
-    # Try to also queue host-level cleanup via the watcher flag file.
+    # 2026-05 BUGFIX — only write the pending-flag if the host watcher
+    # is actually running on this VPS. Otherwise the flag stays on disk
+    # forever (nobody clears it), the cleanup-status endpoint keeps
+    # reporting `pending: True`, and the UI stuck at "Pending…" — the
+    # exact symptom the user reported.
+    #
+    # Detection rule: HOST_STATS_FILE must exist AND have been written
+    # within the last 5 minutes (the host watcher updates it every
+    # minute when active). A stale file from a long-uninstalled watcher
+    # is treated as "not configured" so we don't write an orphan flag.
+    watcher_alive = False
+    try:
+        if HOST_STATS_FILE.exists():
+            from time import time as _now
+            _age = _now() - HOST_STATS_FILE.stat().st_mtime
+            watcher_alive = _age < 300  # 5 minutes
+    except Exception:
+        watcher_alive = False
+
     flag_written = False
     flag_error: Optional[str] = None
-    try:
-        CLEANUP_FLAG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "requested_at": datetime.now(timezone.utc).isoformat(),
-            "requested_by": admin.get("email"),
-        }
-        CLEANUP_FLAG_FILE.write_text(_json.dumps(payload), encoding="utf-8")
-        flag_written = True
-        logger.info(f"[cleanup] flag written → {CLEANUP_FLAG_FILE}")
-    except Exception as e:  # noqa: BLE001
-        flag_error = str(e)
-        logger.warning(f"[cleanup] flag write failed: {e}")
+    if watcher_alive:
+        try:
+            CLEANUP_FLAG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "requested_at": datetime.now(timezone.utc).isoformat(),
+                "requested_by": admin.get("email"),
+            }
+            CLEANUP_FLAG_FILE.write_text(_json.dumps(payload), encoding="utf-8")
+            flag_written = True
+            logger.info(f"[cleanup] flag written → {CLEANUP_FLAG_FILE} (watcher active)")
+        except Exception as e:  # noqa: BLE001
+            flag_error = str(e)
+            logger.warning(f"[cleanup] flag write failed: {e}")
+    else:
+        # 2026-05 — Guard: remove any STALE flag from a previous attempt
+        # when the watcher was running, so the UI doesn't keep seeing
+        # `pending: True` from an old flag that nothing will clear.
+        try:
+            if CLEANUP_FLAG_FILE.exists():
+                CLEANUP_FLAG_FILE.unlink()
+                logger.info(
+                    f"[cleanup] removed stale flag (watcher inactive) → {CLEANUP_FLAG_FILE}"
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[cleanup] could not remove stale flag: {e}")
 
     # Persist the in-container result so /cleanup-status can show it
     try:
+        # Stamp completion time so the UI's "Last Cleanup" panel shows
+        # an accurate ISO timestamp (otherwise it pulls Date.now from
+        # whenever the operator happens to view the panel).
+        in_container_result["finished_at"] = datetime.now(timezone.utc).isoformat()
+        in_container_result["host_watcher_active"] = watcher_alive
         CLEANUP_RESULT_FILE.write_text(_json.dumps(in_container_result), encoding="utf-8")
     except Exception:  # noqa: BLE001
         pass
@@ -3951,6 +3987,7 @@ async def admin_request_cleanup(admin: dict = Depends(get_current_admin)):
         "in_container_cleanup": in_container_result,
         "host_watcher_flag_written": flag_written,
         "host_watcher_flag_error": flag_error,
+        "host_watcher_active": watcher_alive,
         "flag_path": str(CLEANUP_FLAG_FILE) if flag_written else None,
         "message": (
             f"Freed {in_container_result['mb_freed']} MB immediately. "
@@ -3967,9 +4004,38 @@ async def admin_request_cleanup(admin: dict = Depends(get_current_admin)):
 
 @api_router.get("/admin/system/cleanup-status")
 async def admin_cleanup_status(admin: dict = Depends(get_current_admin)):
-    """Returns whether a cleanup is pending + the most recent result."""
+    """Returns whether a cleanup is pending + the most recent result.
+
+    2026-05 — Watcher-aware: if the host watcher is NOT actively
+    writing host_stats.json (within last 5 min) we treat any leftover
+    flag as STALE and proactively clear it so the UI doesn't spin on
+    a "Pending…" state nobody will ever clear. This was the root cause
+    of the reported "kafi bar try kia par yahin stuck rehta hai" bug.
+    """
     import json as _json
+    from time import time as _now
+
+    # Watcher liveness check — same rule as the request endpoint.
+    watcher_alive = False
+    try:
+        if HOST_STATS_FILE.exists():
+            watcher_alive = (_now() - HOST_STATS_FILE.stat().st_mtime) < 300
+    except Exception:
+        watcher_alive = False
+
     pending = CLEANUP_FLAG_FILE.exists()
+    if pending and not watcher_alive:
+        # Stale flag from before the watcher was uninstalled / from a
+        # previous attempt with no watcher. Remove it so UI unblocks.
+        try:
+            CLEANUP_FLAG_FILE.unlink()
+            logger.info(
+                "[cleanup-status] removed stale flag (watcher inactive >5min)"
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        pending = False
+
     pending_payload = None
     if pending:
         try:
@@ -3987,7 +4053,8 @@ async def admin_cleanup_status(admin: dict = Depends(get_current_admin)):
         "pending": pending,
         "pending_payload": pending_payload,
         "last_result": last_result,
-        "host_watcher_configured": HOST_STATS_FILE.exists(),
+        "host_watcher_configured": watcher_alive,
+        "host_watcher_stats_file_exists": HOST_STATS_FILE.exists(),
     }
 
 
