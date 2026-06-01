@@ -3406,19 +3406,33 @@ async def get_all_users_stats(admin: dict = Depends(get_current_admin)):
 #   - The repo URL inside it is the user's own public GitHub repo.
 @api_router.get("/admin/download-builder-bat")
 async def admin_download_builder_bat():
-    """Serve the Krexion-Admin-One-Click.bat builder file."""
-    from fastapi.responses import FileResponse
+    """Serve the Krexion-Admin-One-Click.bat builder file.
+
+    2026-02 — the file lives on a Linux build host so its newlines are LF.
+    Windows cmd.exe silently fails to parse multi-line .bat files written
+    with LF only (the window opens and immediately closes — exactly the
+    symptom users hit). We convert to CRLF on the fly + add a BOM-free
+    UTF-8 byte stream so cmd.exe parses it reliably on every Windows SKU.
+    """
+    from fastapi.responses import Response
     bat_path = Path(__file__).resolve().parent.parent / "Krexion-Admin-One-Click.bat"
     if not bat_path.is_file():
         raise HTTPException(
             status_code=503,
             detail="Builder file not deployed yet. Push the latest main branch and retry.",
         )
-    return FileResponse(
-        path=str(bat_path),
+    raw = bat_path.read_bytes()
+    # Normalise: strip any existing CR, then add CRLF at every LF, so we
+    # never end up with double-CR sequences if someone commits the file
+    # from a Windows machine in future.
+    raw = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n").replace(b"\n", b"\r\n")
+    return Response(
+        content=raw,
         media_type="application/octet-stream",
-        filename="Krexion-Admin-One-Click.bat",
-        headers={"Cache-Control": "no-store"},
+        headers={
+            "Content-Disposition": 'attachment; filename="Krexion-Admin-One-Click.bat"',
+            "Cache-Control": "no-store",
+        },
     )
 
 
