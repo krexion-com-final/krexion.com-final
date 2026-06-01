@@ -56,7 +56,7 @@ ArchitecturesInstallIn64BitMode=x64
 PrivilegesRequired=admin
 UninstallDisplayName={#AppName}
 ; SetupIconFile=krexion.ico   ; <- Uncomment after you add installer/krexion.ico
-UninstallDisplayIcon={app}\bin\{#AppExeBackend}
+UninstallDisplayIcon={app}\bin\python.exe
 VersionInfoCompany={#AppPublisher}
 VersionInfoProductName={#AppName}
 VersionInfoVersion={#AppVersion}
@@ -101,10 +101,10 @@ Name: "{app}\logs"
 Name: "{commonappdata}\Krexion"; Permissions: users-modify
 
 [Icons]
-Name: "{group}\Krexion"; Filename: "http://127.0.0.1:3000"; IconFilename: "{app}\bin\{#AppExeBackend}"
+Name: "{group}\Krexion"; Filename: "http://127.0.0.1:3000"; IconFilename: "{app}\bin\python.exe"
 Name: "{group}\Krexion Logs"; Filename: "{app}\logs"
 Name: "{group}\Uninstall Krexion"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\Krexion"; Filename: "http://127.0.0.1:3000"; IconFilename: "{app}\bin\{#AppExeBackend}"; Tasks: desktopicon
+Name: "{autodesktop}\Krexion"; Filename: "http://127.0.0.1:3000"; IconFilename: "{app}\bin\python.exe"; Tasks: desktopicon
 
 [Registry]
 ; Auto-start Krexion Tray on login (per-user)
@@ -135,8 +135,10 @@ Filename: "{app}\bin\nssm.exe"; \
   Flags: runhidden; StatusMsg: "Starting Krexion Database..."
 
 ; ─── Install + start Krexion Backend as Windows Service ─────────────────
+; Uses the embedded Python launcher (.bat) which runs:
+;   python.exe -m uvicorn server:app --host 127.0.0.1 --port 8001
 Filename: "{app}\bin\nssm.exe"; \
-  Parameters: "install KrexionBackend ""{app}\bin\{#AppExeBackend}"""; \
+  Parameters: "install KrexionBackend ""{app}\bin\python.exe"" -m uvicorn server:app --host 127.0.0.1 --port 8001"; \
   Flags: runhidden; StatusMsg: "Registering Krexion Backend service..."
 
 Filename: "{app}\bin\nssm.exe"; \
@@ -152,11 +154,11 @@ Filename: "{app}\bin\nssm.exe"; \
   Flags: runhidden
 
 Filename: "{app}\bin\nssm.exe"; \
-  Parameters: "set KrexionBackend AppEnvironmentExtra MONGO_URL=mongodb://127.0.0.1:27017 DB_NAME=krexion KREXION_MODE=native KREXION_BUILD_TYPE=binary PLAYWRIGHT_BROWSERS_PATH={app}\chromium"; \
+  Parameters: "set KrexionBackend AppEnvironmentExtra MONGO_URL=mongodb://127.0.0.1:27017 DB_NAME=krexion KREXION_MODE=native KREXION_BUILD_TYPE=binary PLAYWRIGHT_BROWSERS_PATH={app}\chromium STRICT_CLOUD_HEAVY_BLOCK=false"; \
   Flags: runhidden
 
 Filename: "{app}\bin\nssm.exe"; \
-  Parameters: "set KrexionBackend AppDirectory ""{app}\bin"""; \
+  Parameters: "set KrexionBackend AppDirectory ""{app}\bin\app"""; \
   Flags: runhidden
 
 Filename: "{app}\bin\nssm.exe"; \

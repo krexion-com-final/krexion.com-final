@@ -26,9 +26,24 @@ next-env.d.ts
 *.tsbuildinfo
 
 # Production builds
-/build
+# /build           <- was ignoring entire build/ folder which also blocked
+#                     our Python build scripts (build-backend.py, etc.).
+# Now we only ignore the OUTPUT subfolders that the build pipeline
+# produces locally / on the runner. Source build scripts in build/ are
+# tracked so GitHub Actions can find them.
+/build/dist/
+/build/work/
+/build/chromium-bundle/
+/build/mongo-portable/
+/build/mongo-extract/
+/build/nssm-portable/
+/build/nssm-extract/
+/build/frontend-build/
+/build/requirements.windows.txt
+/build/python-embed.zip
+/build/get-pip.py
 dist/
-dist
+dist/
 
 # Environment files (comprehensive coverage)
 
