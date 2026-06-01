@@ -1,43 +1,27 @@
 @echo off
 REM =====================================================================
-REM  KREXION - ADMIN ONE-CLICK BUILDER  (v4 - guaranteed pause-on-exit)
+REM  KREXION - ADMIN ONE-CLICK BUILDER  (v5 - goto-based, no :main wrapper)
 REM =====================================================================
-REM  Yeh script aap ki Windows VPS pe Krexion installer .exe banayega.
-REM  Window HAMESHA khuli rahegi - chahe success ho ya error.
+REM  Window HAMESHA khuli rahegi - har step ke baad pause ya error ke
+REM  baad guaranteed pause. v5 mein call :main pattern hata diya kyunki
+REM  cmd.exe ke yarn.cmd shim ke saath label table corrupt ho jata tha.
 REM =====================================================================
 
-REM --- Outer wrapper: call :main, then ALWAYS pause before exit ---
-call :main %*
-set "FINAL_EC=%errorlevel%"
-echo.
-echo  =====================================================
-echo   SCRIPT FINISHED  (exit code: %FINAL_EC%)
-echo  =====================================================
-echo.
-echo   Yeh window khuli rahegi. Koi key dabayein band karne ke liye.
-pause
-exit /b %FINAL_EC%
-
-
-REM =====================================================================
-REM  :main - actual logic
-REM =====================================================================
-:main
 setlocal EnableDelayedExpansion
 
 set "BUILD_DIR=C:\Krexion-Build"
 set "REPO_URL=https://github.com/dennisedmaartins9-sudo/krexion.com.git"
 set "LOG=%USERPROFILE%\Desktop\Krexion-Admin-Build-Log.txt"
 set "TRACE=%USERPROFILE%\Desktop\Krexion-Trace.txt"
+set "INNO_EXE=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
 
-REM Wipe both log files at start
-echo Krexion v4 trace started: %DATE% %TIME% > "%TRACE%" 2>nul
-echo Krexion v4 build started: %DATE% %TIME% > "%LOG%" 2>nul
+echo Krexion v5 trace started: %DATE% %TIME% > "%TRACE%" 2>nul
+echo Krexion v5 build started: %DATE% %TIME% > "%LOG%" 2>nul
 
 cls
 echo.
 echo  =====================================================
-echo   KREXION - ADMIN ONE-CLICK BUILDER  v4
+echo   KREXION - ADMIN ONE-CLICK BUILDER  v5
 echo  =====================================================
 echo.
 echo   Build folder: %BUILD_DIR%
@@ -49,10 +33,10 @@ echo   Press any key to start (or close window to cancel)
 echo  =====================================================
 pause >nul
 
-echo [trace] User pressed key, starting checks >> "%TRACE%"
+echo [trace] User pressed key >> "%TRACE%"
 
 REM =====================================================================
-REM  STEP 0: Admin check (NO self-elevation - we tell user how to fix)
+REM  STEP 0: Admin check
 REM =====================================================================
 echo.
 echo  [STEP 0/7] Admin rights check...
@@ -66,11 +50,12 @@ if errorlevel 1 (
     echo     2. "Run as administrator" select karein
     echo     3. UAC popup pe "Yes" click karein
     echo.
+    set "FINAL_EC=2"
     echo [trace] FAILED: not admin >> "%TRACE%"
-    exit /b 2
+    goto :END_PAUSE
 )
 echo   [OK] Running as Administrator
-echo [trace] Step 0 done - admin OK >> "%TRACE%"
+echo [trace] Step 0 done >> "%TRACE%"
 
 REM =====================================================================
 REM  STEP 1: Chocolatey
@@ -81,23 +66,17 @@ where choco >nul 2>&1
 if errorlevel 1 (
     echo   [..] Chocolatey install ho raha hai - 1 minute wait...
     powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; iex ((New-Object Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))" 1>>"%LOG%" 2>&1
-    if errorlevel 1 (
-        echo.
-        echo   [ERR] Chocolatey install fail ho gaya.
-        echo         Log file Desktop pe hai: %LOG%
-        echo [trace] FAILED: Chocolatey install >> "%TRACE%"
-        exit /b 3
-    )
 )
 set "PATH=%ALLUSERSPROFILE%\chocolatey\bin;%PATH%"
 where choco >nul 2>&1
 if errorlevel 1 (
-    echo   [ERR] Chocolatey install ke baad bhi PATH mein nahi mila.
-    echo [trace] FAILED: choco not in PATH after install >> "%TRACE%"
-    exit /b 4
+    echo   [ERR] Chocolatey install fail.
+    set "FINAL_EC=3"
+    echo [trace] FAILED: choco >> "%TRACE%"
+    goto :END_PAUSE
 )
 echo   [OK] Chocolatey ready
-echo [trace] Step 1 done - choco OK >> "%TRACE%"
+echo [trace] Step 1 done >> "%TRACE%"
 
 REM =====================================================================
 REM  STEP 2: Git
@@ -112,12 +91,13 @@ if errorlevel 1 (
 set "PATH=%PROGRAMFILES%\Git\cmd;%PROGRAMFILES%\Git\bin;%PATH%"
 where git >nul 2>&1
 if errorlevel 1 (
-    echo   [ERR] Git install ke baad bhi PATH mein nahi mila.
-    echo [trace] FAILED: git not in PATH >> "%TRACE%"
-    exit /b 5
+    echo   [ERR] Git PATH mein nahi mila.
+    set "FINAL_EC=5"
+    echo [trace] FAILED: git >> "%TRACE%"
+    goto :END_PAUSE
 )
 echo   [OK] Git ready
-echo [trace] Step 2 done - git OK >> "%TRACE%"
+echo [trace] Step 2 done >> "%TRACE%"
 
 REM =====================================================================
 REM  STEP 3: Python 3.11
@@ -132,14 +112,14 @@ if errorlevel 1 (
 set "PATH=C:\Python311;C:\Python311\Scripts;%PROGRAMFILES%\Python311;%PROGRAMFILES%\Python311\Scripts;%LOCALAPPDATA%\Programs\Python\Python311;%LOCALAPPDATA%\Programs\Python\Python311\Scripts;%PATH%"
 where python >nul 2>&1
 if errorlevel 1 (
-    echo   [ERR] Python install ke baad bhi PATH mein nahi mila.
-    echo         Check karein: C:\Python311\python.exe ya C:\Program Files\Python311\python.exe
-    echo [trace] FAILED: python not in PATH >> "%TRACE%"
-    exit /b 6
+    echo   [ERR] Python PATH mein nahi mila.
+    set "FINAL_EC=6"
+    echo [trace] FAILED: python >> "%TRACE%"
+    goto :END_PAUSE
 )
 echo   [OK] Python ready
 python --version
-echo [trace] Step 3 done - python OK >> "%TRACE%"
+echo [trace] Step 3 done >> "%TRACE%"
 
 REM =====================================================================
 REM  STEP 4: Node.js + Yarn
@@ -154,9 +134,10 @@ if errorlevel 1 (
 set "PATH=%PROGRAMFILES%\nodejs;%APPDATA%\npm;%PATH%"
 where node >nul 2>&1
 if errorlevel 1 (
-    echo   [ERR] Node.js install ke baad bhi PATH mein nahi mila.
-    echo [trace] FAILED: node not in PATH >> "%TRACE%"
-    exit /b 7
+    echo   [ERR] Node.js PATH mein nahi mila.
+    set "FINAL_EC=7"
+    echo [trace] FAILED: node >> "%TRACE%"
+    goto :END_PAUSE
 )
 echo   [OK] Node.js ready
 node --version
@@ -169,30 +150,32 @@ if errorlevel 1 (
 where yarn >nul 2>&1
 if errorlevel 1 (
     echo   [ERR] Yarn install fail.
-    echo [trace] FAILED: yarn not in PATH >> "%TRACE%"
-    exit /b 8
+    set "FINAL_EC=8"
+    echo [trace] FAILED: yarn >> "%TRACE%"
+    goto :END_PAUSE
 )
 echo   [OK] Yarn ready
-yarn --version
-echo [trace] Step 4 done - node+yarn OK >> "%TRACE%"
+REM Skip yarn --version output - causes label-table corruption with cmd.exe
+echo [trace] Step 4 done >> "%TRACE%"
 
 REM =====================================================================
 REM  STEP 5: Inno Setup
 REM =====================================================================
 echo.
 echo  [STEP 5/7] Inno Setup install check...
-if not exist "%PROGRAMFILES(X86)%\Inno Setup 6\ISCC.exe" (
+if not exist "!INNO_EXE!" (
     echo   [..] Inno Setup install ho raha hai - 1 min...
     choco install innosetup -y --no-progress 1>>"%LOG%" 2>&1
 )
-if not exist "%PROGRAMFILES(X86)%\Inno Setup 6\ISCC.exe" (
+if not exist "!INNO_EXE!" (
     echo   [ERR] Inno Setup install fail.
-    echo [trace] FAILED: ISCC.exe missing >> "%TRACE%"
-    exit /b 9
+    set "FINAL_EC=9"
+    echo [trace] FAILED: inno >> "%TRACE%"
+    goto :END_PAUSE
 )
-set "PATH=%PROGRAMFILES(X86)%\Inno Setup 6;%PATH%"
+set "PATH=%ProgramFiles(x86)%\Inno Setup 6;%PATH%"
 echo   [OK] Inno Setup ready
-echo [trace] Step 5 done - inno OK >> "%TRACE%"
+echo [trace] Step 5 done >> "%TRACE%"
 
 REM =====================================================================
 REM  STEP 6: Clone or update Krexion repo
@@ -205,8 +188,9 @@ if not exist "%BUILD_DIR%\.git" (
     git clone %REPO_URL% "%BUILD_DIR%" 1>>"%LOG%" 2>&1
     if errorlevel 1 (
         echo   [ERR] Repo clone fail. Internet check karein.
-        echo [trace] FAILED: git clone >> "%TRACE%"
-        exit /b 10
+        set "FINAL_EC=10"
+        echo [trace] FAILED: clone >> "%TRACE%"
+        goto :END_PAUSE
     )
 ) else (
     echo   [..] Repo update ho raha hai...
@@ -215,7 +199,7 @@ if not exist "%BUILD_DIR%\.git" (
     popd
 )
 echo   [OK] Source code ready at %BUILD_DIR%
-echo [trace] Step 6 done - repo OK >> "%TRACE%"
+echo [trace] Step 6 done >> "%TRACE%"
 
 REM =====================================================================
 REM  STEP 7: Run build pipeline
@@ -259,9 +243,9 @@ if !BUILD_EC! neq 0 (
     echo  =====================================================
     powershell -NoProfile -Command "Get-Content -Path '%LOG%' -Tail 50 -ErrorAction SilentlyContinue"
     echo  =====================================================
-    echo   Full log file:  %LOG%
-    echo [trace] FAILED: build step 7, EC=!BUILD_EC! >> "%TRACE%"
-    exit /b !BUILD_EC!
+    set "FINAL_EC=!BUILD_EC!"
+    echo [trace] FAILED: build, EC=!BUILD_EC! >> "%TRACE%"
+    goto :END_PAUSE
 )
 
 echo [trace] Step 7 done - BUILD COMPLETE v%VER% >> "%TRACE%"
@@ -272,7 +256,7 @@ echo  =====================================================
 echo            BUILD SUCCESSFUL!  v%VER%
 echo  =====================================================
 echo.
-echo   Aap ki Krexion installer file ban gayi hai:
+echo   Aap ki Krexion installer file:
 echo.
 echo     %BUILD_DIR%\installer\Output\Krexion-Setup-%VER%.exe
 echo.
@@ -297,8 +281,17 @@ echo   C) Customers download from:
 echo      https://krexion.com/download
 echo.
 echo  =====================================================
-echo.
 
 start "" explorer.exe "%BUILD_DIR%\installer\Output"
 
-exit /b 0
+set "FINAL_EC=0"
+
+:END_PAUSE
+echo.
+echo  =====================================================
+echo   SCRIPT FINISHED  (exit code: %FINAL_EC%)
+echo  =====================================================
+echo.
+echo   Yeh window khuli rahegi. Koi key dabayein band karne ke liye.
+pause
+exit /b %FINAL_EC%
