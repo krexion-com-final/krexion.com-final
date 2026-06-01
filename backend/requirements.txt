@@ -24,6 +24,7 @@ click==8.3.2
 coloredlogs==15.0.1
 construct==2.10.70
 cryptography==44.0.0
+curl_cffi==0.15.0
 daemonize==2.5.0
 decorator==5.2.1
 developer_disk_image==0.2.0

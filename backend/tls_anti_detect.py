@@ -1,0 +1,329 @@
+"""
+Krexion TLS / JA3 / JA4 / HTTP-2 anti-detect helper.
+====================================================
+
+This module provides a **safe**, **additive** wrapper around `curl_cffi`
+that mimics real Chrome/Edge/Safari TLS + HTTP/2 + Sec-CH-UA fingerprints
+during the pre-browser HTTP probes used by `real_user_traffic.py`
+(`_probe_proxy_geo`, `_probe_proxy_target_reachable`,
+`_probe_offer_duplicate_via_proxy`, `_get_exit_ip_via_proxy`).
+
+Design contract
+---------------
+1. **NEVER raises** — if `curl_cffi` is missing / a request errors out /
+   any unexpected exception fires, the public helpers return a sentinel
+   (``None``) and the caller can transparently fall back to the existing
+   `httpx`-based code path. Existing flows are NOT modified by this
+   module by itself.
+
+2. **ADDITIVE only** — nothing in this file deletes, renames, or
+   monkey-patches anything in the existing codebase. Callers explicitly
+   opt-in by calling these helpers.
+
+3. **No state** — every call is stateless. No globals, no caches, no
+   background tasks. Safe for parallel RUT workers.
+
+4. **Backwards-compatible** — if `curl_cffi` is unavailable for any
+   reason (missing wheel for the host arch, etc.), `is_available()`
+   returns False and every helper safely returns None. Behaviour
+   degrades gracefully to the existing httpx behaviour.
+
+Why this matters
+----------------
+Detectors like Cloudflare Bot Management, DataDome, Akamai Bot Manager
+and IPQualityScore Deep cross-check the TLS ClientHello fingerprint
+(JA3 / JA4) and the HTTP/2 frame fingerprint against the User-Agent
+header. A bare `httpx` request through a residential proxy looks like
+"Python httpx" on the wire, even when the UA header claims Chrome —
+that mismatch is a hard bot signal.
+
+`curl_cffi` (built on libcurl-impersonate) sends the SAME TLS extensions,
+GREASE values, cipher suites, ALPN order and HTTP/2 SETTINGS frame as
+real Chrome/Edge/Safari. Combined with the existing JS / Sec-CH-UA
+spoofing in the browser layer, the full network signature now matches
+end-to-end.
+"""
+
+from __future__ import annotations
+
+import logging
+import re as _re
+from typing import Any, Dict, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Lazy import + capability probe — never raises, never imports
+# anything heavy at module load.
+# ──────────────────────────────────────────────────────────────────────
+try:
+    from curl_cffi.requests import AsyncSession as _AsyncSession  # type: ignore
+    _CURL_CFFI_AVAILABLE = True
+except Exception as _import_err:  # pragma: no cover
+    _AsyncSession = None  # type: ignore
+    _CURL_CFFI_AVAILABLE = False
+    logger.warning(
+        f"[tls_anti_detect] curl_cffi not importable ({_import_err}); "
+        f"falling back to httpx for HTTP probes"
+    )
+
+
+def is_available() -> bool:
+    """Return True if curl_cffi is usable on this host."""
+    return _CURL_CFFI_AVAILABLE
+
+
+# ──────────────────────────────────────────────────────────────────────
+# UA → curl_cffi impersonation target
+# ──────────────────────────────────────────────────────────────────────
+# curl_cffi supports the following impersonation targets (v0.7+):
+#   chrome99, chrome100, chrome101, chrome104, chrome107, chrome110,
+#   chrome116, chrome119, chrome120, chrome123, chrome124, chrome131,
+#   chrome133a, chrome136, edge99, edge101, safari15_3, safari15_5,
+#   safari17_0, safari17_2_ios, safari18_0, safari18_0_ios
+# We pick the closest match to the visiting UA so the TLS handshake
+# version matches what the JS / Sec-CH-UA layer already claims.
+
+_CHROME_RE = _re.compile(r"(?:Chrome|CriOS|Chromium)/(\d+)", _re.IGNORECASE)
+_EDGE_RE = _re.compile(r"Edg(?:A|iOS)?/(\d+)", _re.IGNORECASE)
+_SAFARI_RE = _re.compile(r"Version/(\d+)", _re.IGNORECASE)
+_IOS_RE = _re.compile(r"iPhone OS (\d+)_|CPU iPhone OS (\d+)_", _re.IGNORECASE)
+
+# Conservative whitelist — only the most stable / battle-tested
+# impersonation targets. Newer ones (chrome136, chrome133a) work but
+# we keep a small set to avoid surprises when curl_cffi adds/removes
+# tags between minor versions.
+_CHROME_TARGETS = [99, 100, 101, 104, 107, 110, 116, 119, 120, 123, 124, 131]
+
+
+def _pick_chrome_target(version: int) -> str:
+    """Pick the closest supported chrome impersonation target ≤ version."""
+    best = 110  # safe modern default
+    for t in _CHROME_TARGETS:
+        if t <= version and t > best:
+            best = t
+    return f"chrome{best}"
+
+
+def impersonate_for_ua(ua: str) -> str:
+    """Return the curl_cffi impersonation tag matching the given UA.
+
+    Falls back to 'chrome131' for anything we can't classify so the
+    handshake still looks like a recent real browser.
+    """
+    if not ua:
+        return "chrome131"
+    ua_l = ua.lower()
+
+    # Edge (Chromium-based, but curl_cffi has dedicated edge tags)
+    if "edg/" in ua_l or "edga/" in ua_l or "edgios/" in ua_l:
+        m = _EDGE_RE.search(ua)
+        if m:
+            v = int(m.group(1))
+            if v >= 101:
+                return "edge101"
+            return "edge99"
+        return "edge101"
+
+    # iOS Safari — UA looks like "iPhone OS 17_4 like Mac OS X ..."
+    if "iphone" in ua_l or "ipad" in ua_l:
+        m = _IOS_RE.search(ua)
+        ios_major = 0
+        if m:
+            ios_major = int(m.group(1) or m.group(2) or 0)
+        if ios_major >= 18:
+            return "safari18_0_ios"
+        if ios_major >= 17:
+            return "safari17_2_ios"
+        return "safari17_2_ios"
+
+    # macOS Safari (non-Chromium)
+    if "safari/" in ua_l and "chrome/" not in ua_l and "crios" not in ua_l:
+        m = _SAFARI_RE.search(ua)
+        if m:
+            v = int(m.group(1))
+            if v >= 18:
+                return "safari18_0"
+            if v >= 17:
+                return "safari17_0"
+            return "safari15_5"
+        return "safari17_0"
+
+    # Default: any Chromium-flavoured UA → match Chrome major version
+    m = _CHROME_RE.search(ua)
+    if m:
+        return _pick_chrome_target(int(m.group(1)))
+
+    return "chrome131"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Public async helpers — all return Optional[...] so callers can
+# easily detect "not available, fall back" without try/except.
+# ──────────────────────────────────────────────────────────────────────
+def _build_proxy_uri(proxy: Dict[str, Any]) -> Optional[str]:
+    """Convert the Krexion-internal proxy dict to a curl-compatible URI.
+
+    Accepts the same shape the existing `_parse_proxy_line` produces:
+        {"server": "http://host:port", "username": "...", "password": "..."}
+    Returns None on malformed input.
+    """
+    server = proxy.get("server", "")
+    if not server:
+        return None
+    user = proxy.get("username") or ""
+    pwd = proxy.get("password") or ""
+    if not user:
+        return server
+    try:
+        prefix, rest = server.split("://", 1)
+        return f"{prefix}://{user}:{pwd}@{rest}"
+    except ValueError:
+        return None
+
+
+async def get_json(
+    url: str,
+    *,
+    proxy: Optional[Dict[str, Any]] = None,
+    ua: str = "",
+    headers: Optional[Dict[str, str]] = None,
+    timeout: float = 30.0,
+    connect_timeout: float = 20.0,
+) -> Optional[Dict[str, Any]]:
+    """GET ``url`` with Chrome TLS impersonation and return the parsed JSON.
+
+    Returns None on:
+      • curl_cffi not available
+      • transport error
+      • non-2xx response
+      • body not JSON-decodable
+
+    The caller is expected to fall back to its existing httpx path on
+    None — that path is unchanged.
+    """
+    if not _CURL_CFFI_AVAILABLE or _AsyncSession is None:
+        return None
+    proxy_uri = _build_proxy_uri(proxy) if proxy else None
+    impersonate = impersonate_for_ua(ua) if ua else "chrome131"
+
+    req_headers = {
+        "User-Agent": ua or "Mozilla/5.0",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    if headers:
+        req_headers.update(headers)
+
+    try:
+        async with _AsyncSession(
+            impersonate=impersonate,
+            timeout=timeout,
+            verify=False,
+        ) as session:
+            kwargs: Dict[str, Any] = {"headers": req_headers}
+            if proxy_uri:
+                kwargs["proxy"] = proxy_uri
+            r = await session.get(url, **kwargs)
+            if r.status_code >= 400:
+                return None
+            try:
+                return r.json()
+            except Exception:
+                return None
+    except Exception as e:
+        logger.debug(f"[tls_anti_detect] get_json {url} failed via curl_cffi: {e}")
+        return None
+
+
+async def get_text(
+    url: str,
+    *,
+    proxy: Optional[Dict[str, Any]] = None,
+    ua: str = "",
+    headers: Optional[Dict[str, str]] = None,
+    timeout: float = 30.0,
+    connect_timeout: float = 20.0,
+    max_bytes: int = 32_000,
+) -> Optional[Tuple[int, str]]:
+    """GET ``url`` and return ``(status, body[:max_bytes])`` with
+    Chrome TLS impersonation. Returns None on any failure so the
+    caller can fall back to httpx.
+    """
+    if not _CURL_CFFI_AVAILABLE or _AsyncSession is None:
+        return None
+    proxy_uri = _build_proxy_uri(proxy) if proxy else None
+    impersonate = impersonate_for_ua(ua) if ua else "chrome131"
+
+    req_headers = {
+        "User-Agent": ua or "Mozilla/5.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+    }
+    if headers:
+        req_headers.update(headers)
+
+    try:
+        async with _AsyncSession(
+            impersonate=impersonate,
+            timeout=timeout,
+            verify=False,
+        ) as session:
+            kwargs: Dict[str, Any] = {
+                "headers": req_headers,
+                "allow_redirects": True,
+            }
+            if proxy_uri:
+                kwargs["proxy"] = proxy_uri
+            r = await session.get(url, **kwargs)
+            body = (r.text or "")[:max_bytes]
+            return int(r.status_code), body
+    except Exception as e:
+        logger.debug(f"[tls_anti_detect] get_text {url} failed via curl_cffi: {e}")
+        return None
+
+
+async def head_or_get_status(
+    url: str,
+    *,
+    proxy: Optional[Dict[str, Any]] = None,
+    ua: str = "",
+    timeout: float = 12.0,
+) -> Optional[int]:
+    """Lightweight reachability probe — tries HEAD first, falls back to
+    GET with no-body if HEAD is not allowed. Returns status code or None.
+    """
+    if not _CURL_CFFI_AVAILABLE or _AsyncSession is None:
+        return None
+    proxy_uri = _build_proxy_uri(proxy) if proxy else None
+    impersonate = impersonate_for_ua(ua) if ua else "chrome131"
+
+    req_headers = {
+        "User-Agent": ua or "Mozilla/5.0",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    try:
+        async with _AsyncSession(
+            impersonate=impersonate,
+            timeout=timeout,
+            verify=False,
+        ) as session:
+            kwargs: Dict[str, Any] = {"headers": req_headers, "allow_redirects": True}
+            if proxy_uri:
+                kwargs["proxy"] = proxy_uri
+            # Try HEAD first; some CDNs reject it → GET fallback.
+            try:
+                r = await session.head(url, **kwargs)
+                if 200 <= r.status_code < 500:
+                    return int(r.status_code)
+            except Exception:
+                pass
+            r = await session.get(url, **kwargs)
+            return int(r.status_code)
+    except Exception as e:
+        logger.debug(f"[tls_anti_detect] head_or_get_status {url} failed via curl_cffi: {e}")
+        return None

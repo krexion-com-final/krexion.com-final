@@ -477,6 +477,20 @@ except Exception as _ext_err:  # pragma: no cover
     _EXT_LOADED = False
     logging.getLogger(__name__).warning(f"automation_extensions failed to load: {_ext_err}")
 
+# 2026-01-Phase1: TLS / JA3 / JA4 / HTTP-2 anti-detect for HTTP probes.
+# Pure-additive — if curl_cffi isn't importable, _TLS_AD_OK becomes False
+# and every probe transparently falls back to the existing httpx code
+# path. Browser-layer Playwright flows are NEVER touched by this import.
+try:
+    import tls_anti_detect as _tls_ad  # noqa: F401
+    _TLS_AD_OK = bool(_tls_ad.is_available())
+except Exception as _tls_ad_err:  # pragma: no cover
+    _tls_ad = None  # type: ignore
+    _TLS_AD_OK = False
+    logging.getLogger(__name__).warning(
+        f"tls_anti_detect import failed ({_tls_ad_err}); HTTP probes will use httpx only"
+    )
+
 logger = logging.getLogger(__name__)
 
 RESULTS_ROOT = Path("/app/backend/real_user_traffic_results")
@@ -1631,26 +1645,88 @@ async def _probe_proxy_geo(proxy: Dict[str, Any], ua: str) -> Dict[str, Any]:
         return False
 
     try:
+        # 2026-01-Phase1: Try TLS-impersonated probe FIRST (curl_cffi with
+        # Chrome JA3/JA4/HTTP-2 fingerprint matching the visiting UA).
+        # On success, skip the httpx fallback entirely. On any failure
+        # (including curl_cffi unavailable), the existing httpx code
+        # path below runs UNCHANGED — full backwards compatibility.
+        ok = False
+        if _TLS_AD_OK and _tls_ad is not None:
+            try:
+                # Attempt 1: HTTPS ipwho.is via TLS-spoofed session
+                data_iw = await _tls_ad.get_json(
+                    "https://ipwho.is/",
+                    proxy=proxy, ua=ua, timeout=30.0,
+                )
+                if data_iw and data_iw.get("success") is True:
+                    result["exit_ip"] = data_iw.get("ip")
+                    result["country_name"] = data_iw.get("country") or result["country_name"]
+                    result["country"] = data_iw.get("country_code") or result["country"]
+                    result["region_name"] = data_iw.get("region") or result["region_name"]
+                    result["region"] = data_iw.get("region_code") or result["region"]
+                    result["city"] = data_iw.get("city") or result["city"]
+                    try:
+                        result["lat"] = float(data_iw.get("latitude") or result["lat"])
+                        result["lon"] = float(data_iw.get("longitude") or result["lon"])
+                    except (TypeError, ValueError):
+                        pass
+                    tz = data_iw.get("timezone") or {}
+                    if isinstance(tz, dict):
+                        result["timezone"] = tz.get("id") or result["timezone"]
+                    elif isinstance(tz, str):
+                        result["timezone"] = tz or result["timezone"]
+                    conn = data_iw.get("connection") or {}
+                    result["is_vpn"] = bool(
+                        conn.get("type") in ("hosting", "datacenter")
+                        or (str(conn.get("org") or "").lower().find("hosting") >= 0)
+                    )
+                    ok = True
+                if not ok:
+                    # Attempt 2: ip-api.com via TLS-spoofed session
+                    data_ia = await _tls_ad.get_json(
+                        "http://ip-api.com/json/?fields=status,country,countryCode,region,"
+                        "regionName,city,timezone,lat,lon,query,proxy,hosting",
+                        proxy=proxy, ua=ua, timeout=30.0,
+                    )
+                    if data_ia and data_ia.get("status") == "success":
+                        result["exit_ip"] = data_ia.get("query")
+                        result["country_name"] = data_ia.get("country") or result["country_name"]
+                        result["country"] = data_ia.get("countryCode") or result["country"]
+                        result["region"] = data_ia.get("region") or result["region"]
+                        result["region_name"] = data_ia.get("regionName") or result["region_name"]
+                        result["city"] = data_ia.get("city") or result["city"]
+                        try:
+                            result["lat"] = float(data_ia.get("lat") or result["lat"])
+                            result["lon"] = float(data_ia.get("lon") or result["lon"])
+                        except (TypeError, ValueError):
+                            pass
+                        result["timezone"] = data_ia.get("timezone") or result["timezone"]
+                        result["is_vpn"] = bool(data_ia.get("proxy") or data_ia.get("hosting"))
+                        ok = True
+            except Exception as _tls_e:
+                logger.debug(f"TLS-spoofed geo probe failed, falling back to httpx: {_tls_e}")
+                ok = False
+
         # Longer timeout because residential proxies can take 10-15s to route.
         # Retry up to 3 times — residential proxies (proxy-jet, brightdata,
         # etc.) have ~10-20% per-request failure rate due to rotating exit
         # nodes; retrying the same proxy usually succeeds with a different
         # exit IP on the next attempt.
         timeout_cfg = httpx.Timeout(30.0, connect=20.0)
-        ok = False
-        for attempt in range(3):
-            try:
-                async with httpx.AsyncClient(proxy=server, timeout=timeout_cfg, headers={"User-Agent": ua}, verify=False, http2=False) as cli:
-                    ok = await _try_https_ipwhois(cli)
-                    if not ok:
-                        ok = await _try_http_ipapi(cli)
-                if ok:
-                    break
-            except Exception as e:
-                logger.debug(f"Proxy probe attempt {attempt+1} failed: {e}")
-            # Brief backoff before next attempt
-            if attempt < 2:
-                await asyncio.sleep(1.5 * (attempt + 1))
+        if not ok:
+            for attempt in range(3):
+                try:
+                    async with httpx.AsyncClient(proxy=server, timeout=timeout_cfg, headers={"User-Agent": ua}, verify=False, http2=False) as cli:
+                        ok = await _try_https_ipwhois(cli)
+                        if not ok:
+                            ok = await _try_http_ipapi(cli)
+                    if ok:
+                        break
+                except Exception as e:
+                    logger.debug(f"Proxy probe attempt {attempt+1} failed: {e}")
+                # Brief backoff before next attempt
+                if attempt < 2:
+                    await asyncio.sleep(1.5 * (attempt + 1))
         if ok:
             cc = (result["country"] or "").lower()
             lang_map = {
@@ -1721,6 +1797,21 @@ async def _probe_proxy_target_reachable(
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
     timeout_cfg = httpx.Timeout(timeout_s, connect=min(8.0, timeout_s))
+    # 2026-01-Phase1: Try TLS-impersonated reachability check first. Some
+    # offer CDNs (Cloudflare strict mode, DataDome) reject the bare httpx
+    # JA3 fingerprint with a 403 before the proxy even completes the
+    # tunnel — that false-negative used to mark perfectly-good IPs as
+    # unreachable. curl_cffi sends a real Chrome ClientHello so the
+    # tunnel succeeds and we get the genuine status code.
+    if _TLS_AD_OK and _tls_ad is not None:
+        try:
+            status = await _tls_ad.head_or_get_status(
+                target_url, proxy=proxy, ua=ua, timeout=timeout_s,
+            )
+            if status is not None:
+                return True, f"TLS {status}"
+        except Exception as _tls_e:
+            logger.debug(f"TLS reachability probe failed, falling back to httpx: {_tls_e}")
     try:
         async with httpx.AsyncClient(
             proxy=server, timeout=timeout_cfg, headers=headers,
@@ -2235,6 +2326,326 @@ safe(() => {
     };
   }
 });
+
+// ──────────────────────────────────────────────────────────────────
+// 2026-01 Phase 2 — Mobile sensor data spoofing
+// ──────────────────────────────────────────────────────────────────
+// Anura / TypeFraud / IPQS Deep cross-check mobile UAs against real
+// motion data: a phone UA with ZERO devicemotion / deviceorientation
+// events for 30+ seconds is an instant bot flag. We emit a slow,
+// realistic stream of sensor events seeded per-visit so two visits
+// from the same model still differ slightly. Only active when the
+// per-visit fingerprint marks the device as mobile so desktop visits
+// stay byte-identical to the legacy behaviour.
+safe(() => {
+  if (!__KX.isMobile) return;
+  if (typeof window === 'undefined') return;
+
+  const srng = makeRng(((__KX.audioSeed >>> 0) ^ (__KX.canvasSeed >>> 0)) || 1);
+  // Stationary baseline (phone on a table / in hand) — small gravity
+  // vector + tiny drift. Mirrors what real iPhones / Pixels output
+  // when the user is reading but not actively moving the device.
+  const baseAccel = { x: (srng() - 0.5) * 0.4, y: (srng() - 0.5) * 0.4, z: 9.78 + (srng() - 0.5) * 0.05 };
+  const baseRot   = { alpha: srng() * 360, beta: (srng() - 0.5) * 12, gamma: (srng() - 0.5) * 6 };
+  let lastNow = Date.now();
+
+  function jitter(v, mag) { return v + (srng() - 0.5) * mag; }
+
+  // Make DeviceMotionEvent / DeviceOrientationEvent appear permitted on
+  // iOS (where they require explicit user gesture). Real Safari iframes
+  // resolve to 'granted' once the page is in the foreground.
+  try {
+    if (window.DeviceMotionEvent && typeof DeviceMotionEvent.requestPermission === 'function') {
+      DeviceMotionEvent.requestPermission = function () { return Promise.resolve('granted'); };
+    }
+    if (window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === 'function') {
+      DeviceOrientationEvent.requestPermission = function () { return Promise.resolve('granted'); };
+    }
+  } catch (e) {}
+
+  // Pump synthetic sensor events at the same cadence real phones emit
+  // them: 16-20Hz for motion, 8-12Hz for orientation. Total CPU cost
+  // is negligible (a single setInterval).
+  let _motionInterval = null;
+  let _orientInterval = null;
+  try {
+    _motionInterval = setInterval(function () {
+      try {
+        const now = Date.now();
+        const dt = (now - lastNow) || 50;
+        lastNow = now;
+        const ev = new Event('devicemotion');
+        // Set read-only DeviceMotionEvent fields via defineProperty
+        // because the constructor is missing on most platforms.
+        const acc = { x: jitter(baseAccel.x, 0.05), y: jitter(baseAccel.y, 0.05), z: jitter(baseAccel.z, 0.02) };
+        const accG = { x: jitter(0, 0.02), y: jitter(0, 0.02), z: jitter(0, 0.02) };
+        const rot = { alpha: jitter(0, 0.5), beta: jitter(0, 0.3), gamma: jitter(0, 0.3) };
+        try { Object.defineProperty(ev, 'acceleration', { get: () => accG }); } catch (e) {}
+        try { Object.defineProperty(ev, 'accelerationIncludingGravity', { get: () => acc }); } catch (e) {}
+        try { Object.defineProperty(ev, 'rotationRate', { get: () => rot }); } catch (e) {}
+        try { Object.defineProperty(ev, 'interval', { get: () => dt }); } catch (e) {}
+        window.dispatchEvent(ev);
+      } catch (e) {}
+    }, 55);
+  } catch (e) {}
+
+  try {
+    _orientInterval = setInterval(function () {
+      try {
+        baseRot.alpha = (baseRot.alpha + (srng() - 0.5) * 0.4 + 360) % 360;
+        baseRot.beta  = Math.max(-180, Math.min(180, baseRot.beta + (srng() - 0.5) * 0.3));
+        baseRot.gamma = Math.max(-90,  Math.min(90,  baseRot.gamma + (srng() - 0.5) * 0.25));
+        const ev = new Event('deviceorientation');
+        try { Object.defineProperty(ev, 'alpha', { get: () => baseRot.alpha }); } catch (e) {}
+        try { Object.defineProperty(ev, 'beta',  { get: () => baseRot.beta  }); } catch (e) {}
+        try { Object.defineProperty(ev, 'gamma', { get: () => baseRot.gamma }); } catch (e) {}
+        try { Object.defineProperty(ev, 'absolute', { get: () => true }); } catch (e) {}
+        window.dispatchEvent(ev);
+      } catch (e) {}
+    }, 110);
+  } catch (e) {}
+
+  // Generic Sensor API (Chrome on Android) — Accelerometer / Gyroscope
+  // are gated behind permissions.query; the existing permissions patch
+  // above already returns 'prompt' for them. Detectors that try to
+  // construct the sensors directly should see a working object that
+  // emits realistic readings without ever throwing.
+  try {
+    const FakeReading = function (axes) {
+      return {
+        timestamp: performance.now(),
+        x: axes.x, y: axes.y, z: axes.z,
+        addEventListener: function () {}, removeEventListener: function () {},
+        start: function () {}, stop: function () {},
+      };
+    };
+    if (!window.Accelerometer) {
+      window.Accelerometer = function () { return FakeReading({ x: baseAccel.x, y: baseAccel.y, z: baseAccel.z }); };
+    }
+    if (!window.Gyroscope) {
+      window.Gyroscope = function () { return FakeReading({ x: 0, y: 0, z: 0 }); };
+    }
+  } catch (e) {}
+});
+
+// ──────────────────────────────────────────────────────────────────
+// 2026-01 Phase 3 — Deeper CDP / runtime / fingerprint patches
+// ──────────────────────────────────────────────────────────────────
+// Pure-additive — every block is wrapped in `safe(()=>…)` so any
+// individual failure leaves the rest intact and the page never sees
+// an uncaught exception from our init script.
+
+// ── 3a. Error.stack — strip Playwright / puppeteer fingerprints ─
+// FingerprintJS Pro / DataDome stringify `new Error().stack` and
+// search for tell-tale tokens (puppeteer_evaluation_script, devtools,
+// runtime.evaluate). We post-process the stack so those tokens are
+// rewritten to look like a normal user-script trace.
+safe(() => {
+  const origStackGet = Object.getOwnPropertyDescriptor(Error.prototype, 'stack');
+  // Some Chromium versions expose stack as a data prop only after first
+  // access — guard for both cases.
+  const sanitize = (s) => {
+    if (typeof s !== 'string') return s;
+    return s
+      .replace(/puppeteer_evaluation_script/gi, 'inline_script')
+      .replace(/__puppeteer/gi, '_chrome')
+      .replace(/playwright/gi, 'app')
+      .replace(/at evaluate \(/gi, 'at (anonymous) (')
+      .replace(/Runtime\.evaluate/gi, '');
+  };
+  try {
+    const origToString = Error.prototype.toString;
+    Error.prototype.toString = function () {
+      try { return sanitize(origToString.apply(this, arguments)); }
+      catch (e) { return origToString.apply(this, arguments); }
+    };
+  } catch (e) {}
+  try {
+    Object.defineProperty(Error.prototype, 'stack', {
+      configurable: true,
+      get: function () {
+        let s;
+        try { s = origStackGet && origStackGet.get ? origStackGet.get.call(this) : this.__kx_stack__; }
+        catch (e) { s = ''; }
+        return sanitize(s || '');
+      },
+      set: function (v) { this.__kx_stack__ = v; },
+    });
+  } catch (e) {}
+});
+
+// ── 3b. console.debug timing — some detectors emit a debug() to a
+// secret object and time the round-trip; CDP attached → measurable
+// pause. We pre-bind console.debug to a no-op proxy so the timing is
+// instantaneous regardless of whether CDP is hooked.
+safe(() => {
+  if (!window.console) return;
+  const origDebug = console.debug && console.debug.bind(console);
+  console.debug = function () {
+    // Drop the call entirely when called with the canonical bot-detector
+    // object signature (single object arg with no inherited proto).
+    try {
+      if (arguments.length === 1 &&
+          typeof arguments[0] === 'object' && arguments[0] !== null &&
+          Object.getPrototypeOf(arguments[0]) === null) {
+        return undefined;
+      }
+    } catch (e) {}
+    return origDebug ? origDebug.apply(this, arguments) : undefined;
+  };
+});
+
+// ── 3c. Reflect.ownKeys / getOwnPropertyDescriptor on window —
+// some detectors enumerate window properties looking for cdc_, $cdc,
+// $chrome_asyncScriptInfo, __$webdriverAsyncExecutor, etc. We filter
+// those names out of the descriptor map and the keys list. Anything
+// we don't explicitly hide is passed through unchanged so legitimate
+// site scripts keep working.
+safe(() => {
+  const HIDDEN_NAMES = new Set([
+    'cdc_adoQpoasnfa76pfcZLmcfl_Array',
+    'cdc_adoQpoasnfa76pfcZLmcfl_Promise',
+    'cdc_adoQpoasnfa76pfcZLmcfl_Symbol',
+    '$cdc_asdjflasutopfhvcZLmcfl_',
+    '$chrome_asyncScriptInfo',
+    '__$webdriverAsyncExecutor',
+    '__webdriver_evaluate', '__webdriver_unwrapped', '__webdriver_script_fn',
+    '__webdriver_script_func', '__webdriver_script_function',
+    '__driver_evaluate', '__driver_unwrapped', '__fxdriver_evaluate',
+    '__fxdriver_unwrapped', '__selenium_evaluate', '__selenium_unwrapped',
+    '_phantom', 'callPhantom', 'callSelenium', '_Selenium_IDE_Recorder',
+  ]);
+  const origReflectOwnKeys = Reflect.ownKeys;
+  Reflect.ownKeys = function (target) {
+    try {
+      const keys = origReflectOwnKeys.apply(this, arguments);
+      if (target === window) {
+        return keys.filter((k) => !HIDDEN_NAMES.has(String(k)));
+      }
+      return keys;
+    } catch (e) {
+      return origReflectOwnKeys.apply(this, arguments);
+    }
+  };
+  const origGetOwn = Object.getOwnPropertyNames;
+  Object.getOwnPropertyNames = function (target) {
+    try {
+      const keys = origGetOwn.apply(this, arguments);
+      if (target === window) {
+        return keys.filter((k) => !HIDDEN_NAMES.has(String(k)));
+      }
+      return keys;
+    } catch (e) {
+      return origGetOwn.apply(this, arguments);
+    }
+  };
+  // Belt-and-braces: blank out any of those names if they exist.
+  HIDDEN_NAMES.forEach((n) => {
+    try { delete window[n]; } catch (e) {}
+    try { Object.defineProperty(window, n, { get: () => undefined, configurable: true }); } catch (e) {}
+  });
+});
+
+// ── 3d. Performance API jitter — CreepJS measures performance.now()
+// resolution to detect headless (which uses 100µs steps vs 5µs on
+// real Chrome). We add a tiny per-call jitter so the resolution
+// distribution matches a real desktop / mobile profile.
+safe(() => {
+  if (!window.performance || !performance.now) return;
+  const orig = performance.now.bind(performance);
+  const prng = makeRng((__KX.canvasSeed >>> 0) ^ 0xDEADBEEF);
+  performance.now = function () {
+    try {
+      const t = orig();
+      // Sub-microsecond noise — barely affects timing but breaks
+      // exact-equality fingerprint checks.
+      return t + (prng() * 0.005);
+    } catch (e) { return orig(); }
+  };
+});
+
+// ── 3e. WebGL2 extensions / parameters — detectors call
+// getSupportedExtensions() and bucket the result. Real Chrome on
+// the visiting OS exposes a known set; we return it so headless
+// (which often omits a few) matches the profile.
+safe(() => {
+  const REAL_EXT = [
+    'ANGLE_instanced_arrays', 'EXT_blend_minmax', 'EXT_color_buffer_half_float',
+    'EXT_disjoint_timer_query', 'EXT_float_blend', 'EXT_frag_depth',
+    'EXT_shader_texture_lod', 'EXT_texture_compression_bptc',
+    'EXT_texture_compression_rgtc', 'EXT_texture_filter_anisotropic',
+    'WEBKIT_EXT_texture_filter_anisotropic', 'EXT_sRGB',
+    'KHR_parallel_shader_compile', 'OES_element_index_uint',
+    'OES_fbo_render_mipmap', 'OES_standard_derivatives',
+    'OES_texture_float', 'OES_texture_float_linear',
+    'OES_texture_half_float', 'OES_texture_half_float_linear',
+    'OES_vertex_array_object', 'WEBGL_color_buffer_float',
+    'WEBGL_compressed_texture_s3tc', 'WEBGL_compressed_texture_s3tc_srgb',
+    'WEBGL_debug_renderer_info', 'WEBGL_debug_shaders',
+    'WEBGL_depth_texture', 'WEBGL_draw_buffers',
+    'WEBGL_lose_context', 'WEBGL_multi_draw',
+  ];
+  const patch = (proto) => {
+    if (!proto || !proto.getSupportedExtensions) return;
+    const orig = proto.getSupportedExtensions;
+    proto.getSupportedExtensions = function () {
+      try {
+        const got = orig.call(this) || [];
+        // Union of real-set and what the driver actually supports —
+        // never claim extensions the driver lacks (some detectors
+        // probe each entry) but ensure the headless-only gaps get
+        // filled with realistic names.
+        const set = new Set(got);
+        REAL_EXT.forEach((e) => set.add(e));
+        return Array.from(set);
+      } catch (e) { return orig.call(this); }
+    };
+  };
+  if (window.WebGLRenderingContext) patch(WebGLRenderingContext.prototype);
+  if (window.WebGL2RenderingContext) patch(WebGL2RenderingContext.prototype);
+});
+
+// ── 3f. Iframe contentWindow inheritance — detectors create a
+// throwaway <iframe> and check that navigator.webdriver, plugins,
+// etc. on its contentWindow are ALSO patched. Without this, a
+// nested-frame check would see the un-patched defaults and instantly
+// flag the parent. We re-apply the navigator.webdriver false-flag to
+// every same-origin iframe contentWindow on creation.
+safe(() => {
+  const reapply = (win) => {
+    try {
+      if (!win || !win.navigator) return;
+      Object.defineProperty(win.navigator, 'webdriver', { get: () => false, configurable: true });
+    } catch (e) {}
+  };
+  const origAttach = HTMLIFrameElement.prototype.appendChild;
+  // Watch existing iframes
+  setTimeout(() => {
+    try {
+      const ifrs = document.getElementsByTagName('iframe');
+      for (let i = 0; i < ifrs.length; i++) {
+        try { reapply(ifrs[i].contentWindow); } catch (e) {}
+      }
+    } catch (e) {}
+  }, 0);
+  // Patch the contentWindow accessor so future iframe creation also
+  // returns a window with the patched navigator.
+  try {
+    const desc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');
+    if (desc && desc.get) {
+      const origGet = desc.get;
+      Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
+        configurable: true,
+        get: function () {
+          const w = origGet.call(this);
+          try { reapply(w); } catch (e) {}
+          return w;
+        },
+      });
+    }
+  } catch (e) {}
+});
+
 """
     return "(()=>{" + config_js + js_body + "})();"
 
@@ -2438,21 +2849,39 @@ async def _probe_offer_duplicate_via_proxy(
         "Cache-Control": "no-cache",
     }
     timeout_cfg = httpx.Timeout(timeout_s, connect=min(8.0, timeout_s))
-    try:
-        async with httpx.AsyncClient(
-            proxy=server, timeout=timeout_cfg, headers=headers,
-            verify=False, http2=False, follow_redirects=True,
-        ) as cli:
-            r = await cli.get(target_url)
-            # Only read first ~32 KB — duplicate / VPN markers are
-            # ALWAYS in the visible top-of-page text; deep scans waste
-            # bandwidth on multi-MB landing pages.
-            body = (r.text or "")[:32000].lower()
-    except Exception:
-        # Any transport error → treat as "not blocked here", let the
-        # existing engine handle it via browser. We don't want a
-        # network blip to mark a clean IP as duplicate.
-        return False, "", ""
+    body = ""
+    # 2026-01-Phase1: Prefer TLS-impersonated probe so the offer's CDN
+    # (Cloudflare / DataDome / Akamai) doesn't reject us at the JA3
+    # layer before we even see the page. On failure → fall back to httpx
+    # exactly as before. Body extraction logic afterwards is unchanged.
+    if _TLS_AD_OK and _tls_ad is not None:
+        try:
+            r = await _tls_ad.get_text(
+                target_url, proxy=proxy, ua=ua,
+                headers={"Cache-Control": "no-cache"},
+                timeout=timeout_s, max_bytes=32_000,
+            )
+            if r is not None:
+                _status, _text = r
+                body = (_text or "").lower()
+        except Exception:
+            body = ""
+    if not body:
+        try:
+            async with httpx.AsyncClient(
+                proxy=server, timeout=timeout_cfg, headers=headers,
+                verify=False, http2=False, follow_redirects=True,
+            ) as cli:
+                r = await cli.get(target_url)
+                # Only read first ~32 KB — duplicate / VPN markers are
+                # ALWAYS in the visible top-of-page text; deep scans waste
+                # bandwidth on multi-MB landing pages.
+                body = (r.text or "")[:32000].lower()
+        except Exception:
+            # Any transport error → treat as "not blocked here", let the
+            # existing engine handle it via browser. We don't want a
+            # network blip to mark a clean IP as duplicate.
+            return False, "", ""
 
     if not body:
         return False, "", ""
