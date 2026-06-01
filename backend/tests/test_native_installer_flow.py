@@ -62,7 +62,7 @@ def db():
 
 def _run(coro):
     import asyncio
-    return asyncio.get_event_loop().run_until_complete(coro) if asyncio.get_event_loop().is_running() is False else asyncio.run(coro)
+    return asyncio.run(coro)
 
 
 # ── Tests ─────────────────────────────────────────────────────────────

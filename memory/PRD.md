@@ -581,6 +581,53 @@ Single downloadable `.bat` file that, when double-clicked on admin's Windows VPS
 3. Auto-installs: Git + Python 3.11 + Node.js 20 LTS + Yarn + Inno Setup
 4. Clones/pulls krexion.com repo into `C:\Krexion-Build`
 5. Auto-bumps version, runs `Build-Krexion-Windows.ps1`
+
+---
+
+## Iteration 14 — 2026-06-01: VPS Overload Fix — Strict-Mode Hardened
+
+### User report (Roman Urdu)
+"jab bari job chalai, VPS Contabo pe site slow ho gayi. Maine setting ki hui hai ke heavy job customer PC pe chalein. Check karein aur fix karein."
+
+### Root cause
+`require_local_mode` gate (added 2026-05) had an **online-PC bypass**:
+```python
+if local_status.get("online"):
+    return True   # ← ALLOWED VPS execution if PC is heart-beating
+```
+This meant when a customer with an active desktop app heartbeat clicked "Start RUT" from the cloud web UI:
+1. Gate saw PC online → allowed
+2. `background.add_task(_rut_prepare_and_run, ...)` ran heavy Chromium fleet ON the VPS
+3. 45+ Chromium browsers caused exactly the slowness the user reported
+
+The 2026-05 refinement's intent (online PC = customer accountable, allow either side) was wrong from VPS-load POV.
+
+### Fix
+`backend/server.py:require_local_mode()` — removed the online-PC bypass. When `STRICT_CLOUD_HEAVY_BLOCK=true` on cloud, gate now **always** refuses inline cloud execution. New 503 detail carries `actionable_hint=use_desktop_app` for online-PC customers so the modal copy says "switch to your desktop app" instead of "install desktop app".
+
+Also added missing gate to `POST /traffic/send-real` (was unguarded — could spawn heavy concurrent HTTP traffic on VPS).
+
+### Frontend
+`LocalPCOfflineDialog.js`: extended `hint === "open_desktop_app" || hint === "use_desktop_app"` so the existing online-PC modal copy is reused. Zero new UI work needed.
+
+### Regression test
+`backend/tests/test_strict_mode_gate.py` (4 tests, all pass):
+- All 3 heavy endpoints (RUT/Form Filler/Visual Recorder) require auth (gate is mounted)
+- **Critical:** When PC heartbeat is fresh (online) + strict mode on, gate STILL refuses with `use_desktop_app` hint — locks in the new behaviour
+
+### What customers see now
+| Scenario | Before | After (2026-06) |
+|---|---|---|
+| Cloud + strict + PC online | RUT runs on VPS (bug — VPS overload) | 503 → modal "Switch to your desktop app" |
+| Cloud + strict + PC offline | 503 → "Turn on your PC" | (unchanged) |
+| Cloud + strict + no desktop app ever | 503 → "Install desktop app" | (unchanged) |
+| Local install (KREXION_MODE != cloud) | Allowed | (unchanged) |
+
+### Files touched
+- `backend/server.py` — `require_local_mode` hardened, gate added to `/traffic/send-real`
+- `frontend/src/components/LocalPCOfflineDialog.js` — accept `use_desktop_app` hint
+- `backend/tests/test_strict_mode_gate.py` — new regression suite
+
 6. Produces `Krexion-Setup-X.X.X.exe`, opens output folder
 
 ### Files added/changed

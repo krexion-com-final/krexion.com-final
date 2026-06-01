@@ -453,7 +453,7 @@ CLOUD_HEAVY_BLOCKED_MSG = (
 async def require_local_mode(request: Request):
     """FastAPI dependency for heavy operations (RUT, Form Filler, etc).
 
-    Decision matrix:
+    Decision matrix (2026-06 — STRICT enforcement):
 
       • Bridge worker call (X-Krexion-Bridge-Job header set)
             → ALWAYS allow. This is the customer's own desktop app
@@ -468,22 +468,18 @@ async def require_local_mode(request: Request):
             → allow (the endpoint may still try to bridge first; if the
               bridge fails it falls back to cloud execution as before).
 
-      • Cloud edge + STRICT_CLOUD_HEAVY_BLOCK=true + PC ONLINE
-            → ALLOW. (2026-05 refinement.) The customer literally has
-              "PC connected · X GB / Y cores" in their header bar — the
-              whole point of strict mode is to protect the VPS WHEN THE
-              CUSTOMER HAS NO LOCAL FALLBACK. If their heartbeat is
-              fresh, they have one. Endpoints that bridge route the
-              request to the desktop app; endpoints that don't bridge
-              run inline on the cloud — either is fine because the
-              customer's own machine is active and accountable.
-
-      • Cloud edge + STRICT_CLOUD_HEAVY_BLOCK=true + PC OFFLINE
-            → REFUSE. Returns 503 + customer's local-PC heartbeat
-              status so the frontend modal shows the right copy
-              ("turn on your PC" vs "install desktop app"). This is
-              the ONLY case we block — the case the customer asked
-              for: "agar PC OFF ho to VPS pe load na pare".
+      • Cloud edge + STRICT_CLOUD_HEAVY_BLOCK=true (default)
+            → ALWAYS REFUSE on cloud. Heavy work (RUT, Form Filler,
+              Visual Recorder, bulk proxy tests) must run on the
+              customer's desktop app. Even if their PC is currently
+              heart-beating, we refuse cloud execution — this is the
+              customer's explicit ask:
+              "abi pure load docker k throw chalna chahye sab".
+              The 503 response carries `local_status` so the frontend
+              modal can show the right copy:
+                 - PC online → "Switch to your desktop app to start"
+                 - PC stale  → "Turn on your PC and the desktop app"
+                 - No PC yet → "Install the Krexion desktop app"
     """
     if request.headers.get("X-Krexion-Bridge-Job"):
         return True
@@ -494,17 +490,19 @@ async def require_local_mode(request: Request):
     if not await get_effective_strict_heavy_block():
         return True
 
-    # ── 2026-05 refinement: only block when PC is OFFLINE ──
-    # Before this fix, strict mode was blocking heavy features even when
-    # the customer's desktop app was actively connected (showing
-    # "PC connected · 31.9 GB / 8 cores" in the UI). The customer's
-    # explicit ask was: "agar customer ka PC OFF ho to VPS pe load na
-    # pare" — i.e. block ONLY when the PC is offline. If PC is online,
-    # the customer has resources & accountability — allow.
+    # ── 2026-06 (replaces 2026-05 online-bypass) ──
+    # Previous behaviour:
+    #   Cloud + strict + PC ONLINE → ALLOWED VPS execution.
+    # This caused exactly the VPS-overload the customer reported when
+    # they kicked off a big RUT job — the heavy Chromium fleet ran on
+    # the cloud VPS even though their PC was connected, because the
+    # gate considered "online PC = customer accountable" sufficient.
     #
-    # We resolve the user from the bearer token WITHOUT re-running the
-    # full JWT dependency (avoids HTTPException side-effects inside this
-    # dependency). On any error we fail CLOSED (block) for safety.
+    # New behaviour:
+    #   Cloud + strict = REFUSE inline cloud execution period.
+    #   The customer's desktop app is the only legitimate executor.
+    # We still surface `local_status` so the frontend can render the
+    # most relevant 503 modal copy.
     local_status: Dict[str, Any] = {"online": False, "reason": "status_unknown"}
     try:
         from bridge_module import is_user_local_online as _is_online
@@ -513,17 +511,9 @@ async def require_local_mode(request: Request):
         if token:
             try:
                 _payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-                # ── 2026-05 fix ──
                 # JWT `sub` is the user's EMAIL (see get_current_user
-                # line ~1220). The heartbeat collection keys on
-                # `user_id` (the document `id` UUID), so we MUST resolve
-                # email → user_id before calling is_user_local_online.
-                # Without this resolution the previous code looked up
-                # `user_id = "user@example.com"` against `user_id=UUID`
-                # rows, never matched, and always returned offline
-                # even when the desktop app was actively heart-beating —
-                # which is the EXACT customer-reported bug
-                # ("PC already connected hai phir bhi error aya").
+                # line ~1220). Heartbeats key on `user_id` (the doc
+                # UUID), so resolve email→user_id before lookup.
                 _uid = _payload.get("user_id")
                 if not _uid:
                     _email = _payload.get("sub")
@@ -540,12 +530,16 @@ async def require_local_mode(request: Request):
     except Exception:
         pass
 
-    # PC ONLINE → allow. This is the customer's expected behaviour
-    # ("mera PC already connected hai, error kyun aya"). The /api/mode
-    # banner stays "strict" because the protection IS active — it just
-    # didn't need to trigger for this request.
+    # Pick the most actionable hint for the frontend's "open desktop
+    # app" modal. Customers with an online PC are the easiest case —
+    # they just need to launch the desktop app instead of clicking the
+    # cloud UI button.
     if local_status.get("online"):
-        return True
+        actionable_hint = "use_desktop_app"
+    elif local_status.get("reason") == "stale_heartbeat":
+        actionable_hint = "turn_on_pc"
+    else:
+        actionable_hint = "install_desktop_app"
 
     raise HTTPException(
         status_code=503,
@@ -555,10 +549,7 @@ async def require_local_mode(request: Request):
             "message": CLOUD_HEAVY_BLOCKED_MSG,
             "download_url": "https://krexion.com/download",
             "local_status": local_status,
-            "actionable_hint": (
-                "turn_on_pc" if local_status.get("reason") == "stale_heartbeat"
-                else "install_desktop_app"
-            ),
+            "actionable_hint": actionable_hint,
         },
     )
 
@@ -10293,6 +10284,7 @@ async def send_real_traffic(
     payload: RealTrafficRequest,
     request: Request,
     user: dict = Depends(get_current_user_with_fresh_data),
+    _cloud_gate: bool = Depends(require_local_mode),
 ):
     """
     Send REAL HTTP traffic to a user's short link through residential proxies.

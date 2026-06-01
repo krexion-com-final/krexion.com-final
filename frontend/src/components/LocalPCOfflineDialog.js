@@ -51,7 +51,7 @@ export default function LocalPCOfflineDialog() {
   //   • PC offline / stale heartbeat → turn on PC
   //   • No bridge ever registered → install desktop app
   let icon, headline, body, ctaLabel, ctaHref;
-  if (hint === "open_desktop_app" || localOnline) {
+  if (hint === "open_desktop_app" || hint === "use_desktop_app" || localOnline) {
     icon = <Power size={42} className="text-emerald-400" />;
     headline = "Open the Krexion desktop app";
     body =
