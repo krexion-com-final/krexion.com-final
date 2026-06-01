@@ -798,6 +798,208 @@ async def _human_pre_submit_dwell(page: Any, fp: Dict[str, Any]) -> None:
         pass
 
 
+# ──────────────────────────────────────────────────────────────────────
+# 2026-01 Phase 4 — Lead-validation interactions + Mobile CTIT delay
+# ──────────────────────────────────────────────────────────────────────
+# These additive helpers patch the last two gaps in the anti-detect
+# stack against affiliate-network fraud layers (MaxBounty / Perform[cb]
+# / Glitchy / TrustedForm / Jornaya / AppsFlyer Protect360):
+#
+# 4a. `_emit_lead_validation_interactions` — TrustedForm and Jornaya
+#     LeadiD both score a session on the number and type of DOM events
+#     they witness during form completion. Pure `page.fill()` from
+#     Playwright sets the input value DIRECTLY without firing the
+#     mousedown/mouseup/focus/blur/keydown/keyup chain a real human
+#     would generate. This helper walks every visible form field, fires
+#     the realistic event chain, and dispatches an `input` event so
+#     ActiveProspect's & Jornaya's collector scripts log meaningful
+#     telemetry — turning a previously "bot-like" session into a
+#     "human" one. NEVER fills any data — only fires events on already-
+#     populated fields.
+#
+# 4b. `_apply_mobile_ctit_delay` — AppsFlyer Protect360 and Adjust's
+#     fraud rules flag any mobile install whose Click-To-Install-Time
+#     (CTIT) is <10 seconds OR shows an abnormally narrow distribution.
+#     Real users on mobile take 30-300s to click → view store → install
+#     → first-launch. This helper inserts a per-visit random sleep
+#     drawn from a realistic CTIT distribution BEFORE the form submit
+#     fires, but only for mobile UAs and only when env var
+#     `RUT_MOBILE_CTIT_DELAY=true`. Default OFF so existing customer
+#     flows are byte-identical until they opt in.
+# ──────────────────────────────────────────────────────────────────────
+async def _emit_lead_validation_interactions(page: Any, fp: Dict[str, Any]) -> None:
+    """Fire realistic DOM events on every visible form field so
+    TrustedForm / Jornaya / ActiveProspect collectors record genuine
+    interaction telemetry. NEVER changes field values — only emits
+    focus / blur / input / keydown / keyup / mousedown / mouseup
+    events. Safe-failed at every layer; an exception in any single
+    field never blocks the visit."""
+    try:
+        # Build a list of visible, interactive form fields. Skipping
+        # hidden / disabled inputs because TrustedForm itself skips
+        # them — firing events on a hidden input would look unnatural.
+        fields = await page.evaluate(r"""() => {
+            const out = [];
+            const sel = 'input, select, textarea';
+            const els = document.querySelectorAll(sel);
+            for (let i = 0; i < els.length && i < 30; i++) {
+                const el = els[i];
+                if (!el) continue;
+                const t = (el.type || '').toLowerCase();
+                if (t === 'hidden' || t === 'submit' || t === 'button' || t === 'image') continue;
+                if (el.disabled || el.readOnly) continue;
+                const r = el.getBoundingClientRect();
+                if (!r || r.width === 0 || r.height === 0) continue;
+                const cs = window.getComputedStyle(el);
+                if (cs.visibility === 'hidden' || cs.display === 'none') continue;
+                if (r.top < 0 || r.top > window.innerHeight + 200) continue;
+                out.push({
+                    cx: Math.max(2, Math.min(window.innerWidth - 2, r.left + r.width / 2)),
+                    cy: Math.max(2, Math.min(window.innerHeight - 2, r.top + r.height / 2)),
+                    tag: el.tagName.toLowerCase(),
+                    type: t,
+                    has_value: !!(el.value && String(el.value).length > 0),
+                });
+            }
+            return out;
+        }""")
+    except Exception:
+        return
+    if not fields:
+        return
+
+    for idx, fld in enumerate(fields):
+        try:
+            cx, cy = int(fld.get("cx", 100)), int(fld.get("cy", 100))
+            has_value = bool(fld.get("has_value"))
+            # Brief mouse approach with a few steps so MouseEvent.movementX
+            # values look natural (real users don't teleport the cursor).
+            try:
+                await page.mouse.move(cx, cy, steps=random.randint(4, 9))
+                await asyncio.sleep(random.uniform(0.05, 0.18))
+                await page.mouse.down()
+                await asyncio.sleep(random.uniform(0.02, 0.08))
+                await page.mouse.up()
+            except Exception:
+                pass
+            await asyncio.sleep(random.uniform(0.08, 0.25))
+            # Dispatch synthetic events: focus → keydown → keyup → input
+            # → change → blur. The collector scripts hook these
+            # specific event types; firing them on already-populated
+            # fields produces "user typed here" telemetry without
+            # touching the value Playwright already set.
+            try:
+                await page.evaluate(r"""({i, hasValue}) => {
+                    const all = document.querySelectorAll('input, select, textarea');
+                    let visIdx = 0;
+                    for (let k = 0; k < all.length; k++) {
+                        const el = all[k];
+                        const t = (el.type || '').toLowerCase();
+                        if (t === 'hidden' || t === 'submit' || t === 'button' || t === 'image') continue;
+                        if (el.disabled || el.readOnly) continue;
+                        const r = el.getBoundingClientRect();
+                        if (!r || r.width === 0 || r.height === 0) continue;
+                        const cs = window.getComputedStyle(el);
+                        if (cs.visibility === 'hidden' || cs.display === 'none') continue;
+                        if (visIdx === i) {
+                            const fire = (type, init) => {
+                                try {
+                                    let ev;
+                                    if (type === 'keydown' || type === 'keyup' || type === 'keypress') {
+                                        ev = new KeyboardEvent(type, Object.assign({ bubbles: true, cancelable: true, key: 'a', code: 'KeyA', keyCode: 65, which: 65 }, init || {}));
+                                    } else if (type === 'mousedown' || type === 'mouseup' || type === 'mousemove' || type === 'click') {
+                                        ev = new MouseEvent(type, Object.assign({ bubbles: true, cancelable: true }, init || {}));
+                                    } else if (type === 'input') {
+                                        ev = new InputEvent(type, Object.assign({ bubbles: true, cancelable: false, data: 'a', inputType: 'insertText' }, init || {}));
+                                    } else {
+                                        ev = new Event(type, { bubbles: true, cancelable: true });
+                                    }
+                                    el.dispatchEvent(ev);
+                                } catch (e) {}
+                            };
+                            try { el.focus(); } catch (e) {}
+                            fire('focus');
+                            fire('focusin');
+                            if (hasValue) {
+                                // Each "typed character" — 3-6 keystrokes per
+                                // field — fires keydown / keyup / input.
+                                const n = 3 + Math.floor(Math.random() * 4);
+                                for (let s = 0; s < n; s++) {
+                                    fire('keydown');
+                                    fire('keypress');
+                                    fire('input');
+                                    fire('keyup');
+                                }
+                            }
+                            fire('change');
+                            fire('blur');
+                            fire('focusout');
+                            return true;
+                        }
+                        visIdx++;
+                    }
+                    return false;
+                }""", {"i": idx, "hasValue": has_value})
+            except Exception:
+                pass
+            # Small idle gap between fields (real users pause)
+            await asyncio.sleep(random.uniform(0.18, 0.55))
+        except Exception:
+            continue
+
+    # Final scroll — Jornaya specifically logs scroll events as a
+    # session-quality signal.
+    try:
+        await page.mouse.wheel(0, random.randint(60, 180))
+        await asyncio.sleep(random.uniform(0.15, 0.4))
+    except Exception:
+        pass
+
+
+async def _apply_mobile_ctit_delay(fp: Dict[str, Any]) -> int:
+    """Apply a per-visit random delay sourced from a realistic mobile
+    Click-To-Install-Time distribution. Returns the number of seconds
+    actually slept (0 if the delay was skipped).
+
+    Activation rules (all must be true):
+      • The visit's fingerprint marks the device as mobile.
+      • Env var ``RUT_MOBILE_CTIT_DELAY`` is truthy ("1"/"true"/"yes").
+
+    Bounds are env-tunable (defaults match the real-user 25th-75th
+    percentile reported by AppsFlyer's 2025 CTIT studies):
+      • RUT_MOBILE_CTIT_MIN_SEC = 25 (default)
+      • RUT_MOBILE_CTIT_MAX_SEC = 180 (default)
+
+    NEVER raises — any config-parsing issue → 0s sleep.
+    """
+    try:
+        if not fp.get("is_mobile"):
+            return 0
+        flag = os.environ.get("RUT_MOBILE_CTIT_DELAY", "").strip().lower()
+        if flag not in ("1", "true", "yes", "on"):
+            return 0
+        try:
+            mn = max(0, int(os.environ.get("RUT_MOBILE_CTIT_MIN_SEC", "25")))
+        except (TypeError, ValueError):
+            mn = 25
+        try:
+            mx = max(mn + 1, int(os.environ.get("RUT_MOBILE_CTIT_MAX_SEC", "180")))
+        except (TypeError, ValueError):
+            mx = max(mn + 1, 180)
+        # Triangular distribution centred near the 40s mode — matches
+        # the AppsFlyer "Real Mobile Install" curve more accurately
+        # than a flat uniform random (which clusters CTIT visibly).
+        mid = min(mx - 1, max(mn + 1, int(mn + (mx - mn) * 0.35)))
+        secs = int(random.triangular(mn, mx, mid))
+        # Hard cap so a runaway env-misconfig can't park a worker for
+        # an hour by accident — 600s max regardless of env.
+        secs = max(0, min(600, secs))
+        if secs <= 0:
+            return 0
+        await asyncio.sleep(secs)
+        return secs
+    except Exception:
+        return 0
 
 
 def _device_name_from_ua(ua_str: str) -> str:
@@ -3192,6 +3394,28 @@ async def _get_exit_ip_via_proxy(
         "https://ipinfo.io/ip",
         "https://ifconfig.me/ip",
     )
+    # 2026-01-Phase4: Try TLS-impersonated path first so the IP-echo
+    # endpoint sees a real Chrome handshake — some CDNs (Cloudflare)
+    # in front of ipify rate-limit non-browser TLS fingerprints. On
+    # any failure, the existing httpx loop below runs unchanged.
+    if _TLS_AD_OK and _tls_ad is not None:
+        for url in candidates:
+            try:
+                if url.endswith("json"):
+                    data = await _tls_ad.get_json(url, proxy=proxy, timeout=timeout)
+                    if isinstance(data, dict):
+                        ip = data.get("ip") or data.get("origin")
+                        if ip:
+                            return str(ip).split(",")[0].strip()
+                else:
+                    r = await _tls_ad.get_text(url, proxy=proxy, timeout=timeout, max_bytes=256)
+                    if r is not None:
+                        _status, _text = r
+                        first = (_text or "").strip().splitlines()[0].strip() if _text else ""
+                        if first and first.count(".") == 3 and all(p.isdigit() for p in first.split(".")):
+                            return first
+            except Exception:
+                continue
     for url in candidates:
         try:
             async with httpx.AsyncClient(
@@ -10304,6 +10528,36 @@ async def _multi_step_fill(
                 await pre_submit_cb(f"stage_{step+1}")
             except Exception:
                 pass
+        # 2026-01 Phase 4a: Fire realistic DOM interaction events on every
+        # populated form field so TrustedForm / Jornaya / ActiveProspect
+        # collector scripts record genuine human-like telemetry. Without
+        # this, Playwright's direct value-set looks "bot-like" because no
+        # focus/keydown/keyup/input/blur chain ever fired. Pure-additive
+        # — runs only when the helper is importable, safe-failed inside.
+        try:
+            await _emit_lead_validation_interactions(page, fp)
+        except Exception:
+            pass
+        # 2026-01 Phase 4 (re-wire): pre-submit dwell — adds a realistic
+        # "human reviews form before clicking submit" pause. Helper was
+        # defined earlier but previously not invoked; now firing on the
+        # final step only so multi-step survey funnels don't accumulate
+        # extra latency on intermediate pages.
+        try:
+            await _human_pre_submit_dwell(page, fp)
+        except Exception:
+            pass
+        # 2026-01 Phase 4b: Mobile CTIT delay — env-gated opt-in. Adds
+        # 25-180s realistic Click-To-Install-Time variance for mobile
+        # UAs so AppsFlyer Protect360 / Adjust CTIT-anomaly detectors
+        # see a natural distribution. Default OFF (env var must be
+        # explicitly set), so existing customer flows are unchanged.
+        try:
+            _ctit = await _apply_mobile_ctit_delay(fp)
+            if _ctit > 0:
+                logger.debug(f"[CTIT] Applied mobile install-time delay: {_ctit}s")
+        except Exception:
+            pass
         await _click_submit(page)
         for _ in range(2):
             try:
