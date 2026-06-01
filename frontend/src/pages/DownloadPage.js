@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
 import axios from "axios";
@@ -13,9 +13,33 @@ import PublicMobileMenu from "../components/PublicMobileMenu";
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 const INSTALLER_SHA256 = "b21b9f7d7803d3748dfa3e41d5d5a5eee4127b3b592bf2a56395275f6a1502bc";
-const INSTALLER_VERSION = "1.0.4";
 
 export default function DownloadPage() {
+  // ── Installer info (native-exe vs legacy-zip) ────────────────────
+  // The download flow + UI copy differ between the new white-label
+  // single-.exe install and the legacy Docker-based ZIP. We fetch
+  // /api/system/installer-info once on mount to know which to show.
+  const [installerInfo, setInstallerInfo] = useState({
+    kind: "legacy-zip",
+    version: "1.0.4",
+    size_bytes: null,
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    axios.get(`${API}/system/installer-info`).then((r) => {
+      if (!cancelled && r.data) setInstallerInfo(r.data);
+    }).catch(() => { /* ignore — UI just shows legacy defaults */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  const isNativeExe = installerInfo.kind === "native-exe";
+  const installerVersion = installerInfo.version || "1.0.4";
+  const installerSizeLabel = isNativeExe
+    ? (installerInfo.size_bytes
+        ? `~${Math.round(installerInfo.size_bytes / (1024 * 1024))} MB`
+        : "~300 MB")
+    : "~20 KB ZIP";
   // ── License-gated download state ───────────────────────────────
   // 2026-05: Customers must enter their KRX-XXXX-XXXX-XXXX-XXXX key
   // BEFORE the installer ZIP can be downloaded. The backend verifies
@@ -72,8 +96,27 @@ export default function DownloadPage() {
     if (!verified) return;
     setDownloading(true);
     try {
-      // Use blob download so the personalized ZIP (with embedded
-      // license-key.txt) hits the browser as a normal "save as".
+      // ── Native-exe flow ───────────────────────────────────────────
+      // Backend responds with a 302 redirect to the GitHub Release
+      // .exe asset. We open it in a new tab so the browser handles the
+      // download natively (no in-memory blob → no 300 MB memory spike,
+      // no axios timeout).
+      if (isNativeExe) {
+        const url = `${API}/license/download-installer/${encodeURIComponent(key)}`;
+        // Use a hidden anchor so the request is sent with credentials
+        // (cookies) and the browser follows the 302 automatically.
+        const a = document.createElement("a");
+        a.href = url;
+        a.target = "_self";
+        a.rel = "noopener";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        toast.success("Krexion installer download started.");
+        return;
+      }
+
+      // ── Legacy-zip flow (backwards compat) ───────────────────────
       const r = await axios.get(`${API}/license/download-installer/${encodeURIComponent(key)}`, {
         responseType: "blob",
       });
@@ -147,7 +190,7 @@ export default function DownloadPage() {
       <section className="max-w-5xl mx-auto px-6 pt-20 pb-10 text-center">
         <div className="inline-flex items-center gap-2 bg-white/5 border border-white/10 rounded-full px-4 py-1.5 mb-6 text-xs">
           <Download size={12} className="text-[#3B82F6]" />
-          Optional desktop install • Version {INSTALLER_VERSION} • Windows 10/11 (64-bit)
+          Optional desktop install • Version {installerVersion} • Windows 10/11 (64-bit)
         </div>
         <h1 className="text-5xl sm:text-6xl font-bold tracking-tight mb-5 leading-tight">
           Download <span className="text-[#3B82F6]">Krexion</span>
@@ -268,11 +311,17 @@ export default function DownloadPage() {
                   : "bg-white/5 text-[#52525B] cursor-not-allowed shadow-none border border-white/5"}`}
             >
               {downloading ? <Loader2 size={20} className="animate-spin" /> : verified ? <Download size={20} /> : <Lock size={20} />}
-              {downloading ? "Preparing your installer…" : verified ? "Download installer (.zip)" : "Verify key to unlock download"}
+              {downloading
+                ? "Preparing your installer…"
+                : verified
+                  ? (isNativeExe ? "Download Krexion for Windows" : "Download installer (.zip)")
+                  : "Verify key to unlock download"}
               {verified && !downloading && <ArrowRight size={18} />}
             </button>
             <div className="mt-3 text-xs text-[#71717A] text-center">
-              ~20 KB ZIP • License key auto-embedded • Auto-downloads Krexion runtime (~600 MB) during install
+              {isNativeExe
+                ? `${installerSizeLabel} • Single .exe installer • License key entered during install`
+                : `${installerSizeLabel} • License key auto-embedded • Auto-downloads Krexion runtime (~600 MB) during install`}
             </div>
           </div>
 
@@ -325,26 +374,42 @@ export default function DownloadPage() {
       {/* Install steps */}
       <section className="max-w-4xl mx-auto px-6 py-10">
         <div className="bg-white/[0.02] border border-white/10 rounded-2xl p-8">
-          <h2 className="text-xl font-bold mb-6">Installation in 4 steps</h2>
+          <h2 className="text-xl font-bold mb-6">Installation in {isNativeExe ? "3" : "4"} steps</h2>
           <ol className="space-y-5">
-            {[
-              {
-                t: "Download & extract",
-                d: "Right-click the ZIP → \"Extract All\". Keep all files together in one folder.",
-              },
-              {
-                t: "Run INSTALL.bat",
-                d: "Double-click INSTALL.bat. Click \"Yes\" on the UAC prompt. Wait 20–30 minutes (one-time setup).",
-              },
-              {
-                t: "Login or register",
-                d: "Browser opens automatically. Use the email + password from your Krexion welcome email, or register a new account.",
-              },
-              {
-                t: "Enter license key",
-                d: "In the Setup Wizard, paste the license key from your email. Krexion activates and you're ready.",
-              },
-            ].map((step, i) => (
+            {(isNativeExe
+              ? [
+                  {
+                    t: "Run Krexion-Setup.exe",
+                    d: "Double-click the downloaded file. Click \"Yes\" on the UAC prompt to give Krexion administrator access.",
+                  },
+                  {
+                    t: "Enter your license key",
+                    d: "The installer wizard will ask for your KRX-XXXX-XXXX-XXXX-XXXX key. Paste it and click Next.",
+                  },
+                  {
+                    t: "Wait for install to finish",
+                    d: "Krexion installs silently in ~60-90 seconds. Your dashboard opens automatically at http://127.0.0.1:3000 when done.",
+                  },
+                ]
+              : [
+                  {
+                    t: "Download & extract",
+                    d: "Right-click the ZIP → \"Extract All\". Keep all files together in one folder.",
+                  },
+                  {
+                    t: "Run INSTALL.bat",
+                    d: "Double-click INSTALL.bat. Click \"Yes\" on the UAC prompt. Wait 20–30 minutes (one-time setup).",
+                  },
+                  {
+                    t: "Login or register",
+                    d: "Browser opens automatically. Use the email + password from your Krexion welcome email, or register a new account.",
+                  },
+                  {
+                    t: "Enter license key",
+                    d: "In the Setup Wizard, paste the license key from your email. Krexion activates and you're ready.",
+                  },
+                ]
+            ).map((step, i) => (
               <li key={i} className="flex gap-4">
                 <div className="shrink-0 w-9 h-9 rounded-full bg-[#3B82F6] text-black font-bold flex items-center justify-center text-sm">
                   {i + 1}
@@ -376,6 +441,7 @@ export default function DownloadPage() {
       </section>
 
       {/* File integrity */}
+      {!isNativeExe && (
       <section className="max-w-4xl mx-auto px-6 py-10">
         <div className="bg-white/[0.03] border border-white/10 rounded-xl p-6">
           <div className="flex items-center gap-2 mb-3">
@@ -398,6 +464,7 @@ export default function DownloadPage() {
           </p>
         </div>
       </section>
+      )}
 
       {/* FAQ */}
       <section className="max-w-4xl mx-auto px-6 pb-20">

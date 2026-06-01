@@ -326,15 +326,20 @@ export default function ReleasesAdminPage() {
                 </div>
               </div>
               <div>
-                <label className="block text-xs uppercase tracking-wider text-[#71717A] mb-1">Download URL (optional)</label>
+                <label className="block text-xs uppercase tracking-wider text-[#71717A] mb-1">
+                  Windows installer URL (paste GitHub Release .exe URL)
+                </label>
                 <input
                   type="text"
-                  placeholder="https://krexion.com/releases/1.0.2.zip"
+                  placeholder="https://github.com/<org>/krexion.com/releases/download/v1.1.0/Krexion-Setup-1.1.0.exe"
                   value={form.download_url}
                   onChange={(e) => setForm({ ...form, download_url: e.target.value })}
                   data-testid="release-download-url"
                   className="w-full bg-white/[0.04] border border-white/10 rounded-md px-3 py-2 text-sm font-mono"
                 />
+                <p className="mt-1.5 text-[11px] text-[#71717A] leading-relaxed">
+                  When set to a <code className="text-[#A78BFA]">.exe</code> URL, customers visiting <code>/download</code> are 302-redirected straight to this file. Leave blank to fall back to the legacy ZIP installer.
+                </p>
               </div>
             </div>
             <div className="flex items-center justify-end gap-2 mt-6">

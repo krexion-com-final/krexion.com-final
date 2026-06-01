@@ -489,7 +489,7 @@ async def download_installer_with_key(license_key: str, request: Request):
     import io
     import zipfile
     from pathlib import Path
-    from fastapi.responses import StreamingResponse
+    from fastapi.responses import StreamingResponse, RedirectResponse
 
     # ── 1. Verify the key (re-uses the same logic; never bind machine) ──
     cfg = await get_config()
@@ -511,9 +511,53 @@ async def download_installer_with_key(license_key: str, request: Request):
             )
             raise HTTPException(410, "License / trial expired.")
 
-    # ── 2. Locate installer payload ────────────────────────────────────
-    # Look in repo root (one level up from /app/backend → /app), where
-    # `Krexion-User-Package/` lives in the cloned repo.
+    # ── 2026-02: Native installer redirect ─────────────────────────────
+    # If the admin has published a release with a `download_url` set
+    # (e.g. a GitHub Releases asset for the Krexion-Setup-x.x.x.exe),
+    # short-circuit the legacy ZIP build and send the customer to the
+    # native installer directly. This is the white-label single-.exe
+    # flow that replaces the Docker-based ZIP for new customers.
+    try:
+        latest_rel = await _db.app_releases.find_one(
+            {"published": True, "download_url": {"$regex": r"\.exe(\?|$)"}},
+            sort=[("created_at", -1)],
+            projection={"_id": 0, "download_url": 1, "version": 1},
+        )
+    except Exception:
+        latest_rel = None
+
+    if latest_rel and latest_rel.get("download_url"):
+        # Soft analytics — same fields the ZIP path writes, so the
+        # admin "downloads" counter keeps incrementing regardless of
+        # which payload was served.
+        try:
+            await _db.licenses.update_one(
+                {"license_key": key},
+                {"$set": {
+                    "installer_downloaded_at": _now().isoformat(),
+                    "installer_kind": "native-exe",
+                    "installer_version": latest_rel.get("version") or "",
+                    "installer_downloaded_count": (lic_doc.get("installer_downloaded_count") or 0) + 1 if lic_doc else 1,
+                }},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        logger.info(
+            "[download-installer] redirecting key=%s to native installer v%s",
+            key[:8] + "…", latest_rel.get("version", "?"),
+        )
+        # 302 with Cache-Control so browsers don't cache and miss
+        # future installer-URL updates.
+        return RedirectResponse(
+            url=latest_rel["download_url"],
+            status_code=302,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    # ── 3. Legacy fallback: build the Docker-based ZIP in-memory ───────
+    # Used only when no native release with a `.exe` download_url has
+    # been published yet. Older customers stay on this path so they
+    # don't break mid-rollout.
     backend_dir = Path(__file__).resolve().parent
     candidates = [
         backend_dir.parent / "Krexion-User-Package",   # /app/Krexion-User-Package
@@ -525,9 +569,10 @@ async def download_installer_with_key(license_key: str, request: Request):
         raise HTTPException(
             status_code=503,
             detail=(
-                "Installer payload is not deployed on this server yet. "
-                "Admin: please ensure the `Krexion-User-Package/` folder is "
-                "present in the backend repo root, then retry."
+                "Installer is not yet available. Admin: publish a release "
+                "with a `download_url` pointing to the native "
+                "Krexion-Setup-*.exe, or restore the `Krexion-User-Package/` "
+                "folder in the repo root."
             ),
         )
 

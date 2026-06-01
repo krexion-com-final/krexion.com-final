@@ -1,5 +1,5 @@
 ; ════════════════════════════════════════════════════════════════════════
-; Krexion — Inno Setup Installer Script
+; Krexion — Inno Setup Installer Script (White-Label Edition)
 ; ════════════════════════════════════════════════════════════════════════
 ;
 ; Build with:
@@ -8,29 +8,29 @@
 ; Produces:  installer\Output\Krexion-Setup-<version>.exe
 ;
 ; What it installs (all in C:\Program Files\Krexion by default):
-;   • bin\krexion-backend.exe        — Nuitka-compiled FastAPI backend
-;   • bin\nssm.exe                   — Windows service wrapper
-;   • mongo\                         — MongoDB Portable (no Docker!)
-;   • chromium\                      — Bundled Playwright Chromium
-;   • frontend\                      — Production React build
-;   • krexion-tray.exe               — System tray app (replaces Docker icon)
+;   • bin\krexion-core.exe            — Krexion-branded core engine binary
+;   • bin\krexion-service.exe         — Windows service wrapper (renamed NSSM)
+;   • database\                       — Embedded local database engine
+;   • browser-engine\                 — Bundled Chromium for anti-detect
+;   • frontend\                       — Production React build
+;   • krexion-tray.exe                — System tray app (optional)
 ;
 ; What it registers:
 ;   • Windows Service "KrexionBackend"   (auto-start)
-;   • Windows Service "KrexionDatabase"  (auto-start, MongoDB)
+;   • Windows Service "KrexionDatabase"  (auto-start)
 ;   • Start Menu shortcut "Krexion"
-;   • Desktop shortcut "Krexion" (optional, customer-tickable)
-;   • Krexion Tray app in HKCU Run (starts at login)
+;   • Desktop shortcut "Krexion" (optional)
+;   • Krexion auto-start at login (optional)
 ;
-; UNINSTALL is clean — stops services, deletes them, removes all files.
-;
-; THIS DOES NOT INSTALL DOCKER. Customer sees "Krexion" everywhere, not Docker.
+; NO third-party branding anywhere customer-visible — folder names, service
+; names, registry keys, tray tooltip all say "Krexion".
 ; ════════════════════════════════════════════════════════════════════════
 
 #define AppName        "Krexion"
 #define AppPublisher   "Krexion"
 #define AppURL         "https://krexion.com"
-#define AppExeBackend  "krexion-backend.exe"
+#define AppExeCore     "krexion-core.exe"
+#define AppExeService  "krexion-service.exe"
 #define AppExeTray     "krexion-tray.exe"
 #ifndef AppVersion
   #define AppVersion "1.0.0"
@@ -56,13 +56,14 @@ ArchitecturesInstallIn64BitMode=x64
 PrivilegesRequired=admin
 UninstallDisplayName={#AppName}
 ; SetupIconFile=krexion.ico   ; <- Uncomment after you add installer/krexion.ico
-UninstallDisplayIcon={app}\bin\python.exe
+UninstallDisplayIcon={app}\bin\{#AppExeCore}
 VersionInfoCompany={#AppPublisher}
 VersionInfoProductName={#AppName}
 VersionInfoVersion={#AppVersion}
-VersionInfoDescription=Krexion installer
+VersionInfoDescription=Krexion Real-User Traffic Engine
 CloseApplications=force
 RestartApplications=no
+WizardImageStretch=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -72,17 +73,17 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 Name: "startupTray"; Description: "Start Krexion automatically when Windows starts"; GroupDescription: "Startup:"; Flags: unchecked
 
 [Files]
-; Backend PyInstaller bundle (folder) — required
+; Backend embedded-Python bundle — required
 Source: "..\build\dist\krexion-backend.dist\*"; DestDir: "{app}\bin"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-; NSSM service wrapper — required
-Source: "..\build\nssm-portable\nssm.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
+; Service wrapper (NSSM, renamed to krexion-service.exe to hide third-party branding)
+Source: "..\build\nssm-portable\nssm.exe"; DestDir: "{app}\bin"; DestName: "{#AppExeService}"; Flags: ignoreversion
 
-; MongoDB Portable — required
-Source: "..\build\mongo-portable\*"; DestDir: "{app}\mongo"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Local database engine (MongoDB Portable, folder renamed to `database`)
+Source: "..\build\mongo-portable\*"; DestDir: "{app}\database"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-; Playwright Chromium bundle — optional (backend self-installs if missing)
-Source: "..\build\chromium-bundle\*"; DestDir: "{app}\chromium"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+; Browser engine (Playwright Chromium, folder renamed to `browser-engine`)
+Source: "..\build\chromium-bundle\*"; DestDir: "{app}\browser-engine"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
 ; Frontend production build — required
 Source: "..\build\frontend-build\*"; DestDir: "{app}\frontend"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -90,21 +91,21 @@ Source: "..\build\frontend-build\*"; DestDir: "{app}\frontend"; Flags: ignorever
 ; Tray app — optional
 Source: "..\build\dist\krexion-tray.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
-; Manifest + license shells — optional
+; Manifest — optional
 Source: "..\build\krexion-manifest.json"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 
 [Dirs]
 Name: "{app}\data"
-Name: "{app}\data\mongo"
+Name: "{app}\data\db"
 Name: "{app}\logs"
 Name: "{commonappdata}\Krexion"; Permissions: users-modify
 
 [Icons]
-Name: "{group}\Krexion"; Filename: "http://127.0.0.1:3000"; IconFilename: "{app}\bin\python.exe"
+Name: "{group}\Krexion"; Filename: "http://127.0.0.1:3000"; IconFilename: "{app}\bin\{#AppExeCore}"
 Name: "{group}\Krexion Logs"; Filename: "{app}\logs"
 Name: "{group}\Uninstall Krexion"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\Krexion"; Filename: "http://127.0.0.1:3000"; IconFilename: "{app}\bin\python.exe"; Tasks: desktopicon
+Name: "{autodesktop}\Krexion"; Filename: "http://127.0.0.1:3000"; IconFilename: "{app}\bin\{#AppExeCore}"; Tasks: desktopicon
 
 [Registry]
 ; Auto-start Krexion Tray on login (per-user)
@@ -113,67 +114,76 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
   Tasks: startupTray; Flags: uninsdeletevalue
 
 [Run]
-; ─── Install + start MongoDB as Windows Service ─────────────────────────
-Filename: "{app}\bin\nssm.exe"; \
-  Parameters: "install KrexionDatabase ""{app}\mongo\bin\mongod.exe"" --dbpath ""{app}\data\mongo"" --port 27017 --bind_ip 127.0.0.1 --quiet"; \
+; ─── Persist the license key the user entered in the wizard ────────────
+; The license is written to %PROGRAMDATA%\Krexion\license-key.txt so the
+; backend reads it via LICENSE_KEY_FILE env var. Customer never has to
+; copy the key to .env manually — installer handles it.
+Filename: "{cmd}"; \
+  Parameters: "/C echo {code:GetLicenseKey} > ""{commonappdata}\Krexion\license-key.txt"""; \
+  Flags: runhidden; StatusMsg: "Saving license key..."; \
+  Check: HasLicenseKey
+
+; ─── Install + start Krexion Database service ──────────────────────────
+Filename: "{app}\bin\{#AppExeService}"; \
+  Parameters: "install KrexionDatabase ""{app}\database\bin\mongod.exe"" --dbpath ""{app}\data\db"" --port 27017 --bind_ip 127.0.0.1 --quiet"; \
   Flags: runhidden; StatusMsg: "Registering Krexion Database service..."
 
-Filename: "{app}\bin\nssm.exe"; \
+Filename: "{app}\bin\{#AppExeService}"; \
   Parameters: "set KrexionDatabase DisplayName ""Krexion Database"""; \
   Flags: runhidden
 
-Filename: "{app}\bin\nssm.exe"; \
-  Parameters: "set KrexionDatabase Description ""Krexion local MongoDB instance"""; \
+Filename: "{app}\bin\{#AppExeService}"; \
+  Parameters: "set KrexionDatabase Description ""Krexion local data engine"""; \
   Flags: runhidden
 
-Filename: "{app}\bin\nssm.exe"; \
+Filename: "{app}\bin\{#AppExeService}"; \
   Parameters: "set KrexionDatabase Start SERVICE_AUTO_START"; \
   Flags: runhidden
 
-Filename: "{app}\bin\nssm.exe"; \
+Filename: "{app}\bin\{#AppExeService}"; \
   Parameters: "start KrexionDatabase"; \
   Flags: runhidden; StatusMsg: "Starting Krexion Database..."
 
-; ─── Install + start Krexion Backend as Windows Service ─────────────────
-; Uses the embedded Python launcher (.bat) which runs:
-;   python.exe -m uvicorn server:app --host 127.0.0.1 --port 8001
-Filename: "{app}\bin\nssm.exe"; \
-  Parameters: "install KrexionBackend ""{app}\bin\python.exe"" -m uvicorn server:app --host 127.0.0.1 --port 8001"; \
+; ─── Install + start Krexion Backend service ───────────────────────────
+; Service runs via krexion-core.exe (white-labelled python.exe copy) so
+; the customer's Task Manager + Services.msc only ever shows "Krexion".
+Filename: "{app}\bin\{#AppExeService}"; \
+  Parameters: "install KrexionBackend ""{app}\bin\{#AppExeCore}"" -m uvicorn server:app --host 127.0.0.1 --port 8001"; \
   Flags: runhidden; StatusMsg: "Registering Krexion Backend service..."
 
-Filename: "{app}\bin\nssm.exe"; \
+Filename: "{app}\bin\{#AppExeService}"; \
   Parameters: "set KrexionBackend DisplayName ""Krexion Backend"""; \
   Flags: runhidden
 
-Filename: "{app}\bin\nssm.exe"; \
-  Parameters: "set KrexionBackend Description ""Krexion core service — runs FastAPI backend"""; \
+Filename: "{app}\bin\{#AppExeService}"; \
+  Parameters: "set KrexionBackend Description ""Krexion core service — Real-User Traffic engine"""; \
   Flags: runhidden
 
-Filename: "{app}\bin\nssm.exe"; \
+Filename: "{app}\bin\{#AppExeService}"; \
   Parameters: "set KrexionBackend Start SERVICE_AUTO_START"; \
   Flags: runhidden
 
-Filename: "{app}\bin\nssm.exe"; \
-  Parameters: "set KrexionBackend AppEnvironmentExtra MONGO_URL=mongodb://127.0.0.1:27017 DB_NAME=krexion KREXION_MODE=native KREXION_BUILD_TYPE=binary PLAYWRIGHT_BROWSERS_PATH={app}\chromium STRICT_CLOUD_HEAVY_BLOCK=false"; \
+Filename: "{app}\bin\{#AppExeService}"; \
+  Parameters: "set KrexionBackend AppEnvironmentExtra MONGO_URL=mongodb://127.0.0.1:27017 DB_NAME=krexion KREXION_MODE=native KREXION_BUILD_TYPE=binary PLAYWRIGHT_BROWSERS_PATH={app}\browser-engine STRICT_CLOUD_HEAVY_BLOCK=false LICENSE_KEY_FILE={commonappdata}\Krexion\license-key.txt"; \
   Flags: runhidden
 
-Filename: "{app}\bin\nssm.exe"; \
+Filename: "{app}\bin\{#AppExeService}"; \
   Parameters: "set KrexionBackend AppDirectory ""{app}\bin\app"""; \
   Flags: runhidden
 
-Filename: "{app}\bin\nssm.exe"; \
+Filename: "{app}\bin\{#AppExeService}"; \
   Parameters: "set KrexionBackend AppStdout ""{app}\logs\backend.stdout.log"""; \
   Flags: runhidden
 
-Filename: "{app}\bin\nssm.exe"; \
+Filename: "{app}\bin\{#AppExeService}"; \
   Parameters: "set KrexionBackend AppStderr ""{app}\logs\backend.stderr.log"""; \
   Flags: runhidden
 
-Filename: "{app}\bin\nssm.exe"; \
+Filename: "{app}\bin\{#AppExeService}"; \
   Parameters: "start KrexionBackend"; \
   Flags: runhidden; StatusMsg: "Starting Krexion Backend..."
 
-; ─── Optional: launch tray app + open dashboard at finish ───────────────
+; ─── Optional: launch tray app + open dashboard at finish ──────────────
 Filename: "{app}\{#AppExeTray}"; Flags: nowait postinstall skipifsilent skipifsourcedoesntexist; \
   Description: "Launch Krexion now"
 Filename: "http://127.0.0.1:3000"; Flags: shellexec postinstall skipifsilent; \
@@ -181,10 +191,10 @@ Filename: "http://127.0.0.1:3000"; Flags: shellexec postinstall skipifsilent; \
 
 [UninstallRun]
 ; Stop + remove services BEFORE files are deleted
-Filename: "{app}\bin\nssm.exe"; Parameters: "stop KrexionBackend"; Flags: runhidden; RunOnceId: "StopBackend"
-Filename: "{app}\bin\nssm.exe"; Parameters: "remove KrexionBackend confirm"; Flags: runhidden; RunOnceId: "RemoveBackend"
-Filename: "{app}\bin\nssm.exe"; Parameters: "stop KrexionDatabase"; Flags: runhidden; RunOnceId: "StopDatabase"
-Filename: "{app}\bin\nssm.exe"; Parameters: "remove KrexionDatabase confirm"; Flags: runhidden; RunOnceId: "RemoveDatabase"
+Filename: "{app}\bin\{#AppExeService}"; Parameters: "stop KrexionBackend"; Flags: runhidden; RunOnceId: "StopBackend"
+Filename: "{app}\bin\{#AppExeService}"; Parameters: "remove KrexionBackend confirm"; Flags: runhidden; RunOnceId: "RemoveBackend"
+Filename: "{app}\bin\{#AppExeService}"; Parameters: "stop KrexionDatabase"; Flags: runhidden; RunOnceId: "StopDatabase"
+Filename: "{app}\bin\{#AppExeService}"; Parameters: "remove KrexionDatabase confirm"; Flags: runhidden; RunOnceId: "RemoveDatabase"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\data"
@@ -192,8 +202,43 @@ Type: filesandordirs; Name: "{app}\logs"
 Type: filesandordirs; Name: "{commonappdata}\Krexion"
 
 [Code]
+var
+  LicensePage: TInputQueryWizardPage;
+
+procedure InitializeWizard;
+begin
+  // Custom wizard page — collect the customer's license key BEFORE
+  // installation begins. The value is later piped into license-key.txt
+  // by the [Run] section.
+  LicensePage := CreateInputQueryPage(
+    wpWelcome,
+    'License Activation',
+    'Enter your Krexion license key',
+    'Paste the KRX-XXXX-XXXX-XXXX-XXXX key from your purchase email.' + #13#10 +
+    'You can leave this blank and add it later from the Krexion dashboard.'
+  );
+  LicensePage.Add('License key:', False);
+  LicensePage.Values[0] := '';
+end;
+
+function GetLicenseKey(Param: string): string;
+var
+  Raw: string;
+begin
+  Raw := Trim(LicensePage.Values[0]);
+  // Strip stray whitespace + uppercase so it matches the canonical
+  // KRX-XXXX-XXXX-XXXX-XXXX format the backend expects.
+  StringChangeEx(Raw, ' ', '', True);
+  Result := Uppercase(Raw);
+end;
+
+function HasLicenseKey: Boolean;
+begin
+  Result := Length(GetLicenseKey('')) > 0;
+end;
+
 function InitializeSetup(): Boolean;
 begin
-  // Future hardening hook — could check Windows version, RAM, etc.
+  // Future hardening hook — Windows version / RAM checks could go here.
   Result := True;
 end;

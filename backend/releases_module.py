@@ -570,6 +570,48 @@ def _build_customer_endpoints(get_user_dep):
             "update_available": is_newer(rel["version"], local),
         }
 
+    @router.get("/api/system/installer-info")
+    async def installer_info():
+        """No-auth — tells the public Download page whether a native
+        Windows installer (.exe) is available and how to label the
+        download button (size, version, filename).
+
+        Returns:
+          {
+            "kind": "native-exe" | "legacy-zip",
+            "version": "1.0.5",
+            "url": null,            # never exposed — must go through /api/license/download-installer/{key}
+            "size_bytes": ...,      # optional, only when admin set it
+            "min_windows": "Windows 10 64-bit",
+          }
+        """
+        # Find the newest published release that ships a `.exe` download.
+        try:
+            rel = await _db.app_releases.find_one(
+                {"published": True, "download_url": {"$regex": r"\.exe(\?|$)"}},
+                sort=[("created_at", -1)],
+                projection={"_id": 0, "version": 1, "installer_size_bytes": 1, "created_at": 1},
+            )
+        except Exception:  # noqa: BLE001
+            rel = None
+        if rel:
+            return {
+                "kind": "native-exe",
+                "version": rel.get("version") or "1.0.0",
+                "size_bytes": rel.get("installer_size_bytes") or None,
+                "min_windows": "Windows 10 64-bit",
+                "released_at": rel.get("created_at"),
+            }
+        # No native release yet — fall back to legacy ZIP advertising.
+        local = await _displayed_current_version()
+        return {
+            "kind": "legacy-zip",
+            "version": local or "1.0.0",
+            "size_bytes": None,
+            "min_windows": "Windows 10 64-bit",
+            "released_at": None,
+        }
+
     @router.post("/api/system/install-update")
     async def trigger_update(request: Request, user: dict = Depends(get_user_dep)):
         """Customer clicks Update → flag is written so the host updater

@@ -17135,7 +17135,30 @@ async def startup_db_indexes():
     # still active). If LICENSE_KEY is empty the check is skipped.
     async def _license_heartbeat_task():
         import httpx as _httpx
+        # 2026-02 — accept LICENSE_KEY from either:
+        #   1. env var (legacy Docker .env injection)
+        #   2. LICENSE_KEY_FILE path (new white-label installer writes
+        #      %PROGRAMDATA%\Krexion\license-key.txt during install)
         key = os.environ.get("LICENSE_KEY", "").strip()
+        if not key:
+            key_file = os.environ.get("LICENSE_KEY_FILE", "").strip()
+            if key_file and os.path.isfile(key_file):
+                try:
+                    with open(key_file, "r", encoding="utf-8") as _f:
+                        # Tolerate either a bare key on the first non-
+                        # comment line, or a multi-line `# header\nKRX-..`
+                        # file written by the installer's Inno Setup
+                        # GetLicenseKey hook.
+                        for _line in _f:
+                            _line = _line.strip()
+                            if _line and not _line.startswith("#"):
+                                key = _line.upper()
+                                # Inject for downstream code that still
+                                # reads os.environ["LICENSE_KEY"]
+                                os.environ["LICENSE_KEY"] = key
+                                break
+                except Exception as _exc:  # noqa: BLE001
+                    logger.warning(f"Could not read LICENSE_KEY_FILE: {_exc}")
         server = os.environ.get("LICENSE_SERVER_URL", "").rstrip("/")
         if not key or not server:
             logger.info("License heartbeat: skipped (no LICENSE_KEY/LICENSE_SERVER_URL set)")

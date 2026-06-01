@@ -503,3 +503,65 @@ After: operator runs Health Check (10–30s, zero budget) → sees exactly which
 - `frontend/src/pages/RealUserTrafficPage.js` — button + modal + state + runner
 - `backend/tests/test_health_check_endpoint.py` — new regression test file (3 tests)
 
+
+---
+
+## Iteration 12 — 2026-06-01: White-Label Native Windows Installer
+
+### User ask (Roman Urdu)
+"mujai es project ki customer k liye installation file b khud bana do download able file bana do jo customer install kr k heavy job use kr sakte os mein koi docker yan kisi software ka zikar na ho na branding ho ta k user ko pata lage mein ne krexion ka aik software download kr k install kiya hai jese globally software kaam krta hain like adspower yan or koi b software"
+
+### What this delivers
+A single-click downloadable `Krexion-Setup-X.X.X.exe` for customers with **zero third-party branding**:
+- Customer downloads ONE .exe (no ZIP, no Docker)
+- Setup wizard prompts for license key
+- ~90 seconds: installed + dashboard auto-opens
+- Customer sees only Krexion branding in: Program Files, Task Manager, Services.msc, Start Menu, Tray, Add/Remove Programs
+
+### Changes shipped
+
+| File | What changed |
+|---|---|
+| `build/build-backend.py` | Copies `python.exe` → `krexion-core.exe` + `pythonw.exe` → `krexion-core-silent.exe` during build. Launcher script prefers branded binary. |
+| `installer/krexion-setup.iss` | (1) Renamed folders: `mongo/` → `database/`, `chromium-bundle/` → `browser-engine/`. (2) Renamed `nssm.exe` → `krexion-service.exe` via Inno `DestName`. (3) Services launched via `krexion-core.exe` (not `python.exe`). (4) Added custom Inno wizard page that captures license key + writes to `%PROGRAMDATA%\Krexion\license-key.txt`. (5) Backend service env now points to `LICENSE_KEY_FILE` for auto-pickup. |
+| `backend/license_module.py` | `/api/license/download-installer/{key}` now checks for a published release with `.exe` `download_url` and **302-redirects** to it (GitHub Releases). Falls back to legacy ZIP stream if no native release published. |
+| `backend/releases_module.py` | New endpoint `GET /api/system/installer-info` — public, no-auth, tells the Download page whether to advertise native-exe or legacy-zip flow + version + size. |
+| `backend/server.py` | License heartbeat task now reads `LICENSE_KEY_FILE` env var (set by Inno installer) in addition to `LICENSE_KEY` direct env. Stores back into `os.environ` for downstream consumers. |
+| `frontend/src/pages/DownloadPage.js` | Fetches `/api/system/installer-info` on mount. Native-exe mode: shows "Download Krexion for Windows" + 3-step install (run exe → enter key in wizard → wait 90s). Legacy mode: original 4-step ZIP flow. |
+| `frontend/src/pages/ReleasesAdminPage.js` | Admin "Download URL" field re-labeled to "Windows installer URL (paste GitHub Release .exe URL)" + inline help text. |
+| `BUILD-KREXION.bat` (new) | One-click wrapper around `Build-Krexion-Windows.ps1` for the user's Windows VPS. Auto-elevates UAC. |
+| `BUILD-NATIVE-README.md` | Rewritten end-to-end. Shows ASCII flow diagram from VPS build → GitHub Releases → admin panel → customer download → install. |
+
+### How the user ships a release now
+1. On Windows VPS, double-click `BUILD-KREXION.bat` → produces `installer\Output\Krexion-Setup-X.X.X.exe`
+2. Upload that `.exe` to GitHub Releases, copy the asset URL
+3. Login to `krexion.com/admin` → Releases → New release → paste URL into "Windows installer URL" → Publish
+4. Customers visiting `/download` now get the native .exe via 302 redirect (replaces the old Docker-based ZIP)
+
+### Tests
+- New regression suite: `backend/tests/test_native_installer_flow.py` (4 tests, all pass) covers:
+  - installer-info reports `legacy-zip` with no native release
+  - installer-info flips to `native-exe` when admin publishes
+  - download-installer/{key} 302-redirects to .exe URL
+  - download-installer/{key} falls back to ZIP stream when no native release
+- Manual verification: curl against `/api/system/installer-info` + screenshot of `/download` page confirms UI swap works
+
+### What customers see (white-label audit)
+- Program Files\Krexion\: `bin/krexion-core.exe`, `bin/krexion-service.exe`, `database/`, `browser-engine/`, `frontend/`
+- Services.msc: "Krexion Backend" + "Krexion Database"
+- Task Manager: `krexion-core.exe`
+- Start Menu / Desktop / Tray / Uninstall: "Krexion"
+
+### Bonus — earlier this session: "Duplicate IP — IP: unknown" display fix
+Fixed in `backend/server.py` `_handle_tracking_click`:
+- Expanded MongoDB projection to include `ipv4`, `detected_ip`, `all_ips`, `proxy_ips`, `browser_fingerprint`
+- Cookie-match path no longer hardcodes "unknown" — picks first valid IPv4 from current request
+- Display fallback (`_first_valid_ip`) searches stored row + current request IPs before defaulting to "unknown"
+- Same fix applied to proxy-block path
+
+### Next / Backlog
+- 🟡 P1: Captcha solver integration (2Captcha / CapSolver) for RUT engine
+- 🟢 P2: Cython `.pyd` compilation replacing `.pyc` for stronger source obfuscation
+- 🟢 P3: Auto-publish workflow — wire GitHub Actions to upload Krexion-Setup.exe to Releases on every `main` push, eliminating the manual VPS build step
+- 🟢 P4: Code-signing certificate (~$200/yr) so customers don't see "Unknown Publisher" SmartScreen warning
+
