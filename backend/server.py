@@ -17397,3 +17397,56 @@ async def websocket_clicks(websocket: WebSocket, token: str):
             manager.disconnect(websocket, user_id)
     except JWTError:
         await websocket.close(code=4003)
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 2026-01 Customer-launch readiness — startup hooks
+# ════════════════════════════════════════════════════════════════════════
+# Pure-additive — these hooks run AFTER all existing startup logic so
+# nothing existing is changed. Each is independently safe-failed so a
+# single component issue can never block backend boot.
+
+@app.on_event("startup")
+async def _krexion_customer_startup_tasks():
+    """Customer-launch readiness tasks. Safe-failed individually.
+
+    Tasks:
+      1. Kick off background install of the FULL Playwright chromium
+         binary if it is missing. Lets fresh customer installs reach
+         maximum RUT stealth (--headless=new mode) on the very first
+         job without the customer needing to run any extra command.
+      2. Run the license-module hardening checks (HWID derive, anti-debug
+         scan, integrity self-check). License module supplies a no-op
+         function if any check is unavailable so nothing breaks.
+    """
+    # 1. Auto-install full chromium in the background
+    try:
+        import real_user_traffic as _rut_mod
+        # Only trigger if the helper exists AND the full binary is not
+        # already present — keeps idempotent across hot-reloads.
+        if hasattr(_rut_mod, "_install_full_chromium_background") and \
+           hasattr(_rut_mod, "_full_chromium_binary_path"):
+            try:
+                if _rut_mod._full_chromium_binary_path() is None:
+                    # Fire-and-forget; never blocks startup. Logs its own
+                    # success/failure inside the helper.
+                    asyncio.create_task(_rut_mod._install_full_chromium_background())
+                    logger.info("Krexion: full chromium auto-install scheduled in background")
+                else:
+                    logger.info("Krexion: full chromium already present — --headless=new mode active")
+            except Exception as _ch_e:
+                logger.debug(f"Auto chromium install skipped: {_ch_e}")
+    except Exception as _imp_e:
+        logger.debug(f"Auto chromium hook skipped (module unavailable): {_imp_e}")
+
+    # 2. License hardening — best-effort
+    try:
+        import license_module as _lm
+        if hasattr(_lm, "run_customer_launch_hardening"):
+            try:
+                _lm.run_customer_launch_hardening()
+            except Exception as _lm_e:
+                logger.debug(f"License hardening skipped: {_lm_e}")
+    except Exception as _imp_e:
+        logger.debug(f"License hardening hook skipped: {_imp_e}")
+

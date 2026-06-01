@@ -195,6 +195,17 @@ class ActivateRequest(BaseModel):
 class ValidateRequest(BaseModel):
     license_key: str
     machine_id: str
+    # 2026-01 Phase D anti-crack — optional hardening payload sent by
+    # the local Krexion process. Older clients (no hardening) just omit
+    # these and the server treats absent values as "no data" (no
+    # enforcement). Newer customer builds send the real values and the
+    # admin dashboard can react if anything looks suspicious.
+    hwid: Optional[str] = None
+    debug_tools_detected: Optional[List[str]] = None
+    integrity_ok: Optional[bool] = None
+    integrity_hash: Optional[str] = None
+    build_type: Optional[str] = None
+    platform_info: Optional[str] = None
 
 
 class CheckoutRequest(BaseModel):
@@ -362,6 +373,36 @@ async def validate(body: ValidateRequest):
         {"license_key": body.license_key},
         {"$set": {"last_validated_at": _now()}},
     )
+    # 2026-01 Phase D — record optional hardening telemetry alongside the
+    # heartbeat. Older clients send no hardening fields and this block is
+    # a no-op. Newer customer builds report HWID, debugger-tool scan,
+    # integrity hash; admin dashboard can flag suspicious values without
+    # forcibly killing the session (kill switch is admin-driven via the
+    # /admin/license/revoke endpoint that already exists).
+    try:
+        hardening_updates: Dict[str, Any] = {}
+        if body.hwid:
+            hardening_updates["hardening.hwid"] = body.hwid
+        if body.debug_tools_detected is not None:
+            hardening_updates["hardening.debug_tools_detected"] = list(body.debug_tools_detected)
+            if body.debug_tools_detected:
+                hardening_updates["hardening.last_debug_tools_at"] = _now()
+        if body.integrity_ok is not None:
+            hardening_updates["hardening.integrity_ok"] = bool(body.integrity_ok)
+        if body.integrity_hash:
+            hardening_updates["hardening.integrity_hash"] = body.integrity_hash
+        if body.build_type:
+            hardening_updates["hardening.build_type"] = body.build_type
+        if body.platform_info:
+            hardening_updates["hardening.platform_info"] = body.platform_info
+        if hardening_updates:
+            hardening_updates["hardening.updated_at"] = _now()
+            await _db.licenses.update_one(
+                {"license_key": body.license_key}, {"$set": hardening_updates}
+            )
+    except Exception as _hd_err:
+        # Hardening telemetry is best-effort; never break the heartbeat.
+        logger.debug(f"hardening telemetry update skipped: {_hd_err}")
     return {"ok": True, "status": lic.get("status"), "license": _public_license(lic)}
 
 
