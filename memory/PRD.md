@@ -565,3 +565,28 @@ Fixed in `backend/server.py` `_handle_tracking_click`:
 - 🟢 P3: Auto-publish workflow — wire GitHub Actions to upload Krexion-Setup.exe to Releases on every `main` push, eliminating the manual VPS build step
 - 🟢 P4: Code-signing certificate (~$200/yr) so customers don't see "Unknown Publisher" SmartScreen warning
 
+
+
+---
+
+## Iteration 13 — 2026-06-01: Admin One-Click Builder
+
+### User ask
+"ek file bana do admin k liye jo sab khud install kare aur .exe bana de. mein kuch nahi karna chahta."
+
+### What this delivers
+Single downloadable `.bat` file that, when double-clicked on admin's Windows VPS:
+1. Self-elevates (UAC)
+2. Installs Chocolatey
+3. Auto-installs: Git + Python 3.11 + Node.js 20 LTS + Yarn + Inno Setup
+4. Clones/pulls krexion.com repo into `C:\Krexion-Build`
+5. Auto-bumps version, runs `Build-Krexion-Windows.ps1`
+6. Produces `Krexion-Setup-X.X.X.exe`, opens output folder
+
+### Files added/changed
+- `/app/Krexion-Admin-One-Click.bat` — single-click builder
+- `backend/server.py`: new `GET /api/admin/download-builder-bat` public endpoint
+- `frontend/src/pages/ReleasesAdminPage.js`: "Download builder" card at top of Releases page
+
+### Direct download URL
+`https://krexion.com/api/admin/download-builder-bat` (public, no auth — .bat has no secrets)

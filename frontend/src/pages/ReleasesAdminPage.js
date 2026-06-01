@@ -229,6 +229,35 @@ export default function ReleasesAdminPage() {
         <span className="font-mono text-[#A78BFA]">{currentVersion || "—"}</span>
       </div>
 
+      {/* 2026-02 — Admin Builder card: one-click .bat that builds the
+          customer-facing Krexion-Setup.exe end-to-end on a Windows VPS.
+          Surfaces the download right here so the admin doesn't have to
+          go hunting through docs to find it. */}
+      <div
+        data-testid="admin-builder-card"
+        className="mb-5 bg-gradient-to-r from-[#A78BFA]/10 to-[#3B82F6]/10 border border-[#A78BFA]/30 rounded-xl p-5 flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between"
+      >
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1.5">
+            <Zap size={16} className="text-[#A78BFA]" />
+            <h3 className="text-sm font-semibold text-white">Build a new Krexion installer .exe</h3>
+          </div>
+          <p className="text-xs text-[#A1A1AA] leading-relaxed">
+            Yeh <code className="bg-white/10 px-1.5 py-0.5 rounded text-[#A78BFA]">.bat</code> file apni Windows VPS pe download karke double-click karein.
+            Khud Python + Node + Yarn + Inno Setup install karega, repo clone karega aur <code className="text-[#A78BFA]">Krexion-Setup-X.X.X.exe</code> banayega.
+            Pehli baar ~30-45 min. Output GitHub Releases pe upload karke yahan URL paste karein.
+          </p>
+        </div>
+        <a
+          href={`${API}/admin/download-builder-bat`}
+          download="Krexion-Admin-One-Click.bat"
+          data-testid="download-admin-builder-bat"
+          className="shrink-0 inline-flex items-center gap-2 bg-[#A78BFA] hover:bg-[#C4B5FD] text-black font-semibold px-5 py-2.5 rounded-md transition text-sm whitespace-nowrap"
+        >
+          <Plus size={15} /> Download builder
+        </a>
+      </div>
+
       {showForm && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-[#0f0a18] border border-white/10 rounded-2xl w-full max-w-lg p-6 shadow-2xl">

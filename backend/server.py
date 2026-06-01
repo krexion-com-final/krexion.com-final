@@ -3395,6 +3395,33 @@ async def get_all_users_stats(admin: dict = Depends(get_current_admin)):
         raise HTTPException(status_code=500, detail=f"Failed to fetch user stats: {str(e)}")
 
 
+# ──────────────────────────────────────────────────────────────────────
+# 2026-02 — Public route: admin one-click builder .bat download
+# ──────────────────────────────────────────────────────────────────────
+# The admin's own machine has no Krexion login yet (they're about to
+# build the very first .exe). So this is public + no-auth. It just
+# streams a static .bat file from the repo root. Safe because:
+#   - The .bat only contains generic install logic (Chocolatey, Python,
+#     Node, etc.). No secrets are embedded.
+#   - The repo URL inside it is the user's own public GitHub repo.
+@api_router.get("/admin/download-builder-bat")
+async def admin_download_builder_bat():
+    """Serve the Krexion-Admin-One-Click.bat builder file."""
+    from fastapi.responses import FileResponse
+    bat_path = Path(__file__).resolve().parent.parent / "Krexion-Admin-One-Click.bat"
+    if not bat_path.is_file():
+        raise HTTPException(
+            status_code=503,
+            detail="Builder file not deployed yet. Push the latest main branch and retry.",
+        )
+    return FileResponse(
+        path=str(bat_path),
+        media_type="application/octet-stream",
+        filename="Krexion-Admin-One-Click.bat",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @api_router.get("/admin/system-check")
 async def admin_system_check(admin: dict = Depends(get_current_admin)):
     """Return green/red health status for every dependency the app relies on.
