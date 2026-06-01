@@ -17421,21 +17421,30 @@ async def _krexion_customer_startup_tasks():
     """
     # 1. Auto-install full chromium in the background
     try:
-        import real_user_traffic as _rut_mod
-        # Only trigger if the helper exists AND the full binary is not
-        # already present — keeps idempotent across hot-reloads.
-        if hasattr(_rut_mod, "_install_full_chromium_background") and \
-           hasattr(_rut_mod, "_full_chromium_binary_path"):
-            try:
-                if _rut_mod._full_chromium_binary_path() is None:
-                    # Fire-and-forget; never blocks startup. Logs its own
-                    # success/failure inside the helper.
-                    asyncio.create_task(_rut_mod._install_full_chromium_background())
-                    logger.info("Krexion: full chromium auto-install scheduled in background")
-                else:
-                    logger.info("Krexion: full chromium already present — --headless=new mode active")
-            except Exception as _ch_e:
-                logger.debug(f"Auto chromium install skipped: {_ch_e}")
+        # Respect the existing VPS safety flag — cloud edge / shared
+        # hosts use STRICT_CLOUD_HEAVY_BLOCK=true (default) to skip the
+        # ~165 MB chromium download because heavy features run on the
+        # customer desktop app, not on the VPS. Only auto-install when
+        # this flag is False (i.e. customer-binary / native install).
+        # Uses the existing module-level constant computed at import.
+        if STRICT_CLOUD_HEAVY_BLOCK:
+            logger.info("Krexion: STRICT_CLOUD_HEAVY_BLOCK=true — skipping auto chromium install (VPS mode)")
+        else:
+            import real_user_traffic as _rut_mod
+            # Only trigger if the helper exists AND the full binary is not
+            # already present — keeps idempotent across hot-reloads.
+            if hasattr(_rut_mod, "_install_full_chromium_background") and \
+               hasattr(_rut_mod, "_full_chromium_binary_path"):
+                try:
+                    if _rut_mod._full_chromium_binary_path() is None:
+                        # Fire-and-forget; never blocks startup. Logs its own
+                        # success/failure inside the helper.
+                        asyncio.create_task(_rut_mod._install_full_chromium_background())
+                        logger.info("Krexion: full chromium auto-install scheduled in background")
+                    else:
+                        logger.info("Krexion: full chromium already present — --headless=new mode active")
+                except Exception as _ch_e:
+                    logger.debug(f"Auto chromium install skipped: {_ch_e}")
     except Exception as _imp_e:
         logger.debug(f"Auto chromium hook skipped (module unavailable): {_imp_e}")
 

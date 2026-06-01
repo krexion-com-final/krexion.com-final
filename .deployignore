@@ -14,3 +14,11 @@ form_filler_screenshots/
 *.log
 tests/
 venv/
+# 2026-01: New native-build artefacts — VPS doesn't need them, they're
+# only used by the Windows GitHub Actions runner to produce the
+# customer .exe installer. Excluding keeps VPS deploys fast and avoids
+# any risk of the Inno Setup .iss / PowerShell scripts being touched.
+installer/
+Krexion-Native-Install.ps1
+Krexion-Native-Uninstall.ps1
+BUILD-NATIVE-README.md

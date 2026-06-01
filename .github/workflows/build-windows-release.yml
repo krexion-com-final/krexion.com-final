@@ -23,18 +23,16 @@
 name: Build Native Windows Release
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'backend/**'
-      - 'frontend/**'
-      - 'build/**'
-      - 'installer/**'
-      - '.github/workflows/build-windows-release.yml'
+  # 2026-01: Manual-only trigger. The Windows build takes 30-40 min and
+  # requires several supporting files (Inno Setup icon, GitHub Releases
+  # artifact links) that aren't present on first run. Triggering it
+  # automatically on every push would clutter the Actions tab with
+  # red-X failures. Run it explicitly from Actions → "Build Native
+  # Windows Release" → Run workflow when you want a new customer .exe.
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Optional release tag (e.g. v1.2.3). Leave empty for nightly.'
+        description: 'Release tag (e.g. v1.0.0). Leave empty for nightly build (no GH Release).'
         required: false
         default: ''
 
