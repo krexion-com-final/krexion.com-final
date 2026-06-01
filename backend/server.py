@@ -12751,7 +12751,81 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     ipv4 = client_ips["ipv4"]
     all_ips = client_ips["all"]
     proxy_ips = client_ips.get("proxy_ips", [])
-    
+
+    # ──────────────────────────────────────────────────────────────────
+    # 2026-01 BUGFIX — Strict-duplicate detection failed when the same
+    # visitor's IP rotated between visits (mobile network, VPN, NAT).
+    # We now layer THREE independent duplicate signals so any one of
+    # them triggers a block:
+    #   1. IP address  (existing logic)
+    #   2. Browser fingerprint (UA + Accept-Language + Accept-Encoding
+    #      + Sec-CH-UA hash) — survives IP rotation on the same device
+    #   3. Signed cookie set on the FIRST visit's redirect — survives
+    #      both IP rotation AND minor UA changes (private mode breaks
+    #      this one, but the other two still catch it)
+    # All three signals are recorded in the click document so future
+    # visits can match against ANY of them. The detection cost is one
+    # extra hashing + one extra cookie read per visit (microseconds).
+    # ──────────────────────────────────────────────────────────────────
+    import hashlib as _hashlib_dup
+    import hmac as _hmac_dup
+
+    def _browser_fingerprint_for(req) -> str:
+        """SHA-256 of the fingerprint-relevant headers. Stable across
+        IP changes for the same browser; varies between browsers /
+        private-mode sessions. Returns empty string if not enough
+        signal — caller treats empty as 'no fingerprint'."""
+        try:
+            parts = [
+                (req.headers.get("user-agent") or "").strip(),
+                (req.headers.get("accept-language") or "").strip(),
+                (req.headers.get("accept-encoding") or "").strip(),
+                (req.headers.get("sec-ch-ua") or "").strip(),
+                (req.headers.get("sec-ch-ua-platform") or "").strip(),
+                (req.headers.get("sec-ch-ua-mobile") or "").strip(),
+            ]
+            joined = "|".join(parts)
+            if len(joined.replace("|", "").strip()) < 20:
+                return ""
+            return _hashlib_dup.sha256(joined.encode("utf-8")).hexdigest()
+        except Exception:
+            return ""
+
+    def _link_visit_cookie_name() -> str:
+        # Single cookie name across all links; value encodes WHICH
+        # link the visitor already saw so cookies from link A don't
+        # block link B.
+        return "_kx_seen"
+
+    def _link_visit_cookie_secret() -> str:
+        # Tied to the FastAPI app's JWT secret — stable across
+        # restarts but unguessable. Falls back to a fixed value if
+        # the env var is missing so the cookie still works.
+        return os.environ.get("JWT_SECRET_KEY") or "krexion-default-cookie-key"
+
+    def _sign_short_code(code: str) -> str:
+        return _hmac_dup.new(
+            _link_visit_cookie_secret().encode(),
+            code.encode(),
+            _hashlib_dup.sha256,
+        ).hexdigest()[:24]
+
+    browser_fp = _browser_fingerprint_for(request)
+    expected_cookie_token = _sign_short_code(short_code)
+    visitor_cookie = (request.cookies.get(_link_visit_cookie_name()) or "").strip()
+    cookie_already_seen = bool(visitor_cookie) and (expected_cookie_token in visitor_cookie.split("."))
+
+    try:
+        logger.info(
+            f"[dup-check] code={short_code} client_ip={client_ip!r} ipv4={ipv4!r} "
+            f"all_ips={all_ips} proxy_ips={proxy_ips} "
+            f"fp={browser_fp[:16] if browser_fp else 'NONE'} "
+            f"cookie_seen={cookie_already_seen} "
+            f"strict={link.get('strict_duplicate_check', True)}"
+        )
+    except Exception:
+        pass
+
     # Check for duplicate clicks - IPv4 ONLY
     ip_conditions = []
 
@@ -12825,16 +12899,38 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     # device to be allowed to click multiple times.
     if not link.get("strict_duplicate_check", True):
         existing_click = None
-    elif not ip_conditions:
+    elif cookie_already_seen:
+        # ─── 2026-01: Signed cookie already present on this browser ───
+        # The visitor previously clicked this exact short_code (cookie
+        # was set on the first visit's redirect response). This catches
+        # the "same browser, rotated IP" case our IP-only check missed.
+        existing_click = {
+            "ip_address": client_ip or "unknown",
+            "link_id": link.get("id"),
+            "matched_via": "cookie",
+        }
+        try:
+            logger.info(f"[dup-block] code={short_code} matched via SIGNED COOKIE")
+        except Exception:
+            pass
+    elif not ip_conditions and not browser_fp:
         # 2026-05 BUGFIX — no real IPv4 was detected for this visitor
-        # (e.g. visitor came in over IPv6-only or behind a CDN that
-        # stripped the client IP). With nothing concrete to match
+        # AND no browser fingerprint either (e.g. visitor came in over
+        # IPv6-only with bare headers). With nothing concrete to match
         # against, running the duplicate check would either error
         # (`{"$or": []}` is invalid) or — worse, the legacy behaviour —
         # match a placeholder like "unknown" and falsely block. Safest
         # behaviour: skip the duplicate check and let the click pass.
         existing_click = None
     else:
+        # ─── 2026-01: Layer the browser fingerprint into ip_conditions ──
+        # so a returning visitor whose IP has rotated (mobile, VPN, NAT)
+        # but whose browser headers are identical STILL gets blocked.
+        # We don't *require* fingerprint to match — it's another OR
+        # branch. Real IP matches still work as before.
+        if browser_fp:
+            ip_conditions.append({"browser_fingerprint": browser_fp})
+
         duplicate_query = {"$or": ip_conditions}  # No link_id filter - global check
 
         existing_click = None
@@ -13483,6 +13579,15 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         "sub1": sub1 or None,
         "sub2": sub2 or None,
         "sub3": sub3 or None,
+        # 2026-01: layered duplicate-detection signals — stored alongside
+        # the IP so a future visit from the same browser (even after IP
+        # rotation) gets blocked by the strict-duplicate check above.
+        "browser_fingerprint": browser_fp or None,
+        "duplicate_signals": {
+            "ip": primary_ip_for_storage,
+            "browser_fp": browser_fp or None,
+            "cookie_token": expected_cookie_token,
+        },
         "created_at": datetime.now(timezone.utc).isoformat()
     }
     
@@ -13542,8 +13647,43 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         headers["Referrer-Policy"] = "no-referrer"
     elif referrer_mode == "origin":
         headers["Referrer-Policy"] = "origin"
-    
-    return RedirectResponse(url=destination_url, status_code=302, headers=headers)
+
+    resp = RedirectResponse(url=destination_url, status_code=302, headers=headers)
+
+    # ──────────────────────────────────────────────────────────────────
+    # 2026-01: Set the signed duplicate-protection cookie. On every
+    # FUTURE visit by this browser, the strict-duplicate check at the
+    # top of this handler reads this cookie and blocks the visit
+    # immediately — even if the visitor's IP has rotated.
+    #
+    # Value layout: dot-separated tokens (one per short_code the
+    # browser has already seen). We cap the cookie size to 12 tokens
+    # so it never exceeds 4 KB; older tokens fall off the front. The
+    # token itself is an HMAC(short_code) so a visitor can't forge a
+    # cookie that bypasses or fakes a duplicate from a different link.
+    # ──────────────────────────────────────────────────────────────────
+    try:
+        existing_tokens = (request.cookies.get(_link_visit_cookie_name()) or "").split(".")
+        existing_tokens = [t for t in existing_tokens if t.strip()]
+        if expected_cookie_token not in existing_tokens:
+            existing_tokens.append(expected_cookie_token)
+        # Cap at 12 → ~290 bytes — well under cookie size limits.
+        if len(existing_tokens) > 12:
+            existing_tokens = existing_tokens[-12:]
+        new_cookie_value = ".".join(existing_tokens)
+        resp.set_cookie(
+            key=_link_visit_cookie_name(),
+            value=new_cookie_value,
+            max_age=365 * 24 * 3600,  # 1 year — long enough for any campaign
+            httponly=True,
+            samesite="lax",
+            secure=False,  # Many customer offers run on plain HTTP redirects
+            path="/",
+        )
+    except Exception as _ck_err:
+        logger.debug(f"[dup-cookie] set failed (non-blocking): {_ck_err}")
+
+    return resp
 
 
 # ═══════════════════════════════════════════════════════════════════
