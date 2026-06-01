@@ -215,6 +215,23 @@ where node >> "%LOG%" 2>&1
 where yarn >> "%LOG%" 2>&1
 where git >> "%LOG%" 2>&1
 
+REM Pre-flight: confirm Build-Krexion-Windows.ps1 exists in the repo
+if not exist "%BUILD_DIR%\Build-Krexion-Windows.ps1" (
+    echo   [ERR] Build-Krexion-Windows.ps1 file %BUILD_DIR% mein nahi mili!
+    echo         Repo clone incomplete ho gaya. C:\Krexion-Build ko delete
+    echo         karke phir se script run karein.
+    set "FINAL_EC=11"
+    echo [trace] FAILED: Build script missing >> "%TRACE%"
+    goto :END_PAUSE
+)
+if not exist "%BUILD_DIR%\build\build-backend.py" (
+    echo   [ERR] build\build-backend.py file nahi mili!
+    echo         C:\Krexion-Build ko delete karke phir se script run karein.
+    set "FINAL_EC=12"
+    echo [trace] FAILED: build-backend.py missing >> "%TRACE%"
+    goto :END_PAUSE
+)
+
 pushd "%BUILD_DIR%"
 
 set "VER=1.0.0"
@@ -227,8 +244,14 @@ for /f "tokens=1-3 delims=." %%a in ("%VER%") do (
 )
 echo   Building version: %VER%
 echo.
+echo   PowerShell build script chal raha hai. Sab output yahan
+echo   aur log file dono mein dikhega:
+echo.
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "& { try { & '.\Build-Krexion-Windows.ps1' -Version '%VER%' *>&1 | Tee-Object -FilePath '%LOG%' -Append; exit $LASTEXITCODE } catch { Write-Host ('FATAL: ' + $_.Exception.Message); exit 99 } }"
+REM Direct invocation - NO try/catch wrapper. Any PowerShell error message
+REM goes straight to screen + log so user sees actual cause of failure.
+REM Exit code propagates via $LASTEXITCODE automatically.
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\Build-Krexion-Windows.ps1" -Version "%VER%" 2>&1
 set "BUILD_EC=!errorlevel!"
 
 popd
@@ -239,10 +262,11 @@ if !BUILD_EC! neq 0 (
     echo   BUILD FAILED  (exit code: !BUILD_EC!)
     echo  =====================================================
     echo.
-    echo   Last 50 lines from log:
-    echo  =====================================================
-    powershell -NoProfile -Command "Get-Content -Path '%LOG%' -Tail 50 -ErrorAction SilentlyContinue"
-    echo  =====================================================
+    echo   Upar screen pe jo error dikha hai woh actual cause hai.
+    echo   Scroll up karke uske paas ki red lines dekhein.
+    echo.
+    echo   Full log:  %LOG%
+    echo.
     set "FINAL_EC=!BUILD_EC!"
     echo [trace] FAILED: build, EC=!BUILD_EC! >> "%TRACE%"
     goto :END_PAUSE
