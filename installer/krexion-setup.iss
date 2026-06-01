@@ -72,27 +72,27 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 Name: "startupTray"; Description: "Start Krexion automatically when Windows starts"; GroupDescription: "Startup:"; Flags: unchecked
 
 [Files]
-; Backend Nuitka bundle (folder)
+; Backend PyInstaller bundle (folder) — required
 Source: "..\build\dist\krexion-backend.dist\*"; DestDir: "{app}\bin"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-; NSSM service wrapper
+; NSSM service wrapper — required
 Source: "..\build\nssm-portable\nssm.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 
-; MongoDB Portable
+; MongoDB Portable — required
 Source: "..\build\mongo-portable\*"; DestDir: "{app}\mongo"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-; Playwright Chromium bundle
-Source: "..\build\chromium-bundle\*"; DestDir: "{app}\chromium"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Playwright Chromium bundle — optional (backend self-installs if missing)
+Source: "..\build\chromium-bundle\*"; DestDir: "{app}\chromium"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
-; Frontend production build
+; Frontend production build — required
 Source: "..\build\frontend-build\*"; DestDir: "{app}\frontend"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-; Tray app (if present)
+; Tray app — optional
 Source: "..\build\dist\krexion-tray.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
-; Manifest + license shells
+; Manifest + license shells — optional
 Source: "..\build\krexion-manifest.json"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "README.txt"; DestDir: "{app}"; Flags: isreadme ignoreversion skipifsourcedoesntexist
+
 
 [Dirs]
 Name: "{app}\data"

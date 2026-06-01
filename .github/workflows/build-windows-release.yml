@@ -1,34 +1,22 @@
 # ════════════════════════════════════════════════════════════════════════
 # Krexion — Windows native build & release pipeline
 # ════════════════════════════════════════════════════════════════════════
-# Triggers on push to `main` AND on manual dispatch from the Actions tab.
-# Produces three GitHub Release artifacts:
-#   1. krexion-backend.exe   — Nuitka-compiled FastAPI backend (no .py
-#                              source visible; runs as a Windows service)
-#   2. Krexion-Setup.exe     — Inno Setup installer that:
-#        • Installs backend + frontend to C:\Program Files\Krexion
-#        • Bundles Playwright Chromium (FULL build for --headless=new)
-#        • Bundles MongoDB Portable (no Docker)
-#        • Registers "Krexion" Windows Service (auto-start)
-#        • Adds Krexion Tray app to startup
-#        • Creates Start Menu + Desktop shortcuts
-#   3. Krexion-User-Package.zip — Legacy Docker-based zip (unchanged) for
-#                              customers who still want the Docker route
+# Manual-only — Trigger from Actions tab → "Build Native Windows Release"
+# → Run workflow.
 #
-# IMPORTANT: This workflow ADDS a new release path. The existing
-# `deploy.yml` cloud-deploy workflow is untouched. Customers using the
-# old Docker installer keep working; new customers use Krexion-Setup.exe.
+# Produces these artifacts:
+#   1. krexion-backend     — PyInstaller-compiled FastAPI backend
+#   2. krexion-frontend    — Static React build
+#   3. (optional) Krexion-Setup.exe — Inno Setup installer
+#
+# Build is INTENTIONALLY tolerant — individual sub-steps are allowed to
+# fail without blocking the others, so you ALWAYS get downloadable
+# artifacts to inspect logs even if one piece breaks.
 # ════════════════════════════════════════════════════════════════════════
 
 name: Build Native Windows Release
 
 on:
-  # 2026-01: Manual-only trigger. The Windows build takes 30-40 min and
-  # requires several supporting files (Inno Setup icon, GitHub Releases
-  # artifact links) that aren't present on first run. Triggering it
-  # automatically on every push would clutter the Actions tab with
-  # red-X failures. Run it explicitly from Actions → "Build Native
-  # Windows Release" → Run workflow when you want a new customer .exe.
   workflow_dispatch:
     inputs:
       release_tag:
@@ -36,14 +24,13 @@ on:
         required: false
         default: ''
 
-# Avoid concurrent builds of the same ref racing each other
 concurrency:
   group: krexion-native-build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build-backend:
-    name: Compile backend with Nuitka
+    name: Compile backend with PyInstaller
     runs-on: windows-latest
     timeout-minutes: 60
     outputs:
@@ -65,41 +52,54 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
 
-      - name: Install backend deps + Nuitka
+      - name: Install backend deps + PyInstaller
         shell: powershell
         run: |
-          python -m pip install --upgrade pip wheel
+          python -m pip install --upgrade pip wheel setuptools
           pip install -r backend/requirements.txt
-          pip install nuitka ordered-set zstandard
+          pip install pyinstaller==6.11.1
 
       - name: Pre-install Playwright Chromium (FULL build)
         shell: powershell
+        continue-on-error: true   # don't block backend build if Chromium download fails
         run: |
           $env:PLAYWRIGHT_BROWSERS_PATH = "$PWD\build\chromium-bundle"
           python -m playwright install chromium --no-shell
-          # Verify chromium present
-          Get-ChildItem -Path "$env:PLAYWRIGHT_BROWSERS_PATH" -Recurse -Filter "chrome.exe" | Select-Object FullName
+          Get-ChildItem -Path "$env:PLAYWRIGHT_BROWSERS_PATH" -Recurse -Filter "chrome.exe" -ErrorAction SilentlyContinue | Select-Object FullName
 
-      - name: Run Nuitka build script
+      - name: Run PyInstaller build script
         shell: powershell
         run: |
           if (Test-Path build/build-backend.py) {
             python build/build-backend.py
           } else {
-            Write-Host "build/build-backend.py missing — skipping (legacy build)"
+            Write-Error "build/build-backend.py missing"
             exit 1
           }
 
+      - name: Show build output (diagnostic)
+        if: always()
+        shell: powershell
+        run: |
+          if (Test-Path build/dist) {
+            Get-ChildItem build/dist -Recurse -ErrorAction SilentlyContinue |
+              Select-Object FullName, Length |
+              Format-Table -AutoSize
+          } else {
+            Write-Host "No build/dist directory was produced."
+          }
+
       - name: Upload backend artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: krexion-backend-exe
           path: |
             build/dist/krexion-backend.dist/**
             build/chromium-bundle/**
-          retention-days: 7
+          retention-days: 14
+          if-no-files-found: warn
 
   build-frontend:
     name: Build React frontend
@@ -112,8 +112,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'yarn'
-          cache-dependency-path: frontend/yarn.lock
+          # NOTE: yarn cache intentionally disabled — the cache action
+          # threw "No existing directories" warnings on this repo's
+          # layout. yarn install is fast enough without cache for a
+          # manual-trigger workflow that runs only on release builds.
 
       - name: Build production bundle
         run: |
@@ -130,12 +132,13 @@ jobs:
         with:
           name: krexion-frontend-build
           path: frontend/build
-          retention-days: 7
+          retention-days: 14
 
   build-installer:
     name: Build Krexion-Setup.exe via Inno Setup
     runs-on: windows-latest
     needs: [build-backend, build-frontend]
+    if: always() && needs.build-backend.result == 'success' && needs.build-frontend.result == 'success'
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -156,24 +159,22 @@ jobs:
         shell: powershell
         run: |
           $url = "https://fastdl.mongodb.org/windows/mongodb-windows-x86_64-7.0.14.zip"
-          $out = "build/mongo.zip"
-          Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
-          Expand-Archive -Path $out -DestinationPath build/mongo-extract -Force
-          Get-ChildItem -Path build/mongo-extract -Recurse -Filter "mongod.exe" |
+          Invoke-WebRequest -Uri $url -OutFile build/mongo.zip -UseBasicParsing
+          Expand-Archive -Path build/mongo.zip -DestinationPath build/mongo-extract -Force
+          Get-ChildItem build/mongo-extract -Recurse -Filter "mongod.exe" |
             Select-Object -First 1 |
             ForEach-Object {
               $src = $_.DirectoryName
               New-Item -ItemType Directory -Force -Path build/mongo-portable | Out-Null
-              Copy-Item -Path "$src\*" -Destination build/mongo-portable -Recurse -Force
+              Copy-Item -Path "$src\..\*" -Destination build/mongo-portable -Recurse -Force
             }
           Remove-Item -Path build/mongo.zip,build/mongo-extract -Recurse -Force -ErrorAction SilentlyContinue
-          Get-ChildItem build/mongo-portable
 
-      - name: Download NSSM (service wrapper)
+      - name: Download NSSM
         shell: powershell
         run: |
-          $url = "https://nssm.cc/release/nssm-2.24.zip"
-          Invoke-WebRequest -Uri $url -OutFile build/nssm.zip -UseBasicParsing
+          Invoke-WebRequest -Uri "https://nssm.cc/release/nssm-2.24.zip" `
+                            -OutFile build/nssm.zip -UseBasicParsing
           Expand-Archive -Path build/nssm.zip -DestinationPath build/nssm-extract -Force
           New-Item -ItemType Directory -Force -Path build/nssm-portable | Out-Null
           Copy-Item -Path build/nssm-extract/nssm-2.24/win64/nssm.exe `
@@ -189,22 +190,25 @@ jobs:
         shell: powershell
         run: |
           if (Test-Path installer/krexion-setup.iss) {
-            & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /Qp installer/krexion-setup.iss `
-              /DAppVersion=${{ needs.build-backend.outputs.version }}
+            & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+                /Qp installer/krexion-setup.iss `
+                /DAppVersion=${{ needs.build-backend.outputs.version }}
           } else {
-            Write-Host "installer/krexion-setup.iss missing — skipping"
+            Write-Error "installer/krexion-setup.iss missing"
             exit 1
           }
 
       - name: Upload installer artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: krexion-installer
           path: installer/Output/Krexion-Setup-*.exe
           retention-days: 30
+          if-no-files-found: warn
 
       - name: Create GitHub Release
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != ''
+        if: github.event.inputs.release_tag != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.release_tag }}
