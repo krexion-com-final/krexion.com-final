@@ -12904,8 +12904,16 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         # The visitor previously clicked this exact short_code (cookie
         # was set on the first visit's redirect response). This catches
         # the "same browser, rotated IP" case our IP-only check missed.
+        # 2026-02 — never store the placeholder "unknown" here. Pick
+        # the FIRST real IPv4 we can see from the current request so
+        # the customer-facing block page shows something useful.
+        _cookie_ip = None
+        for _cand in [client_ip, ipv4] + list(all_ips or []) + list(proxy_ips or []):
+            if _is_valid_dup_ipv4(_cand):
+                _cookie_ip = _cand
+                break
         existing_click = {
-            "ip_address": client_ip or "unknown",
+            "ip_address": _cookie_ip or client_ip or ipv4 or "unknown",
             "link_id": link.get("id"),
             "matched_via": "cookie",
         }
@@ -12947,8 +12955,25 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         # 1. Check the link OWNER's per-tenant DB (this is where the
         #    real click history lives — and it correctly includes
         #    sub-users because they save into the parent's DB).
+        # 2026-02 — fetch ALL ip-related fields so we can report the
+        # exact match to the customer. Earlier this projection only
+        # asked for `ip_address`, which is null on click rows where the
+        # match landed on `ipv4` / `detected_ip` / `all_ips` /
+        # `proxy_ips` / `browser_fingerprint`. Result: customer saw
+        # "IP: unknown" even though we *did* have the real IP on the
+        # stored row.
+        _DUP_PROJECTION = {
+            "_id": 0,
+            "ip_address": 1,
+            "ipv4": 1,
+            "detected_ip": 1,
+            "all_ips": 1,
+            "proxy_ips": 1,
+            "browser_fingerprint": 1,
+            "link_id": 1,
+        }
         try:
-            existing_click = await user_db.clicks.find_one(duplicate_query, {"_id": 0, "ip_address": 1, "link_id": 1})
+            existing_click = await user_db.clicks.find_one(duplicate_query, _DUP_PROJECTION)
         except Exception:
             pass
 
@@ -12969,7 +12994,7 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
                             {"link_id": {"$in": legacy_link_ids}},
                         ]
                     }
-                    existing_click = await db.clicks.find_one(scoped_q, {"_id": 0, "ip_address": 1, "link_id": 1})
+                    existing_click = await db.clicks.find_one(scoped_q, _DUP_PROJECTION)
             except Exception:
                 pass
     
@@ -12979,22 +13004,52 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     
     if existing_click:
         # Found duplicate - STRICTLY BLOCK - NO ACCESS AT ALL
-        # 2026-01 — pull the MATCHED IP from the stored click record
-        # and ALSO show the visitor's current IP separately. Earlier
-        # the page only displayed `client_ip`, which is often
-        # "unknown" when the visitor is behind certain proxies/CDNs.
-        # Now the user always sees which IP triggered the match.
-        matched_ip = existing_click.get("ip_address") or existing_click.get("ipv4") or existing_click.get("detected_ip") or "unknown"
+        # 2026-02 — pick the ACTUAL matched IP out of whichever field
+        # of the stored click row held it. Earlier this only checked
+        # `ip_address`/`ipv4`/`detected_ip` and ignored the array
+        # fields (`all_ips`, `proxy_ips`) — which is exactly where the
+        # match lived when the visitor came in behind a proxy/CDN,
+        # producing the "IP: unknown" customer report.
+        def _first_valid_ip(*candidates):
+            for c in candidates:
+                if isinstance(c, str) and _is_valid_dup_ipv4(c):
+                    return c
+                if isinstance(c, (list, tuple)):
+                    for x in c:
+                        if isinstance(x, str) and _is_valid_dup_ipv4(x):
+                            return x
+            return None
+
+        matched_ip = _first_valid_ip(
+            existing_click.get("ip_address"),
+            existing_click.get("ipv4"),
+            existing_click.get("detected_ip"),
+            existing_click.get("all_ips"),
+            existing_click.get("proxy_ips"),
+        )
+        # If nothing on the stored row was valid (very old rows, or
+        # match was purely via browser_fingerprint), fall back to the
+        # IPs we can see on THIS request. That's still the visitor's
+        # real IP — we just couldn't pull a historical one.
+        if not matched_ip:
+            matched_ip = _first_valid_ip(client_ip, ipv4, all_ips, proxy_ips)
+        if not matched_ip:
+            matched_ip = "unknown"
+
         matched_link = existing_click.get("link_id", "Unknown")
-        display_ip = matched_ip if matched_ip and matched_ip != "unknown" else (client_ip or "unknown")
         # Compose a single human-readable line so both pieces of info
         # are visible: matched-IP (the row in DB) and request-IP (what
         # the browser is presenting right now). If they're identical
         # we just show one.
-        if client_ip and client_ip != "unknown" and client_ip != matched_ip and matched_ip != "unknown":
+        if (
+            client_ip
+            and client_ip != "unknown"
+            and client_ip != matched_ip
+            and matched_ip != "unknown"
+        ):
             ip_display_line = f"IP: {matched_ip} (your IP: {client_ip})"
         else:
-            ip_display_line = f"IP: {display_ip}"
+            ip_display_line = f"IP: {matched_ip}"
         try:
             logger.info(
                 f"[duplicate-block] short_code={short_code} matched_ip={matched_ip} "
@@ -13165,20 +13220,27 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     
     is_duplicate_proxy = existing_proxy is not None
     if is_duplicate_proxy:
-        # 2026-01 — surface the actual matching IP from the proxy
+        # 2026-01/02 — surface the actual matching IP from the proxy
         # record so the user knows WHICH IP triggered the block
         # instead of seeing "unknown" when the visitor's request
-        # IP can't be resolved.
+        # IP can't be resolved. Falls back to ANY real IPv4 we see
+        # on this request before defaulting to "unknown".
         matched_proxy_ip = (
             existing_proxy.get("ip_address")
             or existing_proxy.get("detected_ip")
             or existing_proxy.get("ipv4")
-            or "unknown"
         )
+        if not matched_proxy_ip or matched_proxy_ip in _INVALID_DUP_IPS:
+            for _cand in [client_ip, ipv4] + list(all_ips or []) + list(proxy_ips or []):
+                if _is_valid_dup_ipv4(_cand):
+                    matched_proxy_ip = _cand
+                    break
+        if not matched_proxy_ip:
+            matched_proxy_ip = "unknown"
         if client_ip and client_ip != "unknown" and client_ip != matched_proxy_ip and matched_proxy_ip != "unknown":
             proxy_ip_display = f"IP: {matched_proxy_ip} (your IP: {client_ip})"
         else:
-            proxy_ip_display = f"IP: {matched_proxy_ip if matched_proxy_ip != 'unknown' else (client_ip or 'unknown')}"
+            proxy_ip_display = f"IP: {matched_proxy_ip}"
         try:
             logger.info(
                 f"[duplicate-proxy-block] short_code={short_code} "
