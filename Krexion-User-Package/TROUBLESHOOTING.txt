@@ -99,7 +99,7 @@ PROBLEM 7: Install complete, browser nahi khula
   Solution:
     Manually browser kholein aur yeh URL paste karein:
     
-    http://localhost:3000/register
+    https://krexion.com/register
 
 
 PROBLEM 8: Register page khuli but submit pe error aaya
@@ -139,7 +139,7 @@ PROBLEM 11: GO-ONLINE.bat se public URL nahi bana
 
   Solution:
     1. Pehle confirm karein Krexion chal raha hai
-       Browser mein http://localhost:3000 kholein
+       Browser mein https://krexion.com/login kholein
     2. Agar nahi chal raha:
        - C:\krexion folder kholein
        - LOCAL-START.bat double-click karein
@@ -165,9 +165,10 @@ STILL NEED HELP?
   Admin ko yeh information bhejein WhatsApp pe:
   
     1. Screenshot of error
-    2. Yeh log files:
-       C:\Users\[YOUR-NAME]\AppData\Local\Temp\krexion-install.log
-       C:\Users\[YOUR-NAME]\AppData\Local\Temp\krexion-transcript.log
+    2. Yeh 3 log files (SABSE ZAROORI):
+       a. Desktop par: Krexion-Install-Log.txt   <-- SABSE PEHLE BHEJEN
+       b. %TEMP%\krexion-install.log
+       c. %TEMP%\krexion-transcript.log
     3. Aap ka Windows version (Settings -> System -> About)
     4. Aap ki RAM (Task Manager -> Performance -> Memory)
   
@@ -175,7 +176,7 @@ STILL NEED HELP?
     1. Windows Explorer kholein
     2. Address bar mein paste karein: %TEMP%
     3. Enter dabayein
-    4. krexion-install.log aur krexion-transcript.log dhondein
+    4. Krexion-Install-Log.txt Desktop par, baqi 2 log files (krexion-install.log, krexion-transcript.log) %TEMP% mein dhondein
     5. Dono files admin ko WhatsApp karein
 
 

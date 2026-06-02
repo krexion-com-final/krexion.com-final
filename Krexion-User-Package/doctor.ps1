@@ -389,7 +389,7 @@ for ($i = 0; $i -lt 12; $i++) {
 }
 
 if ($webOk) {
-    DOk "Web server chal raha hai - http://localhost:3000"
+    DOk "Krexion background service chal raha hai (ready for krexion.com)"
 } else {
     DErr "Web server response nahi de raha"
     DFix "Containers restart kar raha hun..."
@@ -452,12 +452,15 @@ if ($webOk) {
     Write-Host "    SUCCESS! Sab kuch theek hai." -ForegroundColor Green
     Write-Host "  ===============================================" -ForegroundColor Green
     Write-Host ""
-    Write-Host "  Krexion chal raha hai:" -ForegroundColor White
-    Write-Host "    http://localhost:3000" -ForegroundColor Yellow
+    Write-Host "  Krexion background service chal raha hai." -ForegroundColor White
+    Write-Host "  Heavy features (Proxy / RUT / Form Filler) ready hain." -ForegroundColor White
     Write-Host ""
-    Write-Host "  Browser khud khol raha hun..." -ForegroundColor Cyan
+    Write-Host "  Apna dashboard kholein:" -ForegroundColor Cyan
+    Write-Host "    https://krexion.com/login" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Browser khud khol raha hun krexion.com pe..." -ForegroundColor Cyan
     Start-Sleep -Seconds 2
-    Start-Process "http://localhost:3000"
+    Start-Process "https://krexion.com/login"
 } else {
     Write-Host "  ===============================================" -ForegroundColor Red
     Write-Host "    Kuch issues fix nahi ho sake" -ForegroundColor Red

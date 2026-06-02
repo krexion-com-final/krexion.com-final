@@ -111,13 +111,16 @@ PROBLEM AA RAHA HAI?
     - "FIX-PROBLEMS.bat" double-click karein
     - Wo khud sab fix karega
   
-  Phir bhi issue?
-    - Log files admin ko bhejen:
-      C:\Users\YOUR-NAME\AppData\Local\Temp\krexion-install.log
-      C:\Users\YOUR-NAME\AppData\Local\Temp\krexion-transcript.log
+  Phir bhi issue? Yeh 3 log files admin ko bhejen:
+    1. Desktop par:    Krexion-Install-Log.txt
+    2. TEMP folder:    %TEMP%\krexion-install.log
+    3. TEMP folder:    %TEMP%\krexion-transcript.log
+
+    TEMP folder kholne ka tareeqa:
+      Windows + R dabayein -> "%TEMP%" likh kar Enter karein
   
   Browser nahi khula?
-    - Manually kholein: http://localhost:3000/register
+    - Manually kholein: https://krexion.com/register
 
 
 

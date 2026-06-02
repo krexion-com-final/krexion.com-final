@@ -725,3 +725,68 @@ The `/api/license/download-installer/{key}` endpoint **builds the ZIP fresh from
 - `Krexion-User-Package/README.txt`, `START-HERE.txt`, `TROUBLESHOOTING.txt`, `ONLINE-ACCESS-GUIDE.txt` (CRLF, ASCII)
 - `install-master.ps1` (root copy: BOM, CRLF, ASCII)
 - `backend/license_module.py` (em-dash → `-`, LF → CRLF in license-key.txt blob)
+
+
+## 2026-06-02 — Iteration 3: Remove localhost UI from customer flow
+
+### User Requirement
+"install hone k bad local link chalna he ni chahye hamesha krexion.com he chalna chahye"
+Customer ko kahin bhi `localhost:3000` UI nahi dikhni chahiye. Sab kuch `krexion.com` pe redirect ho. Heavy compute background mein Docker pe chalti rahe but customer is unaware.
+
+### Problem Diagnosed
+`FIX-PROBLEMS.bat` → `doctor.ps1` line 460 was auto-opening browser at `http://localhost:3000` post-fix, which showed the customer's local Docker UI (still branded "RealFlow" from a stale older install). Customer-facing docs (`README.txt`, `TROUBLESHOOTING.txt`, `ONLINE-ACCESS-GUIDE.txt`) also referenced localhost URLs as troubleshooting fallbacks.
+
+### Fix Applied — Audit & Replace
+
+**`doctor.ps1`:**
+- Removed `Start-Process "http://localhost:3000"` (line 460) — no more auto-open of local UI
+- Replaced "Krexion chal raha hai - http://localhost:3000" success message with "Krexion background service chal raha hai (ready for krexion.com)" + auto-opens `https://krexion.com/login` instead
+- Kept internal `Invoke-WebRequest "http://localhost:3000"` health checks (silent, customer never sees)
+
+**Customer-facing .txt files:**
+- `README.txt` L120: `localhost:3000/register` → `https://krexion.com/register`
+- `README.txt` log paths: updated to point to `Desktop\Krexion-Install-Log.txt` FIRST (easier to find than %TEMP%)
+- `TROUBLESHOOTING.txt`: localhost references replaced with krexion.com; log-file instructions clarified with Desktop log as primary
+- `ONLINE-ACCESS-GUIDE.txt`: localhost reference replaced with krexion.com
+
+### Final Audit — Customer ZIP
+After fix, customer's ZIP contains **ZERO localhost references in any .txt or .bat file**. PS1 files only retain localhost in:
+- Internal `Invoke-WebRequest` health checks (silent — customer never sees output)
+- `} else { ... }` admin-mode branches (CustomerMode flag bypasses these)
+
+| File | Customer-visible localhost mentions | krexion.com mentions |
+|---|---:|---:|
+| README.txt | **0** | 5 |
+| START-HERE.txt | **0** | 5 |
+| TROUBLESHOOTING.txt | **0** | 3 |
+| ONLINE-ACCESS-GUIDE.txt | **0** | 1 |
+| INSTALL.bat | **0** | 9 |
+| FIX-PROBLEMS.bat | **0** | 0 |
+| install-master.ps1 (customer mode branches) | **0** | 26 |
+| doctor.ps1 (customer-visible) | **0** | 8 |
+
+### Verification
+- ✅ Both PS1 files pass `pwsh 7.4.6` syntax check
+- ✅ All 10 ZIP files maintain canonical encoding (BOM/CRLF/ASCII policy from iteration 2)
+- ✅ `/api/license/download-installer/{key}` live test: ZIP downloads correctly with all fixes
+- ✅ Customer post-install flow: only sees `https://krexion.com/login`, never `localhost:3000`
+
+### Customer Install-Log Locations (for support cases)
+1. **Primary (easy to find):** `Desktop\Krexion-Install-Log.txt`
+2. Backup details: `%TEMP%\krexion-install.log`, `%TEMP%\krexion-transcript.log`
+   (Open `%TEMP%` via Win+R → type `%TEMP%` → Enter)
+
+### Files Changed in This Iteration (4)
+- `Krexion-User-Package/doctor.ps1`
+- `Krexion-User-Package/README.txt`
+- `Krexion-User-Package/TROUBLESHOOTING.txt`
+- `Krexion-User-Package/ONLINE-ACCESS-GUIDE.txt`
+
+### Upcoming Phase 2 (Next Session) — Pure Native Windows App
+User chose **Option C: Pure native (.NET/Rust)**, 4-6 weeks effort:
+- Single `Krexion-Setup-x.x.x.exe` installer
+- Native Windows app with Krexion icon (Desktop, Start Menu, Taskbar, Task Manager)
+- Heavy compute (Proxy/RUT/FormFiller/AdsPower) runs INSIDE the .exe — no Docker, no localhost UI
+- Customer ONLY uses krexion.com SaaS, .exe runs silently in background as tray agent
+- Like AdsPower / iTunes / VLC architecture
+

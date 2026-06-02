@@ -23,7 +23,7 @@ KYA KAREIN?
 =============
 
   Step 1: Confirm karein Krexion chal raha hai
-    - Browser mein http://localhost:3000 kholein
+    - Browser mein https://krexion.com/login kholein
     - Agar khulta hai = OK, agar nahi to LOCAL-START.bat chalayein
 
   Step 2: Folder kholein
