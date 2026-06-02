@@ -35,6 +35,16 @@
 #ifndef AppVersion
   #define AppVersion "1.0.0"
 #endif
+; AppVersionNumeric is the strict X.X.X.X form (digits + dots only,
+; max 4 parts) that Inno Setup's VersionInfoVersion field requires
+; (it ultimately becomes the Windows EXE FILEVERSION resource). The
+; GitHub Actions workflow derives it from the display tag — e.g.
+; "v1.0.5" -> "1.0.5.0", "nightly-…" -> "0.0.0.0". When building
+; locally without /DAppVersionNumeric, fall back to "1.0.0.0" so
+; Inno Setup doesn't choke on a non-numeric AppVersion like "v1.0.0".
+#ifndef AppVersionNumeric
+  #define AppVersionNumeric "1.0.0.0"
+#endif
 
 [Setup]
 AppId={{A4F5C3D2-7E91-4B6E-B0F1-KREXION0001}}
@@ -59,7 +69,7 @@ SetupIconFile=krexion.ico
 UninstallDisplayIcon={app}\bin\{#AppExeCore}
 VersionInfoCompany={#AppPublisher}
 VersionInfoProductName={#AppName}
-VersionInfoVersion={#AppVersion}
+VersionInfoVersion={#AppVersionNumeric}
 VersionInfoDescription=Krexion Real-User Traffic Engine
 CloseApplications=force
 RestartApplications=no

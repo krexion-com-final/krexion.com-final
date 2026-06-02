@@ -26,6 +26,7 @@ jobs:
     timeout-minutes: 30
     outputs:
       version: ${{ steps.version.outputs.version }}
+      numeric_version: ${{ steps.version.outputs.numeric_version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -33,11 +34,35 @@ jobs:
         id: version
         shell: bash
         run: |
+          # `version` = human/display tag — used for filenames, GitHub
+          # Release title, and AppVersion in installer branding. Can be
+          # anything (e.g. "v1.0.5", "nightly-20260602-1430").
           if [ -n "${{ github.event.inputs.release_tag }}" ]; then
-            echo "version=${{ github.event.inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+            VER="${{ github.event.inputs.release_tag }}"
           else
-            echo "version=nightly-$(date +%Y%m%d-%H%M)" >> "$GITHUB_OUTPUT"
+            VER="nightly-$(date +%Y%m%d-%H%M)"
           fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+          # `numeric_version` = strict X.X.X.X (digits + dots, max 4
+          # parts) — required by Inno Setup's VersionInfoVersion field
+          # which feeds into the Windows EXE FILEVERSION resource. We
+          # extract the first up-to-4 dotted-decimal groups from the
+          # display tag (e.g. "v1.0.5" -> "1.0.5", "1.2.3.4-rc1" ->
+          # "1.2.3.4") and pad to 4 parts so Windows shows it cleanly
+          # in Properties → Details. If no numeric prefix can be
+          # found (e.g. pure-nightly tag), fall back to 0.0.0.0.
+          NUM=$(echo "$VER" | grep -oE '^v?[0-9]+(\.[0-9]+){0,3}' | sed 's/^v//' | head -n1)
+          if [ -z "$NUM" ]; then
+            NUM="0.0.0.0"
+          fi
+          # Pad to exactly 4 components (Inno accepts 1-4, but Windows
+          # Explorer is happier with 4).
+          IFS='.' read -r A B C D <<<"$NUM"
+          NUM4="${A:-0}.${B:-0}.${C:-0}.${D:-0}"
+          echo "numeric_version=$NUM4" >> "$GITHUB_OUTPUT"
+          echo "Display version : $VER"
+          echo "Numeric version : $NUM4"
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -165,7 +190,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path installer/Output | Out-Null
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
               /Qp installer/krexion-setup.iss `
-              /DAppVersion=${{ needs.build-backend.outputs.version }}
+              /DAppVersion=${{ needs.build-backend.outputs.version }} `
+              /DAppVersionNumeric=${{ needs.build-backend.outputs.numeric_version }}
           Write-Host "=== installer/Output contents ==="
           Get-ChildItem installer/Output -ErrorAction SilentlyContinue
 
