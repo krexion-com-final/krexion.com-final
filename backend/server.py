@@ -11067,7 +11067,16 @@ async def get_clicks(
 async def get_clicks_count(
     user: dict = Depends(get_current_user_with_fresh_data),
     filter_type: str = "all",
-    link_id: str = None
+    link_id: str = None,
+    # 2026-06: accept the same explicit date range the frontend already
+    # sends to /clicks (list endpoint). Without these, the count endpoint
+    # used `filter_type=month` = last-30-days rolling window, while the
+    # frontend's "This Month" sent calendar start-of-month to the list —
+    # so the top stats card showed 8118 while the table below showed 0.
+    # When both are provided they WIN over filter_type so the two queries
+    # always agree.
+    start_date: str = None,
+    end_date: str = None,
 ):
     """Get total click count for pagination"""
     check_user_feature(user, "clicks")
@@ -11083,20 +11092,44 @@ async def get_clicks_count(
     else:
         query = {"link_id": {"$in": link_ids}}
     
-    # Filter by time period
-    if filter_type == "today":
-        today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-        query["created_at"] = {"$gte": today.isoformat()}
-    elif filter_type == "yesterday":
-        today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-        yesterday = today - timedelta(days=1)
-        query["created_at"] = {"$gte": yesterday.isoformat(), "$lt": today.isoformat()}
-    elif filter_type == "week":
-        week_ago = datetime.now(timezone.utc) - timedelta(days=7)
-        query["created_at"] = {"$gte": week_ago.isoformat()}
-    elif filter_type == "month":
-        month_ago = datetime.now(timezone.utc) - timedelta(days=30)
-        query["created_at"] = {"$gte": month_ago.isoformat()}
+    # ── Date filter: explicit range wins over filter_type ──────────────
+    applied_explicit = False
+    if start_date:
+        try:
+            start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+            query["created_at"] = {"$gte": start_dt.isoformat()}
+            applied_explicit = True
+        except Exception:
+            pass
+    if end_date:
+        try:
+            end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+            end_dt = end_dt.replace(hour=23, minute=59, second=59)
+            if "created_at" in query:
+                query["created_at"]["$lte"] = end_dt.isoformat()
+            else:
+                query["created_at"] = {"$lte": end_dt.isoformat()}
+            applied_explicit = True
+        except Exception:
+            pass
+
+    # Filter by time period (only when frontend hasn't sent an explicit
+    # range — preserves legacy `filter_type=all|today|yesterday|week|month`
+    # callers).
+    if not applied_explicit:
+        if filter_type == "today":
+            today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            query["created_at"] = {"$gte": today.isoformat()}
+        elif filter_type == "yesterday":
+            today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            yesterday = today - timedelta(days=1)
+            query["created_at"] = {"$gte": yesterday.isoformat(), "$lt": today.isoformat()}
+        elif filter_type == "week":
+            week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+            query["created_at"] = {"$gte": week_ago.isoformat()}
+        elif filter_type == "month":
+            month_ago = datetime.now(timezone.utc) - timedelta(days=30)
+            query["created_at"] = {"$gte": month_ago.isoformat()}
     
     # Count from BOTH user_db and main db
     user_db_count = await user_db.clicks.count_documents(query)
@@ -11126,7 +11159,13 @@ async def get_clicks_count(
 async def export_clicks(
     user: dict = Depends(get_current_user_with_fresh_data),
     filter_type: str = "all",
-    link_id: str = None
+    link_id: str = None,
+    # 2026-06 — same alignment as /clicks/count. Without these, exporting
+    # "This Month" returned the last 30 days while the visible table
+    # showed only the current calendar month → CSV had extra rows the
+    # user never saw on screen.
+    start_date: str = None,
+    end_date: str = None,
 ):
     """Export ALL clicks for CSV download"""
     check_user_feature(user, "clicks")
@@ -11148,20 +11187,42 @@ async def export_clicks(
     else:
         query = {"link_id": {"$in": link_ids}}
     
-    # Apply date filter
-    if filter_type == "today":
-        today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-        query["created_at"] = {"$gte": today.isoformat()}
-    elif filter_type == "yesterday":
-        today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-        yesterday = today - timedelta(days=1)
-        query["created_at"] = {"$gte": yesterday.isoformat(), "$lt": today.isoformat()}
-    elif filter_type == "week":
-        week_ago = datetime.now(timezone.utc) - timedelta(days=7)
-        query["created_at"] = {"$gte": week_ago.isoformat()}
-    elif filter_type == "month":
-        month_ago = datetime.now(timezone.utc) - timedelta(days=30)
-        query["created_at"] = {"$gte": month_ago.isoformat()}
+    # ── Date filter: explicit range wins over filter_type ──────────────
+    applied_explicit = False
+    if start_date:
+        try:
+            start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+            query["created_at"] = {"$gte": start_dt.isoformat()}
+            applied_explicit = True
+        except Exception:
+            pass
+    if end_date:
+        try:
+            end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+            end_dt = end_dt.replace(hour=23, minute=59, second=59)
+            if "created_at" in query:
+                query["created_at"]["$lte"] = end_dt.isoformat()
+            else:
+                query["created_at"] = {"$lte": end_dt.isoformat()}
+            applied_explicit = True
+        except Exception:
+            pass
+
+    # Apply date filter (only when no explicit range came from frontend)
+    if not applied_explicit:
+        if filter_type == "today":
+            today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            query["created_at"] = {"$gte": today.isoformat()}
+        elif filter_type == "yesterday":
+            today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            yesterday = today - timedelta(days=1)
+            query["created_at"] = {"$gte": yesterday.isoformat(), "$lt": today.isoformat()}
+        elif filter_type == "week":
+            week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+            query["created_at"] = {"$gte": week_ago.isoformat()}
+        elif filter_type == "month":
+            month_ago = datetime.now(timezone.utc) - timedelta(days=30)
+            query["created_at"] = {"$gte": month_ago.isoformat()}
     
     # Get ALL clicks from both databases
     clicks_user_db = await user_db.clicks.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000000)

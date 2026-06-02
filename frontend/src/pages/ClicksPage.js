@@ -197,8 +197,15 @@ export default function ClicksPage() {
   const fetchClickStats = async () => {
     try {
       let url = `${API}/clicks/count?`;
+      // 2026-06 — send the SAME explicit date range we send to /clicks
+      // (the list endpoint). Previously this endpoint only got
+      // `filter_type=month` which the backend treated as last-30-days,
+      // while the list got `start_date=startOfMonth(...)` (calendar
+      // month). Result: top-cards showed 8118 but the table showed 0
+      // because the two queries were looking at different windows.
       const dateRange = getDateRange(dateFilter);
       if (dateRange) {
+        url += `start_date=${dateRange.start.toISOString()}&end_date=${dateRange.end.toISOString()}&`;
         url += `filter_type=${dateFilter}&`;
       }
       if (linkFilter !== "all") url += `link_id=${linkFilter}&`;
@@ -379,6 +386,15 @@ export default function ClicksPage() {
     try {
       // Build export URL with filters
       let url = `${API}/clicks/export?`;
+      // 2026-06 — send explicit start_date+end_date so the export window
+      // matches the on-screen table exactly. Previously this only sent
+      // `filter_type=month` which the backend interpreted as last-30-days
+      // — so CSV downloads contained rows that weren't visible in the UI,
+      // OR worse, returned 0 rows when the visible "This Month" had data.
+      const dateRange = getDateRange(dateFilter);
+      if (dateRange) {
+        url += `start_date=${dateRange.start.toISOString()}&end_date=${dateRange.end.toISOString()}&`;
+      }
       if (dateFilter !== "all") url += `filter_type=${dateFilter}&`;
       if (linkFilter !== "all") url += `link_id=${linkFilter}&`;
       
