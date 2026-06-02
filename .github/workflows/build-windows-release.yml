@@ -46,20 +46,40 @@ jobs:
 
           # `numeric_version` = strict X.X.X.X (digits + dots, max 4
           # parts) — required by Inno Setup's VersionInfoVersion field
-          # which feeds into the Windows EXE FILEVERSION resource. We
-          # extract the first up-to-4 dotted-decimal groups from the
-          # display tag (e.g. "v1.0.5" -> "1.0.5", "1.2.3.4-rc1" ->
-          # "1.2.3.4") and pad to 4 parts so Windows shows it cleanly
-          # in Properties → Details. If no numeric prefix can be
-          # found (e.g. pure-nightly tag), fall back to 0.0.0.0.
-          NUM=$(echo "$VER" | grep -oE '^v?[0-9]+(\.[0-9]+){0,3}' | sed 's/^v//' | head -n1)
-          if [ -z "$NUM" ]; then
-            NUM="0.0.0.0"
-          fi
-          # Pad to exactly 4 components (Inno accepts 1-4, but Windows
-          # Explorer is happier with 4).
-          IFS='.' read -r A B C D <<<"$NUM"
-          NUM4="${A:-0}.${B:-0}.${C:-0}.${D:-0}"
+          # which feeds into the Windows EXE FILEVERSION resource.
+          #
+          # Why this is done with `awk` instead of `read`+IFS: the
+          # GitHub Actions default `bash` is invoked with
+          # `set -eo pipefail`, and `IFS='.' read -r A B C D <<<"$X"`
+          # returns non-zero whenever the input has fewer than 4
+          # fields (read hits EOF before filling D), which silently
+          # kills the whole step.
+          #
+          # We use `*` instead of `{0,3}` so this works on both mawk
+          # (Linux/macOS default) and gawk (Git Bash on Windows) —
+          # mawk doesn't support ERE interval quantifiers without
+          # `--re-interval`. We then cap the array to 4 parts after
+          # splitting.
+          #
+          # Examples:
+          #   v1.0.5            -> 1.0.5.0
+          #   v2.0.0-beta1      -> 2.0.0.0
+          #   1.0.5.10-rc2      -> 1.0.5.10
+          #   1.2.3.4.5         -> 1.2.3.4    (extras dropped)
+          #   nightly-20260602  -> 0.0.0.0
+          #   v1                -> 1.0.0.0
+          NUM4=$(echo "$VER" | awk '{
+            if (match($0, /^v?[0-9]+(\.[0-9]+)*/)) {
+              s = substr($0, RSTART, RLENGTH)
+              sub(/^v/, "", s)
+              n = split(s, a, ".")
+              if (n > 4) n = 4
+              for (i = n + 1; i <= 4; i++) a[i] = "0"
+              printf "%s.%s.%s.%s", a[1], a[2], a[3], a[4]
+            } else {
+              printf "0.0.0.0"
+            }
+          }')
           echo "numeric_version=$NUM4" >> "$GITHUB_OUTPUT"
           echo "Display version : $VER"
           echo "Numeric version : $NUM4"
