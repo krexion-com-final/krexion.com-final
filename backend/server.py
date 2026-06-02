@@ -1260,15 +1260,24 @@ class LinkResponse(BaseModel):
     created_at: str
 
 class ClickResponse(BaseModel):
+    # 2026-06 — fields that used to be required `str` (no default) are
+    # now lenient with `""` defaults. Imported / legacy click docs may
+    # have `None` or missing values for these (e.g. an XLSX import row
+    # with an empty user_agent cell). Previously a single such doc made
+    # Pydantic 500 the whole /api/clicks listing → frontend showed
+    # "Failed to load clicks" even though the count endpoint worked
+    # because count doesn't validate docs. Defaulting to "" keeps the
+    # response shape stable for the UI (which already renders empty
+    # strings safely) without losing any data.
     model_config = ConfigDict(extra="ignore")
-    id: str
-    click_id: str
-    link_id: str
-    ip_address: str
+    id: str = ""
+    click_id: str = ""
+    link_id: str = ""
+    ip_address: str = ""
     ipv4: Optional[str] = None
     all_ips: Optional[List[str]] = None
     proxy_ips: Optional[List[str]] = None
-    country: str
+    country: str = ""
     city: Optional[str] = None
     region: Optional[str] = None
     lat: Optional[float] = None
@@ -1277,13 +1286,13 @@ class ClickResponse(BaseModel):
     is_vpn: bool = False
     is_proxy: bool = False
     vpn_score: Optional[int] = None
-    user_agent: str
+    user_agent: str = ""
     user_agent_raw: Optional[str] = None
-    referrer: str
+    referrer: str = ""
     referrer_source: Optional[str] = None
     referrer_source_name: Optional[str] = None
     referrer_detected_from: Optional[str] = None
-    device: str
+    device: str = ""
     device_type: Optional[str] = None
     device_brand: Optional[str] = None
     device_model: Optional[str] = None
@@ -1297,7 +1306,7 @@ class ClickResponse(BaseModel):
     sub1: Optional[str] = None
     sub2: Optional[str] = None
     sub3: Optional[str] = None
-    created_at: str
+    created_at: str = ""
 
 class ConversionResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -10743,17 +10752,22 @@ async def import_clicks(request: Request, user: dict = Depends(get_current_user_
                     "id": str(uuid.uuid4()),
                     "click_id": click_data.get("click_id", str(uuid.uuid4())),
                     "link_id": link_id,
-                    "ip_address": click_data.get("ip_address", "Unknown"),
-                    "country": click_data.get("country", "Unknown"),
-                    "is_vpn": click_data.get("is_vpn", False),
-                    "is_proxy": click_data.get("is_proxy", False),
-                    "user_agent": click_data.get("user_agent", ""),
-                    "referrer": click_data.get("referrer", ""),
-                    "device": click_data.get("device", "desktop"),
+                    # 2026-06 — use `or default` instead of `.get(k, default)`
+                    # so that explicit None / empty values in the imported
+                    # row don't get stored as None (Pydantic ClickResponse
+                    # validation later rejected docs with `user_agent=None`
+                    # etc., which broke the entire /api/clicks listing).
+                    "ip_address": click_data.get("ip_address") or "Unknown",
+                    "country": click_data.get("country") or "Unknown",
+                    "is_vpn": bool(click_data.get("is_vpn", False)),
+                    "is_proxy": bool(click_data.get("is_proxy", False)),
+                    "user_agent": click_data.get("user_agent") or "",
+                    "referrer": click_data.get("referrer") or "",
+                    "device": click_data.get("device") or "desktop",
                     "sub1": click_data.get("sub1"),
                     "sub2": click_data.get("sub2"),
                     "sub3": click_data.get("sub3"),
-                    "created_at": click_data.get("created_at", datetime.now(timezone.utc).isoformat())
+                    "created_at": click_data.get("created_at") or datetime.now(timezone.utc).isoformat()
                 }
                 
                 imported_clicks.append(click_doc)
@@ -11061,7 +11075,36 @@ async def get_clicks(
     # Sort by created_at descending
     unique_clicks.sort(key=lambda x: x.get("created_at", ""), reverse=True)
     
-    return [ClickResponse(**click) for click in unique_clicks]
+    # 2026-06 — per-doc validation with try/except. Even with
+    # ClickResponse now defaulting str fields to "", a doc with a
+    # genuinely-wrong type (e.g. `ip_address: 123` from a very old
+    # import or an `lat: "abc"`) could still throw at validation time.
+    # Skipping the bad doc and logging it preserves the rest of the
+    # listing instead of 500-ing the whole request (the symptom the
+    # user saw as "Failed to load clicks" while the count card showed
+    # 8118).
+    response_clicks: List[ClickResponse] = []
+    bad_docs = 0
+    for click in unique_clicks:
+        # Coerce explicit Nones on required-shape fields to "" so the
+        # pydantic str validator is happy. (Defaults only kick in for
+        # MISSING keys, not for keys whose stored value is None.)
+        for _k in ("id", "click_id", "link_id", "ip_address", "country",
+                   "user_agent", "referrer", "device", "created_at"):
+            if click.get(_k) is None:
+                click[_k] = ""
+        try:
+            response_clicks.append(ClickResponse(**click))
+        except Exception as _e:  # noqa: BLE001
+            bad_docs += 1
+            if bad_docs <= 5:
+                logger.warning(
+                    f"/api/clicks: skipping malformed click "
+                    f"id={click.get('id') or click.get('click_id')}: {_e}"
+                )
+    if bad_docs:
+        logger.warning(f"/api/clicks: skipped {bad_docs} malformed click docs in this page")
+    return response_clicks
 
 @api_router.get("/clicks/count")
 async def get_clicks_count(
