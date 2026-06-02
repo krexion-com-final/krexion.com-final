@@ -201,7 +201,11 @@ Filename: "{app}\bin\{#AppExeService}"; \
   Flags: runhidden; StatusMsg: "Starting Krexion Backend..."
 
 ; ─── Optional: launch tray app + open dashboard at finish ──────────────
-Filename: "{app}\{#AppExeTray}"; Flags: nowait postinstall skipifsilent skipifsourcedoesntexist; \
+; Note: `skipifdoesntexist` is the correct `[Run]` flag — its `[Files]`
+; section sibling is `skipifsourcedoesntexist` and Inno Setup rejects
+; the latter inside `[Run]` with "Parameter Flags includes an unknown
+; flag." (this script previously had that mistake).
+Filename: "{app}\{#AppExeTray}"; Flags: nowait postinstall skipifsilent skipifdoesntexist; \
   Description: "Launch Krexion now"
 Filename: "{#AppURL}/login"; Flags: shellexec postinstall skipifsilent; \
   Description: "Open Krexion dashboard at krexion.com"
