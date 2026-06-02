@@ -55,7 +55,7 @@ WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64
 PrivilegesRequired=admin
 UninstallDisplayName={#AppName}
-; SetupIconFile=krexion.ico   ; <- Uncomment after you add installer/krexion.ico
+SetupIconFile=krexion.ico
 UninstallDisplayIcon={app}\bin\{#AppExeCore}
 VersionInfoCompany={#AppPublisher}
 VersionInfoProductName={#AppName}
@@ -73,6 +73,11 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 Name: "startupTray"; Description: "Start Krexion automatically when Windows starts"; GroupDescription: "Startup:"; Flags: unchecked
 
 [Files]
+; Krexion brand icon — used for all Start Menu + Desktop shortcuts so
+; the customer sees the Krexion "K" mark everywhere (not the default
+; python.exe snake icon embedded in krexion-core.exe).
+Source: "krexion.ico"; DestDir: "{app}"; Flags: ignoreversion
+
 ; Backend embedded-Python bundle — required
 Source: "..\build\dist\krexion-backend.dist\*"; DestDir: "{app}\bin"; Flags: ignoreversion recursesubdirs createallsubdirs
 
@@ -102,10 +107,12 @@ Name: "{app}\logs"
 Name: "{commonappdata}\Krexion"; Permissions: users-modify
 
 [Icons]
-Name: "{group}\Krexion"; Filename: "http://127.0.0.1:3000"; IconFilename: "{app}\bin\{#AppExeCore}"
-Name: "{group}\Krexion Logs"; Filename: "{app}\logs"
-Name: "{group}\Uninstall Krexion"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\Krexion"; Filename: "http://127.0.0.1:3000"; IconFilename: "{app}\bin\{#AppExeCore}"; Tasks: desktopicon
+Name: "{group}\Krexion"; Filename: "{#AppURL}/login"; IconFilename: "{app}\krexion.ico"
+Name: "{group}\Krexion Support"; Filename: "{#AppURL}/support"; IconFilename: "{app}\krexion.ico"
+Name: "{group}\Buy / Renew License"; Filename: "{#AppURL}/pricing"; IconFilename: "{app}\krexion.ico"
+Name: "{group}\Krexion Logs"; Filename: "{app}\logs"; IconFilename: "{app}\krexion.ico"
+Name: "{group}\Uninstall Krexion"; Filename: "{uninstallexe}"; IconFilename: "{app}\krexion.ico"
+Name: "{autodesktop}\Krexion"; Filename: "{#AppURL}/login"; IconFilename: "{app}\krexion.ico"; Tasks: desktopicon
 
 [Registry]
 ; Auto-start Krexion Tray on login (per-user)
@@ -186,8 +193,8 @@ Filename: "{app}\bin\{#AppExeService}"; \
 ; ─── Optional: launch tray app + open dashboard at finish ──────────────
 Filename: "{app}\{#AppExeTray}"; Flags: nowait postinstall skipifsilent skipifsourcedoesntexist; \
   Description: "Launch Krexion now"
-Filename: "http://127.0.0.1:3000"; Flags: shellexec postinstall skipifsilent; \
-  Description: "Open Krexion dashboard"
+Filename: "{#AppURL}/login"; Flags: shellexec postinstall skipifsilent; \
+  Description: "Open Krexion dashboard at krexion.com"
 
 [UninstallRun]
 ; Stop + remove services BEFORE files are deleted

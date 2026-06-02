@@ -884,3 +884,8 @@ credentials.json
 *.pem
 *.key
 .credentials
+
+# Krexion native build intermediates (regenerated each build)
+build/requirements-native.txt
+build/krexion-manifest.json
+build/python-*-embed.zip
