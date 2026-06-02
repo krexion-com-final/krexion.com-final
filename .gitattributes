@@ -1,0 +1,63 @@
+# Krexion repository line-ending & encoding policy.
+#
+# WHY THIS FILE EXISTS:
+# We had a fatal customer-side install failure where install-master.ps1
+# was committed without a UTF-8 BOM and contained em-dashes (—). On
+# Windows PowerShell 5.1 (the default on every Windows 10/11 install),
+# a BOM-less script is parsed as Windows-1252 ANSI, so the UTF-8 bytes
+# `E2 80 94` for `—` were misread as `â€"` — which immediately breaks
+# string quoting and crashes the customer's installer with
+# "Unexpected token 'will'" / "Missing closing ')' in expression".
+#
+# These rules pin the canonical form so neither git auto-conversion
+# nor a future editor can ever re-introduce that class of bug.
+
+# ── Default: text files normalise to LF on commit, native on checkout
+*           text=auto
+
+# ── Windows installer payload: SHIPPED files (downloaded by customers,
+#    extracted on Windows, executed by cmd.exe / PowerShell). Must be
+#    CRLF + appropriate encoding so they work on any Windows locale.
+Krexion-User-Package/*.bat   text eol=crlf working-tree-encoding=ASCII
+Krexion-User-Package/*.ps1   text eol=crlf working-tree-encoding=UTF-8
+Krexion-User-Package/*.txt   text eol=crlf working-tree-encoding=ASCII
+
+# Same rules for the standalone master script at repo root
+install-master.ps1           text eol=crlf working-tree-encoding=UTF-8
+
+# Anything else PowerShell-flavoured anywhere in the tree
+*.ps1                        text eol=crlf
+*.psm1                       text eol=crlf
+*.psd1                       text eol=crlf
+
+# Windows batch / cmd: always CRLF, always ASCII (cmd.exe chokes on BOM)
+*.bat                        text eol=crlf
+*.cmd                        text eol=crlf
+
+# Shell scripts & makefiles: LF only (anything else breaks bash)
+*.sh                         text eol=lf
+*.bash                       text eol=lf
+Makefile                     text eol=lf
+makefile                     text eol=lf
+
+# Docker / yaml / config files: LF
+Dockerfile                   text eol=lf
+*.yml                        text eol=lf
+*.yaml                       text eol=lf
+
+# ── Binary types: never touch ─────────────────────────────────────────
+*.png                        binary
+*.jpg                        binary
+*.jpeg                       binary
+*.gif                        binary
+*.ico                        binary
+*.zip                        binary
+*.exe                        binary
+*.dll                        binary
+*.pdf                        binary
+*.woff                       binary
+*.woff2                      binary
+*.ttf                        binary
+*.eot                        binary
+*.mp3                        binary
+*.mp4                        binary

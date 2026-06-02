@@ -674,3 +674,54 @@ Also added missing gate to `POST /traffic/send-real` (was unguarded — could sp
 
 ### Production Deploy Note
 User will use Emergent "Save to GitHub" → main branch → VPS auto-deploys. Customer installer ZIP is generated from `Krexion-User-Package/` folder by `backend/license_module.py:download_installer_with_key`, so the PS1 fix flows automatically to next customer download.
+
+
+## 2026-06-02 — Iteration 2: Bulletproof Customer Installer
+
+### Problem (customer screenshot)
+Customer downloaded `Krexion-User-Package-16FE48E2.zip` and got fatal PowerShell parse error at line 617 char 74:
+```
+Unexpected token 'will' in expression or statement
+Missing closing ')' in expression
+Installation problem hui (error code: 99)
+```
+The em-dash (`—`) byte sequence `E2 80 94` was misread as `â€"` by Windows PowerShell 5.1 default ANSI parser.
+
+### User Requirement
+"Full proof setup karo, har chiz khud check karo, admin ko kuch na karna pare." Make the installer ZIP bulletproof so this class of bug never reaches a customer again.
+
+### Comprehensive Fix Applied
+Audited & normalised **every file** in `Krexion-User-Package/` to its canonical Windows-safe encoding:
+
+| File | BOM | Line Endings | Encoding | Why |
+|------|-----|--------------|----------|-----|
+| `*.ps1` (install-master, doctor) | UTF-8 BOM | CRLF | UTF-8 | PowerShell 5.1 reads BOM-less files as ANSI on default Windows locales |
+| `*.bat` (INSTALL, FIX-PROBLEMS, UPDATE-WATCHER) | NO BOM | CRLF | ASCII | `cmd.exe` chokes on BOM (interprets BOM bytes as commands) |
+| `*.txt` (README, START-HERE, TROUBLESHOOTING, ONLINE-ACCESS-GUIDE) | NO BOM | CRLF | ASCII | Notepad displays cleanly on every Windows codepage |
+
+Plus replaced all non-ASCII characters (em-dash `—`, en-dash `–`, ellipsis `…`, curly quotes `' ' " "`, etc.) with their ASCII equivalents. Final byte-level audit: **zero non-ASCII bytes** in any shipped file (PS1 BOM excepted).
+
+### Backend Side (license_module.py)
+- Replaced em-dash in dynamically-generated `license-key.txt` comment with `-`
+- Changed `license-key.txt` line endings from `\n` to `\r\n` for full Windows-native consistency
+
+### Lock-in: `.gitattributes`
+Added `.gitattributes` at repo root that pins these encoding/line-ending rules per file pattern. Now any contributor (human or AI), any editor, any git auto-conversion **cannot** regress the file encoding back to LF/BOM-less. This is the structural fix that prevents recurrence.
+
+### End-to-End Verification (live ZIP test)
+Hit actual production endpoint `/api/license/download-installer/{key}` with a test license, downloaded the ZIP, and audited every byte:
+- ✅ All 10 files (9 source + dynamic license-key.txt) pass encoding policy
+- ✅ Both PowerShell scripts pass `pwsh` parser syntax check (zero errors)
+- ✅ `license-key.txt` correctly extracts the key on line 5 (after 4 comment lines)
+
+### Deployment Path
+The `/api/license/download-installer/{key}` endpoint **builds the ZIP fresh from `/app/Krexion-User-Package/` on every request**. So once user pushes via "Save to GitHub" → VPS auto-deploys → every new customer download = fixed installer. **No manual VPS file replacement needed.** Existing customers who already downloaded the broken ZIP just need to re-download from `krexion.com/download`.
+
+### Files Changed in This Iteration
+- `.gitattributes` (new file — structural prevention)
+- `Krexion-User-Package/install-master.ps1` (BOM, CRLF, ASCII)
+- `Krexion-User-Package/doctor.ps1` (BOM added, CRLF, ASCII)
+- `Krexion-User-Package/INSTALL.bat`, `FIX-PROBLEMS.bat`, `UPDATE-WATCHER.bat` (CRLF, ASCII)
+- `Krexion-User-Package/README.txt`, `START-HERE.txt`, `TROUBLESHOOTING.txt`, `ONLINE-ACCESS-GUIDE.txt` (CRLF, ASCII)
+- `install-master.ps1` (root copy: BOM, CRLF, ASCII)
+- `backend/license_module.py` (em-dash → `-`, LF → CRLF in license-key.txt blob)

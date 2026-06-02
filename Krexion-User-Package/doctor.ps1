@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # Krexion Doctor - Self-Healing Diagnostic + Auto-Fix Tool
 # ============================================================
 # Customer ke liye - agar install kahin stuck ya broken hai

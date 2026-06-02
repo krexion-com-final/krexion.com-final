@@ -591,12 +591,16 @@ async def download_installer_with_key(license_key: str, request: Request):
         # generated .env during STEP 6.
         email_line = (lic_doc.get("email") if lic_doc else "") or ""
         status_line = (lic_doc.get("status") if lic_doc else "licensing_disabled") or "active"
+        # license-key.txt: ASCII + CRLF so PowerShell `Get-Content` on
+        # every Windows locale reads it cleanly regardless of $OutputEncoding
+        # or chcp. Pure ASCII (em-dash replaced with `-`) means even an
+        # ANSI-default Notepad-style read will work.
         license_blob = (
-            f"# Krexion auto-generated license file — DO NOT EDIT.\n"
-            f"# Issued for: {email_line}\n"
-            f"# Status at download time: {status_line}\n"
-            f"# Generated at: {_now().isoformat()}\n"
-            f"{key}\n"
+            "# Krexion auto-generated license file - DO NOT EDIT.\r\n"
+            f"# Issued for: {email_line}\r\n"
+            f"# Status at download time: {status_line}\r\n"
+            f"# Generated at: {_now().isoformat()}\r\n"
+            f"{key}\r\n"
         )
         zf.writestr("Krexion-User-Package/license-key.txt", license_blob)
 
