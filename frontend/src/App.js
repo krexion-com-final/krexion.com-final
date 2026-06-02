@@ -67,6 +67,19 @@ function PrivateRoute({ children }) {
 
 function PublicHome() {
   const token = localStorage.getItem("token");
+  // 2026-06 — Edit-mode escape hatch. When the admin clicks
+  // "Edit Website" we open `/?edit=1` in a new tab. If that browser
+  // happens to ALSO have a regular-user `token` in localStorage (very
+  // common — most admins are also customers) the old code would
+  // bounce them to /dashboard and they'd never see the live editor.
+  // Allow the redirect to be skipped when ?edit=1 + adminToken are
+  // present so the in-place editor on HomePage can mount.
+  try {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("edit") === "1" && localStorage.getItem("adminToken")) {
+      return <HomePage />;
+    }
+  } catch { /* ignore */ }
   return token ? <Navigate to="/dashboard" replace /> : <HomePage />;
 }
 
