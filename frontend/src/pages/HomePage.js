@@ -8,6 +8,41 @@ import {
 } from "lucide-react";
 import WavyBackground from "../components/WavyBackground";
 import PublicMobileMenu from "../components/PublicMobileMenu";
+import { EditModeProvider, useEditMode } from "../components/EditModeProvider";
+import EditableText from "../components/EditableText";
+import EditModeToolbar from "../components/EditModeToolbar";
+
+// 2026-06 — Hero bottom-line: in normal view it shows a gradient
+// (`bg-clip-text text-transparent` motion.span). In edit mode the
+// gradient is dropped because EditableText's `inline-block` wrapper
+// breaks bg-clip-text inheritance and makes the line invisible. Plain
+// white still looks fine while editing — the gradient comes back the
+// moment the admin exits edit mode.
+function HeroBottomLine({ value }) {
+  const { editMode } = useEditMode();
+  if (editMode) {
+    return (
+      <span className="block text-white">
+        <EditableText section="hero" field="h1_bottom" value={value} as="span" />
+      </span>
+    );
+  }
+  return (
+    <motion.span
+      initial={{ opacity: 0, y: 30, filter: "blur(8px)" }}
+      animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+      transition={{ delay: 0.35, duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
+      className="block bg-clip-text text-transparent"
+      style={{
+        backgroundImage: "linear-gradient(90deg, #60A5FA 0%, #3B82F6 25%, #93C5FD 50%, #3B82F6 75%, #60A5FA 100%)",
+        backgroundSize: "200% 100%",
+        animation: "krx-gradient 5s ease-in-out infinite",
+      }}
+    >
+      {value}
+    </motion.span>
+  );
+}
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -123,6 +158,34 @@ export default function HomePage() {
   // stats, features, FAQ and footer copy live without a redeploy.
   const [content, setContent] = useState(DEFAULT_CONTENT);
 
+  // 2026-06 — live-edit helper. Replaces a whole list section
+  // (`stats`, `features`, `faqs`) in one PUT call. The backend wholesale-
+  // replaces list sections (see `_merge` in site_content_module.py) so
+  // sending the full new list is the right contract.
+  const saveContentList = async (listKey, list) => {
+    try {
+      const token = localStorage.getItem("adminToken") || localStorage.getItem("token");
+      const r = await axios.put(`${API}/admin/site-content`, { [listKey]: list }, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setContent(r.data);
+      // Lazy-load `sonner` toast through window so we don't add an
+      // extra import for a single call site. (sonner is already
+      // mounted globally via App.js.)
+      try {
+        const { toast } = await import("sonner");
+        toast.success("Saved");
+      } catch { /* toast optional */ }
+      return true;
+    } catch (e) {
+      try {
+        const { toast } = await import("sonner");
+        toast.error(e?.response?.data?.detail || "Save failed");
+      } catch { /* toast optional */ }
+      return false;
+    }
+  };
+
   useEffect(() => {
     axios.get(`${API}/crypto/plans`)
       .then(r => setPlans(r.data.plans || []))
@@ -148,7 +211,9 @@ export default function HomePage() {
   }, []);
 
   return (
+    <EditModeProvider content={content} setContent={setContent}>
     <div className="min-h-screen bg-black text-white overflow-x-hidden relative" data-testid="home-page">
+      <EditModeToolbar />
       <WavyBackground />
 
       {/* Soft blue ambient glows */}
@@ -205,25 +270,24 @@ export default function HomePage() {
           className="inline-flex items-center gap-2 bg-blue-500/10 border border-blue-500/30 rounded-full px-4 py-1.5 mb-7 text-xs backdrop-blur-sm"
         >
           <Zap size={12} className="text-blue-400" />
-          <span className="text-blue-100">{content.hero.badge}</span>
+          <EditableText section="hero" field="badge" value={content.hero.badge}
+            className="text-blue-100" />
         </motion.div>
 
         {/* Animated heading */}
         <h1 className="text-5xl sm:text-6xl lg:text-7xl font-extrabold tracking-tight leading-[1.05] mb-6">
-          <AnimatedWords text={content.hero.h1_top} className="block" />
-          <motion.span
-            initial={{ opacity: 0, y: 30, filter: "blur(8px)" }}
-            animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-            transition={{ delay: 0.35, duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
-            className="block bg-clip-text text-transparent"
-            style={{
-              backgroundImage: "linear-gradient(90deg, #60A5FA 0%, #3B82F6 25%, #93C5FD 50%, #3B82F6 75%, #60A5FA 100%)",
-              backgroundSize: "200% 100%",
-              animation: "krx-gradient 5s ease-in-out infinite",
-            }}
-          >
-            {content.hero.h1_bottom}
-          </motion.span>
+          <EditableText section="hero" field="h1_top" value={content.hero.h1_top}
+            as="span" className="block">
+            <AnimatedWords text={content.hero.h1_top} className="block" />
+          </EditableText>
+          {/* 2026-06 — the bottom line normally has a `bg-clip-text
+              text-transparent` gradient. EditableText wraps its target in
+              `display: inline-block`, which breaks bg-clip-text
+              inheritance and made the gradient line render INVISIBLE in
+              edit mode. Workaround: render plain (no gradient) when the
+              admin is editing — the gradient comes back the moment they
+              exit edit mode. */}
+          <HeroBottomLine value={content.hero.h1_bottom} />
         </h1>
 
         <motion.p
@@ -232,7 +296,8 @@ export default function HomePage() {
           transition={{ delay: 0.6, duration: 0.6 }}
           className="text-lg text-zinc-400 max-w-2xl mx-auto mb-9 leading-relaxed"
         >
-          {content.hero.subtitle}
+          <EditableText section="hero" field="subtitle" value={content.hero.subtitle}
+            as="span" multiline />
         </motion.p>
 
         <motion.div
@@ -246,13 +311,14 @@ export default function HomePage() {
             className="group bg-blue-500 text-white font-semibold px-7 py-3.5 rounded-lg hover:bg-blue-400 transition inline-flex items-center gap-2 shadow-xl shadow-blue-500/30"
             data-testid="hero-cta-pricing"
           >
-            {content.hero.cta_label} <ArrowRight size={16} className="group-hover:translate-x-1 transition-transform" />
+            <EditableText section="hero" field="cta_label" value={content.hero.cta_label} as="span" />
+            <ArrowRight size={16} className="group-hover:translate-x-1 transition-transform" />
           </Link>
           <a
             href="#features"
             className="border border-white/15 px-7 py-3.5 rounded-lg hover:bg-white/5 transition text-sm backdrop-blur-sm"
           >
-            {content.hero.cta_secondary_label}
+            <EditableText section="hero" field="cta_secondary_label" value={content.hero.cta_secondary_label} as="span" />
           </a>
         </motion.div>
 
@@ -271,9 +337,27 @@ export default function HomePage() {
               transition={{ delay: 1.0 + idx * 0.08, duration: 0.5 }}
             >
               <div className="text-2xl font-bold bg-clip-text text-transparent" style={{ backgroundImage: "linear-gradient(90deg, #93C5FD, #3B82F6)" }}>
-                {s.value}
+                <EditableText
+                  section="stats" field={`stats.${idx}.value`}
+                  value={s.value}
+                  onSave={async (newVal) => {
+                    const next = [...(content.stats || [])];
+                    next[idx] = { ...next[idx], value: newVal };
+                    return await saveContentList("stats", next);
+                  }}
+                />
               </div>
-              <div className="text-xs text-zinc-500 mt-1">{s.label}</div>
+              <div className="text-xs text-zinc-500 mt-1">
+                <EditableText
+                  section="stats" field={`stats.${idx}.label`}
+                  value={s.label}
+                  onSave={async (newVal) => {
+                    const next = [...(content.stats || [])];
+                    next[idx] = { ...next[idx], label: newVal };
+                    return await saveContentList("stats", next);
+                  }}
+                />
+              </div>
             </motion.div>
           ))}
         </motion.div>
@@ -288,10 +372,14 @@ export default function HomePage() {
           transition={{ duration: 0.5 }}
           className="text-center mb-14"
         >
-          <div className="text-xs uppercase tracking-widest text-blue-400 mb-3">{content.features_intro.eyebrow}</div>
-          <h2 className="text-3xl sm:text-4xl font-bold mb-3">{content.features_intro.title}</h2>
+          <div className="text-xs uppercase tracking-widest text-blue-400 mb-3">
+            <EditableText section="features_intro" field="eyebrow" value={content.features_intro.eyebrow} />
+          </div>
+          <h2 className="text-3xl sm:text-4xl font-bold mb-3">
+            <EditableText section="features_intro" field="title" value={content.features_intro.title} />
+          </h2>
           <p className="text-zinc-400 max-w-2xl mx-auto text-sm">
-            {content.features_intro.subtitle}
+            <EditableText section="features_intro" field="subtitle" value={content.features_intro.subtitle} multiline />
           </p>
         </motion.div>
 
@@ -314,8 +402,28 @@ export default function HomePage() {
                 <div className="w-10 h-10 rounded-lg bg-blue-500/15 border border-blue-500/30 flex items-center justify-center mb-4 group-hover:bg-blue-500/25 group-hover:scale-110 transition">
                   <Icon className="text-blue-400" size={18} />
                 </div>
-                <h3 className="font-semibold mb-1.5">{f.title}</h3>
-                <p className="text-sm text-zinc-400 leading-relaxed">{f.desc}</p>
+                <h3 className="font-semibold mb-1.5">
+                  <EditableText
+                    section="features" field={`features.${idx}.title`}
+                    value={f.title}
+                    onSave={async (newVal) => {
+                      const next = [...(content.features || [])];
+                      next[idx] = { ...next[idx], title: newVal };
+                      return await saveContentList("features", next);
+                    }}
+                  />
+                </h3>
+                <p className="text-sm text-zinc-400 leading-relaxed">
+                  <EditableText
+                    section="features" field={`features.${idx}.desc`}
+                    value={f.desc} multiline
+                    onSave={async (newVal) => {
+                      const next = [...(content.features || [])];
+                      next[idx] = { ...next[idx], desc: newVal };
+                      return await saveContentList("features", next);
+                    }}
+                  />
+                </p>
               </div>
             </motion.div>
             );
@@ -332,10 +440,14 @@ export default function HomePage() {
           transition={{ duration: 0.5 }}
           className="text-center mb-12"
         >
-          <div className="text-xs uppercase tracking-widest text-blue-400 mb-3">{content.pricing_intro.eyebrow}</div>
-          <h2 className="text-3xl sm:text-4xl font-bold mb-3">{content.pricing_intro.title}</h2>
+          <div className="text-xs uppercase tracking-widest text-blue-400 mb-3">
+            <EditableText section="pricing_intro" field="eyebrow" value={content.pricing_intro.eyebrow} />
+          </div>
+          <h2 className="text-3xl sm:text-4xl font-bold mb-3">
+            <EditableText section="pricing_intro" field="title" value={content.pricing_intro.title} />
+          </h2>
           <p className="text-zinc-400 text-sm max-w-xl mx-auto">
-            {content.pricing_intro.subtitle}
+            <EditableText section="pricing_intro" field="subtitle" value={content.pricing_intro.subtitle} multiline />
           </p>
         </motion.div>
 
@@ -446,10 +558,16 @@ export default function HomePage() {
           transition={{ duration: 0.5 }}
           className="text-center mb-10"
         >
-          <div className="text-xs uppercase tracking-widest text-blue-400 mb-3">{content.faq_intro.eyebrow}</div>
-          <h2 className="text-3xl sm:text-4xl font-bold">{content.faq_intro.title}</h2>
+          <div className="text-xs uppercase tracking-widest text-blue-400 mb-3">
+            <EditableText section="faq_intro" field="eyebrow" value={content.faq_intro.eyebrow} />
+          </div>
+          <h2 className="text-3xl sm:text-4xl font-bold">
+            <EditableText section="faq_intro" field="title" value={content.faq_intro.title} />
+          </h2>
           {content.faq_intro.subtitle ? (
-            <p className="text-zinc-400 text-sm max-w-xl mx-auto mt-3">{content.faq_intro.subtitle}</p>
+            <p className="text-zinc-400 text-sm max-w-xl mx-auto mt-3">
+              <EditableText section="faq_intro" field="subtitle" value={content.faq_intro.subtitle} multiline />
+            </p>
           ) : null}
         </motion.div>
         <div className="space-y-3">
@@ -466,7 +584,17 @@ export default function HomePage() {
                   className="w-full flex items-center justify-between text-left px-5 py-4 hover:bg-white/[0.02] transition"
                   data-testid={`faq-toggle-${idx}`}
                 >
-                  <span className="font-medium text-sm">{item.q}</span>
+                  <span className="font-medium text-sm">
+                    <EditableText
+                      section="faqs" field={`faqs.${idx}.q`}
+                      value={item.q}
+                      onSave={async (newVal) => {
+                        const next = [...(content.faqs || [])];
+                        next[idx] = { ...next[idx], q: newVal };
+                        return await saveContentList("faqs", next);
+                      }}
+                    />
+                  </span>
                   <ChevronDown size={16} className={`text-zinc-400 transition-transform ${open ? "rotate-180 text-blue-400" : ""}`} />
                 </button>
                 {open && (
@@ -475,7 +603,17 @@ export default function HomePage() {
                     animate={{ opacity: 1, height: "auto" }}
                     className="px-5 pb-4 text-sm text-zinc-400 leading-relaxed border-t border-white/5"
                   >
-                    <div className="pt-3">{item.a}</div>
+                    <div className="pt-3">
+                      <EditableText
+                        section="faqs" field={`faqs.${idx}.a`}
+                        value={item.a} multiline
+                        onSave={async (newVal) => {
+                          const next = [...(content.faqs || [])];
+                          next[idx] = { ...next[idx], a: newVal };
+                          return await saveContentList("faqs", next);
+                        }}
+                      />
+                    </div>
                   </motion.div>
                 )}
               </div>
@@ -528,7 +666,7 @@ export default function HomePage() {
           <div className="flex items-center gap-2">
             <Sparkles className="text-blue-400" size={14} />
             <span className="font-semibold text-white">KREXION</span>
-            <span>{content.footer.copyright}</span>
+            <EditableText section="footer" field="copyright" value={content.footer.copyright} />
           </div>
           <div className="flex items-center gap-5">
             <Link to="/pricing" className="hover:text-white transition">{content.nav.pricing_label}</Link>
@@ -546,7 +684,13 @@ export default function HomePage() {
           0%, 100% { background-position: 0% 50%; }
           50% { background-position: 100% 50%; }
         }
+        /* Edit-mode hover affordance for editable text */
+        .krx-editable:hover {
+          background-color: rgba(59,130,246,0.08);
+          outline-color: rgba(59,130,246,0.9) !important;
+        }
       `}</style>
     </div>
+    </EditModeProvider>
   );
 }

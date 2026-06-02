@@ -44,7 +44,7 @@ export default function SiteContentAdminPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
-  const token = () => localStorage.getItem("admin_token") || localStorage.getItem("token");
+  const token = () => localStorage.getItem("adminToken") || localStorage.getItem("token");
 
   const load = async () => {
     setLoading(true);

@@ -752,12 +752,12 @@ export default function AdminDashboard() {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => window.location.href = "/admin/website-content"}
+              onClick={() => window.open("/?edit=1", "_blank")}
               data-testid="goto-website-content-btn"
               className="border-blue-500/40 text-blue-400 hover:bg-blue-500/10"
             >
               <Palette size={16} className="mr-2" />
-              Website Content
+              Edit Website
             </Button>
             <Button
               variant="outline"
@@ -807,9 +807,9 @@ export default function AdminDashboard() {
                   <Trash2 size={16} className="mr-2 text-yellow-400" />
                   VPS Cleanup
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => window.location.href = "/admin/website-content"} data-testid="mobile-goto-website-content">
+                <DropdownMenuItem onClick={() => window.open("/?edit=1", "_blank")} data-testid="mobile-goto-website-content">
                   <Palette size={16} className="mr-2 text-blue-400" />
-                  Website Content
+                  Edit Website
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => window.location.href = "/admin/licenses"} data-testid="mobile-goto-licenses">
                   <Settings size={16} className="mr-2" />
