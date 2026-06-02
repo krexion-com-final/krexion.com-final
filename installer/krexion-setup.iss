@@ -119,7 +119,13 @@ Name: "{commonappdata}\Krexion"; Permissions: users-modify
 [Icons]
 Name: "{group}\Krexion"; Filename: "{#AppURL}/login"; IconFilename: "{app}\krexion.ico"
 Name: "{group}\Krexion Support"; Filename: "{#AppURL}/support"; IconFilename: "{app}\krexion.ico"
-Name: "{group}\Buy / Renew License"; Filename: "{#AppURL}/pricing"; IconFilename: "{app}\krexion.ico"
+; The shortcut name MUST NOT contain "/" or "\" — Windows' file system
+; treats both as path separators, so a name like "Buy / Renew License"
+; makes Inno Setup try to create "Renew License.url" inside a missing
+; "Buy " subfolder and abort with "The system cannot find the path
+; specified." We use the word "or" (or an en-dash) which is shell-safe
+; and reads identically to the user.
+Name: "{group}\Buy or Renew License"; Filename: "{#AppURL}/pricing"; IconFilename: "{app}\krexion.ico"
 Name: "{group}\Krexion Logs"; Filename: "{app}\logs"; IconFilename: "{app}\krexion.ico"
 Name: "{group}\Uninstall Krexion"; Filename: "{uninstallexe}"; IconFilename: "{app}\krexion.ico"
 Name: "{autodesktop}\Krexion"; Filename: "{#AppURL}/login"; IconFilename: "{app}\krexion.ico"; Tasks: desktopicon
