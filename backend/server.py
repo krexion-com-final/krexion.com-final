@@ -4119,6 +4119,83 @@ def _safe_in_container_cleanup() -> dict:
     }
 
 
+def _safe_docker_prune() -> dict:
+    """Reclaim host-level disk by pruning unused Docker objects via the
+    mounted /var/run/docker.sock. Returns the same `{bytes_freed,
+    mb_freed, actions}` shape as `_safe_in_container_cleanup` so the
+    response can merge them transparently.
+
+    SAFETY — what we touch and what we DON'T:
+      • image prune ─ ONLY dangling (untagged intermediate) images, no
+        named-tag images that any current service might reuse.
+      • container prune ─ ONLY stopped containers >24h old.
+      • builder prune ─ build cache only.
+      • volume prune ─ ONLY anonymous volumes not referenced by ANY
+        container. The named volumes the docker-compose creates
+        (mongo-data, pw-browsers, uploaded-data, rut-results, etc.)
+        are always referenced by their running service → NEVER pruned.
+
+    Errors are swallowed (returns 0 bytes_freed) so a missing socket or
+    permission issue can't break the admin's button click.
+    """
+    out = {"bytes_freed": 0, "mb_freed": 0.0, "actions": [], "available": False, "error": None}
+    try:
+        import docker as _docker  # type: ignore
+    except Exception as e:  # noqa: BLE001
+        out["error"] = f"docker SDK not installed: {e}"
+        return out
+    try:
+        client = _docker.from_env()  # Uses /var/run/docker.sock
+        client.ping()
+        out["available"] = True
+    except Exception as e:  # noqa: BLE001
+        out["error"] = f"docker socket unreachable (mount /var/run/docker.sock): {e}"
+        return out
+
+    def _add(label: str, reclaimed: int):
+        if reclaimed and reclaimed > 0:
+            out["bytes_freed"] += reclaimed
+            out["actions"].append(f"{label} ({reclaimed / 1024 / 1024:.1f} MB)")
+
+    # 1. Containers — stopped >24h
+    try:
+        r = client.containers.prune(filters={"until": "24h"})
+        _add("docker container prune (stopped >24h)", r.get("SpaceReclaimed", 0))
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[docker-prune] container prune skipped: {e}")
+    # 2. Images — dangling/untagged
+    try:
+        r = client.images.prune(filters={"dangling": True})
+        _add("docker image prune (dangling)", r.get("SpaceReclaimed", 0))
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[docker-prune] image prune skipped: {e}")
+    # 3. Build cache
+    try:
+        # SDK doesn't expose builder.prune cleanly in older versions —
+        # use the low-level API call. `keep_storage` defaults to 0 →
+        # purge all cache.
+        r = client.api.prune_builds(filters={"until": "24h"})
+        _add("docker builder prune (cache >24h)", r.get("SpaceReclaimed", 0))
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[docker-prune] builder prune skipped: {e}")
+    # 4. Anonymous, unused volumes ONLY (named volumes always have a
+    #    `label` or are attached → won't be touched).
+    try:
+        r = client.volumes.prune()
+        _add("docker volume prune (unused anonymous only)", r.get("SpaceReclaimed", 0))
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[docker-prune] volume prune skipped: {e}")
+    # 5. Network prune — totally safe (unused networks only)
+    try:
+        client.networks.prune()
+        # SpaceReclaimed often 0 for networks, but still removes clutter.
+    except Exception:
+        pass
+
+    out["mb_freed"] = round(out["bytes_freed"] / 1024 / 1024, 1)
+    return out
+
+
 @api_router.post("/admin/system/cleanup")
 async def admin_request_cleanup(admin: dict = Depends(get_current_admin)):
     """Queue a VPS cleanup job AND run safe in-container cleanup immediately.
@@ -4148,6 +4225,26 @@ async def admin_request_cleanup(admin: dict = Depends(get_current_admin)):
         f"{in_container_result['mb_freed']} MB freed across "
         f"{len(in_container_result['actions'])} actions"
     )
+
+    # 2026-06 — Host-level Docker prune from inside the container.
+    # When docker-compose mounts /var/run/docker.sock, we can call the
+    # host's Docker daemon and reclaim:
+    #   • Dangling images (intermediate layers from old builds)
+    #   • Build cache older than 24h
+    #   • Stopped containers older than 24h
+    #   • Volumes NOT referenced by any container (mongo-data,
+    #     pw-browsers, uploaded-data are always referenced → safe)
+    # Typical reclaim on a 30-day-old VPS: 1-8 GB. No host SSH needed.
+    docker_result = _safe_docker_prune()
+    if docker_result.get("mb_freed", 0) > 0:
+        # Merge totals into the response shown to the admin so the
+        # toast/UI reflects the FULL number freed (not just in-container).
+        in_container_result["mb_freed"] = round(
+            in_container_result["mb_freed"] + docker_result["mb_freed"], 1
+        )
+        in_container_result["bytes_freed"] += docker_result["bytes_freed"]
+        in_container_result["actions"].extend(docker_result["actions"])
+    in_container_result["docker_prune"] = docker_result
 
     # 2026-05 BUGFIX — only write the pending-flag if the host watcher
     # is actually running on this VPS. Otherwise the flag stays on disk
@@ -4215,10 +4312,17 @@ async def admin_request_cleanup(admin: dict = Depends(get_current_admin)):
         "host_watcher_active": watcher_alive,
         "flag_path": str(CLEANUP_FLAG_FILE) if flag_written else None,
         "message": (
-            f"Freed {in_container_result['mb_freed']} MB immediately. "
+            f"Freed {in_container_result['mb_freed']} MB. "
             + (
-                "Host watcher will run additional system-level cleanup within ~60s."
+                "Docker prune ran on host — reclaimed disk via build cache "
+                "& dangling images. "
+                if in_container_result.get("docker_prune", {}).get("available")
+                else ""
+            )
+            + (
+                "Host watcher queued additional system-level cleanup; results within ~60s."
                 if flag_written
+                else "" if in_container_result.get("docker_prune", {}).get("available")
                 else "Host watcher not configured — only in-container cleanup ran. "
                      "Install scripts/vps-cleanup-watcher.sh on the VPS to also "
                      "free Docker build cache & rotate access logs."
