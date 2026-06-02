@@ -85,6 +85,16 @@ services:
       # here makes it readable from inside the container at the path
       # GOOGLE_SHEETS_SA_PATH points to.
       - ./backend/secrets:/app/backend/secrets:ro
+      # 2026-06 — installer ZIP payload (Krexion-User-Package/) lives at
+      # the REPO ROOT, but the backend Docker build context is ./backend
+      # so this folder is NOT baked into the image. Without this mount,
+      # /api/license/download-installer/{key} returns 503 "Installer is
+      # not yet available" → frontend (axios responseType=blob) can't
+      # parse the JSON error and shows the generic "Download failed."
+      # toast even though the license verifies fine. Mounting the host's
+      # repo folder read-only fixes the customer download flow without
+      # any code change or image rebuild.
+      - ./Krexion-User-Package:/app/Krexion-User-Package:ro
       # Update-flag dir: when the user clicks "Install update" in the UI
       # the backend writes /data/update_requested.flag (inside the container)
       # which the host UPDATE-WATCHER.bat scheduled task picks up and
