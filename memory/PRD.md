@@ -881,3 +881,61 @@ every new customer download is the native `.exe`.
 - 2e: Code signing (EV cert ~$300/year, removes SmartScreen warning)
 - 2f: MSI variant for corporate IT deployments
 
+
+
+## 2026-06-02 — Iteration 5: Fix "Bundle backend (embedded Python)" CI failure
+
+### Problem (from GitHub Actions screenshot)
+Workflow run #4 of `Build Native Windows Release` failed at the **first** job, `Bundle backend (embedded Python)`, with:
+- `Process completed with exit code 1`
+- `Build script returned exit code 2` (= subprocess.CalledProcessError in build-backend.py)
+- `No files were found with the provided path: build/dist/krexion-backend.dist/**`
+
+Exit code 2 in `build-backend.py` maps to `pip install` failing. Root cause: the previous `EXCLUDE_PACKAGES` list (15 entries) wasn't aggressive enough. `requirements.txt` (228 packages) contains ~60 packages that are Unix-only / iOS-tooling / dev-only and **cannot install** on a Windows runner.
+
+### Audit Done
+Grep-checked every suspect package against backend source imports. Found that **all 25** of these are UNUSED by the actual Krexion runtime — they're transitive bloat from the dev pod's `pip freeze` snapshot:
+
+```
+daemonize     uvloop          pexpect       ptyprocess     plumbum
+pytun-pmd3    sslpsk-pmd3     tidevice3     pykdebugparser librt
+lzfse         pygnuutils      pyimg4        pyusb          opack
+ifaddr*       hexdump         remotezip     ipsw-parser    pycrashreport
+xonsh         ipython         jedi          flake8         isort
+```
+(`*ifaddr` kept — actually used by some package, harmless on Windows)
+
+Plus 35+ more unused (huggingface_hub, tokenizers, scipy, prompt_toolkit, mypy, pytest, etc).
+
+### Fix Applied to `build/build-backend.py`
+
+**1. Comprehensive `EXCLUDE_PACKAGES` list (60+ entries)** — categorised with explanatory comments:
+- Unix-only (will fail at install OR import time)
+- iOS / mobile-device automation (zero use in native runtime)
+- Dev / REPL tools (ipython, jedi, asttokens, …)
+- Linters / formatters (black, mypy, pytest, …)
+- Heavy unused packages (huggingface_hub, tokenizers, scipy, ImageHash)
+- Emergent internal helper
+
+**2. Two-pass resilient `pip_install_requirements()`:**
+- **Pass 1**: Bulk install -r requirements-native.txt with `--only-binary :all: --prefer-binary` (fastest)
+- **Pass 2** (fallback if Pass 1 fails): Per-package install, **skip on failure**, log each skip. One unexpected wheel mismatch no longer aborts the entire native build.
+
+**3. New `verify_core_packages()` hard gate:**
+Only fail the build if the 14 CORE Krexion runtime packages can't be imported:
+`fastapi, uvicorn, starlette, pydantic, pydantic_core, motor, pymongo, bcrypt, cryptography, httpx, passlib, jose, stripe, playwright`. Everything else is best-effort.
+
+### Verified
+- Dry-run on Linux: filtered 228 → 166 packages; bundle still 22.7 MB; build OK
+- Python syntax check: `py_compile` clean
+- Excluded list normalised (lowercase + `-`/`_` swap) so we catch every spelling
+
+### Outcome
+Next GitHub Actions run of `Build Native Windows Release`:
+1. Pass 1 bulk install will likely succeed (since the known-bad packages are filtered).
+2. If any new transitive dep introduces a Windows-wheel issue, Pass 2 fallback isolates and skips it without aborting the build.
+3. Build only fails if a CORE package can't be imported → clear, actionable error.
+
+### Files Changed in This Iteration
+- `build/build-backend.py` (modified — expanded exclude list, two-pass resilient install, core verification)
+
