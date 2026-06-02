@@ -90,6 +90,25 @@ JOURNAL=$(journalctl --vacuum-time=7d 2>&1 | tail -2 | oneline)
 # 5. APT package cache
 apt-get clean >/dev/null 2>&1 && APT="apt cache cleaned" || APT="apt clean skipped"
 
+# 5b. 2026-06 — clear OS thumbnail / unattended-upgrade leftover caches
+# (safe, gets regenerated on demand). Adds another ~50-200 MB of headroom
+# on long-running VPS hosts.
+EXTRA_CACHE=""
+if [ -d /var/cache/man ]; then
+  rm -rf /var/cache/man/* 2>/dev/null || true
+  EXTRA_CACHE="${EXTRA_CACHE} man-cache"
+fi
+if [ -d /var/cache/debconf ]; then
+  find /var/cache/debconf -name "*-old" -mtime +7 -delete 2>/dev/null || true
+  EXTRA_CACHE="${EXTRA_CACHE} debconf-old"
+fi
+if [ -d /root/.cache ]; then
+  # Skip ~/.cache/playwright (browser binaries; reinstalling them is 300+ MB)
+  find /root/.cache -mindepth 1 -maxdepth 1 ! -name playwright -exec rm -rf {} + 2>/dev/null || true
+  EXTRA_CACHE="${EXTRA_CACHE} root-cache"
+fi
+[ -z "$EXTRA_CACHE" ] && EXTRA_CACHE="none"
+
 # 6. Caddy access log rotation (if larger than 10 MB)
 CADDY_LOG=/var/lib/docker/volumes/krexion_caddy_data/_data/access.log
 CADDY_OUT="caddy log not present"
@@ -131,6 +150,7 @@ cat > "$RESULT_FILE.tmp" <<EOF
     "docker_image_prune_dangling": "$DOCKER_IMAGES",
     "journalctl_vacuum": "$JOURNAL",
     "apt_clean": "$APT",
+    "extra_cache_cleanup": "$EXTRA_CACHE",
     "caddy_log_rotate": "$CADDY_OUT",
     "tmp_playwright_cleanup": "$TMP_OUT"
   }

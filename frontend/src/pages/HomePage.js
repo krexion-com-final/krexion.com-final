@@ -14,35 +14,79 @@ const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 // Brand blue (matches dashboard / login page)
 const BLUE = "#3B82F6";
 
-const FEATURES = [
-  { icon: Globe, title: "Cloud Dashboard — Login Anywhere",
-    desc: "Manage links, clicks and campaigns from any browser, any device. Your dashboard lives at krexion.com, not stuck on one PC." },
-  { icon: Activity, title: "Always-On Tracking Links",
-    desc: "Every link you generate runs at krexion.com/r/xxx — clicks keep flowing even when your computer is off, sleeping, or unplugged." },
-  { icon: Layers, title: "Massive Proxy Pool",
-    desc: "Plug in residential, ISP or mobile proxies. Built-in checker validates them at scale across parallel batches." },
-  { icon: Cpu, title: "CPI Job Orchestrator",
-    desc: "Run Cost-Per-Install campaigns across distributed worker devices with smart routing and per-device fingerprinting." },
-  { icon: Shield, title: "Form Filler + Real User Traffic",
-    desc: "Auto-fill landing pages and emulate genuine human patterns through real Chrome — not headless bots." },
-  { icon: MailCheck, title: "Email Validation Suite",
-    desc: "Verify deliverability, separate cleaned lists, and feed only valid leads into your campaigns." },
-];
+// 2026-06 — Icon lookup so admin can pick a lucide-react icon by name
+// in the Site Content CMS (`features[].icon`). Anything outside this
+// map falls back to Sparkles so we never crash on a typo.
+const ICONS = {
+  Globe, Activity, Layers, Cpu, Shield, MailCheck,
+  Zap, Lock, Sparkles, Check, ArrowRight, ChevronDown, MailCheck,
+};
+const getIcon = (name) => ICONS[name] || Sparkles;
 
-const FAQS = [
-  { q: "Do I need to install anything?",
-    a: "No — Krexion runs fully online at krexion.com. Login, generate links, view clicks, manage campaigns from any browser. The optional desktop installer is only for heavy features like Real User Traffic and Form Filler." },
-  { q: "Will my links die if I turn off my computer?",
-    a: "Never. All your links live on the krexion.com cloud — they keep tracking clicks 24/7 regardless of whether your PC is on, off, sleeping, or in a different country." },
-  { q: "How does payment work?",
-    a: "We accept USDT (TRC-20) only. Pick a plan, send USDT to the wallet shown at checkout, paste your TxID, and your license + login credentials are delivered to your email within 30 minutes." },
-  { q: "Do I need a credit card or bank?",
-    a: "No. Everything runs on crypto — no subscriptions, no recurring charges, no bank required. Pay only for the months you use." },
-  { q: "How many PCs can I activate?",
-    a: "Cloud dashboard works on unlimited devices. For the optional desktop install: Starter 1 PC, Pro 3 PCs, Business 10 PCs, Trial 1 PC." },
-  { q: "Can I get a refund?",
-    a: "Yes — if your license is not delivered within 24 hours of TxID submission and on-chain confirmation, we refund in full. Otherwise sales are final." },
-];
+// Built-in fallback content — used until the /api/site-content fetch
+// completes (so the first paint isn't blank) AND when the API call
+// fails entirely. Mirrors DEFAULT_SITE_CONTENT in
+// backend/site_content_module.py.
+const DEFAULT_CONTENT = {
+  hero: {
+    badge: "Cloud + Self-host • Pay with USDT • Links live 24/7",
+    h1_top: "Real traffic.",
+    h1_bottom: "Real conversions.",
+    subtitle: "Manage your tracking, links and campaigns from anywhere in the world. Your krexion.com links stay live 24/7 — even when your PC is off.",
+    cta_label: "See plans",
+    cta_secondary_label: "How it works",
+  },
+  stats: [
+    { value: "10M+", label: "Clicks delivered" },
+    { value: "120+", label: "Countries supported" },
+    { value: "99.9%", label: "Uptime" },
+    { value: "<30 min", label: "License delivery" },
+  ],
+  features_intro: {
+    eyebrow: "Built for scale",
+    title: "Everything you need to run traffic at scale",
+    subtitle: "From single landing-page tests to multi-thousand-PC campaigns — one platform, fully self-hosted under your license.",
+  },
+  features: [
+    { icon: "Globe", title: "Cloud Dashboard — Login Anywhere", desc: "Manage links, clicks and campaigns from any browser, any device. Your dashboard lives at krexion.com, not stuck on one PC." },
+    { icon: "Activity", title: "Always-On Tracking Links", desc: "Every link you generate runs at krexion.com/r/xxx — clicks keep flowing even when your computer is off, sleeping, or unplugged." },
+    { icon: "Layers", title: "Massive Proxy Pool", desc: "Plug in residential, ISP or mobile proxies. Built-in checker validates them at scale across parallel batches." },
+    { icon: "Cpu", title: "CPI Job Orchestrator", desc: "Run Cost-Per-Install campaigns across distributed worker devices with smart routing and per-device fingerprinting." },
+    { icon: "Shield", title: "Form Filler + Real User Traffic", desc: "Auto-fill landing pages and emulate genuine human patterns through real Chrome — not headless bots." },
+    { icon: "MailCheck", title: "Email Validation Suite", desc: "Verify deliverability, separate cleaned lists, and feed only valid leads into your campaigns." },
+  ],
+  pricing_intro: {
+    eyebrow: "Pricing",
+    title: "Simple plans, USDT only",
+    subtitle: "One-time payments. Pay per month — no auto-renewal, no surprises.",
+  },
+  faq_intro: {
+    eyebrow: "FAQ",
+    title: "Questions, answered",
+    subtitle: "",
+  },
+  faqs: [
+    { q: "Do I need to install anything?", a: "No — Krexion runs fully online at krexion.com. Login, generate links, view clicks, manage campaigns from any browser. The optional desktop installer is only for heavy features like Real User Traffic and Form Filler." },
+    { q: "Will my links die if I turn off my computer?", a: "Never. All your links live on the krexion.com cloud — they keep tracking clicks 24/7 regardless of whether your PC is on, off, sleeping, or in a different country." },
+    { q: "How does payment work?", a: "We accept USDT (TRC-20) only. Pick a plan, send USDT to the wallet shown at checkout, paste your TxID, and your license + login credentials are delivered to your email within 30 minutes." },
+    { q: "Do I need a credit card or bank?", a: "No. Everything runs on crypto — no subscriptions, no recurring charges, no bank required. Pay only for the months you use." },
+    { q: "How many PCs can I activate?", a: "Cloud dashboard works on unlimited devices. For the optional desktop install: Starter 1 PC, Pro 3 PCs, Business 10 PCs, Trial 1 PC." },
+    { q: "Can I get a refund?", a: "Yes — if your license is not delivered within 24 hours of TxID submission and on-chain confirmation, we refund in full. Otherwise sales are final." },
+  ],
+  footer: {
+    tagline: "Real traffic. Real conversions. Self-hosted under your license.",
+    copyright: "© 2026 Krexion. All rights reserved.",
+  },
+  nav: {
+    features_label: "Features",
+    pricing_label: "Pricing",
+    download_label: "Download",
+    guide_label: "Guide",
+    faq_label: "FAQ",
+    login_label: "Login",
+    cta_label: "Get started",
+  },
+};
 
 // Word-by-word reveal animation for the hero headline
 const WORD_VARIANTS = {
@@ -75,11 +119,32 @@ function AnimatedWords({ text, className = "", accent = false }) {
 export default function HomePage() {
   const [plans, setPlans] = useState([]);
   const [openFaq, setOpenFaq] = useState(0);
+  // 2026-06 — site content fetched from CMS so admin can edit hero,
+  // stats, features, FAQ and footer copy live without a redeploy.
+  const [content, setContent] = useState(DEFAULT_CONTENT);
 
   useEffect(() => {
     axios.get(`${API}/crypto/plans`)
       .then(r => setPlans(r.data.plans || []))
       .catch(() => setPlans([]));
+    // Site content (CMS) — fall back to DEFAULT_CONTENT on any failure
+    // so the public site is ALWAYS renderable even if Mongo is down.
+    axios.get(`${API}/site-content`)
+      .then(r => {
+        if (r?.data && typeof r.data === "object") {
+          // Shallow merge with defaults so partially-saved docs still
+          // render every section.
+          setContent({ ...DEFAULT_CONTENT, ...r.data,
+            hero: { ...DEFAULT_CONTENT.hero, ...(r.data.hero || {}) },
+            features_intro: { ...DEFAULT_CONTENT.features_intro, ...(r.data.features_intro || {}) },
+            pricing_intro: { ...DEFAULT_CONTENT.pricing_intro, ...(r.data.pricing_intro || {}) },
+            faq_intro: { ...DEFAULT_CONTENT.faq_intro, ...(r.data.faq_intro || {}) },
+            footer: { ...DEFAULT_CONTENT.footer, ...(r.data.footer || {}) },
+            nav: { ...DEFAULT_CONTENT.nav, ...(r.data.nav || {}) },
+          });
+        }
+      })
+      .catch(() => { /* defaults are fine */ });
   }, []);
 
   return (
@@ -101,31 +166,31 @@ export default function HomePage() {
             <span className="text-xl font-bold tracking-tight">KREXION</span>
           </Link>
           <nav className="hidden md:flex items-center gap-7 text-sm">
-            <a href="#features" className="text-zinc-400 hover:text-white transition">Features</a>
-            <a href="#pricing" className="text-zinc-400 hover:text-white transition">Pricing</a>
-            <Link to="/download" className="text-zinc-400 hover:text-white transition" data-testid="nav-download">Download</Link>
-            <Link to="/guide" className="text-zinc-400 hover:text-white transition" data-testid="nav-guide">Guide</Link>
-            <a href="#faq" className="text-zinc-400 hover:text-white transition">FAQ</a>
-            <Link to="/login" className="text-zinc-400 hover:text-white transition" data-testid="nav-login">Login</Link>
+            <a href="#features" className="text-zinc-400 hover:text-white transition">{content.nav.features_label}</a>
+            <a href="#pricing" className="text-zinc-400 hover:text-white transition">{content.nav.pricing_label}</a>
+            <Link to="/download" className="text-zinc-400 hover:text-white transition" data-testid="nav-download">{content.nav.download_label}</Link>
+            <Link to="/guide" className="text-zinc-400 hover:text-white transition" data-testid="nav-guide">{content.nav.guide_label}</Link>
+            <a href="#faq" className="text-zinc-400 hover:text-white transition">{content.nav.faq_label}</a>
+            <Link to="/login" className="text-zinc-400 hover:text-white transition" data-testid="nav-login">{content.nav.login_label}</Link>
             <Link
               to="/pricing"
               className="bg-blue-500 text-white px-4 py-1.5 rounded-md font-medium hover:bg-blue-400 transition shadow-lg shadow-blue-500/30"
               data-testid="nav-get-started"
             >
-              Get started
+              {content.nav.cta_label}
             </Link>
           </nav>
           <PublicMobileMenu
             accent="blue"
             ctaTo="/pricing"
-            ctaLabel="Get started"
+            ctaLabel={content.nav.cta_label}
             links={[
-              { to: "#features", label: "Features" },
-              { to: "#pricing", label: "Pricing" },
-              { to: "/download", label: "Download" },
-              { to: "/guide", label: "Guide" },
-              { to: "#faq", label: "FAQ" },
-              { to: "/login", label: "Login" },
+              { to: "#features", label: content.nav.features_label },
+              { to: "#pricing", label: content.nav.pricing_label },
+              { to: "/download", label: content.nav.download_label },
+              { to: "/guide", label: content.nav.guide_label },
+              { to: "#faq", label: content.nav.faq_label },
+              { to: "/login", label: content.nav.login_label },
             ]}
           />
         </div>
@@ -140,12 +205,12 @@ export default function HomePage() {
           className="inline-flex items-center gap-2 bg-blue-500/10 border border-blue-500/30 rounded-full px-4 py-1.5 mb-7 text-xs backdrop-blur-sm"
         >
           <Zap size={12} className="text-blue-400" />
-          <span className="text-blue-100">Cloud + Self-host • Pay with USDT • Links live 24/7</span>
+          <span className="text-blue-100">{content.hero.badge}</span>
         </motion.div>
 
         {/* Animated heading */}
         <h1 className="text-5xl sm:text-6xl lg:text-7xl font-extrabold tracking-tight leading-[1.05] mb-6">
-          <AnimatedWords text="Real traffic." className="block" />
+          <AnimatedWords text={content.hero.h1_top} className="block" />
           <motion.span
             initial={{ opacity: 0, y: 30, filter: "blur(8px)" }}
             animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
@@ -157,7 +222,7 @@ export default function HomePage() {
               animation: "krx-gradient 5s ease-in-out infinite",
             }}
           >
-            Real conversions.
+            {content.hero.h1_bottom}
           </motion.span>
         </h1>
 
@@ -167,8 +232,7 @@ export default function HomePage() {
           transition={{ delay: 0.6, duration: 0.6 }}
           className="text-lg text-zinc-400 max-w-2xl mx-auto mb-9 leading-relaxed"
         >
-          Manage your tracking, links and campaigns from anywhere in the world. Your{" "}
-          <span className="text-white font-semibold">krexion.com</span> links stay live 24/7 — even when your PC is off.
+          {content.hero.subtitle}
         </motion.p>
 
         <motion.div
@@ -182,13 +246,13 @@ export default function HomePage() {
             className="group bg-blue-500 text-white font-semibold px-7 py-3.5 rounded-lg hover:bg-blue-400 transition inline-flex items-center gap-2 shadow-xl shadow-blue-500/30"
             data-testid="hero-cta-pricing"
           >
-            See plans <ArrowRight size={16} className="group-hover:translate-x-1 transition-transform" />
+            {content.hero.cta_label} <ArrowRight size={16} className="group-hover:translate-x-1 transition-transform" />
           </Link>
           <a
             href="#features"
             className="border border-white/15 px-7 py-3.5 rounded-lg hover:bg-white/5 transition text-sm backdrop-blur-sm"
           >
-            How it works
+            {content.hero.cta_secondary_label}
           </a>
         </motion.div>
 
@@ -199,22 +263,17 @@ export default function HomePage() {
           transition={{ delay: 1.0, duration: 0.7 }}
           className="mt-14 grid grid-cols-2 md:grid-cols-4 gap-6 max-w-3xl mx-auto text-center"
         >
-          {[
-            { v: "10M+", l: "Clicks delivered" },
-            { v: "120+", l: "Countries supported" },
-            { v: "99.9%", l: "Uptime" },
-            { v: "<30 min", l: "License delivery" },
-          ].map((s, idx) => (
+          {(content.stats || []).map((s, idx) => (
             <motion.div
-              key={s.l}
+              key={s.label || idx}
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 1.0 + idx * 0.08, duration: 0.5 }}
             >
               <div className="text-2xl font-bold bg-clip-text text-transparent" style={{ backgroundImage: "linear-gradient(90deg, #93C5FD, #3B82F6)" }}>
-                {s.v}
+                {s.value}
               </div>
-              <div className="text-xs text-zinc-500 mt-1">{s.l}</div>
+              <div className="text-xs text-zinc-500 mt-1">{s.label}</div>
             </motion.div>
           ))}
         </motion.div>
@@ -229,35 +288,38 @@ export default function HomePage() {
           transition={{ duration: 0.5 }}
           className="text-center mb-14"
         >
-          <div className="text-xs uppercase tracking-widest text-blue-400 mb-3">Built for scale</div>
-          <h2 className="text-3xl sm:text-4xl font-bold mb-3">Everything you need to run traffic at scale</h2>
+          <div className="text-xs uppercase tracking-widest text-blue-400 mb-3">{content.features_intro.eyebrow}</div>
+          <h2 className="text-3xl sm:text-4xl font-bold mb-3">{content.features_intro.title}</h2>
           <p className="text-zinc-400 max-w-2xl mx-auto text-sm">
-            From single landing-page tests to multi-thousand-PC campaigns — one platform, fully self-hosted under your license.
+            {content.features_intro.subtitle}
           </p>
         </motion.div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {FEATURES.map((f, idx) => (
+          {(content.features || []).map((f, idx) => {
+            const Icon = getIcon(f.icon);
+            return (
             <motion.div
-              key={f.title}
+              key={f.title || idx}
               initial={{ opacity: 0, y: 22 }}
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true, margin: "-80px" }}
               transition={{ duration: 0.5, delay: idx * 0.06 }}
-              data-testid={`feature-card-${f.title.toLowerCase().replace(/\s+/g, '-')}`}
+              data-testid={`feature-card-${(f.title || '').toLowerCase().replace(/\s+/g, '-')}`}
               className="group relative bg-white/[0.025] border border-white/10 rounded-xl p-6 hover:border-blue-500/40 hover:bg-blue-500/5 transition-all duration-300 overflow-hidden"
             >
               <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-300 pointer-events-none"
                    style={{ background: "radial-gradient(circle at top left, rgba(59,130,246,0.12), transparent 60%)" }} />
               <div className="relative">
                 <div className="w-10 h-10 rounded-lg bg-blue-500/15 border border-blue-500/30 flex items-center justify-center mb-4 group-hover:bg-blue-500/25 group-hover:scale-110 transition">
-                  <f.icon className="text-blue-400" size={18} />
+                  <Icon className="text-blue-400" size={18} />
                 </div>
                 <h3 className="font-semibold mb-1.5">{f.title}</h3>
                 <p className="text-sm text-zinc-400 leading-relaxed">{f.desc}</p>
               </div>
             </motion.div>
-          ))}
+            );
+          })}
         </div>
       </section>
 
@@ -270,10 +332,10 @@ export default function HomePage() {
           transition={{ duration: 0.5 }}
           className="text-center mb-12"
         >
-          <div className="text-xs uppercase tracking-widest text-blue-400 mb-3">Pricing</div>
-          <h2 className="text-3xl sm:text-4xl font-bold mb-3">Simple plans, USDT only</h2>
+          <div className="text-xs uppercase tracking-widest text-blue-400 mb-3">{content.pricing_intro.eyebrow}</div>
+          <h2 className="text-3xl sm:text-4xl font-bold mb-3">{content.pricing_intro.title}</h2>
           <p className="text-zinc-400 text-sm max-w-xl mx-auto">
-            One-time payments. Pay per month — no auto-renewal, no surprises.
+            {content.pricing_intro.subtitle}
           </p>
         </motion.div>
 
@@ -384,11 +446,14 @@ export default function HomePage() {
           transition={{ duration: 0.5 }}
           className="text-center mb-10"
         >
-          <div className="text-xs uppercase tracking-widest text-blue-400 mb-3">FAQ</div>
-          <h2 className="text-3xl sm:text-4xl font-bold">Questions, answered</h2>
+          <div className="text-xs uppercase tracking-widest text-blue-400 mb-3">{content.faq_intro.eyebrow}</div>
+          <h2 className="text-3xl sm:text-4xl font-bold">{content.faq_intro.title}</h2>
+          {content.faq_intro.subtitle ? (
+            <p className="text-zinc-400 text-sm max-w-xl mx-auto mt-3">{content.faq_intro.subtitle}</p>
+          ) : null}
         </motion.div>
         <div className="space-y-3">
-          {FAQS.map((item, idx) => {
+          {(content.faqs || []).map((item, idx) => {
             const open = openFaq === idx;
             return (
               <div
@@ -463,13 +528,13 @@ export default function HomePage() {
           <div className="flex items-center gap-2">
             <Sparkles className="text-blue-400" size={14} />
             <span className="font-semibold text-white">KREXION</span>
-            <span>© {new Date().getFullYear()}</span>
+            <span>{content.footer.copyright}</span>
           </div>
           <div className="flex items-center gap-5">
-            <Link to="/pricing" className="hover:text-white transition">Pricing</Link>
-            <Link to="/download" className="hover:text-white transition">Download</Link>
-            <Link to="/guide" className="hover:text-white transition">Guide</Link>
-            <Link to="/login" className="hover:text-white transition">Login</Link>
+            <Link to="/pricing" className="hover:text-white transition">{content.nav.pricing_label}</Link>
+            <Link to="/download" className="hover:text-white transition">{content.nav.download_label}</Link>
+            <Link to="/guide" className="hover:text-white transition">{content.nav.guide_label}</Link>
+            <Link to="/login" className="hover:text-white transition">{content.nav.login_label}</Link>
             <a href="mailto:support@krexion.com" className="hover:text-white transition">Support</a>
           </div>
         </div>

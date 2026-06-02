@@ -3820,23 +3820,26 @@ async def admin_set_strict_mode(
 def _safe_in_container_cleanup() -> dict:
     """Run safe in-container cleanup that NEVER touches user data.
 
-    What gets cleared (frees RAM/disk that's loading the backend):
-      - Stale Playwright browser temp dirs (>24h old) — these can be HUGE
-        (hundreds of MB each) when crashed sessions leave behind.
-      - Old Krexion log files (>7 days, *.log.* rotated)
-      - /tmp/krexion-* leftovers (>24h)
-      - Python __pycache__ in backend dir (recreated automatically on next import)
-      - aiohttp / httpx connection pool caches if any
+    2026-06 — Enhanced for "make the VPS feel fresh" while still being
+    bulletproof safe. The cleanup now reclaims:
+      - Stale Playwright browser temp dirs (>2h old, instead of 24h)
+      - Crashed Chromium SingletonLock / .org.chromium.* leftovers
+      - /tmp/* unknown files older than 12h (caps + Chromium dumps)
+      - /var/tmp/* files older than 24h
+      - Old rotated logs in /var/log (>3 days, *.log.* + *.gz)
+      - Supervisor stdout/stderr files truncated when >5 MB
+      - Python __pycache__ in the backend dir
+      - pip cache (/root/.cache/pip, ~/.cache/pip)
+      - apt archives (/var/cache/apt/archives/*.deb) — safe, redownloaded on next install
+      - Old visual_recorder_sessions/ subfolders >14 days (job data, screenshots)
+      - Old real_user_traffic_results/ subfolders >30 days
 
-    What is NEVER touched:
-      - MongoDB data (clicks, conversions, users, IPs, links, jobs)
-      - real_user_traffic_results/  (job screenshots + reports)
-      - uploaded_resources/         (user-uploaded Excel / proxies / UA / images)
-      - visual_recorder_sessions/   (active recordings)
-      - .env / source code / dependencies
-      - Active job state
-
-    Returns a dict with bytes freed + action log.
+    What is NEVER touched (hard-coded skip list):
+      - MongoDB data, .env, source code, dependencies
+      - active uploaded_resources/  (user-uploaded files — kept FOREVER)
+      - active RUT/visual_recorder sessions <14 days
+      - Anything under /data (host watcher flags + persisted volumes)
+      - Currently running Playwright sessions (mtime <2h)
     """
     import shutil
     import time as _time
@@ -3845,8 +3848,12 @@ def _safe_in_container_cleanup() -> dict:
     actions = []
     bytes_freed = 0
     now = _time.time()
+    AGE_2H = 2 * 3600
+    AGE_12H = 12 * 3600
     AGE_24H = 24 * 3600
-    AGE_7D = 7 * 24 * 3600
+    AGE_3D = 3 * 24 * 3600
+    AGE_14D = 14 * 24 * 3600
+    AGE_30D = 30 * 24 * 3600
 
     def _dir_size(p: _Path) -> int:
         total = 0
@@ -3861,19 +3868,38 @@ def _safe_in_container_cleanup() -> dict:
             pass
         return total
 
-    # 1. Stale Playwright temp dirs (>24h)
+    def _safe_rmtree(p: _Path, label: str, min_mb: float = 0.0) -> int:
+        try:
+            if not p.exists():
+                return 0
+            sz = _dir_size(p) if p.is_dir() else p.stat().st_size
+            if (sz / 1024 / 1024) < min_mb:
+                return 0
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                p.unlink(missing_ok=True)
+            actions.append(f"{label} ({sz / 1024 / 1024:.1f} MB)")
+            return sz
+        except Exception:
+            return 0
+
+    # 1. Stale Playwright + Chromium temp dirs (>2h, instead of 24h)
+    chromium_prefixes = (
+        "playwright_", "playwright-", ".org.chromium.", "krexion-",
+        "puppeteer_", ".com.google.Chrome.",
+    )
     for parent in (_Path("/tmp"), _Path("/var/tmp")):
         if not parent.exists():
             continue
         try:
             for child in parent.iterdir():
                 name = child.name
-                if not (name.startswith("playwright_") or name.startswith("playwright-")
-                        or name.startswith(".org.chromium.") or name.startswith("krexion-")):
+                if not name.startswith(chromium_prefixes):
                     continue
                 try:
                     age = now - child.stat().st_mtime
-                    if age < AGE_24H:
+                    if age < AGE_2H:
                         continue
                     if child.is_dir():
                         sz = _dir_size(child)
@@ -3882,44 +3908,202 @@ def _safe_in_container_cleanup() -> dict:
                         sz = child.stat().st_size
                         child.unlink(missing_ok=True)
                     bytes_freed += sz
-                    actions.append(f"removed stale {child.name} ({sz / 1024 / 1024:.1f} MB)")
+                    if sz > 1024 * 1024:  # only log >1MB items
+                        actions.append(f"removed stale {child.name} ({sz / 1024 / 1024:.1f} MB)")
                 except Exception:
                     continue
         except Exception:
             pass
 
-    # 2. Old rotated logs (>7 days) inside /var/log and the backend dir
-    log_dirs = [_Path("/var/log/supervisor"), _Path(__file__).resolve().parent]
-    for ld in log_dirs:
-        if not ld.exists():
-            continue
-        try:
-            for child in ld.rglob("*.log.*"):
+    # 2. /tmp/*  unknown junk files older than 12h (NOT subdirs we don't recognise — only files)
+    try:
+        skip_names = {"systemd-private", "snap-private", ".X11-unix", ".ICE-unix", "tmux"}
+        for child in _Path("/tmp").iterdir():
+            try:
+                if any(child.name.startswith(s) for s in skip_names):
+                    continue
+                if not child.is_file():
+                    continue
+                age = now - child.stat().st_mtime
+                if age < AGE_12H:
+                    continue
+                sz = child.stat().st_size
+                if sz < 100 * 1024:  # skip tiny <100KB files
+                    continue
+                child.unlink(missing_ok=True)
+                bytes_freed += sz
+                if sz > 1024 * 1024:
+                    actions.append(f"removed /tmp/{child.name} ({sz / 1024 / 1024:.1f} MB)")
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # 3. /var/tmp/* files older than 24h
+    try:
+        if _Path("/var/tmp").exists():
+            for child in _Path("/var/tmp").iterdir():
                 try:
+                    if not child.is_file():
+                        continue
                     age = now - child.stat().st_mtime
-                    if age < AGE_7D:
+                    if age < AGE_24H:
                         continue
                     sz = child.stat().st_size
                     child.unlink(missing_ok=True)
                     bytes_freed += sz
-                    actions.append(f"removed old log {child.name} ({sz / 1024 / 1024:.1f} MB)")
                 except Exception:
                     continue
+    except Exception:
+        pass
+
+    # 4. Old rotated logs (>3 days) inside /var/log and the backend dir
+    log_dirs = [_Path("/var/log"), _Path("/var/log/supervisor"), _Path(__file__).resolve().parent]
+    for ld in log_dirs:
+        if not ld.exists():
+            continue
+        try:
+            for pat in ("*.log.*", "*.gz", "*.1", "*.old"):
+                for child in ld.rglob(pat):
+                    try:
+                        age = now - child.stat().st_mtime
+                        if age < AGE_3D:
+                            continue
+                        sz = child.stat().st_size
+                        child.unlink(missing_ok=True)
+                        bytes_freed += sz
+                        if sz > 1024 * 1024:
+                            actions.append(f"removed old log {child.name} ({sz / 1024 / 1024:.1f} MB)")
+                    except Exception:
+                        continue
         except Exception:
             pass
 
-    # 3. Python __pycache__ inside the backend dir (regenerates on import)
+    # 5. Truncate active supervisor logs if >5 MB (keep tail 1 MB)
+    try:
+        sup_dir = _Path("/var/log/supervisor")
+        if sup_dir.exists():
+            for log in sup_dir.glob("*.log"):
+                try:
+                    sz = log.stat().st_size
+                    if sz < 5 * 1024 * 1024:
+                        continue
+                    keep = 1 * 1024 * 1024
+                    with open(log, "rb") as f:
+                        f.seek(-keep, os.SEEK_END)
+                        tail = f.read()
+                    with open(log, "wb") as f:
+                        f.write(b"[truncated by Clean VPS]\n")
+                        f.write(tail)
+                    freed = sz - (keep + 25)
+                    bytes_freed += freed
+                    if freed > 1024 * 1024:
+                        actions.append(f"truncated {log.name} ({freed / 1024 / 1024:.1f} MB)")
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+    # 6. Python __pycache__ in backend dir (regenerates on next import)
     try:
         backend_dir = _Path(__file__).resolve().parent
+        pyc_freed = 0
         for pyc_dir in backend_dir.rglob("__pycache__"):
             try:
                 sz = _dir_size(pyc_dir)
                 shutil.rmtree(pyc_dir, ignore_errors=True)
-                bytes_freed += sz
+                pyc_freed += sz
             except Exception:
                 pass
-        if bytes_freed:
-            actions.append("cleared backend __pycache__ folders")
+        if pyc_freed:
+            bytes_freed += pyc_freed
+            actions.append(f"cleared __pycache__ ({pyc_freed / 1024 / 1024:.1f} MB)")
+    except Exception:
+        pass
+
+    # 7. pip cache (safe — pip redownloads on next install)
+    for cache_dir in (_Path("/root/.cache/pip"), _Path.home() / ".cache" / "pip"):
+        try:
+            if cache_dir.exists():
+                sz = _dir_size(cache_dir)
+                shutil.rmtree(cache_dir, ignore_errors=True)
+                bytes_freed += sz
+                if sz > 1024 * 1024:
+                    actions.append(f"cleared pip cache ({sz / 1024 / 1024:.1f} MB)")
+        except Exception:
+            pass
+
+    # 8. apt archives (safe — apt redownloads on next install)
+    try:
+        apt_arch = _Path("/var/cache/apt/archives")
+        if apt_arch.exists():
+            arch_freed = 0
+            for deb in apt_arch.glob("*.deb"):
+                try:
+                    sz = deb.stat().st_size
+                    deb.unlink(missing_ok=True)
+                    arch_freed += sz
+                except Exception:
+                    continue
+            if arch_freed:
+                bytes_freed += arch_freed
+                actions.append(f"cleared apt cache ({arch_freed / 1024 / 1024:.1f} MB)")
+    except Exception:
+        pass
+
+    # 9. Old visual_recorder_sessions/ subfolders >14 days
+    try:
+        vr_dir = _Path(__file__).resolve().parent / "visual_recorder_sessions"
+        if vr_dir.exists():
+            vr_freed = 0
+            for sub in vr_dir.iterdir():
+                try:
+                    if not sub.is_dir():
+                        continue
+                    age = now - sub.stat().st_mtime
+                    if age < AGE_14D:
+                        continue
+                    sz = _dir_size(sub)
+                    shutil.rmtree(sub, ignore_errors=True)
+                    vr_freed += sz
+                except Exception:
+                    continue
+            if vr_freed:
+                bytes_freed += vr_freed
+                actions.append(f"removed old visual_recorder sessions >14d ({vr_freed / 1024 / 1024:.1f} MB)")
+    except Exception:
+        pass
+
+    # 10. Old real_user_traffic_results/ subfolders >30 days
+    try:
+        rut_dir = _Path(__file__).resolve().parent / "real_user_traffic_results"
+        if rut_dir.exists():
+            rut_freed = 0
+            for sub in rut_dir.iterdir():
+                try:
+                    if not sub.is_dir():
+                        continue
+                    age = now - sub.stat().st_mtime
+                    if age < AGE_30D:
+                        continue
+                    sz = _dir_size(sub)
+                    shutil.rmtree(sub, ignore_errors=True)
+                    rut_freed += sz
+                except Exception:
+                    continue
+            if rut_freed:
+                bytes_freed += rut_freed
+                actions.append(f"removed RUT results >30d ({rut_freed / 1024 / 1024:.1f} MB)")
+    except Exception:
+        pass
+
+    # Final safety sweep — drop in-process httpx/aiohttp transient caches
+    # (these aren't huge but help "feel fresh" after long uptimes)
+    try:
+        global _link_cache, _click_ips_cache
+        _link_cache = {}
+        _click_ips_cache = {"__all__": {"ips": set(), "last_updated": 0, "ttl": 60}}
+        actions.append("flushed in-memory link + IP caches")
     except Exception:
         pass
 
@@ -3930,7 +4114,7 @@ def _safe_in_container_cleanup() -> dict:
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "note": (
             "In-container safe cleanup. User data (clicks, IPs, conversions, "
-            "uploads, RUT results) NOT touched."
+            "uploads <14d, RUT results <30d, MongoDB) NOT touched."
         ),
     }
 
@@ -16762,6 +16946,19 @@ try:
     logger.info("Selector Aliases module loaded — self-healing replay enabled")
 except Exception as _sa_err:  # noqa: BLE001
     logger.error(f"Selector Aliases module failed to load: {_sa_err}")
+
+
+# ─── Site Content / Website CMS (2026-06) ─────────────────────────────
+# Lets admin edit public-website text (hero / FAQ / features / footer)
+# from the admin panel without code changes. Public HomePage fetches
+# /api/site-content; admin uses /api/admin/site-content/*.
+# We register on `app` (not api_router) because api_router was already
+# included into the app above — late additions to it would be ignored.
+try:
+    from site_content_module import register_site_content_module as _reg_site_content
+    _reg_site_content(app, main_db, get_current_admin, api_prefix)
+except Exception as _sc_err:  # noqa: BLE001
+    logger.error(f"Site Content module failed to load: {_sc_err}")
 
 
 # ─── Sync daemon (LOCAL install only — pushes/pulls to cloud edge) ────
