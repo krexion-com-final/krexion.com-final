@@ -46,6 +46,9 @@ jobs:
 
       - name: Run embedded-Python build
         shell: powershell
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: '1'
         run: |
           python build/build-backend.py
           if ($LASTEXITCODE -ne 0) {
