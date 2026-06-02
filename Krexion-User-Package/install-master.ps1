@@ -1,4 +1,4 @@
-# ==============================================================
+﻿# ==============================================================
 # Krexion Master Installer v3.1
 # NO here-strings, NO parens-in-strings, Windows-safe encoding
 # ==============================================================
@@ -579,8 +579,8 @@ $adminPw = New-RandomString -L 16
 $pbToken = New-RandomString -L 24
 
 # ============================================================
-# Auto-read license-key.txt — written by the krexion.com /download
-# gate. The customer entered their KRX-XXXX-… key on the website
+# Auto-read license-key.txt - written by the krexion.com /download
+# gate. The customer entered their KRX-XXXX-... key on the website
 # (verified server-side first) and that key was embedded into this
 # package as `license-key.txt` next to install-master.ps1. We pick
 # it up here so the customer doesn't have to copy it manually into
@@ -614,9 +614,9 @@ foreach ($cand in $candidates) {
     }
 }
 if ($licenseKey) {
-    Show-Ok ("License key auto-detected from " + $licenseKeyFile + " — will pre-fill .env")
+    Show-Ok ("License key auto-detected from " + $licenseKeyFile + " - will pre-fill .env")
 } else {
-    Show-Warn "No license-key.txt found — .env will be created with LICENSE_KEY empty. Customer can paste it manually later, OR re-download from krexion.com/download after entering their key on the gate."
+    Show-Warn "No license-key.txt found - .env will be created with LICENSE_KEY empty. Customer can paste it manually later, OR re-download from krexion.com/download after entering their key on the gate."
 }
 
 $envPath = $INSTALL_DIR + "\.env"

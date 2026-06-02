@@ -637,3 +637,40 @@ Also added missing gate to `POST /traffic/send-real` (was unguarded — could sp
 
 ### Direct download URL
 `https://krexion.com/api/admin/download-builder-bat` (public, no auth — .bat has no secrets)
+
+
+## 2026-06-02 — Emergent Session Bug Fixes (Iteration 1)
+
+### Bugs Reported by User (via screenshots)
+1. **Admin panel showing 0 clicks per user** while user's own dashboard showed thousands (e.g. usmanjaved070: dashboard = 8,118 clicks, admin = 0 clicks, 419 proxies)
+2. **PowerShell installer crash** on customer PC — `install-master.ps1` line 617 fatal parse error: `Unexpected token 'will' in expression or statement` due to em-dash (`—`) character encoding mismatch
+
+### Root Cause Analysis
+**Bug 1 (admin stats):** `/api/admin/users/stats/all` was querying `user_db.links` (per-tenant), but links are **always** inserted into `db.links` (main) — every `db.links.insert_one()` site in `server.py` writes to main, never per-tenant. The user dashboard correctly reads from `db.links` + sums clicks from BOTH `user_db.clicks` (real-time RUT) AND `db.clicks` (imported traffic). The admin endpoint diverged → always returned 0. The legacy fallback was guarded by `link_count == 0 AND click_count == 0 AND proxy_count == 0`, which never triggered for users with proxies (e.g. 419 proxies → fallback never ran → links/clicks stayed at 0).
+
+**Bug 2 (PowerShell):** `Krexion-User-Package/install-master.ps1` had 3 em-dash characters (U+2014) and 1 ellipsis (U+2026), no UTF-8 BOM. Windows PowerShell 5.1 defaults to ANSI/Windows-1252 for BOM-less files → UTF-8 bytes `E2 80 94` got misread as `â€"` → string-quoting broken → parse error.
+
+### Fixes Applied
+- **`backend/server.py`** (admin endpoint) — mirror the user-dashboard logic:
+  - Read links from main `db.links` (not `user_db.links`)
+  - Click count = `user_db.clicks` + `db.clicks` (sum both)
+  - Proxies primary from `user_db.proxies`, legacy fallback to `db.proxies`
+- **`Krexion-User-Package/install-master.ps1`** — defensive double-fix:
+  - Added UTF-8 BOM (so PowerShell explicitly reads as UTF-8)
+  - Replaced all 3 em-dashes with `-` and 1 ellipsis with `...` (pure ASCII content)
+  - File is now zero non-ASCII bytes after BOM → bulletproof on all Windows codepages
+
+### Verification (end-to-end)
+- Seeded test user: 1 link in main, 30 clicks in main, 70 clicks in per-tenant, 419 proxies in per-tenant
+- Admin `/api/admin/users/stats/all` → `{link_count:1, click_count:100, proxy_count:419}` ✅
+- User `/api/dashboard/stats` → `{total_clicks:100}` ✅
+- Both numbers now match exactly (100 = 30 + 70)
+- PowerShell file: 0 non-ASCII bytes after BOM, syntax-blocking em-dashes removed
+- Smoke test: all critical endpoints return correct HTTP codes (200/401)
+
+### Files Changed
+- `backend/server.py` (+45/-44 lines, single function `get_all_users_stats`)
+- `Krexion-User-Package/install-master.ps1` (+BOM, 4 character replacements)
+
+### Production Deploy Note
+User will use Emergent "Save to GitHub" → main branch → VPS auto-deploys. Customer installer ZIP is generated from `Krexion-User-Package/` folder by `backend/license_module.py:download_installer_with_key`, so the PS1 fix flows automatically to next customer download.

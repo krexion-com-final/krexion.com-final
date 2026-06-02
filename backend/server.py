@@ -3302,6 +3302,21 @@ async def get_all_users_stats(admin: dict = Depends(get_current_admin)):
     dashboard, had thousands of clicks. We now query each user's
     per-tenant DB via the existing `get_user_db()` helper so the admin
     sees the same numbers the user sees.
+
+    2026-06 fix: links are ALWAYS written to the main `db.links`
+    collection (never per-tenant — see all insert sites in this file:
+    only `db.links.insert_one` exists, never `user_db.links.insert_*`).
+    Clicks are split: real-time RUT writes go to `user_db.clicks`, but
+    imported-traffic flows and conversions still write to `db.clicks`.
+    The user-side dashboard (/api/dashboard/stats) reflects this by:
+      - reading links from `db.links`
+      - summing clicks from BOTH `user_db.clicks` + `db.clicks`
+    The admin per-user stats endpoint was diverging from the user
+    dashboard (it read links only from `user_db.links` → always 0, and
+    clicks only from `user_db.clicks`), so the admin panel showed
+    "0 clicks / 0 links" for every user even though their own
+    dashboard showed thousands. We now mirror the user dashboard's
+    logic exactly so admin numbers match user numbers.
     """
     try:
         users = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(1000)
@@ -3310,61 +3325,47 @@ async def get_all_users_stats(admin: dict = Depends(get_current_admin)):
         for user in users:
             try:
                 user_id = user["id"]
-                # Per-tenant DB (this is where the user's REAL data lives)
+                # Per-tenant DB (where proxies & real-time clicks live)
                 user_db = get_user_db(user_id)
 
-                # Run all four counts in parallel — each user-DB hit
-                # talks to a different namespace, so awaiting them
-                # sequentially would multiply latency by 4x with no
-                # benefit. Falls back to MAIN db if the per-tenant DB
-                # is missing the collection (very old users).
                 async def _safe_count(coll, q):
                     try:
                         return await coll.count_documents(q)
                     except Exception:
                         return 0
 
-                link_count_t = asyncio.create_task(_safe_count(user_db.links, {"user_id": user_id}))
-                proxy_count_t = asyncio.create_task(_safe_count(user_db.proxies, {"user_id": user_id}))
-                sub_user_count_t = asyncio.create_task(_safe_count(db.sub_users, {"parent_user_id": user_id}))
-
-                # Click count: join via the user's link IDs (same model
-                # as the user-side dashboard).
-                user_links = await user_db.links.find(
+                # ── Links: stored ONLY in main db.links (mirror user dashboard) ──
+                user_links = await db.links.find(
                     {"user_id": user_id}, {"_id": 0, "id": 1},
                 ).to_list(100000)
                 link_ids = [l["id"] for l in user_links if l.get("id")]
+                link_count = len(link_ids)
+
+                # ── Clicks: sum of per-tenant + main db (mirror user dashboard) ──
                 if link_ids:
-                    click_count = await _safe_count(user_db.clicks, {"link_id": {"$in": link_ids}})
+                    user_db_clicks_t = asyncio.create_task(
+                        _safe_count(user_db.clicks, {"link_id": {"$in": link_ids}})
+                    )
+                    main_db_clicks_t = asyncio.create_task(
+                        _safe_count(db.clicks, {"link_id": {"$in": link_ids}})
+                    )
+                    user_db_clicks, main_db_clicks = await asyncio.gather(
+                        user_db_clicks_t, main_db_clicks_t
+                    )
+                    click_count = user_db_clicks + main_db_clicks
                 else:
                     click_count = 0
 
-                link_count, proxy_count, sub_user_count = await asyncio.gather(
-                    link_count_t, proxy_count_t, sub_user_count_t,
+                # ── Proxies: per-tenant primary, fallback to main db (legacy) ──
+                proxy_count_t = asyncio.create_task(_safe_count(user_db.proxies, {"user_id": user_id}))
+                sub_user_count_t = asyncio.create_task(_safe_count(db.sub_users, {"parent_user_id": user_id}))
+                proxy_count, sub_user_count = await asyncio.gather(
+                    proxy_count_t, sub_user_count_t,
                 )
-
-                # Legacy fallback: some VERY old accounts may still
-                # have content in the MAIN db.* collections (pre-
-                # per-tenant migration). If per-tenant counts are
-                # all zero, peek at main db too and use the larger.
-                if link_count == 0 and click_count == 0 and proxy_count == 0:
-                    try:
-                        legacy_links = await db.links.find(
-                            {"user_id": user_id}, {"_id": 0, "id": 1},
-                        ).to_list(100000)
-                        legacy_link_ids = [l["id"] for l in legacy_links if l.get("id")]
-                        legacy_link_count = len(legacy_link_ids)
-                        legacy_click_count = (
-                            await db.clicks.count_documents({"link_id": {"$in": legacy_link_ids}})
-                            if legacy_link_ids else 0
-                        )
-                        legacy_proxy_count = await db.proxies.count_documents({"user_id": user_id})
-                        if legacy_link_count + legacy_click_count + legacy_proxy_count > 0:
-                            link_count = legacy_link_count
-                            click_count = legacy_click_count
-                            proxy_count = legacy_proxy_count
-                    except Exception:
-                        pass
+                if proxy_count == 0:
+                    legacy_proxy_count = await _safe_count(db.proxies, {"user_id": user_id})
+                    if legacy_proxy_count > 0:
+                        proxy_count = legacy_proxy_count
 
                 result.append({
                     "id": user_id,
