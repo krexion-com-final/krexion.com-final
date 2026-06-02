@@ -186,8 +186,18 @@ Filename: "{app}\bin\{#AppExeService}"; \
   Parameters: "set KrexionBackend Start SERVICE_AUTO_START"; \
   Flags: runhidden
 
+; NSSM's `AppEnvironmentExtra` accepts multiple "NAME=VALUE" arguments
+; in one call, but Windows command-line parsing splits on spaces — so
+; values containing spaces (notably PLAYWRIGHT_BROWSERS_PATH when {app}
+; resolves to "C:\Program Files\Krexion") would be torn into separate
+; argv slots and NSSM would receive garbage. Result: NO env vars get
+; set, the Python backend crashes with "MONGO_URL environment variable
+; is required!", and NSSM throttles the service into the "Paused"
+; state. We wrap EVERY "NAME=VALUE" pair in literal quotes (Inno Setup
+; doubles "" -> ") so each one arrives at NSSM as a single argv entry,
+; regardless of the install path the customer picks.
 Filename: "{app}\bin\{#AppExeService}"; \
-  Parameters: "set KrexionBackend AppEnvironmentExtra MONGO_URL=mongodb://127.0.0.1:27017 DB_NAME=krexion KREXION_MODE=native KREXION_BUILD_TYPE=binary PLAYWRIGHT_BROWSERS_PATH={app}\browser-engine STRICT_CLOUD_HEAVY_BLOCK=false LICENSE_KEY_FILE={commonappdata}\Krexion\license-key.txt"; \
+  Parameters: "set KrexionBackend AppEnvironmentExtra ""MONGO_URL=mongodb://127.0.0.1:27017"" ""DB_NAME=krexion"" ""KREXION_MODE=native"" ""KREXION_BUILD_TYPE=binary"" ""PLAYWRIGHT_BROWSERS_PATH={app}\browser-engine"" ""STRICT_CLOUD_HEAVY_BLOCK=false"" ""LICENSE_KEY_FILE={commonappdata}\Krexion\license-key.txt"""; \
   Flags: runhidden
 
 Filename: "{app}\bin\{#AppExeService}"; \
