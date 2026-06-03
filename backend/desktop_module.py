@@ -273,9 +273,26 @@ async def desktop_specs():
     """Tiny read-only endpoint a future Settings tab could call. Same
     payload as the `system` block in /stats — exposed separately so the
     settings page can display the install-time specs without polling
-    the full live snapshot."""
+    the full live snapshot.
+
+    On the cloud edge (where the `desktop` package isn't mounted into
+    the backend Docker container), we degrade gracefully and return a
+    fallback payload rather than 500 — the cloud frontend never calls
+    this endpoint anyway, but better to be quiet than noisy.
+    """
     try:
         from desktop.system_info import get_specs  # type: ignore
         return get_specs()
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(500, f"system_info unavailable: {exc}")
+        logger.debug(f"system_info unavailable on this host: {exc}")
+        return {
+            "ram_gb": 0,
+            "cpu_cores": 0,
+            "ram_used_gb": 0,
+            "ram_used_pct": 0,
+            "cpu_pct": 0,
+            "tier": "unknown",
+            "max_concurrent_heavy_jobs": 2,
+            "detected_by": "fallback",
+            "note": "desktop package not available on this host (cloud edge)",
+        }
