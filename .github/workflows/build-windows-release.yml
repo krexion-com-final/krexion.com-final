@@ -1,11 +1,11 @@
 name: Build Native Windows Release
 
-# ════════════════════════════════════════════════════════════════════════
-# Krexion — Embedded-Python Windows build pipeline
-# ════════════════════════════════════════════════════════════════════════
+# ========================================================================
+# Krexion - Embedded-Python Windows build pipeline
+# ========================================================================
 # Uses the embedded-Python approach (same as Calibre, Anki, etc.) instead
 # of PyInstaller/Nuitka compilation. ~99% first-try success rate.
-# ════════════════════════════════════════════════════════════════════════
+# ========================================================================
 
 on:
   workflow_dispatch:
@@ -19,7 +19,7 @@ concurrency:
   group: krexion-native-build-${{ github.ref }}
   cancel-in-progress: true
 
-# ──────────────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------------
 # `contents: write` is required by softprops/action-gh-release@v2 in the
 # final "Create GitHub Release" step. Since 2023 GitHub ships repos with
 # the default GITHUB_TOKEN scoped to read-only, so without this line the
@@ -27,7 +27,7 @@ concurrency:
 #     HTTP 403 "Resource not accessible by integration"
 # We grant the minimum permissions needed; everything else stays default
 # (read-only), so workflows can still check out code and download deps.
-# ──────────────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------------
 permissions:
   contents: write
 
@@ -46,7 +46,7 @@ jobs:
         id: version
         shell: bash
         run: |
-          # `version` = human/display tag — used for filenames, GitHub
+          # `version` = human/display tag - used for filenames, GitHub
           # Release title, and AppVersion in installer branding. Can be
           # anything (e.g. "v1.0.5", "nightly-20260602-1430").
           if [ -n "${{ github.event.inputs.release_tag }}" ]; then
@@ -57,7 +57,7 @@ jobs:
           echo "version=$VER" >> "$GITHUB_OUTPUT"
 
           # `numeric_version` = strict X.X.X.X (digits + dots, max 4
-          # parts) — required by Inno Setup's VersionInfoVersion field
+          # parts) - required by Inno Setup's VersionInfoVersion field
           # which feeds into the Windows EXE FILEVERSION resource.
           #
           # Why this is done with `awk` instead of `read`+IFS: the
@@ -68,7 +68,7 @@ jobs:
           # kills the whole step.
           #
           # We use `*` instead of `{0,3}` so this works on both mawk
-          # (Linux/macOS default) and gawk (Git Bash on Windows) —
+          # (Linux/macOS default) and gawk (Git Bash on Windows) -
           # mawk doesn't support ERE interval quantifiers without
           # `--re-interval`. We then cap the array to 4 parts after
           # splitting.
@@ -226,7 +226,7 @@ jobs:
           # DLL is missing -> mongod.exe silently fails on first boot
           # and the Krexion Database service never starts.
           # We bundle the redistributable directly into the installer
-          # and run it silently (idempotent — exits 1638 if a newer
+          # and run it silently (idempotent - exits 1638 if a newer
           # version is already installed).
           New-Item -ItemType Directory -Force -Path build/vcredist | Out-Null
           $url = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
@@ -251,14 +251,14 @@ jobs:
           # PyWebView 5.x on Windows uses the EdgeChromium backend which
           # requires Microsoft's WebView2 Runtime. Win11 ships it pre-
           # installed, but a clean Win10 install (especially LTSC /
-          # older 1809-1909 builds, Server 2019, N editions) does NOT —
+          # older 1809-1909 builds, Server 2019, N editions) does NOT -
           # the Krexion dashboard window would silently fail to appear
           # (customer only sees krexion.com open in their browser, no
           # local window, no tray icon).
           #
           # We bundle Microsoft's official Evergreen bootstrapper
           # (~1.6 MB) and run it silently from the installer. It is
-          # idempotent — exits 0 instantly if WebView2 is already on
+          # idempotent - exits 0 instantly if WebView2 is already on
           # the PC, otherwise downloads + installs the latest runtime.
           New-Item -ItemType Directory -Force -Path build/webview2 | Out-Null
           $url = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
@@ -291,7 +291,7 @@ jobs:
           # On the dev pod the Playwright runtime auto-downloads at
           # first use, but on a customer's Windows install the bundle
           # we ship is the ONLY copy they get (no internet round-trip
-          # at runtime — that breaks behind corporate proxies and
+          # at runtime - that breaks behind corporate proxies and
           # creates a 30-90s first-job stall).
           #
           # We invoke Playwright's own CLI on the runner to download
@@ -304,11 +304,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install playwright==1.49.1
           # Both chromium (full) and chromium-headless-shell (smaller,
-          # used by the production RUT runner) — the runtime selects
+          # used by the production RUT runner) - the runtime selects
           # one based on the job kind, so we ship both.
           python -m playwright install chromium chromium-headless-shell
           if ($LASTEXITCODE -ne 0) {
-            Write-Warning "Playwright install returned exit $LASTEXITCODE — continuing build (chromium-bundle may be partial)"
+            Write-Warning "Playwright install returned exit $LASTEXITCODE - continuing build (chromium-bundle may be partial)"
           }
           Write-Host "=== Chromium bundle contents (top level) ==="
           Get-ChildItem build/chromium-bundle -Directory -ErrorAction SilentlyContinue |
@@ -320,19 +320,19 @@ jobs:
       - name: Install NSSM (via Chocolatey + GitHub mirror fallback)
         shell: powershell
         run: |
-          # NSSM's official mirror (nssm.cc) is flaky — it has
+          # NSSM's official mirror (nssm.cc) is flaky - it has
           # historically returned 503 Service Temporarily Unavailable
           # and gone offline for entire days. The whole native-build
           # pipeline used to depend on one Invoke-WebRequest to that
           # host, which made the build non-deterministic.
           #
           # Reliable fallback chain (first one that succeeds wins):
-          #   1. Chocolatey "nssm" package — preinstalled on every
+          #   1. Chocolatey "nssm" package - preinstalled on every
           #      windows-latest runner, fetches via chocolatey.org
           #      (Cloudflare CDN, ~100 percent uptime).
-          #   2. nssm.cc with 3-attempt retry — the original source,
+          #   2. nssm.cc with 3-attempt retry - the original source,
           #      kept as backup.
-          #   3. web.archive.org wayback snapshot — never goes away.
+          #   3. web.archive.org wayback snapshot - never goes away.
           New-Item -ItemType Directory -Force -Path build/nssm-portable | Out-Null
           $ok = $false
 
@@ -437,11 +437,11 @@ jobs:
           # Prefer a user-supplied Personal Access Token (added as the
           # repo secret RELEASE_TOKEN) so this step works even when the
           # repo has the strict default "Read repository contents and
-          # packages permissions" applied at Settings → Actions →
-          # General → Workflow permissions. If RELEASE_TOKEN is not
+          # packages permissions" applied at Settings -> Actions ->
+          # General -> Workflow permissions. If RELEASE_TOKEN is not
           # set, fall back to the workflow-scoped GITHUB_TOKEN which
           # works as long as the repo has been flipped to "Read and
           # write permissions" (or our top-level `permissions: contents:
-          # write` declaration is honoured). Either path → release
+          # write` declaration is honoured). Either path -> release
           # publishes successfully, no 403.
           token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
