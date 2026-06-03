@@ -19,6 +19,18 @@ concurrency:
   group: krexion-native-build-${{ github.ref }}
   cancel-in-progress: true
 
+# ──────────────────────────────────────────────────────────────────────
+# `contents: write` is required by softprops/action-gh-release@v2 in the
+# final "Create GitHub Release" step. Since 2023 GitHub ships repos with
+# the default GITHUB_TOKEN scoped to read-only, so without this line the
+# release step fails with:
+#     HTTP 403 "Resource not accessible by integration"
+# We grant the minimum permissions needed; everything else stays default
+# (read-only), so workflows can still check out code and download deps.
+# ──────────────────────────────────────────────────────────────────────
+permissions:
+  contents: write
+
 jobs:
   build-backend:
     name: Bundle backend (embedded Python)
