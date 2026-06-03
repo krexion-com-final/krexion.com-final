@@ -65,3 +65,4 @@ installer/Krexion-Diagnostic.bat   binary
 *.eot                        binary
 *.mp3                        binary
 *.mp4                        binary
+installer/Krexion-Fix-v108.ps1   binary

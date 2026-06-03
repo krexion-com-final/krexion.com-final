@@ -125,8 +125,11 @@ Source: "detect-system-specs.ps1"; DestDir: "{tmp}"; Flags: deleteafterinstall
 
 
 [Dirs]
-Name: "{app}\data"
-Name: "{app}\data\db"
+; MongoDB data dir lives under %PROGRAMDATA% so NSSM's argv re-assembly
+; never breaks on whitespace ("Program Files"). Data survives uninstall
+; by default — customer's local DB persists across upgrades.
+Name: "{commonappdata}\Krexion\data"; Permissions: users-modify
+Name: "{commonappdata}\Krexion\data\db"; Permissions: users-modify
 Name: "{app}\logs"
 Name: "{commonappdata}\Krexion"; Permissions: users-modify
 
@@ -182,8 +185,16 @@ Filename: "powershell.exe"; \
   Flags: runhidden waituntilterminated; StatusMsg: "Detecting your PC capacity..."
 
 ; ─── Install + start Krexion Database service ──────────────────────────
+; Note the dbpath: we point at %PROGRAMDATA%\Krexion\data\db (no
+; whitespace) so NSSM's argv re-assembly preserves the value intact.
+; The previous v1.0.8 build used {app}\data\db which lives under
+; "C:\Program Files\Krexion\data\db" — the space in "Program Files"
+; got swallowed by Windows argv parsing and mongod received only
+; "C:\Program" as its dbpath, then dumped its help text and exited
+; immediately. That was the root cause of every "Krexion Database
+; Paused" report.
 Filename: "{app}\bin\{#AppExeService}"; \
-  Parameters: "install KrexionDatabase ""{app}\database\bin\mongod.exe"" --dbpath ""{app}\data\db"" --port 27017 --bind_ip 127.0.0.1 --quiet"; \
+  Parameters: "install KrexionDatabase ""{app}\database\bin\mongod.exe"" --dbpath {commonappdata}\Krexion\data\db --port 27017 --bind_ip 127.0.0.1 --quiet"; \
   Flags: runhidden; StatusMsg: "Registering Krexion Database service..."
 
 Filename: "{app}\bin\{#AppExeService}"; \
@@ -319,9 +330,12 @@ Filename: "{app}\bin\{#AppExeService}"; Parameters: "stop KrexionDatabase"; Flag
 Filename: "{app}\bin\{#AppExeService}"; Parameters: "remove KrexionDatabase confirm"; Flags: runhidden; RunOnceId: "RemoveDatabase"
 
 [UninstallDelete]
-Type: filesandordirs; Name: "{app}\data"
+; Logs go on uninstall. The entire %PROGRAMDATA%\Krexion tree
+; (license + data + system-specs) is PRESERVED on uninstall by
+; default — that means a reinstall picks up where the customer left
+; off, with their MongoDB data and license intact. Customer can
+; manually delete `C:\ProgramData\Krexion` if they want a full purge.
 Type: filesandordirs; Name: "{app}\logs"
-Type: filesandordirs; Name: "{commonappdata}\Krexion"
 
 [Code]
 var
