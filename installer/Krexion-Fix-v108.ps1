@@ -62,8 +62,8 @@ $NewDataDir = 'C:\ProgramData\Krexion\data\db'
 if (-not (Test-Path $NSSM))    { Write-Host "ERROR: $NSSM not found." -ForegroundColor Red; pause; return }
 if (-not (Test-Path $Mongod))  { Write-Host "ERROR: $Mongod not found." -ForegroundColor Red; pause; return }
 
-# ── Step 1: Stop services ─────────────────────────────────────
-Write-Host "[1/8] Stopping Krexion services..." -ForegroundColor Yellow
+# ── Step 1: Stop services + kill zombies ─────────────────────
+Write-Host "[1/8] Stopping Krexion services + killing any zombies..." -ForegroundColor Yellow
 foreach ($svc in @('KrexionBackend','KrexionDatabase')) {
     try {
         $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
@@ -76,6 +76,28 @@ foreach ($svc in @('KrexionBackend','KrexionDatabase')) {
     } catch {}
 }
 Start-Sleep -Seconds 2
+
+# Zombie cleanup — when the v1.0.8 backend crash-looped, every uvicorn
+# exit left a krexion-core.exe holding port 8001 in TIME_WAIT. Killing
+# the parent NSSM service does NOT always cascade to its python child.
+# If we don't sweep them now, the freshly-started backend hits
+# 'Errno 10048 only one usage of each socket address is permitted'.
+$zombiesKilled = 0
+Get-Process | Where-Object { $_.Path -and $_.Path -like '*Krexion*' } | ForEach-Object {
+    try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue; $zombiesKilled++ } catch {}
+}
+if ($zombiesKilled -gt 0) {
+    Write-Host "   killed $zombiesKilled lingering Krexion process(es)" -ForegroundColor Gray
+}
+try {
+    Get-NetTCPConnection -LocalPort 8001 -ErrorAction SilentlyContinue | ForEach-Object {
+        try {
+            Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue
+            Write-Host "   freed port 8001 from PID $($_.OwningProcess)" -ForegroundColor Gray
+        } catch {}
+    }
+} catch {}
+Start-Sleep -Seconds 3
 
 # ── Step 2: Create new data dir ───────────────────────────────
 Write-Host "[2/8] Creating new data directory at $NewDataDir ..." -ForegroundColor Yellow
