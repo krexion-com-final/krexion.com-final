@@ -220,64 +220,49 @@ jobs:
       - name: Install NSSM (via Chocolatey + GitHub mirror fallback)
         shell: powershell
         run: |
-          # NSSM's official mirror (nssm.cc) is flaky — it has historically
-          # returned 503 Service Temporarily Unavailable and even gone
-          # offline for entire days. The whole native-build pipeline
-          # used to depend on a single Invoke-WebRequest to that host,
-          # which made the build wholly non-deterministic.
+          # NSSM's official mirror (nssm.cc) is flaky — it has
+          # historically returned 503 Service Temporarily Unavailable
+          # and gone offline for entire days. The whole native-build
+          # pipeline used to depend on one Invoke-WebRequest to that
+          # host, which made the build non-deterministic.
           #
           # Reliable fallback chain (first one that succeeds wins):
-          #   1. Chocolatey package "nssm" — preinstalled tool on every
-          #      windows-latest runner, fetches from chocolatey.org CDN
-          #      (Cloudflare-backed, ~100% uptime).
-          #   2. nssm.cc — the official zip (current behaviour, kept as
-          #      backup in case Chocolatey ever yanks the package).
-          #   3. web.archive.org — wayback-machine snapshot of the same
-          #      nssm.cc zip. As long as the binary existed once, this
-          #      mirror never goes away.
-          #
-          # We always copy the final binary into build/nssm-portable/
-          # so the rest of the pipeline (Inno Setup [Files] section)
-          # doesn't care how it got there.
+          #   1. Chocolatey "nssm" package — preinstalled on every
+          #      windows-latest runner, fetches via chocolatey.org
+          #      (Cloudflare CDN, ~100 percent uptime).
+          #   2. nssm.cc with 3-attempt retry — the original source,
+          #      kept as backup.
+          #   3. web.archive.org wayback snapshot — never goes away.
           New-Item -ItemType Directory -Force -Path build/nssm-portable | Out-Null
-
           $ok = $false
-          $nssmExe = ""
 
-          # ── Source 1: Chocolatey (fast, reliable, ~5 seconds) ─────
+          # Source 1: Chocolatey
           try {
             Write-Host "[1/3] Installing NSSM via Chocolatey..."
             choco install nssm -y --no-progress --limit-output
-            # Chocolatey ships nssm.exe as a shim in C:\ProgramData\chocolatey\bin
-            # — but the real binary is under \chocolatey\lib\NSSM\tools\.
-            $real = Get-ChildItem "C:\ProgramData\chocolatey\lib\NSSM" -Recurse -Filter "nssm.exe" `
-                    -ErrorAction SilentlyContinue |
-                    Where-Object { $_.FullName -match 'win64' } |
-                    Select-Object -First 1
-            if (-not $real) {
-              $real = Get-ChildItem "C:\ProgramData\chocolatey\lib\NSSM" -Recurse -Filter "nssm.exe" `
-                      -ErrorAction SilentlyContinue | Select-Object -First 1
-            }
+            $candidates = Get-ChildItem -Path "C:\ProgramData\chocolatey\lib\NSSM" -Recurse -Filter "nssm.exe" -ErrorAction SilentlyContinue
+            $real = $candidates | Where-Object { $_.FullName -match 'win64' } | Select-Object -First 1
+            if (-not $real) { $real = $candidates | Select-Object -First 1 }
             if ($real) {
-              Copy-Item $real.FullName build/nssm-portable/nssm.exe -Force
-              Write-Host "    OK — nssm.exe from $($real.FullName)"
+              Copy-Item -Path $real.FullName -Destination "build/nssm-portable/nssm.exe" -Force
+              Write-Host "    OK from $($real.FullName)"
               $ok = $true
             }
           } catch {
             Write-Warning "[1/3] Chocolatey nssm install failed: $($_.Exception.Message)"
           }
 
-          # ── Source 2: nssm.cc direct (with 3-attempt retry) ───────
+          # Source 2: nssm.cc with retry
           if (-not $ok) {
             $url = "https://nssm.cc/release/nssm-2.24.zip"
-            for ($i = 1; $i -le 3 -and -not $ok; $i++) {
+            for ($i = 1; $i -le 3; $i++) {
+              if ($ok) { break }
               try {
                 Write-Host "[2/3] Attempt $i : downloading from nssm.cc..."
-                Invoke-WebRequest -Uri $url -OutFile build/nssm.zip -UseBasicParsing -TimeoutSec 120
-                Expand-Archive -Path build/nssm.zip -DestinationPath build/nssm-extract -Force
-                Copy-Item -Path build/nssm-extract/nssm-2.24/win64/nssm.exe `
-                          -Destination build/nssm-portable/nssm.exe -Force
-                Remove-Item build/nssm.zip,build/nssm-extract -Recurse -Force -ErrorAction SilentlyContinue
+                Invoke-WebRequest -Uri $url -OutFile "build/nssm.zip" -UseBasicParsing -TimeoutSec 120
+                Expand-Archive -Path "build/nssm.zip" -DestinationPath "build/nssm-extract" -Force
+                Copy-Item -Path "build/nssm-extract/nssm-2.24/win64/nssm.exe" -Destination "build/nssm-portable/nssm.exe" -Force
+                Remove-Item -Path "build/nssm.zip","build/nssm-extract" -Recurse -Force -ErrorAction SilentlyContinue
                 $ok = $true
               } catch {
                 Write-Warning "[2/3] nssm.cc attempt $i failed: $($_.Exception.Message)"
@@ -286,16 +271,15 @@ jobs:
             }
           }
 
-          # ── Source 3: web.archive.org wayback mirror ──────────────
+          # Source 3: web.archive.org
           if (-not $ok) {
             try {
               Write-Host "[3/3] Falling back to web.archive.org..."
               $wb = "https://web.archive.org/web/2024if_/https://nssm.cc/release/nssm-2.24.zip"
-              Invoke-WebRequest -Uri $wb -OutFile build/nssm.zip -UseBasicParsing -TimeoutSec 180
-              Expand-Archive -Path build/nssm.zip -DestinationPath build/nssm-extract -Force
-              Copy-Item -Path build/nssm-extract/nssm-2.24/win64/nssm.exe `
-                        -Destination build/nssm-portable/nssm.exe -Force
-              Remove-Item build/nssm.zip,build/nssm-extract -Recurse -Force -ErrorAction SilentlyContinue
+              Invoke-WebRequest -Uri $wb -OutFile "build/nssm.zip" -UseBasicParsing -TimeoutSec 180
+              Expand-Archive -Path "build/nssm.zip" -DestinationPath "build/nssm-extract" -Force
+              Copy-Item -Path "build/nssm-extract/nssm-2.24/win64/nssm.exe" -Destination "build/nssm-portable/nssm.exe" -Force
+              Remove-Item -Path "build/nssm.zip","build/nssm-extract" -Recurse -Force -ErrorAction SilentlyContinue
               $ok = $true
             } catch {
               Write-Warning "[3/3] web.archive.org fallback failed: $($_.Exception.Message)"
@@ -307,12 +291,12 @@ jobs:
             exit 1
           }
 
-          # Final sanity check
           if (-not (Test-Path "build/nssm-portable/nssm.exe")) {
             Write-Host "::error::build/nssm-portable/nssm.exe not present after acquisition"
             exit 1
           }
-          $size = (Get-Item build/nssm-portable/nssm.exe).Length
+
+          $size = (Get-Item "build/nssm-portable/nssm.exe").Length
           Write-Host "=== NSSM ready: build/nssm-portable/nssm.exe ($size bytes) ==="
 
       - name: Install Inno Setup
