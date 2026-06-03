@@ -169,7 +169,14 @@ jobs:
     runs-on: windows-latest
     needs: [build-backend, build-frontend]
     if: always() && needs.build-backend.result == 'success' && needs.build-frontend.result == 'success'
-    timeout-minutes: 30
+    # Timeout raised from 30 -> 75 min in v1.0.10:
+    # Bundling Playwright Chromium (~250 MB compressed inside the
+    # installer) pushes Inno Setup's lzma2/ultra compression past the
+    # previous 30-min budget. Build #22 hit the wall at minute 35 while
+    # still inside the silent ISCC compile (12+ min on the chromium
+    # folder alone). 75 min gives ~25-30 min of headroom even with
+    # slow GitHub-hosted Windows runners.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 
