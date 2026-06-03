@@ -150,6 +150,15 @@ pykdebugparser==1.2.7
 pylzss==0.3.4
 pystray==0.19.5
 pywebview==5.4
+# pythonnet provides the .NET CLR bridge that pywebview's EdgeChromium
+# backend uses to talk to Microsoft.Web.WebView2.dll on Windows. Without
+# this, webview.start() silently fails at runtime (no exception
+# visible to the user) because pywebview 5.x's import-time check for
+# the CLR happens lazily. v1.0.4 - v1.0.10 customer installs had no
+# pythonnet -> dashboard window never appeared after install, only
+# the krexion.com tab opened. Adding this dependency is THE fix for
+# that "software open ni hota" report.
+pythonnet==3.0.3
 pymobiledevice3==4.10.0
 pymongo==4.9.2
 pyparsing==3.3.2

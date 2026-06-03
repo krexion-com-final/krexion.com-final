@@ -108,6 +108,12 @@ Source: "..\build\frontend-build\*"; DestDir: "{app}\frontend"; Flags: ignorever
 ; Bundled inside krexion-backend.dist as krexion-coreapp.exe — surfaced as
 ; krexion-tray.exe shortcut launcher for the customer.
 Source: "..\desktop\krexion_tray_launcher.bat"; DestDir: "{app}"; DestName: "{#AppLauncherBat}"; Flags: ignoreversion skipifsourcedoesntexist
+; Diagnostic / visible-console launcher (v1.0.11+). Shipped alongside
+; the normal launcher so customers can self-diagnose when the silent
+; launcher does nothing - this one keeps the cmd.exe window open and
+; runs python.exe (NOT pythonw.exe) so every error is on screen.
+; Linked to Start Menu as "Krexion Diagnostic".
+Source: "..\desktop\krexion_tray_debug.bat"; DestDir: "{app}"; DestName: "krexion-tray-debug.bat"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\desktop\*"; DestDir: "{app}\bin\app\desktop"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
 ; Manifest — optional
@@ -144,7 +150,34 @@ Name: "{app}\logs"
 Name: "{commonappdata}\Krexion"; Permissions: users-modify
 
 [Icons]
-Name: "{group}\Krexion"; Filename: "{#AppURL}/login"; IconFilename: "{app}\krexion.ico"
+; v1.0.11 fix: the PRIMARY "Krexion" shortcut MUST launch the native
+; PyWebView dashboard, NOT open krexion.com in a browser. Previously
+; (v1.0.4 - v1.0.10) ALL Start Menu + desktop icons pointed at
+; "{#AppURL}/login" which is just the cloud login page — customers had
+; literally no way to re-open the local Krexion window after they
+; closed it the first time (the wizard's "Launch Krexion now" post-
+; install checkbox was the only entry point, and if they unticked it
+; or quit the tray, they were stuck reinstalling). That's the root
+; cause of the "software open ni rehta" + "tray mein ni aata" reports.
+;
+; New layout:
+;   * "Krexion"                     -> krexion-tray.bat (native dashboard)
+;   * "Krexion (Web)"               -> krexion.com/login (cloud login)
+;   * "Krexion Diagnostic"          -> krexion-tray-debug.bat (visible console
+;                                      window with full Python output, for
+;                                      customer-side debugging when the silent
+;                                      launcher does nothing)
+;   * "Krexion Logs / Support / Renew / Uninstall" -> unchanged
+Name: "{group}\Krexion"; Filename: "{app}\{#AppLauncherBat}"; \
+  WorkingDir: "{app}"; IconFilename: "{app}\krexion.ico"; \
+  Comment: "Open the Krexion Local PC Dashboard"
+Name: "{group}\Krexion (Web)"; Filename: "{#AppURL}/login"; \
+  IconFilename: "{app}\krexion.ico"; \
+  Comment: "Open krexion.com login in your browser"
+Name: "{group}\Krexion Diagnostic"; Filename: "{app}\krexion-tray-debug.bat"; \
+  WorkingDir: "{app}"; IconFilename: "{app}\krexion.ico"; \
+  Comment: "Open Krexion in visible-console debug mode (for troubleshooting)"; \
+  Flags: createonlyiffileexists
 Name: "{group}\Krexion Support"; Filename: "{#AppURL}/support"; IconFilename: "{app}\krexion.ico"
 ; The shortcut name MUST NOT contain "/" or "\" — Windows' file system
 ; treats both as path separators, so a name like "Buy / Renew License"
@@ -155,7 +188,9 @@ Name: "{group}\Krexion Support"; Filename: "{#AppURL}/support"; IconFilename: "{
 Name: "{group}\Buy or Renew License"; Filename: "{#AppURL}/pricing"; IconFilename: "{app}\krexion.ico"
 Name: "{group}\Krexion Logs"; Filename: "{app}\logs"; IconFilename: "{app}\krexion.ico"
 Name: "{group}\Uninstall Krexion"; Filename: "{uninstallexe}"; IconFilename: "{app}\krexion.ico"
-Name: "{autodesktop}\Krexion"; Filename: "{#AppURL}/login"; IconFilename: "{app}\krexion.ico"; Tasks: desktopicon
+Name: "{autodesktop}\Krexion"; Filename: "{app}\{#AppLauncherBat}"; \
+  WorkingDir: "{app}"; IconFilename: "{app}\krexion.ico"; \
+  Comment: "Open the Krexion Local PC Dashboard"; Tasks: desktopicon
 
 [Registry]
 ; Auto-start Krexion Dashboard on login (per-user). Launches the

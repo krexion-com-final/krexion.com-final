@@ -85,7 +85,20 @@ def current_version() -> str:
 async def _displayed_current_version() -> str:
     """Return the version to display in UI. Prefers the latest published
     release in the DB over the static VERSION file. Falls back to the
-    file when DB lookup fails or no published release exists."""
+    file when DB lookup fails or no published release exists.
+
+    v1.0.11 fix: also require the DB record to carry a non-empty
+    ``download_url`` AND the URL must look like a real GitHub Releases
+    asset (not a placeholder / orphan). Pre-1.0.11 the cloud admin DB
+    accumulated an orphan ``v1.1.20`` "Update available" record from a
+    prior session that was never actually built or attached to a
+    GitHub Release - this caused customer dashboards to show "v1.1.20"
+    in the sidebar badge even though the installed product and the
+    GitHub Releases page were all on 1.0.x. Filtering on the URL
+    shape silently hides that orphan without forcing the admin to
+    manually delete the DB row (matches user's "kuch delete na ho"
+    rule).
+    """
     file_ver = current_version()
     try:
         if _db is None:
@@ -93,12 +106,19 @@ async def _displayed_current_version() -> str:
         rel = await _db.app_releases.find_one(
             {"published": True},
             sort=[("created_at", -1)],
-            projection={"version": 1, "_id": 0},
+            projection={"version": 1, "download_url": 1, "_id": 0},
         )
         if rel and rel.get("version"):
             db_ver = str(rel["version"]).strip()
-            # Return the newer of the two
-            if is_newer(db_ver, file_ver):
+            url = (rel.get("download_url") or "").strip().lower()
+            looks_real = (
+                url.startswith("http")
+                and "/releases/download/" in url
+                and url.endswith(".exe")
+            )
+            # Return the newer of the two - but only if the DB record is
+            # backed by a real downloadable asset.
+            if looks_real and is_newer(db_ver, file_ver):
                 return db_ver
     except Exception:  # noqa: BLE001
         pass

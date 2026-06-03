@@ -1,6 +1,6 @@
 @echo off
 REM ────────────────────────────────────────────────────────────────
-REM Krexion Tray / Dashboard Launcher  (v1.0.10+)
+REM Krexion Tray / Dashboard Launcher  (v1.0.11+)
 REM ────────────────────────────────────────────────────────────────
 REM Launched by:
 REM   * Installer "Launch Krexion now" final-page checkbox

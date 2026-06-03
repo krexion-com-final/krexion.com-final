@@ -265,103 +265,61 @@ def _launch_pywebview_window() -> bool:
         return False
 
 
-def _launch_tkinter_fallback() -> None:
-    """Last-resort window so the customer is NEVER left wondering
-    whether Krexion installed correctly. Uses Tkinter (ships with
-    embeddable CPython, no extra deps).
+def _launch_native_messagebox_fallback() -> None:
+    """Last-resort dialog so the customer is NEVER left wondering whether
+    Krexion installed correctly. Uses Win32 ``user32!MessageBoxW`` via
+    ``ctypes`` — works in EVERY Python interpreter on Windows including
+    the embedded distribution we ship with the installer (which does
+    NOT include tcl/tk, so Tkinter is unavailable; we previously tried
+    Tkinter as fallback and it crashed too with "Can't find a usable
+    init.tcl in the following directories...").
 
     Shows:
-      * Krexion brand text + version
-      * Backend status (polled every 2 s)
-      * "Open krexion.com" + "Open logs folder" buttons
-      * A clear "WebView2 runtime not detected — install it from
-        https://go.microsoft.com/fwlink/p/?LinkId=2124703" hint
+      * Krexion brand + version + reason for compatibility mode
+      * Two buttons: "Open krexion.com" + "Open Logs Folder"
+      * A close button (does NOT kill the tray icon)
+
+    Falls back to opening krexion.com in the default browser if even
+    ctypes is unavailable (which would only happen on a broken
+    Python install).
     """
     try:
-        import tkinter as tk
-        from tkinter import ttk
+        import ctypes
+        import ctypes.wintypes
     except Exception as exc:  # noqa: BLE001
-        logger.error(f"Tkinter unavailable, no GUI possible: {exc}", exc_info=True)
+        logger.error(f"ctypes unavailable, opening krexion.com in browser: {exc}", exc_info=True)
+        webbrowser.open(f"{KREXION_CLOUD}/login")
         return
 
-    import urllib.request
+    # MB_OKCANCEL | MB_ICONWARNING | MB_TOPMOST = 0x00040031
+    MB_FLAGS = 0x00000001 | 0x00000030 | 0x00040000
+    title = "Krexion - Compatibility Mode"
+    body = (
+        "Krexion is installed and running in the background, but the\n"
+        "full dashboard window could not start on this PC.\n\n"
+        "Most likely cause: Microsoft Edge WebView2 Runtime is missing.\n"
+        "Install it once from:\n"
+        "https://go.microsoft.com/fwlink/p/?LinkId=2124703\n\n"
+        "Backend services are running on 127.0.0.1:8001. The tray icon\n"
+        "should still be visible in the notification area - right-click\n"
+        "it for Show Dashboard / Open krexion.com / View Logs.\n\n"
+        "Press OK to open krexion.com in your browser,\n"
+        "or Cancel to open the logs folder for troubleshooting."
+    )
 
-    root = tk.Tk()
-    root.title("Krexion — Local PC Dashboard (compatibility mode)")
-    root.configure(bg="#0a0e1a")
-    root.geometry("720x460")
-    root.minsize(640, 400)
+    try:
+        rv = ctypes.windll.user32.MessageBoxW(None, body, title, MB_FLAGS)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"MessageBoxW failed: {exc}", exc_info=True)
+        webbrowser.open(f"{KREXION_CLOUD}/login")
+        return
 
-    # Brand header
-    header = tk.Frame(root, bg="#0a0e1a")
-    header.pack(fill="x", padx=24, pady=(22, 8))
-    tk.Label(header, text="KREXION", fg="#2dd4bf", bg="#0a0e1a",
-             font=("Segoe UI", 20, "bold")).pack(side="left")
-    tk.Label(header, text="Local PC Dashboard", fg="#94a3b8", bg="#0a0e1a",
-             font=("Segoe UI", 11)).pack(side="left", padx=12, pady=(8, 0))
-
-    # Status box
-    status_frame = tk.Frame(root, bg="#0f172a", highlightthickness=1,
-                             highlightbackground="#1e293b")
-    status_frame.pack(fill="x", padx=24, pady=12)
-    backend_lbl = tk.Label(status_frame, text="Backend: checking...",
-                            fg="#e2e8f0", bg="#0f172a",
-                            font=("Segoe UI", 11), anchor="w", padx=18, pady=14)
-    backend_lbl.pack(fill="x")
-
-    # Compatibility notice
-    notice_frame = tk.Frame(root, bg="#1e293b")
-    notice_frame.pack(fill="x", padx=24, pady=8)
-    tk.Label(notice_frame,
-             text=("Compatibility-mode window. The full Krexion Dashboard\n"
-                   "requires Microsoft WebView2 Runtime on Windows 10.\n"
-                   "Install it from: go.microsoft.com/fwlink/p/?LinkId=2124703"),
-             fg="#fbbf24", bg="#1e293b",
-             font=("Segoe UI", 9), justify="left", padx=14, pady=12).pack(anchor="w")
-
-    # Buttons
-    btn_frame = tk.Frame(root, bg="#0a0e1a")
-    btn_frame.pack(fill="x", padx=24, pady=(8, 20))
-
-    def open_url(u):
-        webbrowser.open(u)
-
-    style = ttk.Style()
-    style.theme_use("clam")
-    style.configure("Krexion.TButton", background="#2dd4bf", foreground="#0a0e1a",
-                    font=("Segoe UI", 10, "bold"), padding=10, borderwidth=0)
-    style.map("Krexion.TButton", background=[("active", "#14b8a6")])
-
-    ttk.Button(btn_frame, text="Open krexion.com", style="Krexion.TButton",
-               command=lambda: open_url(f"{KREXION_CLOUD}/login")).pack(side="left", padx=(0, 8))
-    ttk.Button(btn_frame, text="Install WebView2", style="Krexion.TButton",
-               command=lambda: open_url("https://go.microsoft.com/fwlink/p/?LinkId=2124703")).pack(side="left", padx=8)
-    ttk.Button(btn_frame, text="View Logs", style="Krexion.TButton",
-               command=lambda: _open_in_explorer(LOG_DIR)).pack(side="left", padx=8)
-    ttk.Button(btn_frame, text="Quit", style="Krexion.TButton",
-               command=root.destroy).pack(side="right")
-
-    # Footer
-    tk.Label(root,
-             text="Krexion runs in the system tray. Closing this window keeps services running.",
-             fg="#64748b", bg="#0a0e1a", font=("Segoe UI", 9)).pack(side="bottom", pady=8)
-
-    # Poll backend status every 2 s
-    def poll_backend():
-        try:
-            with urllib.request.urlopen("http://127.0.0.1:8001/api/desktop/stats", timeout=2) as r:
-                if r.status == 200:
-                    backend_lbl.config(text="Backend: ONLINE — local engine reachable on 127.0.0.1:8001",
-                                       fg="#2dd4bf")
-                else:
-                    backend_lbl.config(text=f"Backend: HTTP {r.status}", fg="#fbbf24")
-        except Exception as exc:  # noqa: BLE001
-            backend_lbl.config(text=f"Backend: unreachable ({type(exc).__name__})", fg="#fb7185")
-        root.after(2000, poll_backend)
-
-    root.after(500, poll_backend)
-    logger.info("Tkinter fallback window entering mainloop.")
-    root.mainloop()
+    # IDOK = 1, IDCANCEL = 2
+    if rv == 1:
+        webbrowser.open(f"{KREXION_CLOUD}/login")
+    elif rv == 2:
+        _open_in_explorer(LOG_DIR)
+    logger.info(f"Compatibility MessageBox closed (button={rv}).")
 
 
 def main() -> int:
@@ -370,9 +328,9 @@ def main() -> int:
 
     if _launch_pywebview_window():
         return 0
-    # PyWebView failed → fallback so customer ALWAYS sees a window
-    logger.warning("Falling back to Tkinter compatibility window.")
-    _launch_tkinter_fallback()
+    # PyWebView failed - fallback so customer ALWAYS sees a window
+    logger.warning("Falling back to native Win32 MessageBox compatibility dialog.")
+    _launch_native_messagebox_fallback()
     return 0
 
 
