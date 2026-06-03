@@ -118,6 +118,11 @@ Source: "..\build\krexion-manifest.json"; DestDir: "{app}"; Flags: ignoreversion
 ; missing. We ship it inline and run silently if not already present.
 Source: "..\build\vcredist\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall skipifsourcedoesntexist
 
+; Adaptive system-specs detector — invoked from the [Run] section to
+; write %PROGRAMDATA%\Krexion\system-specs.json the backend reads on
+; startup to size its heavy-job semaphore. Deleted after install.
+Source: "detect-system-specs.ps1"; DestDir: "{tmp}"; Flags: deleteafterinstall
+
 
 [Dirs]
 Name: "{app}\data"
@@ -167,12 +172,14 @@ Filename: "{cmd}"; \
   Check: HasLicenseKey
 
 ; ─── Persist detected hardware specs ──────────────────────────────────
-; Inno Setup [Code] section detected RAM/CPU during install. Backend
-; reads {commonappdata}\Krexion\system-specs.json on startup to set
-; adaptive concurrency limits for heavy jobs.
-Filename: "{cmd}"; \
-  Parameters: "/C echo {code:GetSystemSpecsJson} > ""{commonappdata}\Krexion\system-specs.json"""; \
-  Flags: runhidden; StatusMsg: "Detecting your PC capacity..."
+; Runs detect-system-specs.ps1 which writes
+; %PROGRAMDATA%\Krexion\system-specs.json. Backend reads this on
+; startup to set adaptive concurrency limits for heavy jobs. The
+; PowerShell script handles its own errors and never fails the
+; installer — worst case it writes a safe medium-tier fallback.
+Filename: "powershell.exe"; \
+  Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{tmp}\detect-system-specs.ps1"" -OutDir ""{commonappdata}\Krexion"""; \
+  Flags: runhidden waituntilterminated; StatusMsg: "Detecting your PC capacity..."
 
 ; ─── Install + start Krexion Database service ──────────────────────────
 Filename: "{app}\bin\{#AppExeService}"; \
@@ -319,10 +326,6 @@ Type: filesandordirs; Name: "{commonappdata}\Krexion"
 [Code]
 var
   LicensePage: TInputQueryWizardPage;
-  DetectedCores: Integer;
-  DetectedRamGB: Integer;
-  DetectedTier: string;
-  DetectedMaxJobs: Integer;
 
 procedure InitializeWizard;
 begin
@@ -356,64 +359,8 @@ begin
   Result := Length(GetLicenseKey('')) > 0;
 end;
 
-procedure DetectSystemSpecs;
-// Detects the customer's CPU core count and RAM (GB) using Windows API,
-// then derives an adaptive "tier" + max concurrent heavy job count.
-// Result is consumed by GetSystemSpecsJson during the [Run] section.
-var
-  MemStatus: TMemoryStatusEx;
-  SysInfo: TSystemInfo;
-begin
-  // ── RAM detection ──
-  MemStatus.dwLength := SizeOf(MemStatus);
-  if GlobalMemoryStatusEx(MemStatus) then
-    DetectedRamGB := Round(MemStatus.ullTotalPhys / (1024.0 * 1024.0 * 1024.0))
-  else
-    DetectedRamGB := 8;  // safe fallback
-
-  // ── CPU cores ──
-  GetSystemInfo(SysInfo);
-  DetectedCores := SysInfo.dwNumberOfProcessors;
-  if DetectedCores < 1 then DetectedCores := 4;
-
-  // ── Adaptive tier ──
-  // low    : <= 4 GB RAM or <= 2 cores  → max 1 concurrent heavy job
-  // medium : <= 8 GB RAM or <= 4 cores  → max 2
-  // high   : <= 16 GB RAM and <= 8 cores → max 4
-  // extreme: 16+ GB AND 8+ cores         → max 8
-  if (DetectedRamGB <= 4) or (DetectedCores <= 2) then begin
-    DetectedTier := 'low';
-    DetectedMaxJobs := 1;
-  end else if (DetectedRamGB <= 8) or (DetectedCores <= 4) then begin
-    DetectedTier := 'medium';
-    DetectedMaxJobs := 2;
-  end else if (DetectedRamGB <= 16) or (DetectedCores <= 8) then begin
-    DetectedTier := 'high';
-    DetectedMaxJobs := 4;
-  end else begin
-    DetectedTier := 'extreme';
-    DetectedMaxJobs := 8;
-  end;
-end;
-
-function GetSystemSpecsJson(Param: string): string;
-// Returns a single-line JSON object the [Run] section pipes into
-// {commonappdata}\Krexion\system-specs.json. Single line because we use
-// `echo > file` to write it — multi-line would need a temp file roundtrip.
-begin
-  if DetectedCores = 0 then DetectSystemSpecs;
-  Result :=
-    '{"ram_gb":' + IntToStr(DetectedRamGB) +
-    ',"cpu_cores":' + IntToStr(DetectedCores) +
-    ',"tier":"' + DetectedTier + '"' +
-    ',"max_concurrent_heavy_jobs":' + IntToStr(DetectedMaxJobs) +
-    ',"detected_by":"installer"}';
-end;
-
 function InitializeSetup(): Boolean;
 begin
-  // Detect specs once at the very start so they're available throughout
-  // the install + visible in the final UI page if we ever add one.
-  DetectSystemSpecs;
+  // Future hook for OS version / disk space pre-flight checks.
   Result := True;
 end;
