@@ -188,8 +188,25 @@ jobs:
       - name: Download MongoDB Portable
         shell: powershell
         run: |
+          # MongoDB Portable from MongoDB Inc.'s own CDN. Generally
+          # rock-solid, but we wrap it in a 3-attempt retry loop just in
+          # case the runner hits a transient TLS/DNS hiccup or fastdl
+          # has a regional outage. ~700 MB download = the heaviest step
+          # in the whole workflow, so we don't want a one-off blip to
+          # waste 13 minutes of build time.
           $url = "https://fastdl.mongodb.org/windows/mongodb-windows-x86_64-7.0.14.zip"
-          Invoke-WebRequest -Uri $url -OutFile build/mongo.zip -UseBasicParsing
+          $maxAttempts = 3
+          for ($i = 1; $i -le $maxAttempts; $i++) {
+            try {
+              Write-Host "Attempt $i of $maxAttempts : downloading MongoDB Portable..."
+              Invoke-WebRequest -Uri $url -OutFile build/mongo.zip -UseBasicParsing -TimeoutSec 900
+              break
+            } catch {
+              Write-Warning "Attempt $i failed: $($_.Exception.Message)"
+              if ($i -eq $maxAttempts) { throw }
+              Start-Sleep -Seconds (10 * $i)
+            }
+          }
           Expand-Archive -Path build/mongo.zip -DestinationPath build/mongo-extract -Force
           $srcDir = Get-ChildItem build/mongo-extract -Filter "mongodb-*" -Directory | Select-Object -First 1
           if ($srcDir) {
@@ -200,16 +217,103 @@ jobs:
           Write-Host "=== mongo-portable contents ==="
           Get-ChildItem build/mongo-portable -Recurse -File | Select-Object Name | Select-Object -First 10
 
-      - name: Download NSSM
+      - name: Install NSSM (via Chocolatey + GitHub mirror fallback)
         shell: powershell
         run: |
-          Invoke-WebRequest -Uri "https://nssm.cc/release/nssm-2.24.zip" `
-                            -OutFile build/nssm.zip -UseBasicParsing
-          Expand-Archive -Path build/nssm.zip -DestinationPath build/nssm-extract -Force
+          # NSSM's official mirror (nssm.cc) is flaky — it has historically
+          # returned 503 Service Temporarily Unavailable and even gone
+          # offline for entire days. The whole native-build pipeline
+          # used to depend on a single Invoke-WebRequest to that host,
+          # which made the build wholly non-deterministic.
+          #
+          # Reliable fallback chain (first one that succeeds wins):
+          #   1. Chocolatey package "nssm" — preinstalled tool on every
+          #      windows-latest runner, fetches from chocolatey.org CDN
+          #      (Cloudflare-backed, ~100% uptime).
+          #   2. nssm.cc — the official zip (current behaviour, kept as
+          #      backup in case Chocolatey ever yanks the package).
+          #   3. web.archive.org — wayback-machine snapshot of the same
+          #      nssm.cc zip. As long as the binary existed once, this
+          #      mirror never goes away.
+          #
+          # We always copy the final binary into build/nssm-portable/
+          # so the rest of the pipeline (Inno Setup [Files] section)
+          # doesn't care how it got there.
           New-Item -ItemType Directory -Force -Path build/nssm-portable | Out-Null
-          Copy-Item -Path build/nssm-extract/nssm-2.24/win64/nssm.exe `
-                    -Destination build/nssm-portable/nssm.exe -Force
-          Remove-Item -Path build/nssm.zip,build/nssm-extract -Recurse -Force -ErrorAction SilentlyContinue
+
+          $ok = $false
+          $nssmExe = ""
+
+          # ── Source 1: Chocolatey (fast, reliable, ~5 seconds) ─────
+          try {
+            Write-Host "[1/3] Installing NSSM via Chocolatey..."
+            choco install nssm -y --no-progress --limit-output
+            # Chocolatey ships nssm.exe as a shim in C:\ProgramData\chocolatey\bin
+            # — but the real binary is under \chocolatey\lib\NSSM\tools\.
+            $real = Get-ChildItem "C:\ProgramData\chocolatey\lib\NSSM" -Recurse -Filter "nssm.exe" `
+                    -ErrorAction SilentlyContinue |
+                    Where-Object { $_.FullName -match 'win64' } |
+                    Select-Object -First 1
+            if (-not $real) {
+              $real = Get-ChildItem "C:\ProgramData\chocolatey\lib\NSSM" -Recurse -Filter "nssm.exe" `
+                      -ErrorAction SilentlyContinue | Select-Object -First 1
+            }
+            if ($real) {
+              Copy-Item $real.FullName build/nssm-portable/nssm.exe -Force
+              Write-Host "    OK — nssm.exe from $($real.FullName)"
+              $ok = $true
+            }
+          } catch {
+            Write-Warning "[1/3] Chocolatey nssm install failed: $($_.Exception.Message)"
+          }
+
+          # ── Source 2: nssm.cc direct (with 3-attempt retry) ───────
+          if (-not $ok) {
+            $url = "https://nssm.cc/release/nssm-2.24.zip"
+            for ($i = 1; $i -le 3 -and -not $ok; $i++) {
+              try {
+                Write-Host "[2/3] Attempt $i : downloading from nssm.cc..."
+                Invoke-WebRequest -Uri $url -OutFile build/nssm.zip -UseBasicParsing -TimeoutSec 120
+                Expand-Archive -Path build/nssm.zip -DestinationPath build/nssm-extract -Force
+                Copy-Item -Path build/nssm-extract/nssm-2.24/win64/nssm.exe `
+                          -Destination build/nssm-portable/nssm.exe -Force
+                Remove-Item build/nssm.zip,build/nssm-extract -Recurse -Force -ErrorAction SilentlyContinue
+                $ok = $true
+              } catch {
+                Write-Warning "[2/3] nssm.cc attempt $i failed: $($_.Exception.Message)"
+                Start-Sleep -Seconds (5 * $i)
+              }
+            }
+          }
+
+          # ── Source 3: web.archive.org wayback mirror ──────────────
+          if (-not $ok) {
+            try {
+              Write-Host "[3/3] Falling back to web.archive.org..."
+              $wb = "https://web.archive.org/web/2024if_/https://nssm.cc/release/nssm-2.24.zip"
+              Invoke-WebRequest -Uri $wb -OutFile build/nssm.zip -UseBasicParsing -TimeoutSec 180
+              Expand-Archive -Path build/nssm.zip -DestinationPath build/nssm-extract -Force
+              Copy-Item -Path build/nssm-extract/nssm-2.24/win64/nssm.exe `
+                        -Destination build/nssm-portable/nssm.exe -Force
+              Remove-Item build/nssm.zip,build/nssm-extract -Recurse -Force -ErrorAction SilentlyContinue
+              $ok = $true
+            } catch {
+              Write-Warning "[3/3] web.archive.org fallback failed: $($_.Exception.Message)"
+            }
+          }
+
+          if (-not $ok) {
+            Write-Host "::error::All NSSM acquisition methods failed (chocolatey + nssm.cc + web.archive.org)"
+            exit 1
+          }
+
+          # Final sanity check
+          if (-not (Test-Path "build/nssm-portable/nssm.exe")) {
+            Write-Host "::error::build/nssm-portable/nssm.exe not present after acquisition"
+            exit 1
+          }
+          $size = (Get-Item build/nssm-portable/nssm.exe).Length
+          Write-Host "=== NSSM ready: build/nssm-portable/nssm.exe ($size bytes) ==="
 
       - name: Install Inno Setup
         shell: powershell
@@ -246,4 +350,14 @@ jobs:
           prerelease: false
           files: |
             installer/Output/Krexion-Setup-*.exe
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # Prefer a user-supplied Personal Access Token (added as the
+          # repo secret RELEASE_TOKEN) so this step works even when the
+          # repo has the strict default "Read repository contents and
+          # packages permissions" applied at Settings → Actions →
+          # General → Workflow permissions. If RELEASE_TOKEN is not
+          # set, fall back to the workflow-scoped GITHUB_TOKEN which
+          # works as long as the repo has been flipped to "Read and
+          # write permissions" (or our top-level `permissions: contents:
+          # write` declaration is honoured). Either path → release
+          # publishes successfully, no 403.
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
