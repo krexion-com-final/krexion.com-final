@@ -1,6 +1,6 @@
 @echo off
 REM ────────────────────────────────────────────────────────────────
-REM Krexion Tray / Dashboard Launcher  (v1.0.5+)
+REM Krexion Tray / Dashboard Launcher  (v1.0.10+)
 REM ────────────────────────────────────────────────────────────────
 REM Launched by:
 REM   * Installer "Launch Krexion now" final-page checkbox
@@ -12,7 +12,7 @@ REM (== renamed pythonw.exe). The Python module now sets up its own
 REM file logger at logs\dashboard.log BEFORE any imports, so even an
 REM ImportError leaves a paper trail.
 REM
-REM v1.0.5 fix: previously used `start "Krexion Dashboard" /B "%PY%" ...
+REM v1.0.10 fix: previously used `start "Krexion Dashboard" /B "%PY%" ...
 REM `>> logfile 2>&1` — the redirection only captured `start`'s own
 REM output, not the launched process (start detaches handles), so any
 REM pywebview/WebView2 failure vanished into NUL. We now use the

@@ -15,4 +15,4 @@ The dashboard window:
     a real "Quit" lives in the tray menu so the customer never
     accidentally kills it
 """
-__version__ = "1.0.5"
+__version__ = "1.0.10"

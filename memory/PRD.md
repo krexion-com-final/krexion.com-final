@@ -1040,7 +1040,7 @@ Admin needs to manually trigger **Actions → Build Native Windows Release → R
 
 ---
 
-## Iteration N — 2026-06-03: v1.0.5 — Native install dashboard + heavy-feature fixes
+## Iteration v1.0.10 — 2026-06-03: Native install dashboard + heavy-feature fixes
 
 ### User-reported symptoms (after v1.0.4 install on a fresh Windows PC)
 1. **`krexion.com` opens after install but the local Krexion dashboard window does NOT** — customer expected the v1.0.8 PyWebView dashboard (per saved screenshot showing "Krexion — Local PC Dashboard" with CPU/RAM gauges + tier badge).
@@ -1061,7 +1061,7 @@ Admin needs to manually trigger **Actions → Build Native Windows Release → R
 - **`_launch_tkinter_fallback()`** — brand-new compatibility window using Tkinter (ships with embeddable CPython, zero extra deps). Shows Krexion brand + live backend status (polled every 2 s via `urllib.request`) + clear "Install WebView2 from go.microsoft.com/fwlink/p/?LinkId=2124703" hint + buttons to open krexion.com / logs folder. Customer ALWAYS sees a Krexion window after install — never a silent miss.
 - **Tray icon fallback now uses solid-teal 16x16 image** instead of 1x1 transparent pixel (which Windows refused to render → invisible icon bug).
 
-#### 2. `desktop/krexion_tray_launcher.bat` (rewritten — clean v1.0.5)
+#### 2. `desktop/krexion_tray_launcher.bat` (rewritten — clean v1.0.10)
 - Removed `start /B "%PY%" ... >> logfile 2>&1` (broken redirection).
 - Now uses `start "" "%PY%" -m desktop.krexion_dashboard` — spawns the GUI interpreter detached, relies on Python's file logger inside the module for diagnostics.
 - Exports `KREXION_LOG_DIR` env var so the Python logger always knows where to write (regardless of working-dir detection).
@@ -1077,7 +1077,7 @@ Admin needs to manually trigger **Actions → Build Native Windows Release → R
 - **New step: "Download Microsoft Edge WebView2 Runtime bootstrapper"** — pulls from `go.microsoft.com/fwlink/p/?LinkId=2124703` with 3-attempt retry, lands at `build/webview2/MicrosoftEdgeWebview2Setup.exe`.
 - **New step: "Bundle Playwright Chromium"** — invokes `python -m playwright install chromium chromium-headless-shell` with `PLAYWRIGHT_BROWSERS_PATH=build/chromium-bundle`. Ships both the full Chromium (for visual recording / debugging) and the smaller chromium-headless-shell (used by the production RUT runner) so customers get heavy features working immediately, with no first-run download stall (also fixes corporate-proxy installs).
 
-#### 5. `backend/VERSION` + `desktop/__init__.py` — bumped to `1.0.5`
+#### 5. `backend/VERSION` + `desktop/__init__.py` — bumped to `1.0.10`
 
 ### Tests run
 - `ruff check desktop/krexion_dashboard.py` → all checks passed.
@@ -1095,7 +1095,7 @@ Admin needs to manually trigger **Actions → Build Native Windows Release → R
 - Database schema, MongoDB collections, user data — untouched
 - Frontend (cloud krexion.com) — untouched
 
-### How customer experience changes after re-release as v1.0.5
+### How customer experience changes after re-release as v1.0.10
 1. Install runs as before (no change in wizard).
 2. NEW: silent WebView2 install during prerequisites step (~2-20 s on Win10 without it, instant on Win11).
 3. Backend + Database services register and start (same as before).
@@ -1119,7 +1119,19 @@ Working tree clean apart from these 8 files, no merge conflicts possible.
 
 ### Build & release flow for admin
 After "Save to GitHub" lands on `main`:
-1. Go to GitHub → Actions → "Build Native Windows Release" → Run workflow → enter tag `v1.0.5` → run.
-2. ~12-18 minute build (Chromium download adds ~3-5 min). Produces `Krexion-Setup-v1.0.5.exe`.
-3. Workflow auto-attaches the .exe to a new GitHub Release named `v1.0.5`.
+1. Go to GitHub → Actions → "Build Native Windows Release" → Run workflow → enter tag `v1.0.10` → run.
+2. ~12-18 minute build (Chromium download adds ~3-5 min). Produces `Krexion-Setup-v1.0.10.exe`.
+3. Workflow auto-attaches the .exe to a new GitHub Release named `v1.0.10`.
 4. Admin publishes via krexion.com → Releases admin page → customers get auto-update banner via the existing desktop updater path.
+
+### Correction note (added same session)
+First push went out as v1.0.5 because the local repo's `backend/VERSION`
+file still read `1.0.4` and that's what we bumped from. The customer
+pointed out that **v1.0.9 was already published** on GitHub Releases
+on 2026-06-03. We cancelled the v1.0.5 workflow run, bumped both
+`backend/VERSION` → `1.0.10` and `desktop/__init__.py.__version__` →
+`1.0.10` to slot in cleanly after v1.0.9, and re-pushed + re-triggered
+the build with tag `v1.0.10`. No code changes — only the version
+strings and PRD wording were updated. The fix set described in this
+section is identical to what landed in commit a72b41e plus the
+version bump.
