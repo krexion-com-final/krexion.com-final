@@ -1,0 +1,259 @@
+/* Krexion Desktop Dashboard — visual design
+   ──────────────────────────────────────────
+   Deep-space dark theme with a single electric-teal accent. Mirrors
+   the krexion.com cloud look so users feel "this is part of the same
+   app". Variables make a future light-mode trivial.
+*/
+
+:root {
+  --bg-0: #060912;
+  --bg-1: #0a0e1a;
+  --bg-2: #111726;
+  --bg-3: #1a2235;
+  --border: #1f293f;
+  --text-1: #e8edf7;
+  --text-2: #9aa3b8;
+  --text-3: #5d6781;
+  --accent: #00e8c5;        /* electric teal */
+  --accent-dim: #00b797;
+  --warn: #f7b955;
+  --danger: #ef4d5e;
+  --ok: #3ddb8d;
+  --shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  --radius: 14px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg-0);
+  color: var(--text-1);
+  font-family: "Segoe UI Variable", "Segoe UI", -apple-system, system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  overflow: hidden;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background:
+    radial-gradient(900px 600px at 80% -20%, rgba(0, 232, 197, 0.06), transparent 60%),
+    radial-gradient(800px 500px at -10% 110%, rgba(99, 102, 241, 0.05), transparent 55%),
+    var(--bg-0);
+}
+
+/* ── Top bar ────────────────────────────────────────────────────── */
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-1);
+}
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand-mark {
+  width: 36px; height: 36px;
+  border-radius: 9px;
+  display: grid; place-items: center;
+  font-weight: 700; font-size: 18px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-dim));
+  color: var(--bg-0);
+  box-shadow: 0 4px 16px rgba(0, 232, 197, 0.35);
+}
+.brand-name { font-weight: 600; letter-spacing: 0.2px; }
+.brand-sub  { font-size: 11px; color: var(--text-3); margin-top: 1px; }
+
+.topbar-right { display: flex; align-items: center; gap: 10px; }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; padding: 5px 11px;
+  border-radius: 999px;
+  background: var(--bg-3);
+  color: var(--text-2);
+  border: 1px solid var(--border);
+}
+.pill-ok    { background: rgba(61, 219, 141, 0.08); color: var(--ok); border-color: rgba(61, 219, 141, 0.25); }
+.pill-warn  { background: rgba(247, 185, 85, 0.08); color: var(--warn); border-color: rgba(247, 185, 85, 0.25); }
+.pill-danger{ background: rgba(239, 77, 94, 0.08); color: var(--danger); border-color: rgba(239, 77, 94, 0.25); }
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-1);
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.btn-ghost:hover { background: var(--bg-2); border-color: var(--accent-dim); }
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--bg-0);
+  border: none;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 120ms ease, background 120ms ease;
+}
+.btn-primary:hover { background: var(--accent-dim); transform: translateY(-1px); }
+
+/* ── Update banner ──────────────────────────────────────────────── */
+.update-banner {
+  margin: 14px 22px 0 22px;
+  border-radius: var(--radius);
+  background: linear-gradient(90deg, rgba(0, 232, 197, 0.12), rgba(99, 102, 241, 0.08));
+  border: 1px solid rgba(0, 232, 197, 0.35);
+  padding: 14px 18px;
+  box-shadow: var(--shadow);
+}
+.update-banner.hidden { display: none; }
+.update-banner-content { display: flex; align-items: center; gap: 16px; }
+.update-banner-icon {
+  width: 36px; height: 36px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--bg-0);
+  display: grid; place-items: center;
+  font-weight: 700; font-size: 18px;
+}
+.update-banner-text { flex: 1; }
+.update-banner-text strong { display: block; font-size: 14px; color: var(--text-1); }
+.update-banner-text span { font-size: 12px; color: var(--text-2); }
+.update-banner-actions { display: flex; gap: 8px; }
+
+/* ── Grid layout ───────────────────────────────────────────────── */
+.grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  padding: 18px 22px;
+  overflow-y: auto;
+}
+.span-2 { grid-column: span 2; }
+
+.card {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  box-shadow: var(--shadow);
+  position: relative;
+  transition: border-color 150ms ease;
+}
+.card:hover { border-color: rgba(0, 232, 197, 0.25); }
+
+.card-head {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 12px;
+}
+.card h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--text-2); letter-spacing: 0.4px; text-transform: uppercase; }
+.muted { font-size: 11px; color: var(--text-3); }
+
+/* ── Status row ────────────────────────────────────────────────── */
+.status-row { display: flex; gap: 24px; flex-wrap: wrap; }
+.status-row-item { display: flex; align-items: center; gap: 10px; }
+.dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--text-3);
+  box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.04);
+  flex-shrink: 0;
+}
+.dot-ok     { background: var(--ok);     box-shadow: 0 0 0 4px rgba(61, 219, 141, 0.15); }
+.dot-warn   { background: var(--warn);   box-shadow: 0 0 0 4px rgba(247, 185, 85, 0.15); }
+.dot-danger { background: var(--danger); box-shadow: 0 0 0 4px rgba(239, 77, 94, 0.15); }
+.dot-unknown{ background: var(--text-3); }
+
+.status-label { font-size: 13px; color: var(--text-1); }
+.status-sub   { font-size: 11px; color: var(--text-3); margin-top: 2px; }
+
+/* ── Big stat ──────────────────────────────────────────────────── */
+.big-stat { display: flex; flex-direction: column; gap: 4px; }
+.big-stat-value { font-size: 28px; font-weight: 700; color: var(--text-1); }
+.big-stat-sub   { font-size: 12px; color: var(--text-3); }
+
+/* ── Gauges ────────────────────────────────────────────────────── */
+.gauge {
+  width: 100%; height: 8px;
+  background: var(--bg-3);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-top: 6px;
+}
+.gauge-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+  transition: width 600ms ease;
+}
+.gauge-readings {
+  display: flex; justify-content: space-between;
+  margin-top: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+/* ── Capacity ──────────────────────────────────────────────────── */
+.capacity-detail {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+#capacity-max { color: var(--accent); font-weight: 700; }
+
+/* ── Jobs lists ────────────────────────────────────────────────── */
+.jobs-list, .recent-list { display: flex; flex-direction: column; gap: 8px; }
+.job-item {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.job-item-meta { color: var(--text-3); font-size: 11px; }
+.job-status-running { color: var(--accent); }
+.job-status-completed { color: var(--ok); }
+.job-status-failed { color: var(--danger); }
+.jobs-empty {
+  text-align: center;
+  padding: 18px;
+  color: var(--text-3);
+  font-size: 13px;
+  background: var(--bg-2);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+
+/* ── Footer ────────────────────────────────────────────────────── */
+.footer {
+  display: flex; justify-content: space-between;
+  padding: 10px 22px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-1);
+  font-size: 11px;
+}
+
+/* ── Responsive ────────────────────────────────────────────────── */
+@media (max-width: 980px) {
+  .grid { grid-template-columns: 1fr 1fr; }
+  .span-2 { grid-column: span 2; }
+}
+@media (max-width: 700px) {
+  .grid { grid-template-columns: 1fr; }
+  .span-2 { grid-column: span 1; }
+  .topbar-right { gap: 6px; }
+  .topbar-right .btn-ghost { display: none; }
+}

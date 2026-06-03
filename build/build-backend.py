@@ -403,10 +403,18 @@ def rebrand_python_exe() -> None:
     that loads python311.dll, so any renamed copy still works the
     same way.
 
-    Same trick for pythonw.exe → krexion-tray.exe (the tray app
-    placeholder; until we ship a real tray UI, this binary just sits
-    unused but it's referenced by the .iss as `skipifsourcedoesntexist`
-    so it's safe to omit OR include).
+    Same trick for pythonw.exe → krexion-coreapp.exe (the GUI-mode
+    interpreter used by the desktop dashboard / tray app).
+
+    Important: in v1.0.7 and earlier this function only COPIED the
+    originals, which left python.exe + pythonw.exe sitting next to the
+    renamed binaries. The 2026-01 white-label audit confirmed customers
+    were still seeing "python.exe" in Task Manager (its PE Version Info
+    field reads "Python" and is matched on by Task Manager's search).
+    We now DELETE the originals after copying so only Krexion-branded
+    binaries survive on disk. Admins who need `python -m pip` can call
+    `krexion-core.exe -m pip ...` — the renamed binary behaves
+    identically.
     """
     if os.name != "nt":
         log("Cross-platform dry-run — skipping .exe rename")
@@ -414,17 +422,45 @@ def rebrand_python_exe() -> None:
 
     mapping = [
         ("python.exe", "krexion-core.exe"),
-        ("pythonw.exe", "krexion-coreapp.exe"),  # pythonw = GUI-mode Python
+        ("pythonw.exe", "krexion-coreapp.exe"),  # GUI-mode (no console window)
     ]
     for src_name, dst_name in mapping:
         src = DIST_DIR / src_name
         dst = DIST_DIR / dst_name
         if src.exists():
-            # KEEP a copy of python.exe so `python -m pip` still works
-            # when admins run maintenance scripts; the rename is the
-            # *customer-facing* one. shutil.copy2 preserves PE metadata.
+            # shutil.copy2 preserves PE metadata. We then delete the
+            # original so Task Manager never has a chance to display
+            # the un-branded name.
             shutil.copy2(src, dst)
-            log(f"  rebranded {src_name} -> {dst_name}")
+            try:
+                src.unlink()
+                log(f"  rebranded {src_name} -> {dst_name} (original removed)")
+            except Exception as exc:  # noqa: BLE001
+                # Don't fail the build if delete fails — copy is enough
+                # for the rename to take effect. Log and continue.
+                log(f"  rebranded {src_name} -> {dst_name} (could not delete original: {exc})")
+
+
+def copy_desktop_package() -> None:
+    """Copy the ``/desktop`` package into the bundle so the dashboard
+    runs from ``krexion-coreapp.exe -m desktop.krexion_dashboard``.
+
+    Lands at ``{DIST_DIR}/app/desktop/`` because:
+      * ``python311._pth`` adds ``app`` to sys.path
+      * The NSSM backend service sets ``AppDirectory={app}\\bin\\app``
+      * `krexion-tray.bat` cds into the same directory before launching
+    """
+    src = REPO_ROOT / "desktop"
+    if not src.exists():
+        log("desktop/ package not found at repo root — skipping (dashboard will not be shipped)")
+        return
+    dest = DIST_DIR / "app" / "desktop"
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(src, dest, ignore=shutil.ignore_patterns(
+        "__pycache__", "*.pyc", ".pytest_cache",
+    ))
+    log(f"Bundled desktop dashboard at {dest}")
 
 
 def write_build_manifest() -> None:
@@ -464,6 +500,7 @@ def main() -> int:
         req = filtered_requirements()
         pip_install_requirements(req)
         copy_backend_source()
+        copy_desktop_package()
         rebrand_python_exe()
         write_build_manifest()
     except subprocess.CalledProcessError as e:

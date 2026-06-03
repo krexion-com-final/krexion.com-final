@@ -217,6 +217,34 @@ jobs:
           Write-Host "=== mongo-portable contents ==="
           Get-ChildItem build/mongo-portable -Recurse -File | Select-Object Name | Select-Object -First 10
 
+      - name: Download Microsoft VC++ Redistributable (required by MongoDB 7.0)
+        shell: powershell
+        run: |
+          # MongoDB 7.0.x mongod.exe links against VCRUNTIME140_1.dll
+          # which only ships with the Visual C++ 2015-2022 Redistributable.
+          # On a fresh Windows 10 install without recent updates this
+          # DLL is missing -> mongod.exe silently fails on first boot
+          # and the Krexion Database service never starts.
+          # We bundle the redistributable directly into the installer
+          # and run it silently (idempotent — exits 1638 if a newer
+          # version is already installed).
+          New-Item -ItemType Directory -Force -Path build/vcredist | Out-Null
+          $url = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+          $out = "build/vcredist/vc_redist.x64.exe"
+          for ($i = 1; $i -le 3; $i++) {
+            try {
+              Write-Host "Attempt $i : downloading vc_redist.x64.exe from aka.ms..."
+              Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing -TimeoutSec 180
+              break
+            } catch {
+              Write-Warning "Attempt $i failed: $($_.Exception.Message)"
+              if ($i -eq 3) { throw }
+              Start-Sleep -Seconds (5 * $i)
+            }
+          }
+          $size = (Get-Item $out).Length
+          Write-Host "=== VC++ Redistributable ready: $out ($size bytes) ==="
+
       - name: Install NSSM (via Chocolatey + GitHub mirror fallback)
         shell: powershell
         run: |

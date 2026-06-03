@@ -17040,6 +17040,21 @@ except Exception as _rel_err:  # noqa: BLE001
     logger.error(f"Releases module failed to load: {_rel_err}")
 
 
+# ─── Desktop Companion module (PyWebView dashboard endpoints) ─────────
+# Powers the local-install dashboard window at
+# `krexion-coreapp.exe -m desktop.krexion_dashboard`. Endpoints respond
+# meaningfully only when KREXION_MODE is local/native — they're still
+# mounted on the cloud edge but return a polite "not applicable" so any
+# accidental hit doesn't leak host stats.
+try:
+    from desktop_module import desktop_router, _bind as _desk_bind
+    _desk_bind(main_db=main_db)
+    app.include_router(desktop_router)
+    logger.info("Desktop module loaded — /api/desktop/* (local dashboard endpoints)")
+except Exception as _desk_err:  # noqa: BLE001
+    logger.error(f"Desktop module failed to load: {_desk_err}")
+
+
 # ─── Selector Aliases (Self-healing automation, 2026-01) ──────────────
 # Permanent memory of selector renames per (user, domain). When the
 # user fixes a wrong selector in the Visual Recorder Edit modal, the

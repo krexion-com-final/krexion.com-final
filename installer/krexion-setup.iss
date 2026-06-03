@@ -32,6 +32,7 @@
 #define AppExeCore     "krexion-core.exe"
 #define AppExeService  "krexion-service.exe"
 #define AppExeTray     "krexion-tray.exe"
+#define AppLauncherBat "krexion-tray.bat"
 #ifndef AppVersion
   #define AppVersion "1.0.0"
 #endif
@@ -103,11 +104,19 @@ Source: "..\build\chromium-bundle\*"; DestDir: "{app}\browser-engine"; Flags: ig
 ; Frontend production build — required
 Source: "..\build\frontend-build\*"; DestDir: "{app}\frontend"; Flags: ignoreversion recursesubdirs createallsubdirs
 
-; Tray app — optional
-Source: "..\build\dist\krexion-tray.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+; Tray / Dashboard app (PyWebView + pystray, renamed pythonw.exe)
+; Bundled inside krexion-backend.dist as krexion-coreapp.exe — surfaced as
+; krexion-tray.exe shortcut launcher for the customer.
+Source: "..\desktop\krexion_tray_launcher.bat"; DestDir: "{app}"; DestName: "{#AppLauncherBat}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\desktop\*"; DestDir: "{app}\bin\app\desktop"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
 ; Manifest — optional
 Source: "..\build\krexion-manifest.json"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+
+; Microsoft Visual C++ 2015-2022 Redistributable (x64) — REQUIRED by MongoDB
+; 7.0.x. Without it mongod.exe silently crashes with VCRUNTIME140_1.dll
+; missing. We ship it inline and run silently if not already present.
+Source: "..\build\vcredist\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall skipifsourcedoesntexist
 
 
 [Dirs]
@@ -131,12 +140,23 @@ Name: "{group}\Uninstall Krexion"; Filename: "{uninstallexe}"; IconFilename: "{a
 Name: "{autodesktop}\Krexion"; Filename: "{#AppURL}/login"; IconFilename: "{app}\krexion.ico"; Tasks: desktopicon
 
 [Registry]
-; Auto-start Krexion Tray on login (per-user)
+; Auto-start Krexion Dashboard on login (per-user). Launches the
+; PyWebView+tray app via a small .bat shim so customer sees Krexion's
+; brand and not any python prompt window.
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
-  ValueType: string; ValueName: "Krexion"; ValueData: """{app}\{#AppExeTray}"""; \
+  ValueType: string; ValueName: "Krexion"; ValueData: """{app}\{#AppLauncherBat}"""; \
   Tasks: startupTray; Flags: uninsdeletevalue
 
 [Run]
+; ─── Install Microsoft VC++ 2015-2022 Redistributable (silent, idempotent) ──
+; MongoDB 7.0 needs VCRUNTIME140_1.dll which only ships with this runtime.
+; /install /quiet /norestart returns exit code 1638 when the runtime is
+; already installed (a NEWER version) — that's fine, we accept it.
+Filename: "{tmp}\vc_redist.x64.exe"; \
+  Parameters: "/install /quiet /norestart"; \
+  Flags: runhidden waituntilterminated skipifdoesntexist; \
+  StatusMsg: "Installing prerequisites (Visual C++ Runtime)..."
+
 ; ─── Persist the license key the user entered in the wizard ────────────
 ; The license is written to %PROGRAMDATA%\Krexion\license-key.txt so the
 ; backend reads it via LICENSE_KEY_FILE env var. Customer never has to
@@ -145,6 +165,14 @@ Filename: "{cmd}"; \
   Parameters: "/C echo {code:GetLicenseKey} > ""{commonappdata}\Krexion\license-key.txt"""; \
   Flags: runhidden; StatusMsg: "Saving license key..."; \
   Check: HasLicenseKey
+
+; ─── Persist detected hardware specs ──────────────────────────────────
+; Inno Setup [Code] section detected RAM/CPU during install. Backend
+; reads {commonappdata}\Krexion\system-specs.json on startup to set
+; adaptive concurrency limits for heavy jobs.
+Filename: "{cmd}"; \
+  Parameters: "/C echo {code:GetSystemSpecsJson} > ""{commonappdata}\Krexion\system-specs.json"""; \
+  Flags: runhidden; StatusMsg: "Detecting your PC capacity..."
 
 ; ─── Install + start Krexion Database service ──────────────────────────
 Filename: "{app}\bin\{#AppExeService}"; \
@@ -161,6 +189,38 @@ Filename: "{app}\bin\{#AppExeService}"; \
 
 Filename: "{app}\bin\{#AppExeService}"; \
   Parameters: "set KrexionDatabase Start SERVICE_AUTO_START"; \
+  Flags: runhidden
+
+; Diagnostic logging — captures mongod stdout/stderr to {app}\logs\
+; (without these, if mongod crashes the customer has zero visibility)
+Filename: "{app}\bin\{#AppExeService}"; \
+  Parameters: "set KrexionDatabase AppDirectory ""{app}\database\bin"""; \
+  Flags: runhidden
+
+Filename: "{app}\bin\{#AppExeService}"; \
+  Parameters: "set KrexionDatabase AppStdout ""{app}\logs\mongod.stdout.log"""; \
+  Flags: runhidden
+
+Filename: "{app}\bin\{#AppExeService}"; \
+  Parameters: "set KrexionDatabase AppStderr ""{app}\logs\mongod.stderr.log"""; \
+  Flags: runhidden
+
+; Auto-restart on crash (NSSM AppExit Default Restart) + 5s cooldown
+Filename: "{app}\bin\{#AppExeService}"; \
+  Parameters: "set KrexionDatabase AppExit Default Restart"; \
+  Flags: runhidden
+
+Filename: "{app}\bin\{#AppExeService}"; \
+  Parameters: "set KrexionDatabase AppRestartDelay 5000"; \
+  Flags: runhidden
+
+; Rotate log files at 10 MB to prevent disk fill on long-running installs
+Filename: "{app}\bin\{#AppExeService}"; \
+  Parameters: "set KrexionDatabase AppRotateFiles 1"; \
+  Flags: runhidden
+
+Filename: "{app}\bin\{#AppExeService}"; \
+  Parameters: "set KrexionDatabase AppRotateBytes 10485760"; \
   Flags: runhidden
 
 Filename: "{app}\bin\{#AppExeService}"; \
@@ -212,16 +272,34 @@ Filename: "{app}\bin\{#AppExeService}"; \
   Parameters: "set KrexionBackend AppStderr ""{app}\logs\backend.stderr.log"""; \
   Flags: runhidden
 
+; Auto-restart on crash (NSSM AppExit Default Restart) + 5s cooldown
+Filename: "{app}\bin\{#AppExeService}"; \
+  Parameters: "set KrexionBackend AppExit Default Restart"; \
+  Flags: runhidden
+
+Filename: "{app}\bin\{#AppExeService}"; \
+  Parameters: "set KrexionBackend AppRestartDelay 5000"; \
+  Flags: runhidden
+
+; Rotate log files at 10 MB
+Filename: "{app}\bin\{#AppExeService}"; \
+  Parameters: "set KrexionBackend AppRotateFiles 1"; \
+  Flags: runhidden
+
+Filename: "{app}\bin\{#AppExeService}"; \
+  Parameters: "set KrexionBackend AppRotateBytes 10485760"; \
+  Flags: runhidden
+
 Filename: "{app}\bin\{#AppExeService}"; \
   Parameters: "start KrexionBackend"; \
   Flags: runhidden; StatusMsg: "Starting Krexion Backend..."
 
-; ─── Optional: launch tray app + open dashboard at finish ──────────────
-; Note: `skipifdoesntexist` is the correct `[Run]` flag — its `[Files]`
-; section sibling is `skipifsourcedoesntexist` and Inno Setup rejects
-; the latter inside `[Run]` with "Parameter Flags includes an unknown
-; flag." (this script previously had that mistake).
-Filename: "{app}\{#AppExeTray}"; Flags: nowait postinstall skipifsilent skipifdoesntexist; \
+; ─── Auto-launch desktop dashboard at finish ──────────────────────────
+; The dashboard window stays open until the customer right-clicks the
+; tray icon → Quit. Closing the X minimises to tray. Polls local
+; backend at 127.0.0.1:8001 for live CPU/RAM/job stats and shows
+; auto-update banner when admin publishes a new release.
+Filename: "{app}\{#AppLauncherBat}"; Flags: nowait postinstall skipifsilent skipifdoesntexist; \
   Description: "Launch Krexion now"
 Filename: "{#AppURL}/login"; Flags: shellexec postinstall skipifsilent; \
   Description: "Open Krexion dashboard at krexion.com"
@@ -241,6 +319,10 @@ Type: filesandordirs; Name: "{commonappdata}\Krexion"
 [Code]
 var
   LicensePage: TInputQueryWizardPage;
+  DetectedCores: Integer;
+  DetectedRamGB: Integer;
+  DetectedTier: string;
+  DetectedMaxJobs: Integer;
 
 procedure InitializeWizard;
 begin
@@ -274,8 +356,64 @@ begin
   Result := Length(GetLicenseKey('')) > 0;
 end;
 
+procedure DetectSystemSpecs;
+// Detects the customer's CPU core count and RAM (GB) using Windows API,
+// then derives an adaptive "tier" + max concurrent heavy job count.
+// Result is consumed by GetSystemSpecsJson during the [Run] section.
+var
+  MemStatus: TMemoryStatusEx;
+  SysInfo: TSystemInfo;
+begin
+  // ── RAM detection ──
+  MemStatus.dwLength := SizeOf(MemStatus);
+  if GlobalMemoryStatusEx(MemStatus) then
+    DetectedRamGB := Round(MemStatus.ullTotalPhys / (1024.0 * 1024.0 * 1024.0))
+  else
+    DetectedRamGB := 8;  // safe fallback
+
+  // ── CPU cores ──
+  GetSystemInfo(SysInfo);
+  DetectedCores := SysInfo.dwNumberOfProcessors;
+  if DetectedCores < 1 then DetectedCores := 4;
+
+  // ── Adaptive tier ──
+  // low    : <= 4 GB RAM or <= 2 cores  → max 1 concurrent heavy job
+  // medium : <= 8 GB RAM or <= 4 cores  → max 2
+  // high   : <= 16 GB RAM and <= 8 cores → max 4
+  // extreme: 16+ GB AND 8+ cores         → max 8
+  if (DetectedRamGB <= 4) or (DetectedCores <= 2) then begin
+    DetectedTier := 'low';
+    DetectedMaxJobs := 1;
+  end else if (DetectedRamGB <= 8) or (DetectedCores <= 4) then begin
+    DetectedTier := 'medium';
+    DetectedMaxJobs := 2;
+  end else if (DetectedRamGB <= 16) or (DetectedCores <= 8) then begin
+    DetectedTier := 'high';
+    DetectedMaxJobs := 4;
+  end else begin
+    DetectedTier := 'extreme';
+    DetectedMaxJobs := 8;
+  end;
+end;
+
+function GetSystemSpecsJson(Param: string): string;
+// Returns a single-line JSON object the [Run] section pipes into
+// {commonappdata}\Krexion\system-specs.json. Single line because we use
+// `echo > file` to write it — multi-line would need a temp file roundtrip.
+begin
+  if DetectedCores = 0 then DetectSystemSpecs;
+  Result :=
+    '{"ram_gb":' + IntToStr(DetectedRamGB) +
+    ',"cpu_cores":' + IntToStr(DetectedCores) +
+    ',"tier":"' + DetectedTier + '"' +
+    ',"max_concurrent_heavy_jobs":' + IntToStr(DetectedMaxJobs) +
+    ',"detected_by":"installer"}';
+end;
+
 function InitializeSetup(): Boolean;
 begin
-  // Future hardening hook — Windows version / RAM checks could go here.
+  // Detect specs once at the very start so they're available throughout
+  // the install + visible in the final UI page if we ever add one.
+  DetectSystemSpecs;
   Result := True;
 end;
