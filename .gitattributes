@@ -46,6 +46,10 @@ Dockerfile                   text eol=lf
 *.yaml                       text eol=lf
 
 # ── Binary types: never touch ─────────────────────────────────────────
+# Customer-facing diagnostic .bat — declared binary so git stores the
+# CRLF bytes verbatim. Without this, GitHub raw URL serves LF-only and
+# cmd.exe silently fails on the first line.
+installer/Krexion-Diagnostic.bat   binary
 *.png                        binary
 *.jpg                        binary
 *.jpeg                       binary
