@@ -1135,3 +1135,19 @@ the build with tag `v1.0.10`. No code changes — only the version
 strings and PRD wording were updated. The fix set described in this
 section is identical to what landed in commit a72b41e plus the
 version bump.
+
+### Build chase log (same session) - finally green on build #23
+- **#20** v1.0.5 - cancelled (wrong tag - v1.0.5 was already published).
+- **#21** v1.0.10 - failed at "Bundle Playwright Chromium" step. PowerShell parser
+  error on em-dash inside a Write-Warning string literal (U+2014 mangled to
+  multi-byte by Windows-1252 codepage assumption inside the YAML heredoc).
+  Fix: replaced all em-dashes / arrows / box-drawing characters in workflow
+  YAML with ASCII equivalents (commit 86fe267).
+- **#22** v1.0.10 - cancelled at minute 35 during "Compile installer". Inno
+  Setup's lzma2/ultra solid compression of the new ~250 MB Chromium bundle
+  needed ~14 min of silent ISCC.exe progress, blowing past the 30-min
+  build-installer job timeout. Fix: raised timeout-minutes 30 -> 75 (commit
+  d7486e7). No compression / output changes.
+- **#23** v1.0.10 - SUCCESS. Total wall-clock ~50 min. Installer artifact
+  `Krexion-Setup-v1.0.10.exe` (570.5 MB) published to GitHub Releases at
+  https://github.com/dennisedmaartins9-sudo/krexion.com/releases/tag/v1.0.10
