@@ -62,6 +62,40 @@ jobs:
             echo "  KREXION DEPLOY @ $(date)"
             echo "===================================================="
 
+            # v1.0.11 NEW: Disk-space self-heal step.
+            # Deploy #185 failed with:
+            #   "no space left on device" while extracting the new
+            #   docker layer to /var/lib/containerd/... -> the build
+            #   succeeded on the runner but the VPS could not pull the
+            #   new container image.
+            # Root cause: real_user_traffic_results/ + dangling docker
+            # images + container logs were eating the disk. We do a
+            # bounded auto-cleanup BEFORE rebuilding so future deploys
+            # self-heal without admin intervention.
+            echo ">> Disk-space self-heal..."
+            df -h / | tail -1
+            # 1. Trim RUT screenshot results older than 7 days (keeps recent for forensics)
+            if [ -d "/opt/krexion/backend/real_user_traffic_results" ]; then
+              FOUND=$(find /opt/krexion/backend/real_user_traffic_results -maxdepth 1 -mindepth 1 -type d -mtime +7 2>/dev/null | wc -l)
+              echo "   RUT dirs older than 7d: $FOUND"
+              find /opt/krexion/backend/real_user_traffic_results -maxdepth 1 -mindepth 1 -type d -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+            fi
+            # 2. Trim form_filler_screenshots older than 7 days
+            for D in /opt/krexion/backend/form_filler_screenshots /opt/krexion/backend/visual_recorder_sessions /opt/krexion/backend/uploads; do
+              if [ -d "$D" ]; then
+                find "$D" -mindepth 1 -mtime +7 -delete 2>/dev/null || true
+              fi
+            done
+            # 3. Docker housekeeping - dangling images, stopped containers, build cache
+            docker container prune -f >/dev/null 2>&1 || true
+            docker image prune -f >/dev/null 2>&1 || true
+            docker builder prune -f --keep-storage=2GB >/dev/null 2>&1 || true
+            # 4. Trim journalctl logs to last 200 MB (default can grow to GBs)
+            journalctl --vacuum-size=200M >/dev/null 2>&1 || true
+            echo "   After cleanup:"
+            df -h / | tail -1
+            echo ""
+
             # Re-build the installer ZIP from synced source files
             echo ">> Rebuilding installer ZIP..."
             command -v zip >/dev/null 2>&1 || (apt-get update && apt-get install -y zip)
