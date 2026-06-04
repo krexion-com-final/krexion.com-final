@@ -75,6 +75,8 @@ JOB_PULL_INTERVAL = int(os.environ.get("BRIDGE_JOB_PULL_SEC", "5") or 5)
 LOCAL_API_BASE = (os.environ.get("LOCAL_API_BASE") or "http://localhost:8001").rstrip("/")
 
 _running = False
+_HB_FAILS = 0
+_HB_OKS = 0
 
 
 def _current_license_key() -> str:
@@ -121,21 +123,57 @@ def _hardware_info() -> dict:
 
 
 async def _heartbeat() -> None:
+    """v1.0.16 fix: previously logged failures at DEBUG which never made
+    it to dashboard.log. Customers got stuck with 'no recent heartbeat'
+    forever with no visible reason. Now logs the first 3 failures at
+    INFO + a one-line root cause hint, then quiets down."""
+    global _HB_FAILS, _HB_OKS
+    key = _current_license_key()
+    if not key:
+        if _HB_FAILS < 3:
+            logger.info(
+                "[sync] heartbeat skipped: no license key found in env "
+                "LICENSE_KEY/LICENSE_KEY_FILE/PROGRAMDATA. Wizard may "
+                "not have written license-key.txt yet - will retry."
+            )
+        _HB_FAILS += 1
+        return
     try:
         body = {
             "hostname": socket.gethostname(),
-            "version": "1.1.0",
-            "platform": "docker",
+            "version": "1.0.16",
+            "platform": "native-windows" if sys.platform.startswith("win") else "docker",
         }
         body.update(_hardware_info())
         async with httpx.AsyncClient(timeout=8) as client:
-            await client.post(
+            r = await client.post(
                 f"{CLOUD_URL}/api/sync/heartbeat",
                 json=body,
                 headers=_headers(),
             )
+            if r.status_code >= 400:
+                if _HB_FAILS < 3:
+                    logger.info(
+                        f"[sync] heartbeat returned HTTP {r.status_code}: "
+                        f"{r.text[:200]}. License key tail "
+                        f"...{key[-6:]}, cloud={CLOUD_URL}"
+                    )
+                _HB_FAILS += 1
+            else:
+                if _HB_OKS == 0:
+                    logger.info(
+                        f"[sync] heartbeat OK to {CLOUD_URL} - PC is now online "
+                        f"in the cloud, heavy jobs will route here."
+                    )
+                _HB_OKS += 1
+                _HB_FAILS = 0  # reset failure counter on success
     except Exception as e:  # noqa: BLE001
-        logger.debug(f"[sync] heartbeat failed: {e}")
+        if _HB_FAILS < 3:
+            logger.info(
+                f"[sync] heartbeat exception: {type(e).__name__}: {e}. "
+                f"Will retry every 30 s."
+            )
+        _HB_FAILS += 1
 
 
 async def _push_links(user_db: Any) -> int:
