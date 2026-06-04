@@ -90,11 +90,48 @@ jobs:
             docker container prune -f >/dev/null 2>&1 || true
             docker image prune -f >/dev/null 2>&1 || true
             docker builder prune -f --keep-storage=2GB >/dev/null 2>&1 || true
+            # v1.0.20: deploy run 26978817916 still failed with
+            #   "no space left on device" mid-image-extraction. The
+            # 2 GB builder-cache keep was too generous AND we kept
+            # every previous tagged image variant (frontend + backend
+            # + dangling). Aggressively reclaim:
+            #   - prune ALL build cache (we just built fresh, don't
+            #     need any cached layers on the VPS after build)
+            #   - prune dangling images that aren't the currently
+            #     running ones
+            #   - vacuum truncated container logs
+            docker builder prune -af >/dev/null 2>&1 || true
+            # Truncate any container log >100 MB
+            find /var/lib/docker/containers -name "*-json.log" -size +100M -exec truncate -s 0 {} \; 2>/dev/null || true
             # 4. Trim journalctl logs to last 200 MB (default can grow to GBs)
             journalctl --vacuum-size=200M >/dev/null 2>&1 || true
+            # 5. apt cache cleanup on the VPS itself
+            apt-get clean >/dev/null 2>&1 || true
+            rm -rf /var/cache/apt/archives/*.deb 2>/dev/null || true
             echo "   After cleanup:"
             df -h / | tail -1
             echo ""
+
+            # v1.0.20: ABORT EARLY if free space is below the
+            # minimum required to extract a fresh backend image
+            # (~2 GB). Far better to fail fast with a clear message
+            # than to crash 4 min later mid-layer-extract.
+            FREE_KB=$(df / | awk 'NR==2 {print $4}')
+            FREE_GB=$((FREE_KB / 1024 / 1024))
+            echo "   Free disk: ${FREE_GB} GB"
+            if [ "$FREE_GB" -lt 3 ]; then
+              echo "   !!! Free disk below 3 GB — running NUCLEAR cleanup"
+              docker system prune -af --volumes >/dev/null 2>&1 || true
+              # Last-resort: remove untagged & old backend image variants
+              docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
+                | grep -E '(<none>|krexion-backend|krexion-frontend)' \
+                | awk '{print $2}' \
+                | sort -u \
+                | while read IMG; do
+                    docker rmi -f "$IMG" 2>/dev/null || true
+                  done
+              df -h / | tail -1
+            fi
 
             # Re-build the installer ZIP from synced source files
             echo ">> Rebuilding installer ZIP..."
