@@ -1151,3 +1151,65 @@ version bump.
 - **#23** v1.0.10 - SUCCESS. Total wall-clock ~50 min. Installer artifact
   `Krexion-Setup-v1.0.10.exe` (570.5 MB) published to GitHub Releases at
   https://github.com/dennisedmaartins9-sudo/krexion.com/releases/tag/v1.0.10
+
+
+
+---
+
+## v1.0.18 — Heavy job E2E (multipart bridge replay) — 2026-02
+
+### Symptom seen by user on v1.0.17
+- Heartbeat: green ✅, dashboard online in cloud
+- `GET /api/sync/jobs/pull` → 200 OK every 5 s ✅
+- But `[bridge] pulled N job(s)` NEVER logged → jobs NEVER reached the
+  desktop bridge worker. Heavy job clicks on krexion.com vanished
+  silently (or returned generic 503 / 422).
+
+### Root cause (two stacked bugs)
+1. `require_local_mode` in `backend/server.py` captured the heavy-
+   endpoint body via `await request.json()`. That returns `{}` for
+   ANY `multipart/form-data` POST. So the bridge payload had an
+   empty `body` for RUT / Form Filler / Visual Recorder (all
+   multipart). The desktop bridge worker then replayed `json={}`
+   against its local backend, which immediately 422'd because
+   those endpoints declare `Form(...)` fields.
+2. The user's `Authorization: Bearer <jwt>` header was NOT forwarded
+   on bridge replay. The desktop backend's `get_current_user`
+   dependency would 401 even for pure-JSON heavy endpoints, because
+   sync_client only sets `X-Krexion-License`.
+
+### Fix
+- `backend/server.py::require_local_mode`
+  - `await request.body()` → raw bytes, b64-encoded into payload as
+    `raw_body_b64` along with original `content_type` and
+    `authorization` headers.
+  - JSON parse still attempted when `application/json`, otherwise
+    `body` stays empty (multipart replays use raw bytes).
+  - `wait_for_result` timeout raised 10 s → 25 s.
+  - Verbose `[bridge] auto-route ...` INFO log.
+- `backend/sync_client.py::_execute_job_locally`
+  - Decodes `raw_body_b64`; when content-type is multipart /
+    urlencoded, replays via `httpx.AsyncClient.request(content=raw_bytes)`
+    so FastAPI sees the exact original payload.
+  - Forwards `Authorization` header to local backend.
+  - Verbose `[bridge] replay ...` / `[bridge] replay → HTTP X` logs.
+- `backend/bridge_module.py`
+  - INFO logs on `enqueue`, inline `done/pending` exit, worker
+    `claimed` jobs, and `worker_post_result`.
+- `backend/VERSION` → 1.0.18; sync_client UA + version strings bumped.
+
+### Push
+- Commit `e4b5d7f` pushed to origin/main.
+- GitHub Actions will:
+  - Auto-deploy cloud (deploy.yml) → 2-3 min
+  - Build Windows installer `Krexion-Setup-v1.0.18.exe` (build-windows-release.yml) → ~50 min
+- Customer must reinstall v1.0.18 to receive the multipart replay fix
+  (pure-JSON heavy endpoints, e.g. `proxies/bulk-test`, work
+  immediately because the cloud-side raw-body fix routes through).
+
+### Backlog / not addressed yet
+- v1.0.18 still relies on the customer's local Playwright bundle
+  being healthy. If a fresh installer somehow ships a broken
+  `chrome-win/`, RUT will fail with browser-launch error — a
+  separate self-heal that re-downloads chromium on demand would
+  guard against that. Out-of-scope for this iteration.
