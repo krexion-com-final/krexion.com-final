@@ -356,6 +356,27 @@ app = FastAPI(
     default_response_class=__import__("fastapi.responses", fromlist=["ORJSONResponse"]).ORJSONResponse,
 )
 
+# v1.0.19: clean way to return a body from inside a FastAPI Depends.
+# require_local_mode (used as a Depends) needs to short-circuit the
+# request with the desktop bridge's response body. We cannot just
+# `return` it because Depends results don't replace the response. And
+# raising HTTPException(200, detail=body) makes FastAPI wrap it as
+# {"detail": body} which breaks frontends that read top-level keys
+# like `total` or `job_id`. So we raise this custom exception and
+# register a handler below that returns the body VERBATIM.
+class _BridgeDone(Exception):
+    def __init__(self, status, body):
+        self.status = status
+        self.body = body
+
+
+@app.exception_handler(_BridgeDone)
+async def _bridge_done_handler(_request, exc: _BridgeDone):
+    from fastapi.responses import JSONResponse as _JR
+    return _JR(content=exc.body, status_code=exc.status)
+
+
+
 # Increase multipart upload size limit (default 1MB -> 1GB) for large UA / proxy / data file uploads
 from starlette.formparsers import MultiPartParser
 MultiPartParser.max_part_size = 1024 * 1024 * 1024  # 1 GB per part (effectively unlimited for text)
@@ -637,19 +658,31 @@ async def require_local_mode(request: Request):
                     )
                     if _status == "done":
                         result = bridge_resp.get("result") or {}
-                        raise HTTPException(
-                            status_code=result.get("status", 200),
-                            detail=result.get("body") or {"ok": True, "via": "bridge"},
+                        # v1.0.19: previously raised HTTPException(200,
+                        # detail=...) which made FastAPI wrap the body
+                        # as {"detail": <body>}. Frontend then saw
+                        # data.total === undefined and surfaced
+                        # "Job started: undefined visit(s) queued"
+                        # (exactly the customer's RUT screenshot).
+                        # Use _BridgeDone so the registered handler
+                        # returns the local backend's body verbatim.
+                        raise _BridgeDone(
+                            status=int(result.get("status") or 200),
+                            body=result.get("body") if result.get("body") is not None else {"ok": True, "via": "bridge"},
                         )
                     if _status == "failed":
                         raise HTTPException(
                             status_code=500,
                             detail={"error": "bridge_execution_failed", "reason": bridge_resp.get("error")},
                         )
-                    # pending / timeout: hand back the job id for polling
-                    raise HTTPException(
-                        status_code=202,
-                        detail={
+                    # pending / timeout: hand back the job id for polling.
+                    # Use _BridgeDone (not HTTPException) so the body is
+                    # returned VERBATIM as top-level JSON, otherwise
+                    # FastAPI wraps it under {"detail": ...} and the
+                    # frontend can't read top-level `job_id`.
+                    raise _BridgeDone(
+                        status=202,
+                        body={
                             "queued": True,
                             "via": "bridge",
                             "job_id": bridge_resp.get("job_id"),
@@ -657,6 +690,9 @@ async def require_local_mode(request: Request):
                         },
                     )
         except HTTPException:
+            raise
+        except _BridgeDone:
+            # MUST propagate — handler converts to plain JSONResponse.
             raise
         except Exception as _bridge_err:  # noqa: BLE001
             logger.warning(f"[require_local_mode] bridge route failed for user {_uid}: {_bridge_err}")
@@ -17242,6 +17278,160 @@ app.add_middleware(
 # changes. `minimum_size=512` skips tiny responses where compression
 # overhead would dominate.
 app.add_middleware(GZipMiddleware, minimum_size=512, compresslevel=5)
+
+
+# ─── v1.0.19: Visual Recorder bridge middleware ──────────────────────
+# Visual Recorder is stateful — start/screenshot/click/state/etc all
+# operate on the SAME in-memory Playwright session. When the cloud
+# proxies only /start to the desktop, the session lives on the desktop
+# only, but the subsequent screenshot/state/click calls hit the cloud
+# (which has no such session) and 404. The customer sees "Spinning up
+# Chromium directly..." spin forever.
+#
+# Fix: a single middleware that — on the cloud edge — bridges every
+# /api/visual-recorder/* request to the user's online desktop PC and
+# returns the desktop's response verbatim. The middleware short-circuits
+# only when:
+#   - IS_CLOUD is true (this is the public edge), AND
+#   - the request targets /api/visual-recorder/* (any verb), AND
+#   - we can resolve the user from Authorization header OR ?t= JWT, AND
+#   - that user has an online local PC (sync_heartbeat within 90s).
+# Otherwise it falls through to the original endpoint (no change for
+# desktop-mode customers, dev runs, or users without an online PC).
+@app.middleware("http")
+async def _vr_bridge_middleware(request: Request, call_next):
+    try:
+        if not IS_CLOUD:
+            return await call_next(request)
+        path = request.url.path or ""
+        if not path.startswith("/api/visual-recorder/"):
+            return await call_next(request)
+        # Don't bridge the listing endpoint — cloud serves its OWN
+        # listing from MongoDB-replicated session metadata (or returns
+        # empty list, which is correct from cloud's POV).
+        if path.rstrip("/") == "/api/visual-recorder/sessions":
+            return await call_next(request)
+        # /start is already gated by Depends(require_local_mode) which
+        # bridges via _BridgeDone — let it through unchanged.
+        if path.endswith("/visual-recorder/start"):
+            return await call_next(request)
+        # Resolve user from header OR ?t= query param (screenshot uses
+        # ?t= so <img src> can load without a custom fetch).
+        token_str = None
+        auth_header = request.headers.get("Authorization") or ""
+        if auth_header.startswith("Bearer "):
+            token_str = auth_header.split(" ", 1)[1]
+        else:
+            token_str = request.query_params.get("t")
+        if not token_str:
+            return await call_next(request)
+        try:
+            jwt_payload = jwt.decode(token_str, SECRET_KEY, algorithms=[ALGORITHM])
+            email = jwt_payload.get("sub")
+        except Exception:  # noqa: BLE001
+            return await call_next(request)
+        if not email:
+            return await call_next(request)
+        user_doc = await db.users.find_one({"email": email}, {"_id": 0, "id": 1, "email": 1})
+        if not user_doc:
+            return await call_next(request)
+        uid = user_doc["id"]
+        if is_user_local_online is None or enqueue_bridge_job is None:
+            return await call_next(request)
+        local_status = await is_user_local_online(uid)
+        if not local_status.get("online"):
+            return await call_next(request)
+
+        # Capture body + content-type + auth for faithful replay.
+        import base64 as _b64
+        try:
+            raw_body = await request.body()
+        except Exception:  # noqa: BLE001
+            raw_body = b""
+        content_type = request.headers.get("content-type", "")
+        body_json: dict = {}
+        if "application/json" in content_type.lower() and raw_body:
+            try:
+                import json as _json
+                body_json = _json.loads(raw_body.decode("utf-8") or "{}")
+                if not isinstance(body_json, dict):
+                    body_json = {}
+            except Exception:  # noqa: BLE001
+                body_json = {}
+        feature = path
+        if feature.startswith("/api/"):
+            feature = feature[5:]
+        payload = {
+            "method": request.method.upper(),
+            "path": path,
+            "body": body_json,
+            "query": dict(request.query_params),
+            "raw_body_b64": _b64.b64encode(raw_body).decode("ascii") if raw_body else "",
+            "content_type": content_type,
+            "authorization": auth_header if auth_header else f"Bearer {token_str}",
+        }
+        logger.info(
+            f"[vr-bridge] {request.method} {path} → user={uid[:8]} bridging to desktop"
+        )
+        # Visual Recorder operations are usually quick (<2s) but allow
+        # up to 30s for the chromium spin-up call inside the session.
+        bridge_resp = await enqueue_bridge_job(
+            {"id": uid, "email": user_doc.get("email")},
+            feature,
+            payload,
+            wait_for_result=True,
+            wait_timeout=35,
+        )
+        from fastapi.responses import JSONResponse as _JR, Response as _Resp
+        if not bridge_resp:
+            return _JR(status_code=502, content={"error": "bridge_no_response"})
+        status_s = bridge_resp.get("status")
+        if status_s == "done":
+            result = bridge_resp.get("result") or {}
+            sc = int(result.get("status") or 200)
+            body_back = result.get("body")
+            # If the desktop returned an image (screenshot endpoint),
+            # it serialised text body of bytes. Detect & forward.
+            # Heuristic: body is a dict with {"text": "<jpeg-bytes-decoded>"}
+            # when sync_client couldn't json-parse. In that case re-encode
+            # as image/jpeg. For the normal JSON path, just pass through.
+            if isinstance(body_back, dict) and "__binary_b64__" in body_back:
+                # Desktop returned non-JSON content (image/jpeg from
+                # /screenshot, video bytes from /export, etc.). Decode
+                # the b64 and forward as the original media type so
+                # <img src> tags load identically to direct-cloud
+                # serving.
+                import base64 as _b64dec
+                try:
+                    raw_bytes = _b64dec.b64decode(body_back["__binary_b64__"])
+                except Exception:  # noqa: BLE001
+                    return _JR(status_code=502, content={"error": "binary_decode_failed"})
+                return _Resp(
+                    content=raw_bytes,
+                    media_type=body_back.get("__content_type__", "application/octet-stream"),
+                    status_code=sc,
+                    headers={"Cache-Control": "no-store"},
+                )
+            return _JR(status_code=sc, content=body_back if body_back is not None else {"ok": True, "via": "bridge"})
+        if status_s == "failed":
+            return _JR(status_code=500, content={"error": "bridge_execution_failed", "reason": bridge_resp.get("error")})
+        # pending after 35s
+        return _JR(
+            status_code=202,
+            content={
+                "queued": True,
+                "via": "bridge",
+                "job_id": bridge_resp.get("job_id"),
+                "state": "starting",
+                "message": "Bridged to your PC, still running",
+            },
+        )
+    except Exception as _vrm_err:  # noqa: BLE001
+        logger.warning(f"[vr-bridge] middleware error: {_vrm_err}; falling through")
+        return await call_next(request)
+
+
+
 
 # ──────────────────────────────────────────────────────────────────────
 # /api/diagnostics — instant-visibility health endpoint
