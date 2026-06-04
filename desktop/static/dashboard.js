@@ -174,24 +174,12 @@ async function applyUpdate() {
 /* ── Wire it up ─────────────────────────────────────────────────── */
 function init() {
   $("open-cloud-btn").addEventListener("click", () => {
-    // v1.0.13 fix: open the LOCAL backend's bundled React UI by default
-    // (http://127.0.0.1:8001) so all heavy features run on the customer's
-    // own PC. Falls back to krexion.com if the local UI isn't responsive
-    // (e.g., backend service is down). This is what unblocks Visual
-    // Recorder / RUT / Form Filler - those endpoints refuse cloud edge
-    // requests but ALWAYS accept local-backend ones.
-    const LOCAL_UI = "http://127.0.0.1:8001/login";
-    const FALLBACK = CLOUD + "/login";
-    fetch("http://127.0.0.1:8001/api/", { method: "GET" })
-      .then((r) => {
-        const url = r.ok ? LOCAL_UI : FALLBACK;
-        try { window.open(url, "_blank"); }
-        catch (e) { window.location.href = url; }
-      })
-      .catch(() => {
-        try { window.open(FALLBACK, "_blank"); }
-        catch (e) { window.location.href = FALLBACK; }
-      });
+    // v1.0.14: always open krexion.com (per product design - the cloud
+    // UI is authoritative for ALL feature submissions; heavy jobs are
+    // automatically routed to this PC via the bridge worker so they
+    // execute locally without the user ever leaving krexion.com).
+    try { window.open(CLOUD + "/login", "_blank"); }
+    catch (e) { window.location.href = CLOUD + "/login"; }
   });
   $("update-now-btn").addEventListener("click", applyUpdate);
   $("update-dismiss-btn").addEventListener("click", () => {

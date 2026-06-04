@@ -541,6 +541,83 @@ async def require_local_mode(request: Request):
     else:
         actionable_hint = "install_desktop_app"
 
+    # v1.0.14 NEW: bridge auto-route.
+    # If the customer's PC is currently ONLINE (heart-beating in the
+    # last 90 s), don't refuse with 503 - instead AUTO-ENQUEUE this
+    # heavy job into the bridge queue so the desktop app picks it up
+    # and executes locally. This is the customer's explicit ask:
+    #   "heavy job customer k pc k throw chalne chahye krexion.com pr
+    #    koi error ni ana chahye"
+    # The bridge worker on the customer's machine polls /api/bridge/next
+    # every few seconds, runs the job, and posts results back, so the
+    # cloud just becomes a thin router. The original endpoint's
+    # response is short-circuited via this exception, so the frontend
+    # sees a 202-style success instead of a 503 refusal.
+    #
+    # We attempt this BEFORE refusing - if enqueue fails for any reason
+    # (bridge module not loaded, race condition, etc.) we still fall
+    # through to the 503 so the user gets a clear message.
+    if local_status.get("online"):
+        try:
+            try:
+                from bridge_module import enqueue_bridge_job as _enq  # type: ignore
+            except Exception:
+                _enq = None
+            if _enq is not None and _uid:
+                try:
+                    body_json = await request.json()
+                except Exception:
+                    body_json = {}
+                # Use the URL path (minus /api/) as the feature key so
+                # the desktop bridge worker knows which local endpoint
+                # to replay against.
+                feature = request.url.path
+                if feature.startswith("/api/"):
+                    feature = feature[5:]
+                feature = feature.strip("/")
+                payload = {
+                    "method": request.method.upper(),
+                    "path": request.url.path,
+                    "body": body_json,
+                    "query": dict(request.query_params),
+                }
+                bridge_resp = await _enq(
+                    {"id": _uid, "email": local_status.get("email")},
+                    feature,
+                    payload,
+                    wait_for_result=True,
+                    wait_timeout=10,
+                )
+                # When the desktop completes synchronously, return its body.
+                # When still pending, hand back the job_id so the frontend
+                # can poll /api/bridge/jobs/{id} (existing flow).
+                if bridge_resp:
+                    if bridge_resp.get("status") == "done":
+                        result = bridge_resp.get("result") or {}
+                        raise HTTPException(
+                            status_code=result.get("status", 200),
+                            detail=result.get("body") or {"ok": True, "via": "bridge"},
+                        )
+                    if bridge_resp.get("status") == "failed":
+                        raise HTTPException(
+                            status_code=500,
+                            detail={"error": "bridge_execution_failed", "reason": bridge_resp.get("error")},
+                        )
+                    # pending / timeout: hand back the job id for polling
+                    raise HTTPException(
+                        status_code=202,
+                        detail={
+                            "queued": True,
+                            "via": "bridge",
+                            "job_id": bridge_resp.get("job_id"),
+                            "message": "Job routed to your PC - polling for completion",
+                        },
+                    )
+        except HTTPException:
+            raise
+        except Exception as _bridge_err:  # noqa: BLE001
+            logger.warning(f"[require_local_mode] bridge route failed for user {_uid}: {_bridge_err}")
+
     raise HTTPException(
         status_code=503,
         detail={
@@ -18145,65 +18222,12 @@ async def _krexion_customer_startup_tasks():
 
 
 
-# ─── Local UI static mount (v1.0.13, native install only) ─────────────
-# Mounts the production React build at `/` so the customer can browse
-# http://127.0.0.1:8001/ and use the full app against their local
-# backend - require_local_mode passes (IS_CLOUD=false), heavy features
-# (Visual Recorder, RUT, Form Filler) run on their own PC at full speed.
-#
-# This MUST be the LAST route addition in the file - the catch-all
-# `/{full_path:path}` would otherwise shadow every other route registered
-# after it. We guard with `if not IS_CLOUD` so the cloud VPS deploy is
-# completely unaffected (nginx already serves the React build there).
-try:
-    if not IS_CLOUD:
-        from fastapi.staticfiles import StaticFiles as _StaticFiles
-        from fastapi.responses import FileResponse as _FileResponse
-
-        _frontend_candidates = [
-            Path(os.environ.get("KREXION_FRONTEND_DIR", "")) if os.environ.get("KREXION_FRONTEND_DIR") else None,
-            # Native install layout: {app}\bin\backend\server.py + {app}\frontend\index.html
-            Path(__file__).resolve().parent.parent.parent / "frontend",
-            # Defensive: backend at {app}\backend, frontend at {app}\frontend
-            Path(__file__).resolve().parent.parent / "frontend",
-        ]
-        _frontend_dir = next(
-            (p for p in _frontend_candidates if p and (p / "index.html").exists()),
-            None,
-        )
-        if _frontend_dir is not None:
-            _static_subdir = _frontend_dir / "static"
-            if _static_subdir.is_dir():
-                app.mount(
-                    "/static",
-                    _StaticFiles(directory=str(_static_subdir)),
-                    name="frontend-static-assets",
-                )
-
-            @app.get("/{full_path:path}", include_in_schema=False)
-            async def _spa_fallback(full_path: str):
-                # Let any /api/* or docs requests 404 (those are handled
-                # by api_router; we only run if no specific route matched).
-                if (
-                    full_path.startswith("api/")
-                    or full_path.startswith("api")
-                    or full_path.startswith("docs")
-                    or full_path.startswith("openapi")
-                    or full_path.startswith("redoc")
-                ):
-                    raise HTTPException(status_code=404, detail="Not Found")
-
-                # Direct asset passthrough (favicon, manifest, sitemap, etc.)
-                if full_path:
-                    asset = _frontend_dir / full_path
-                    if asset.is_file():
-                        return _FileResponse(str(asset))
-
-                # Everything else: React Router will route client-side
-                return _FileResponse(str(_frontend_dir / "index.html"))
-
-            logger.info(f"Local UI mounted at / from {_frontend_dir}  (KREXION_MODE=local)")
-        else:
-            logger.info("No bundled frontend (index.html) found - backend serves API only.")
-except Exception as _spa_err:  # noqa: BLE001
-    logger.warning(f"Local UI mount skipped: {_spa_err}")
+# ─── Local UI static mount — DISABLED in v1.0.14 ─────────────────────
+# Per customer requirement: "heavy job k liye local link use ni ho ga
+# always krexion.com he use ho ga". The local backend's job is to
+# RUN heavy jobs (executed via the bridge worker which polls cloud
+# for queued jobs) - not to serve a UI. Customer always opens
+# krexion.com in their browser; cloud auto-routes their heavy jobs to
+# the desktop bridge worker on the customer's PC.
+# (v1.0.13 mounted /static + a SPA catch-all here; that block is
+# removed to restore the simple cloud-only UI flow.)

@@ -298,15 +298,32 @@ async def activate(body: ActivateRequest):
     if _expired(lic):
         raise HTTPException(403, f"This license has expired ({lic.get('status')}).")
 
-    # Machine binding — strict 1:1 by default
+    # Machine binding — v1.0.14 "auto-takeover" model.
+    # Customer requirement: "aik licence key aik pc k liye … agr wahi
+    # key pehle kabi kisi app se connected ho ge to os pr band ho
+    # jay ge auto new app pr jidar use ho rahi hai odar connected
+    # rahe ge".
+    # Translation: ONE active machine at a time, but a fresh activation
+    # from a NEW PC silently DEACTIVATES the old PC and takes the seat.
+    # No more 'contact the seller to transfer it' error - the customer
+    # can move between their own PCs freely.
     bound_id = lic.get("machine_id")
     max_pcs = max(1, int(cfg.get("max_pcs_per_license", 1)))
     if max_pcs == 1:
         if bound_id and bound_id != body.machine_id:
-            raise HTTPException(
-                409,
-                "This license is already activated on a different PC. "
-                "Contact the seller to transfer it.",
+            # Auto-takeover: record the old machine as deactivated.
+            await _db.license_events.insert_one({
+                "license_key": body.license_key,
+                "type": "auto_takeover",
+                "old_machine_id": bound_id,
+                "old_machine_label": lic.get("machine_label"),
+                "new_machine_id": body.machine_id,
+                "new_machine_label": body.machine_label,
+                "at": _now(),
+            })
+            logger.info(
+                f"[license] auto-takeover for {body.license_key[-6:]}: "
+                f"{(bound_id or '')[:12]} -> {body.machine_id[:12]}"
             )
         update = {"machine_id": body.machine_id}
     else:
@@ -345,12 +362,25 @@ async def validate(body: ValidateRequest):
     if not lic:
         raise HTTPException(404, "License key not recognized.")
 
+    # v1.0.14: validate path now respects the auto-takeover model.
+    # If a different machine_id is now bound (because the user activated
+    # on a new PC), the OLD PC's heartbeat ends up here and gets a
+    # special "deactivated_by_takeover" status. The desktop dashboard
+    # on the old PC will surface this as "License Inactive - opened on
+    # another PC" so the customer immediately knows what happened.
     max_pcs = max(1, int(cfg.get("max_pcs_per_license", 1)))
     if max_pcs == 1:
         bound = lic.get("machine_id")
         if bound and bound != body.machine_id:
-            return {"ok": False, "status": "wrong_machine",
-                    "reason": "License is bound to a different PC."}
+            return {
+                "ok": False,
+                "status": "deactivated_by_takeover",
+                "reason": (
+                    "This license is now active on another PC. "
+                    "Re-activate here to take the seat back."
+                ),
+                "bound_machine_id": bound,
+            }
     else:
         machines = lic.get("machines") or ([lic.get("machine_id")] if lic.get("machine_id") else [])
         if body.machine_id not in machines:

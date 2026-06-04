@@ -25,8 +25,47 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-CLOUD_URL = (os.environ.get("KREXION_CLOUD_URL") or "").rstrip("/")
-LICENSE_KEY = (os.environ.get("LICENSE_KEY") or "").strip()
+CLOUD_URL = (os.environ.get("KREXION_CLOUD_URL") or "https://krexion.com").rstrip("/")
+
+
+def _resolve_license_key() -> str:
+    """v1.0.14: read LICENSE_KEY from env (highest priority), or from
+    LICENSE_KEY_FILE (used by the installer's NSSM service env which
+    sets LICENSE_KEY_FILE=%PROGRAMDATA%\\Krexion\\license-key.txt). The
+    pre-1.0.14 sync_client only checked the LICENSE_KEY env var which
+    was NEVER set by the installer, so the bridge worker had no key
+    to authenticate with the cloud and silently exited every cycle.
+    The fallback below is the actual reason customers' krexion.com
+    link pill kept reading 'no recent heartbeat' even though the
+    desktop install was running fine."""
+    key = (os.environ.get("LICENSE_KEY") or "").strip()
+    if key:
+        return key
+    key_file = os.environ.get("LICENSE_KEY_FILE")
+    if key_file:
+        try:
+            from pathlib import Path
+            p = Path(key_file)
+            if p.exists():
+                k = p.read_text(encoding="utf-8", errors="ignore").strip()
+                if k:
+                    return k
+        except Exception:  # noqa: BLE001
+            pass
+    # Last resort: well-known native install location
+    try:
+        from pathlib import Path
+        candidate = Path(os.environ.get("PROGRAMDATA", "C:/ProgramData")) / "Krexion" / "license-key.txt"
+        if candidate.exists():
+            k = candidate.read_text(encoding="utf-8", errors="ignore").strip()
+            if k:
+                return k
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+LICENSE_KEY = _resolve_license_key()
 SYNC_INTERVAL = int(os.environ.get("SYNC_INTERVAL_SEC", "30") or 30)
 KREXION_MODE = (os.environ.get("KREXION_MODE") or "local").lower().strip()
 # Bridge-job pulling cycles faster than the main sync loop so heavy
@@ -204,6 +243,53 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
         "adspower/delete": ("POST", "__adspower_delete__"),
     }
     if feature not in feature_routes:
+        # v1.0.14 NEW: generic passthrough for the require_local_mode
+        # auto-route. server.py now enqueues any heavy-feature endpoint
+        # with payload={"method": ..., "path": ..., "body": ..., "query": ...}.
+        # The desktop bridge worker replays it against the LOCAL backend
+        # (127.0.0.1:8001) which executes it (IS_CLOUD=false there) and
+        # we ship the response body back to the cloud where the original
+        # frontend request is waiting on it.
+        if isinstance(payload, dict) and payload.get("method") and payload.get("path"):
+            generic_method = str(payload["method"]).upper()
+            generic_path = str(payload["path"])
+            generic_body = payload.get("body") or {}
+            generic_query = payload.get("query") or {}
+            try:
+                local_base = "http://127.0.0.1:8001"
+                # Bridge worker is part of THIS process; we cannot make
+                # a request to ourselves through httpx without an async
+                # client + we want the X-Krexion-Bridge-Job header set
+                # so require_local_mode lets the call through.
+                headers = {
+                    "X-Krexion-Bridge-Job": "1",
+                    "Content-Type": "application/json",
+                }
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    if generic_method == "GET":
+                        r = await client.get(
+                            f"{local_base}{generic_path}",
+                            headers=headers,
+                            params=generic_query,
+                        )
+                    else:
+                        r = await client.request(
+                            generic_method,
+                            f"{local_base}{generic_path}",
+                            headers=headers,
+                            params=generic_query,
+                            json=generic_body,
+                        )
+                try:
+                    body_back = r.json()
+                except Exception:
+                    body_back = {"text": r.text[:4000]}
+                return {
+                    "status": "done",
+                    "result": {"status": r.status_code, "body": body_back},
+                }
+            except Exception as exc:  # noqa: BLE001
+                return {"status": "failed", "error": f"local replay failed: {exc}"}
         return {"status": "failed", "error": f"unknown feature: {feature}"}
 
     method, route = feature_routes[feature]
@@ -415,16 +501,35 @@ async def _sync_loop(main_db, get_db_for_user) -> None:
 
 
 def start_if_local(main_db, get_db_for_user) -> bool:
-    """Called from server.py on startup. No-op if not configured for sync."""
-    if KREXION_MODE != "local":
-        logger.info("[sync] disabled - KREXION_MODE != local")
+    """Called from server.py on startup. No-op if not configured for sync.
+
+    v1.0.14 fix: previously checked `KREXION_MODE == 'local'` strict-equal.
+    But the actual NSSM service installer's `AppEnvironmentExtra` line
+    in krexion-setup.iss sets `KREXION_MODE=native` (not "local").
+    Result: every native customer install had the sync daemon DISABLED
+    on startup, no heartbeats reached the cloud, the krexion.com link
+    pill in the dashboard read 'no recent heartbeat' forever, AND every
+    heavy job submitted from krexion.com was rejected with
+    'local_pc_offline'. This is THE root cause of the v1.0.12-1.0.13
+    'heavy jobs ni chal rahe' report.
+
+    Now we treat ANY non-'cloud' mode as a customer install that needs
+    to talk to the cloud. Only KREXION_MODE='cloud' (the VPS deploy)
+    skips this path.
+    """
+    if KREXION_MODE == "cloud":
+        logger.info("[sync] disabled - KREXION_MODE=cloud (this IS the cloud edge)")
         return False
     if not CLOUD_URL:
-        logger.info("[sync] disabled - missing KREXION_CLOUD_URL")
+        logger.info("[sync] disabled - KREXION_CLOUD_URL not set")
         return False
     try:
         asyncio.create_task(_sync_loop(main_db, get_db_for_user))
         asyncio.create_task(_bridge_loop())
+        logger.info(
+            f"[sync] daemon enabled for mode={KREXION_MODE!r}, cloud={CLOUD_URL}, "
+            f"license_key_present={bool(LICENSE_KEY)}"
+        )
         if not LICENSE_KEY:
             logger.info(
                 "[sync] no LICENSE_KEY env - daemon will pick it up from "
