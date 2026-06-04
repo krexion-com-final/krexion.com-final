@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import sys
 import random
 import time
 import uuid
@@ -30,6 +31,35 @@ from typing import Any, Dict, List, Optional, Tuple, Callable, Awaitable
 
 if not os.environ.get("PLAYWRIGHT_BROWSERS_PATH") and os.path.isdir("/pw-browsers"):
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/pw-browsers"
+
+
+# v1.0.12 fix: cross-platform helpers for Playwright Chromium paths.
+# Pre-1.0.12 these were hardcoded to Linux conventions (chrome-linux/
+# headless_shell). On native Windows installs (krexion-Setup-v1.0.x.exe
+# bundles Chromium for win64) the actual binary lives at
+# `chromium_headless_shell-{rev}\chrome-win\headless_shell.exe` -
+# the Linux check always missed it and the backend kept reporting
+# "Chromium rev XXXX not installed yet" forever, blocking every heavy
+# job on Windows. The customer's backend.stderr.log showed exactly:
+#   ERROR:real_user_traffic:Playwright install failed: [WinError 2]
+#   The system cannot find the file specified
+# These helpers return the OS-correct sub-path so the same code works
+# on the cloud VPS (Linux) AND on customers' native Windows installs.
+def _pw_platform_dir() -> str:
+    """Playwright's per-OS sub-folder inside chromium-* / chromium_headless_shell-*."""
+    if sys.platform.startswith("win"):
+        return "chrome-win"
+    if sys.platform == "darwin":
+        return "chrome-mac"
+    return "chrome-linux"
+
+
+def _headless_shell_binary_name() -> str:
+    return "headless_shell.exe" if sys.platform.startswith("win") else "headless_shell"
+
+
+def _chrome_binary_name() -> str:
+    return "chrome.exe" if sys.platform.startswith("win") else "chrome"
 
 
 # Serialize concurrent "ensure chromium installed" attempts. The preview pod's
@@ -97,7 +127,7 @@ def get_engine_status() -> Dict[str, Any]:
             "browser_path": None,
         }
 
-    binary_path = Path(browsers_root) / f"chromium_headless_shell-{expected}" / "chrome-linux" / "headless_shell"
+    binary_path = Path(browsers_root) / f"chromium_headless_shell-{expected}" / _pw_platform_dir() / _headless_shell_binary_name()
     # 2026-01: Detect which engine is actually being used at runtime so
     # the admin engine-status badge can show "Full Chromium (--headless=new)"
     # vs "Headless Shell (legacy)". Helps confirm the anti-detect upgrade
@@ -177,7 +207,7 @@ async def _ensure_chromium_available() -> bool:
     def _binary_for(rev: Optional[str]) -> Optional[Path]:
         if not rev:
             return None
-        return Path(browsers_root) / f"chromium_headless_shell-{rev}" / "chrome-linux" / "headless_shell"
+        return Path(browsers_root) / f"chromium_headless_shell-{rev}" / _pw_platform_dir() / _headless_shell_binary_name()
 
     expected = _expected_revision()
 
@@ -191,7 +221,7 @@ async def _ensure_chromium_available() -> bool:
         # Fallback (only when we can't read browsers.json): glob check.
         try:
             for p in Path(browsers_root).glob("chromium_headless_shell-*"):
-                if (p / "chrome-linux" / "headless_shell").exists():
+                if (p / _pw_platform_dir() / _headless_shell_binary_name()).exists():
                     return True
         except Exception:
             pass
@@ -314,7 +344,7 @@ def _full_chromium_binary_path() -> Optional[Path]:
                 break
         if not rev:
             return None
-        bp = Path(browsers_root) / f"chromium-{rev}" / "chrome-linux" / "chrome"
+        bp = Path(browsers_root) / f"chromium-{rev}" / _pw_platform_dir() / _chrome_binary_name()
         return bp if bp.exists() else None
     except Exception:
         return None

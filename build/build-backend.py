@@ -321,16 +321,78 @@ def pip_install_requirements(req_file: Path) -> None:
         for p in failed:
             log(f"  - {p}")
 
+    # ── Pass 3: GUARANTEE the desktop dashboard packages are installed ──
+    # v1.0.12 fix: passes 1 & 2 use --only-binary :all: which makes pip
+    # refuse to install ANY package (including pure-Python ones like
+    # `proxy_tools`, a pywebview dependency) that doesn't ship a wheel.
+    # Result: `pip install pywebview==5.4` died on its proxy_tools dep,
+    # pywebview itself got silently SKIPPED, the build still succeeded
+    # because verify_core_packages didn't check for pywebview, and the
+    # customer's installed app crashed with:
+    #   ModuleNotFoundError: No module named 'webview'
+    # ...the moment they double-clicked the desktop icon. This is the
+    # ACTUAL root cause of the v1.0.4-1.0.11 "software open ni hota" bug.
+    #
+    # Fix: install pywebview + pystray + Pillow + pythonnet + their
+    # pure-Python deps WITHOUT the --only-binary constraint, allowing
+    # pip to fall back to sdist for the handful of source-only packages
+    # (proxy_tools, bottle's older versions, etc). These packages are
+    # pure-Python source distributions that build instantly without a
+    # C compiler, so allowing sdist here is safe and adds ~5 s to the
+    # build.
+    desktop_pkgs = [
+        "pywebview==5.4",
+        "pystray==0.19.5",
+        "Pillow==10.4.0",
+        "pythonnet==3.0.3",
+        "psutil==6.1.0",
+        "proxy-tools==0.1.0",
+        "bottle>=0.12.25",
+        "typing_extensions>=4.0",
+    ]
+    log("Pass 3: forced-install desktop dashboard packages (allow sdist fallback)")
+    r = subprocess.run(
+        [
+            str(python_exe), "-m", "pip", "install",
+            "--no-warn-script-location",
+            "--no-compile",
+            "--prefer-binary",
+            "--upgrade",          # overwrite any partial install from passes 1/2
+            *desktop_pkgs,
+        ],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        # Don't hard-fail yet - the verify step below will say exactly
+        # which import is broken. But log the install output for CI.
+        tail = (r.stdout + r.stderr).strip().splitlines()[-15:]
+        log("  Pass 3 install non-zero exit:", prefix="!!!")
+        for line in tail:
+            log(f"    {line}")
+    else:
+        log("  Pass 3 install OK")
+
     verify_core_packages(python_exe)
 
 
 def verify_core_packages(python_exe: Path) -> None:
     """Hard-fail the build only if the CORE Krexion runtime packages
-    aren't importable. Everything else is best-effort."""
+    aren't importable. Everything else is best-effort.
+
+    v1.0.12 fix: added the desktop-dashboard packages (webview, pystray,
+    PIL) to the verification list. Pre-1.0.12 builds could ship without
+    these and the customer install would crash on first launch with
+    'ModuleNotFoundError: No module named webview'. Adding them to the
+    verify list means the BUILD fails loudly if pip silently skipped
+    one - much better than discovering it post-install.
+    """
     core = [
         "fastapi", "uvicorn", "starlette", "pydantic", "pydantic_core",
         "motor", "pymongo", "bcrypt", "cryptography", "httpx",
         "passlib", "jose", "stripe", "playwright",
+        # Desktop dashboard runtime - missing one of these means the
+        # customer's krexion-tray.bat crashes silently at import time.
+        "webview", "pystray", "PIL", "psutil",
     ]
     log("Verifying core packages importable: " + ", ".join(core))
     code = "; ".join(f"import {p}" for p in core)
