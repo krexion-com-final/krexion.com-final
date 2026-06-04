@@ -336,7 +336,7 @@ Filename: "{app}\bin\{#AppExeService}"; \
 ; doubles "" -> ") so each one arrives at NSSM as a single argv entry,
 ; regardless of the install path the customer picks.
 Filename: "{app}\bin\{#AppExeService}"; \
-  Parameters: "set KrexionBackend AppEnvironmentExtra ""MONGO_URL=mongodb://127.0.0.1:27017"" ""DB_NAME=krexion"" ""KREXION_MODE=native"" ""KREXION_BUILD_TYPE=binary"" ""KREXION_CLOUD_URL={#AppURL}"" ""PLAYWRIGHT_BROWSERS_PATH={app}\browser-engine"" ""STRICT_CLOUD_HEAVY_BLOCK=false"" ""LICENSE_KEY_FILE={commonappdata}\Krexion\license-key.txt"""; \
+  Parameters: "set KrexionBackend AppEnvironmentExtra ""MONGO_URL=mongodb://127.0.0.1:27017"" ""DB_NAME=krexion"" ""KREXION_MODE=native"" ""KREXION_BUILD_TYPE=binary"" ""KREXION_CLOUD_URL={#AppURL}"" ""KREXION_SYNC_STATUS_FILE={commonappdata}\Krexion\sync-status.json"" ""PLAYWRIGHT_BROWSERS_PATH={app}\browser-engine"" ""STRICT_CLOUD_HEAVY_BLOCK=false"" ""LICENSE_KEY_FILE={commonappdata}\Krexion\license-key.txt"""; \
   Flags: runhidden
 
 Filename: "{app}\bin\{#AppExeService}"; \

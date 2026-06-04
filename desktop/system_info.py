@@ -115,7 +115,12 @@ def _installer_specs() -> Optional[dict[str, Any]]:
     not present (e.g., user is on a dev / non-Inno-installed setup)."""
     try:
         if SPECS_FILE.exists():
-            return json.loads(SPECS_FILE.read_text(encoding="utf-8"))
+            # v1.0.17: use utf-8-sig so the PowerShell-written file's
+            # UTF-8 BOM is stripped transparently. Pre-1.0.17 the install
+            # logs were spammed with 'Unexpected UTF-8 BOM' every 5 s
+            # because PowerShell's Set-Content always prepends a BOM and
+            # Python's strict utf-8 codec refuses to skip it.
+            return json.loads(SPECS_FILE.read_text(encoding="utf-8-sig"))
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Could not read {SPECS_FILE}: {exc}")
     return None

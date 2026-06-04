@@ -16,9 +16,13 @@ Auth: customer's `LICENSE_KEY` env var, sent in X-Krexion-License header.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import socket
+import sys
+import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -141,7 +145,7 @@ async def _heartbeat() -> None:
     try:
         body = {
             "hostname": socket.gethostname(),
-            "version": "1.0.16",
+            "version": "1.0.17",
             "platform": "native-windows" if sys.platform.startswith("win") else "docker",
         }
         body.update(_hardware_info())
@@ -167,6 +171,29 @@ async def _heartbeat() -> None:
                     )
                 _HB_OKS += 1
                 _HB_FAILS = 0  # reset failure counter on success
+                # v1.0.17: write the sync-status file the desktop dashboard
+                # polls for the krexion.com link pill. desktop_module's
+                # _cloud_link_status() reads last_heartbeat_at from this
+                # file - pre-1.0.17 we never wrote it so the dashboard
+                # always showed yellow 'no recent heartbeat' even when
+                # the daemon was happily heart-beating.
+                try:
+                    status_path = Path(
+                        os.environ.get("KREXION_SYNC_STATUS_FILE")
+                        or (Path(os.environ.get("PROGRAMDATA", "C:/ProgramData"))
+                            / "Krexion" / "sync-status.json")
+                    )
+                    status_path.parent.mkdir(parents=True, exist_ok=True)
+                    status_path.write_text(
+                        json.dumps({
+                            "last_heartbeat_at": time.time(),
+                            "cloud_url": CLOUD_URL,
+                            "version": "1.0.17",
+                        }),
+                        encoding="utf-8",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
     except Exception as e:  # noqa: BLE001
         if _HB_FAILS < 3:
             logger.info(

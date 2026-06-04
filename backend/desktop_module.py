@@ -166,7 +166,7 @@ async def _cloud_link_status() -> dict:
     status_file = Path(os.environ.get("KREXION_SYNC_STATUS_FILE", "/tmp/krexion-sync-status.json"))
     try:
         if status_file.exists():
-            d = json.loads(status_file.read_text(encoding="utf-8"))
+            d = json.loads(status_file.read_text(encoding="utf-8-sig"))
             last = d.get("last_heartbeat_at")
             if last:
                 age_sec = int(time.time() - float(last))
