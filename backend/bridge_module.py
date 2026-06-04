@@ -124,6 +124,16 @@ async def enqueue_bridge_job(
 
     job_id = uuid.uuid4().hex
     now_iso = _now_iso()
+    # v1.0.19: pre-exclude the legacy PowerShell stub from claiming
+    # any heavy job (anything that ISN'T an adspower/* call). The PS
+    # stub doesn't know how to run real-user-traffic/start,
+    # visual-recorder/start, form-filler/run etc., so without this
+    # filter it would race the Python sync_client, claim the job
+    # first, fail it with "feature not supported", and the customer
+    # would see "Start failed" before Python ever got a chance.
+    excluded_workers: list[str] = []
+    if not str(feature).startswith("adspower/"):
+        excluded_workers.append("powershell")
     doc = {
         "id": job_id,
         "user_id": user["id"],
@@ -137,6 +147,7 @@ async def enqueue_bridge_job(
         "started_at": None,
         "completed_at": None,
         "claimed_by": None,
+        "excluded_workers": excluded_workers,
     }
     await _db.bridge_jobs.insert_one(doc)
     logger.info(
@@ -239,19 +250,49 @@ async def worker_pull_jobs(
     x_krexion_license: Optional[str] = Header(None),
     limit: int = 5,
     hostname: Optional[str] = None,
+    feature_prefix: Optional[str] = None,
 ):
     """Local sync_client pulls up to `limit` pending jobs for its user.
-    Marks them as 'running' so other workers (if any) don't double-run."""
+    Marks them as 'running' so other workers (if any) don't double-run.
+
+    v1.0.19: `feature_prefix` lets a limited worker (e.g. the legacy
+    PowerShell `KrexionBridge` scheduled task that ONLY knows the
+    adspower/* features) opt-in to only the jobs it can actually
+    execute. Without this filter the PowerShell stub was racing the
+    Python sync_client, claiming heavy jobs like visual-recorder/start
+    and immediately failing them with 'feature not supported by the
+    PowerShell bridge worker', which is what the customer reported."""
     if _validate_license is None:
         raise HTTPException(status_code=500, detail="Bridge not initialised")
     lic, user = await _validate_license(x_krexion_license)
     limit = max(1, min(limit, 20))
 
     claimed = []
+    base_query: dict = {"user_id": user["id"], "status": "pending"}
+    # v1.0.19: workers identify themselves via `worker_type` (free-form
+    # string). The Python sync_client passes `worker_type=python`, the
+    # legacy PowerShell scheduled task passes nothing. Any job that was
+    # already once rejected by the PS stub gets `excluded_workers` set
+    # and we filter it out for any worker whose type is in that list.
+    worker_type = (request.query_params.get("worker_type") or "").lower().strip()
+    if not worker_type:
+        # Legacy PS stub never sends worker_type — treat that as PS so
+        # requeued jobs go straight to the Python sync_client (which
+        # always sends worker_type=python in v1.0.19+).
+        worker_type = "powershell"
+    if worker_type:
+        base_query["excluded_workers"] = {"$nin": [worker_type]}
+    if feature_prefix:
+        # Match any feature that begins with the given prefix (e.g.
+        # "adspower/" matches "adspower/test", "adspower/create" …)
+        # Escape regex specials so a stray '.' or '?' can't broaden it.
+        import re as _re
+        base_query["feature"] = {"$regex": "^" + _re.escape(feature_prefix)}
+
     for _ in range(limit):
         # Atomic find-and-claim
         doc = await _db.bridge_jobs.find_one_and_update(
-            {"user_id": user["id"], "status": "pending"},
+            base_query,
             {
                 "$set": {
                     "status": "running",
@@ -267,8 +308,8 @@ async def worker_pull_jobs(
         claimed.append(doc)
     if claimed:
         logger.info(
-            f"[bridge] worker {hostname or '?'} claimed {len(claimed)} job(s) "
-            f"for user={user.get('email')}: "
+            f"[bridge] worker {hostname or '?'} prefix={feature_prefix or '*'} "
+            f"claimed {len(claimed)} job(s) for user={user.get('email')}: "
             + ", ".join(f"{j['id'][:8]}={j.get('feature','?')}" for j in claimed)
         )
     return {"jobs": claimed, "server_time": _now_iso()}
@@ -285,9 +326,65 @@ async def worker_post_result(
     job_id = body.get("job_id")
     if not job_id:
         raise HTTPException(status_code=400, detail="job_id required")
+
+    # v1.0.19: when the legacy PowerShell stub returns "feature not
+    # supported by the PowerShell bridge worker" for a job, the right
+    # behaviour is to PUT IT BACK in the queue (status=pending) so the
+    # Python sync_client running on the same PC can pick it up next
+    # cycle — NOT to mark it failed and surface that misleading error
+    # to the customer (which is exactly what they were seeing for
+    # visual-recorder/start, real-user-traffic/start, form-filler/run
+    # etc). The PowerShell bridge only knows the adspower/* features.
+    new_status = body.get("status", "done")
+    err_text = (body.get("error") or "").lower()
+    if new_status == "failed" and (
+        "not supported by the powershell bridge worker" in err_text
+        or "unhandled feature" in err_text
+    ):
+        # Track requeue count to avoid an infinite ping-pong if the
+        # Python sync_client is somehow absent or also broken. After
+        # 3 requeues we let the failure stand.
+        existing = await _db.bridge_jobs.find_one(
+            {"id": job_id, "user_id": user["id"]}, {"requeue_count": 1}
+        )
+        requeue_count = int((existing or {}).get("requeue_count") or 0)
+        if requeue_count >= 3:
+            logger.warning(
+                f"[bridge] job {job_id[:8]} requeued {requeue_count}x already; "
+                f"letting PowerShell failure stand."
+            )
+        else:
+            logger.info(
+                f"[bridge] requeue {job_id[:8]} (#{requeue_count + 1}) — claimed by "
+                f"legacy PowerShell stub which can't run this feature. Will be "
+                f"picked up by the Python sync_client on next pull."
+            )
+            await _db.bridge_jobs.update_one(
+                {"id": job_id, "user_id": user["id"]},
+                {
+                    "$set": {
+                        "status": "pending",
+                        "started_at": None,
+                        "claimed_by": None,
+                        "result": None,
+                        "error": None,
+                        # After a PowerShell stub rejection, mark this
+                        # job to skip the PS worker on future pulls.
+                        # The PS pull endpoint passes feature_prefix=
+                        # adspower/ so it can't match anyway, but for
+                        # legacy installs that DON'T pass the prefix
+                        # we also gate via job's `excluded_workers`
+                        # list. Cloud-side guard below in pull.
+                        "excluded_workers": ["powershell"],
+                    },
+                    "$inc": {"requeue_count": 1},
+                },
+            )
+            return {"updated": 0, "requeued": True}
+
     update = {
         "$set": {
-            "status": body.get("status", "done"),
+            "status": new_status,
             "result": body.get("result"),
             "error": body.get("error"),
             "completed_at": _now_iso(),
@@ -299,7 +396,7 @@ async def worker_post_result(
     )
     logger.info(
         f"[bridge] worker posted result for {job_id[:8]} → "
-        f"status={body.get('status','done')} err={(body.get('error') or '')[:120]} "
+        f"status={new_status} err={(body.get('error') or '')[:120]} "
         f"updated={res.modified_count}"
     )
     return {"updated": res.modified_count}

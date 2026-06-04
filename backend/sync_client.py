@@ -102,7 +102,7 @@ def _headers() -> dict:
     return {
         "X-Krexion-License": _current_license_key(),
         "Content-Type": "application/json",
-        "User-Agent": "Krexion-Local/1.0.18",
+        "User-Agent": "Krexion-Local/1.0.19",
     }
 
 
@@ -145,7 +145,7 @@ async def _heartbeat() -> None:
     try:
         body = {
             "hostname": socket.gethostname(),
-            "version": "1.0.18",
+            "version": "1.0.19",
             "platform": "native-windows" if sys.platform.startswith("win") else "docker",
         }
         body.update(_hardware_info())
@@ -188,7 +188,7 @@ async def _heartbeat() -> None:
                         json.dumps({
                             "last_heartbeat_at": time.time(),
                             "cloud_url": CLOUD_URL,
-                            "version": "1.0.18",
+                            "version": "1.0.19",
                         }),
                         encoding="utf-8",
                     )
@@ -335,7 +335,7 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
             generic_path = str(payload["path"])
             generic_body = payload.get("body") or {}
             generic_query = payload.get("query") or {}
-            # v1.0.18: faithful raw-body + content-type + auth replay so
+            # v1.0.19: faithful raw-body + content-type + auth replay so
             # multipart/form-data heavy jobs (RUT, Form Filler) actually
             # execute on the desktop backend. Previously sync_client only
             # POSTed the parsed JSON body, which was always {} for
@@ -531,7 +531,7 @@ async def _pull_and_run_jobs() -> int:
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(
                 f"{CLOUD_URL}/api/sync/jobs/pull",
-                params={"limit": 5, "hostname": socket.gethostname()},
+                params={"limit": 5, "hostname": socket.gethostname(), "worker_type": "python"},
                 headers=_headers(),
             )
         if r.status_code != 200:
@@ -648,6 +648,32 @@ def start_if_local(main_db, get_db_for_user) -> bool:
     if not CLOUD_URL:
         logger.info("[sync] disabled - KREXION_CLOUD_URL not set")
         return False
+    # v1.0.19: kill the legacy PowerShell `KrexionBridge` scheduled task
+    # if it exists. Older installs (pre-native bundle, or PCs that ever
+    # ran the cloud's "Pair my PC" PowerShell snippet) have a Scheduled
+    # Task that polls /api/sync/jobs/pull every 5 s with NO feature
+    # filter. It races the Python sync_client and atomically claims
+    # heavy jobs like visual-recorder/start, only to immediately mark
+    # them failed with "feature not supported by the PowerShell bridge
+    # worker." That is exactly what the customer is reporting in
+    # v1.0.19 logs. Deleting the task on startup is idempotent
+    # (schtasks /Delete returns non-zero if task absent — fine).
+    if sys.platform.startswith("win"):
+        try:
+            import subprocess as _sp
+            for _task in ("KrexionBridge", "KrexionHeartbeat"):
+                try:
+                    _sp.run(
+                        ["schtasks", "/Delete", "/TN", _task, "/F"],
+                        capture_output=True,
+                        timeout=10,
+                        creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            logger.info("[sync] legacy KrexionBridge / KrexionHeartbeat scheduled tasks cleaned up (if present)")
+        except Exception as _cleanup_err:  # noqa: BLE001
+            logger.debug(f"[sync] legacy task cleanup skipped: {_cleanup_err}")
     try:
         asyncio.create_task(_sync_loop(main_db, get_db_for_user))
         asyncio.create_task(_bridge_loop())

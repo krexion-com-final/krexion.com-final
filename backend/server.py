@@ -16935,7 +16935,7 @@ function Invoke-AdsPower {
 
 while ((Get-Date) -lt $endTime) {
   try {
-    $resp = Invoke-RestMethod -Uri "$cloud/api/sync/jobs/pull?limit=3&hostname=$env:COMPUTERNAME" -Headers @{"X-Krexion-License"=$key} -TimeoutSec 10
+    $resp = Invoke-RestMethod -Uri "$cloud/api/sync/jobs/pull?limit=3&hostname=$env:COMPUTERNAME&feature_prefix=adspower/" -Headers @{"X-Krexion-License"=$key} -TimeoutSec 10
     foreach ($job in $resp.jobs) {
       $result = @{ job_id = $job.id; status = "failed"; error = "unhandled feature" }
       try {
