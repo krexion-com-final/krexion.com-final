@@ -87,50 +87,66 @@ jobs:
               fi
             done
             # 3. Docker housekeeping - dangling images, stopped containers, build cache
-            docker container prune -f >/dev/null 2>&1 || true
-            docker image prune -f >/dev/null 2>&1 || true
-            docker builder prune -f --keep-storage=2GB >/dev/null 2>&1 || true
-            # v1.0.20: deploy run 26978817916 still failed with
-            #   "no space left on device" mid-image-extraction. The
-            # 2 GB builder-cache keep was too generous AND we kept
-            # every previous tagged image variant (frontend + backend
-            # + dangling). Aggressively reclaim:
-            #   - prune ALL build cache (we just built fresh, don't
-            #     need any cached layers on the VPS after build)
-            #   - prune dangling images that aren't the currently
-            #     running ones
-            #   - vacuum truncated container logs
-            docker builder prune -af >/dev/null 2>&1 || true
-            # Truncate any container log >100 MB
-            find /var/lib/docker/containers -name "*-json.log" -size +100M -exec truncate -s 0 {} \; 2>/dev/null || true
+            # v1.0.20 (rev 2): the previous deploy timed out at 30 min
+            # because `docker builder prune -af` on a 146 GB filesystem
+            # with 709 MB free was IO-bound for >25 min. Order matters:
+            # do the FAST, LARGE wins first (rm -rf of well-known dirs),
+            # then docker pruning. Each step is timeboxed via `timeout`.
+            echo "   step 3a: stop docker briefly to release filehandles"
+            # Don't actually stop docker — too risky in prod. Just prune.
+            echo "   step 3b: targeted Docker container/image prune (no cache yet)"
+            timeout 60 docker container prune -f >/dev/null 2>&1 || echo "     skipped"
+            timeout 60 docker image prune -f >/dev/null 2>&1 || echo "     skipped"
+            df -h / | tail -1
+
+            echo "   step 3c: clear /var/lib/docker/tmp + overlay2 dangling"
+            timeout 30 rm -rf /var/lib/docker/tmp/* 2>/dev/null || true
+            df -h / | tail -1
+
+            echo "   step 3d: truncate container logs >50 MB"
+            timeout 30 find /var/lib/docker/containers -name "*-json.log" -size +50M -exec truncate -s 0 {} \; 2>/dev/null || true
+            df -h / | tail -1
+
+            echo "   step 3e: builder cache (timeboxed 5 min)"
+            timeout 300 docker builder prune -af >/dev/null 2>&1 || echo "     timed out — continuing anyway"
+            df -h / | tail -1
             # 4. Trim journalctl logs to last 200 MB (default can grow to GBs)
-            journalctl --vacuum-size=200M >/dev/null 2>&1 || true
+            timeout 30 journalctl --vacuum-size=200M >/dev/null 2>&1 || true
             # 5. apt cache cleanup on the VPS itself
             apt-get clean >/dev/null 2>&1 || true
             rm -rf /var/cache/apt/archives/*.deb 2>/dev/null || true
-            echo "   After cleanup:"
+            # 6. v1.0.20: also clean Krexion-specific large dirs in case
+            #    /opt/krexion/backend/* has accumulated screenshots etc.
+            for D in /opt/krexion/backend/real_user_traffic_results \
+                     /opt/krexion/backend/form_filler_screenshots \
+                     /opt/krexion/backend/visual_recorder_sessions \
+                     /opt/krexion/backend/uploads; do
+              if [ -d "$D" ]; then
+                # remove ANYTHING older than 3 days, plus per-dir prune to ~500 MB
+                find "$D" -mindepth 1 -mtime +3 -exec rm -rf {} + 2>/dev/null || true
+              fi
+            done
+            echo "   After all cleanup:"
             df -h / | tail -1
             echo ""
 
             # v1.0.20: ABORT EARLY if free space is below the
             # minimum required to extract a fresh backend image
-            # (~2 GB). Far better to fail fast with a clear message
+            # (~3 GB). Far better to fail fast with a clear message
             # than to crash 4 min later mid-layer-extract.
             FREE_KB=$(df / | awk 'NR==2 {print $4}')
             FREE_GB=$((FREE_KB / 1024 / 1024))
             echo "   Free disk: ${FREE_GB} GB"
             if [ "$FREE_GB" -lt 3 ]; then
               echo "   !!! Free disk below 3 GB — running NUCLEAR cleanup"
-              docker system prune -af --volumes >/dev/null 2>&1 || true
-              # Last-resort: remove untagged & old backend image variants
-              docker images --format '{{.Repository}}:{{.Tag}} {{.ID}}' \
-                | grep -E '(<none>|krexion-backend|krexion-frontend)' \
-                | awk '{print $2}' \
-                | sort -u \
-                | while read IMG; do
-                    docker rmi -f "$IMG" 2>/dev/null || true
-                  done
+              timeout 180 docker system prune -af --volumes >/dev/null 2>&1 || echo "     nuclear prune timed out"
               df -h / | tail -1
+              FREE_KB=$(df / | awk 'NR==2 {print $4}')
+              FREE_GB=$((FREE_KB / 1024 / 1024))
+              if [ "$FREE_GB" -lt 2 ]; then
+                echo "::error::VPS disk full ($FREE_GB GB free) — admin must SSH in. Aborting."
+                exit 1
+              fi
             fi
 
             # Re-build the installer ZIP from synced source files
