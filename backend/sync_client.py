@@ -102,7 +102,7 @@ def _headers() -> dict:
     return {
         "X-Krexion-License": _current_license_key(),
         "Content-Type": "application/json",
-        "User-Agent": "Krexion-Local/1.0.15",
+        "User-Agent": "Krexion-Local/1.0.18",
     }
 
 
@@ -145,7 +145,7 @@ async def _heartbeat() -> None:
     try:
         body = {
             "hostname": socket.gethostname(),
-            "version": "1.0.17",
+            "version": "1.0.18",
             "platform": "native-windows" if sys.platform.startswith("win") else "docker",
         }
         body.update(_hardware_info())
@@ -188,7 +188,7 @@ async def _heartbeat() -> None:
                         json.dumps({
                             "last_heartbeat_at": time.time(),
                             "cloud_url": CLOUD_URL,
-                            "version": "1.0.17",
+                            "version": "1.0.18",
                         }),
                         encoding="utf-8",
                     )
@@ -335,6 +335,21 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
             generic_path = str(payload["path"])
             generic_body = payload.get("body") or {}
             generic_query = payload.get("query") or {}
+            # v1.0.18: faithful raw-body + content-type + auth replay so
+            # multipart/form-data heavy jobs (RUT, Form Filler) actually
+            # execute on the desktop backend. Previously sync_client only
+            # POSTed the parsed JSON body, which was always {} for
+            # multipart requests, so the local backend 422'd every time.
+            import base64 as _b64
+            raw_b64 = payload.get("raw_body_b64") or ""
+            content_type = (payload.get("content_type") or "").strip()
+            auth_hdr = (payload.get("authorization") or "").strip()
+            raw_body_bytes = b""
+            if raw_b64:
+                try:
+                    raw_body_bytes = _b64.b64decode(raw_b64)
+                except Exception:
+                    raw_body_bytes = b""
             try:
                 local_base = "http://127.0.0.1:8001"
                 # Bridge worker is part of THIS process; we cannot make
@@ -343,14 +358,40 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
                 # so require_local_mode lets the call through.
                 headers = {
                     "X-Krexion-Bridge-Job": "1",
-                    "Content-Type": "application/json",
                 }
-                async with httpx.AsyncClient(timeout=60.0) as client:
+                # Pass through user's JWT so local get_current_user works
+                if auth_hdr:
+                    headers["Authorization"] = auth_hdr
+                # Pass through the original Content-Type when we have
+                # raw bytes (multipart, urlencoded, etc.). For empty raw
+                # body fall back to JSON.
+                use_raw = bool(raw_body_bytes) and content_type and (
+                    "multipart/form-data" in content_type.lower()
+                    or "application/x-www-form-urlencoded" in content_type.lower()
+                )
+                if use_raw:
+                    headers["Content-Type"] = content_type
+                else:
+                    headers["Content-Type"] = "application/json"
+                logger.info(
+                    f"[bridge] replay {generic_method} {generic_path} "
+                    f"ct={headers.get('Content-Type','')[:40]} "
+                    f"raw_bytes={len(raw_body_bytes)} json_body={bool(generic_body)}"
+                )
+                async with httpx.AsyncClient(timeout=600.0) as client:
                     if generic_method == "GET":
                         r = await client.get(
                             f"{local_base}{generic_path}",
                             headers=headers,
                             params=generic_query,
+                        )
+                    elif use_raw:
+                        r = await client.request(
+                            generic_method,
+                            f"{local_base}{generic_path}",
+                            headers=headers,
+                            params=generic_query,
+                            content=raw_body_bytes,
                         )
                     else:
                         r = await client.request(
@@ -364,11 +405,15 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
                     body_back = r.json()
                 except Exception:
                     body_back = {"text": r.text[:4000]}
+                logger.info(
+                    f"[bridge] replay → HTTP {r.status_code} for {generic_path}"
+                )
                 return {
                     "status": "done",
                     "result": {"status": r.status_code, "body": body_back},
                 }
             except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[bridge] local replay failed for {generic_path}: {exc}")
                 return {"status": "failed", "error": f"local replay failed: {exc}"}
         return {"status": "failed", "error": f"unknown feature: {feature}"}
 

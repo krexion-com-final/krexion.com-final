@@ -139,7 +139,11 @@ async def enqueue_bridge_job(
         "claimed_by": None,
     }
     await _db.bridge_jobs.insert_one(doc)
-    logger.info(f"[bridge] enqueued job {job_id[:8]} feature={feature} user={user.get('email')}")
+    logger.info(
+        f"[bridge] enqueued job {job_id[:8]} feature={feature} user={user.get('email')} "
+        f"hostname={status.get('hostname','?')} wait_for_result={wait_for_result} "
+        f"timeout={wait_timeout}s"
+    )
 
     if not wait_for_result:
         # Return without _id from MongoDB
@@ -152,7 +156,11 @@ async def enqueue_bridge_job(
         await asyncio.sleep(0.5)
         j = await _db.bridge_jobs.find_one({"id": job_id}, {"_id": 0})
         if j and j.get("status") in ("done", "failed"):
+            logger.info(
+                f"[bridge] job {job_id[:8]} completed inline → {j.get('status')}"
+            )
             return {"job_id": job_id, "status": j["status"], "result": j.get("result"), "error": j.get("error")}
+    logger.info(f"[bridge] job {job_id[:8]} still pending after {wait_timeout}s — handing back to caller")
     return {"job_id": job_id, "status": "pending", "local": status, "timeout": True}
 
 
@@ -257,6 +265,12 @@ async def worker_pull_jobs(
         if not doc:
             break
         claimed.append(doc)
+    if claimed:
+        logger.info(
+            f"[bridge] worker {hostname or '?'} claimed {len(claimed)} job(s) "
+            f"for user={user.get('email')}: "
+            + ", ".join(f"{j['id'][:8]}={j.get('feature','?')}" for j in claimed)
+        )
     return {"jobs": claimed, "server_time": _now_iso()}
 
 
@@ -282,5 +296,10 @@ async def worker_post_result(
     res = await _db.bridge_jobs.update_one(
         {"id": job_id, "user_id": user["id"], "status": {"$in": ["running", "pending"]}},
         update,
+    )
+    logger.info(
+        f"[bridge] worker posted result for {job_id[:8]} → "
+        f"status={body.get('status','done')} err={(body.get('error') or '')[:120]} "
+        f"updated={res.modified_count}"
     )
     return {"updated": res.modified_count}

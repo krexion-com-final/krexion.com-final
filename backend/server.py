@@ -564,10 +564,38 @@ async def require_local_mode(request: Request):
             except Exception:
                 _enq = None
             if _enq is not None and _uid:
+                # v1.0.18 FIX: previously we only called request.json() to
+                # capture the body. That silently returned {} for ANY
+                # multipart/form-data request — i.e. EVERY RUT / Form-Filler
+                # / Visual-Recorder submission. The desktop bridge worker
+                # then replayed an empty JSON body against its local
+                # backend, which immediately 422'd because those endpoints
+                # require Form(...) fields. Net result: heavy job vanished
+                # silently. Now we capture the raw body bytes + the
+                # original content-type so the bridge worker can replay
+                # multipart EXACTLY as the cloud received it. We also
+                # forward the user's Authorization (JWT) header so the
+                # local backend's get_current_user dependency succeeds
+                # (it would otherwise 401 because sync_client only sets
+                # X-Krexion-License which most heavy endpoints don't read).
+                import base64 as _b64
                 try:
-                    body_json = await request.json()
+                    raw_body = await request.body()
                 except Exception:
-                    body_json = {}
+                    raw_body = b""
+                content_type = request.headers.get("content-type", "")
+                auth_hdr = request.headers.get("Authorization", "")
+                # Try to parse JSON for legacy callers (proxies/bulk-test
+                # etc.) — fall back to {} on multipart/binary.
+                body_json: dict = {}
+                if "application/json" in content_type.lower():
+                    try:
+                        import json as _json
+                        body_json = _json.loads(raw_body.decode("utf-8") or "{}")
+                        if not isinstance(body_json, dict):
+                            body_json = {}
+                    except Exception:
+                        body_json = {}
                 # Use the URL path (minus /api/) as the feature key so
                 # the desktop bridge worker knows which local endpoint
                 # to replay against.
@@ -580,25 +608,40 @@ async def require_local_mode(request: Request):
                     "path": request.url.path,
                     "body": body_json,
                     "query": dict(request.query_params),
+                    # NEW v1.0.18: raw body + content-type + auth for
+                    # faithful multipart replay on the desktop bridge.
+                    "raw_body_b64": _b64.b64encode(raw_body).decode("ascii") if raw_body else "",
+                    "content_type": content_type,
+                    "authorization": auth_hdr,
                 }
+                logger.info(
+                    f"[bridge] auto-route {feature} → user={_uid[:8]} "
+                    f"method={payload['method']} ct={content_type[:40]} "
+                    f"body_bytes={len(raw_body)}"
+                )
                 bridge_resp = await _enq(
                     {"id": _uid, "email": local_status.get("email")},
                     feature,
                     payload,
                     wait_for_result=True,
-                    wait_timeout=10,
+                    wait_timeout=25,
                 )
                 # When the desktop completes synchronously, return its body.
                 # When still pending, hand back the job_id so the frontend
                 # can poll /api/bridge/jobs/{id} (existing flow).
                 if bridge_resp:
-                    if bridge_resp.get("status") == "done":
+                    _status = bridge_resp.get("status")
+                    logger.info(
+                        f"[bridge] auto-route {feature} job_id={bridge_resp.get('job_id','')[:8]} "
+                        f"status={_status}"
+                    )
+                    if _status == "done":
                         result = bridge_resp.get("result") or {}
                         raise HTTPException(
                             status_code=result.get("status", 200),
                             detail=result.get("body") or {"ok": True, "via": "bridge"},
                         )
-                    if bridge_resp.get("status") == "failed":
+                    if _status == "failed":
                         raise HTTPException(
                             status_code=500,
                             detail={"error": "bridge_execution_failed", "reason": bridge_resp.get("error")},
