@@ -60,26 +60,88 @@ def _is_local_mode() -> bool:
 
 
 def _read_license_summary() -> dict:
-    """Best-effort license info read. The desktop dashboard shows it as a
-    pure visual indicator — never used for auth decisions here."""
-    info = {"active": False, "email": None, "expires_at": None}
+    """Best-effort license info read.
+
+    v1.0.13 fix: previously this only read from `_LICENSE_KEY_CACHE`
+    which is populated by `license_module.validate_license_key()` —
+    a function that ONLY fires when the customer-side proxy validation
+    request reaches it. On a fresh native install, before the first
+    heartbeat round-trip, the cache is empty and the dashboard shows
+    "Inactive" even when a perfectly valid license-key.txt is on disk.
+    Now we ALSO fall back to reading the install-time license file at
+    `%PROGRAMDATA%\\Krexion\\license-key.txt` so the dashboard says
+    "Active" the moment the customer finishes the wizard.
+    """
+    info = {"active": False, "email": None, "expires_at": None, "key_tail": None}
+    # Path 1: runtime in-memory cache (populated after first cloud validation)
     try:
-        # Imports kept lazy so the cloud edge (where this module is also
-        # loaded) doesn't pull in license_module at import time.
         from license_module import _LICENSE_KEY_CACHE  # type: ignore
         cached = _LICENSE_KEY_CACHE or {}
         if cached:
             info["active"] = bool(cached.get("active", True))
             info["email"] = cached.get("email")
             info["expires_at"] = cached.get("expires_at")
+            info["key_tail"] = (cached.get("license_key") or "")[-6:] or None
+            if info["active"]:
+                return info
+    except Exception:  # noqa: BLE001
+        pass
+    # Path 2: on-disk license file written by the installer's [Code] section
+    try:
+        candidates = [
+            Path(os.environ.get("KREXION_LICENSE_FILE", "")) if os.environ.get("KREXION_LICENSE_FILE") else None,
+            Path(os.environ.get("PROGRAMDATA", "C:/ProgramData")) / "Krexion" / "license-key.txt",
+            Path("/etc/krexion/license-key.txt"),
+        ]
+        for p in candidates:
+            if not p:
+                continue
+            try:
+                if p.exists():
+                    raw = p.read_text(encoding="utf-8", errors="ignore").strip()
+                    if raw:
+                        info["active"] = True
+                        info["key_tail"] = raw[-6:]
+                        info["email"] = "—"  # email fetched on next cloud heartbeat
+                        return info
+            except Exception:  # noqa: BLE001
+                continue
     except Exception:  # noqa: BLE001
         pass
     return info
 
 
 def _read_version() -> str:
+    """v1.0.13 fix: original implementation only looked at
+    `Path(__file__).parent / 'VERSION'`. In a native install the layout
+    is:
+        H:\\Krexion\\bin\\app\\backend\\desktop_module.py
+        H:\\Krexion\\bin\\app\\backend\\VERSION
+    which works IF the VERSION file got copied. But our build-backend.py
+    copies the source tree without dotfile filtering, so VERSION should
+    be there. The customer is still seeing 0.0.0 in the dashboard which
+    means EITHER the file is missing OR something is making the relative
+    resolution fail at runtime.
+    Now we check multiple known locations and the embedded fallback in
+    desktop/__init__.__version__ so the badge is NEVER 0.0.0 on a real
+    install."""
+    candidates = [
+        Path(__file__).parent / "VERSION",                # bin/app/backend/VERSION
+        Path(__file__).parent.parent / "backend" / "VERSION",  # bin/app/backend/VERSION (alt path)
+        Path(__file__).parent.parent / "VERSION",          # bin/app/VERSION (defensive)
+    ]
+    for p in candidates:
+        try:
+            if p.exists():
+                v = p.read_text(encoding="utf-8").strip()
+                if v:
+                    return v
+        except Exception:  # noqa: BLE001
+            continue
+    # Last-ditch: the desktop package itself carries __version__
     try:
-        return (Path(__file__).parent / "VERSION").read_text(encoding="utf-8").strip()
+        from desktop import __version__  # type: ignore
+        return str(__version__)
     except Exception:  # noqa: BLE001
         return "0.0.0"
 

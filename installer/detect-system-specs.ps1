@@ -45,20 +45,17 @@ try {
   $cores = [int]$cs.NumberOfLogicalProcessors
   if ($cores -lt 1) { $cores = 4 }
 
-  # Tier ladder — matches desktop/system_info.py exactly so the
-  # installer and runtime never disagree.
-  $tier = if     ($ramGB -le 4  -or $cores -le 2) { 'low' }
-          elseif ($ramGB -le 8  -or $cores -le 4) { 'medium' }
-          elseif ($ramGB -le 16 -or $cores -le 8) { 'high' }
-          else                                    { 'extreme' }
-
-  $maxJobs = switch ($tier) {
-    'low'     { 1 }
-    'medium'  { 2 }
-    'high'    { 4 }
-    'extreme' { 8 }
-    default   { 2 }
-  }
+  # v1.0.13 rebalanced ladder - matches desktop/system_info.py::_derive_tier.
+  # Old ladder maxed at 8 jobs for 32 GB machines; new formula scales with RAM.
+  $usableRamGB = [math]::Max(0.5, $ramGB - 4.0)
+  $byRam       = [math]::Max(1, [int]($usableRamGB / 0.6))
+  $coresCap    = [math]::Max(1, $cores * 6)
+  $maxJobs     = [math]::Min($byRam, $coresCap)
+  $tier = if     ($maxJobs -ge 50) { 'monster' }
+          elseif ($maxJobs -ge 25) { 'extreme' }
+          elseif ($maxJobs -ge 10) { 'high' }
+          elseif ($maxJobs -ge 4)  { 'medium' }
+          else                     { 'low' }
 
   if (-not (Test-Path $OutDir)) {
     New-Item -ItemType Directory -Force -Path $OutDir | Out-Null

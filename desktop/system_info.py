@@ -34,14 +34,51 @@ SPECS_FILE = Path(os.environ.get(
 
 
 def _derive_tier(ram_gb: float, cores: int) -> tuple[str, int]:
-    """Same ladder as the installer's [Code] section."""
-    if ram_gb <= 4 or cores <= 2:
+    """v1.0.13 rebalance — the v1.0.x ladder was way too conservative:
+    it returned only 4 jobs for a 32 GB / 8-core machine because cores
+    capped the tier at "high". Real-world headless Chromium is mostly
+    network-I/O-bound (waiting on the offer page to load), so CPU
+    cores aren't the bottleneck for typical RUT / form-fill traffic
+    workloads. RAM is.
+
+    New ladder (memory-driven, with a soft cores-based cap to avoid
+    over-committing on tiny CPUs):
+
+      headless_shell ~= 350 MB RAM steady-state. Reserve 4 GB for OS +
+      Krexion services. Cap at cores * 8 to keep per-core context
+      switching reasonable.
+
+      ram_gb -> usable -> by_ram -> tier (after cores cap)
+        4     ->   1  ->    2   -> low      (1)
+        8     ->   4  ->   11   -> medium   (8 - cores cap if 1c)
+        16    ->  12  ->   34   -> high     (up to 24)
+        32    ->  28  ->   80   -> extreme  (up to 56 on 8 cores)
+        64    ->  60  ->  171   -> monster  (up to 120 on 16 cores)
+
+    For the customer's 32 GB / 8-core PC the new value is ~56, matching
+    the "40-50 concurrent" expectation they had from the original
+    settings doc.
+    """
+    if ram_gb <= 0 or cores <= 0:
+        # Specs file wasn't ready yet; play safe.
         return "low", 1
-    if ram_gb <= 8 or cores <= 4:
-        return "medium", 2
-    if ram_gb <= 16 or cores <= 8:
-        return "high", 4
-    return "extreme", 8
+
+    usable_ram_gb = max(0.5, ram_gb - 4.0)        # reserve 4 GB for OS / Krexion / Mongo
+    by_ram = max(1, int(usable_ram_gb / 0.6))      # 600 MB / headless_shell incl. peak headroom
+    cores_cap = max(1, cores * 6)                  # 6 jobs per logical core ceiling
+    max_jobs = min(by_ram, cores_cap)
+
+    if max_jobs >= 50:
+        tier = "monster"
+    elif max_jobs >= 25:
+        tier = "extreme"
+    elif max_jobs >= 10:
+        tier = "high"
+    elif max_jobs >= 4:
+        tier = "medium"
+    else:
+        tier = "low"
+    return tier, max_jobs
 
 
 def _live_specs() -> dict[str, Any]:

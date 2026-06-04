@@ -174,10 +174,24 @@ async function applyUpdate() {
 /* ── Wire it up ─────────────────────────────────────────────────── */
 function init() {
   $("open-cloud-btn").addEventListener("click", () => {
-    // PyWebView intercepts window.open by default; fall back to direct
-    // navigation so the user is still launched into the cloud login.
-    try { window.open(CLOUD + "/login", "_blank"); }
-    catch (e) { window.location.href = CLOUD + "/login"; }
+    // v1.0.13 fix: open the LOCAL backend's bundled React UI by default
+    // (http://127.0.0.1:8001) so all heavy features run on the customer's
+    // own PC. Falls back to krexion.com if the local UI isn't responsive
+    // (e.g., backend service is down). This is what unblocks Visual
+    // Recorder / RUT / Form Filler - those endpoints refuse cloud edge
+    // requests but ALWAYS accept local-backend ones.
+    const LOCAL_UI = "http://127.0.0.1:8001/login";
+    const FALLBACK = CLOUD + "/login";
+    fetch("http://127.0.0.1:8001/api/", { method: "GET" })
+      .then((r) => {
+        const url = r.ok ? LOCAL_UI : FALLBACK;
+        try { window.open(url, "_blank"); }
+        catch (e) { window.location.href = url; }
+      })
+      .catch(() => {
+        try { window.open(FALLBACK, "_blank"); }
+        catch (e) { window.location.href = FALLBACK; }
+      });
   });
   $("update-now-btn").addEventListener("click", applyUpdate);
   $("update-dismiss-btn").addEventListener("click", () => {

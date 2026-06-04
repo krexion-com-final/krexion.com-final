@@ -17050,9 +17050,14 @@ try:
     from desktop_module import desktop_router, _bind as _desk_bind
     _desk_bind(main_db=main_db)
     app.include_router(desktop_router)
-    logger.info("Desktop module loaded — /api/desktop/* (local dashboard endpoints)")
+    logger.info("Desktop module loaded - /api/desktop/* (local dashboard endpoints)")
 except Exception as _desk_err:  # noqa: BLE001
     logger.error(f"Desktop module failed to load: {_desk_err}")
+
+
+# (Local-UI static mount moved to end of file so it doesn't shadow
+#  routes registered by later modules - see "Local UI static mount"
+#  block near the bottom of server.py.)
 
 
 # ─── Selector Aliases (Self-healing automation, 2026-01) ──────────────
@@ -18138,3 +18143,67 @@ async def _krexion_customer_startup_tasks():
     except Exception as _imp_e:
         logger.debug(f"License hardening hook skipped: {_imp_e}")
 
+
+
+# ─── Local UI static mount (v1.0.13, native install only) ─────────────
+# Mounts the production React build at `/` so the customer can browse
+# http://127.0.0.1:8001/ and use the full app against their local
+# backend - require_local_mode passes (IS_CLOUD=false), heavy features
+# (Visual Recorder, RUT, Form Filler) run on their own PC at full speed.
+#
+# This MUST be the LAST route addition in the file - the catch-all
+# `/{full_path:path}` would otherwise shadow every other route registered
+# after it. We guard with `if not IS_CLOUD` so the cloud VPS deploy is
+# completely unaffected (nginx already serves the React build there).
+try:
+    if not IS_CLOUD:
+        from fastapi.staticfiles import StaticFiles as _StaticFiles
+        from fastapi.responses import FileResponse as _FileResponse
+
+        _frontend_candidates = [
+            Path(os.environ.get("KREXION_FRONTEND_DIR", "")) if os.environ.get("KREXION_FRONTEND_DIR") else None,
+            # Native install layout: {app}\bin\backend\server.py + {app}\frontend\index.html
+            Path(__file__).resolve().parent.parent.parent / "frontend",
+            # Defensive: backend at {app}\backend, frontend at {app}\frontend
+            Path(__file__).resolve().parent.parent / "frontend",
+        ]
+        _frontend_dir = next(
+            (p for p in _frontend_candidates if p and (p / "index.html").exists()),
+            None,
+        )
+        if _frontend_dir is not None:
+            _static_subdir = _frontend_dir / "static"
+            if _static_subdir.is_dir():
+                app.mount(
+                    "/static",
+                    _StaticFiles(directory=str(_static_subdir)),
+                    name="frontend-static-assets",
+                )
+
+            @app.get("/{full_path:path}", include_in_schema=False)
+            async def _spa_fallback(full_path: str):
+                # Let any /api/* or docs requests 404 (those are handled
+                # by api_router; we only run if no specific route matched).
+                if (
+                    full_path.startswith("api/")
+                    or full_path.startswith("api")
+                    or full_path.startswith("docs")
+                    or full_path.startswith("openapi")
+                    or full_path.startswith("redoc")
+                ):
+                    raise HTTPException(status_code=404, detail="Not Found")
+
+                # Direct asset passthrough (favicon, manifest, sitemap, etc.)
+                if full_path:
+                    asset = _frontend_dir / full_path
+                    if asset.is_file():
+                        return _FileResponse(str(asset))
+
+                # Everything else: React Router will route client-side
+                return _FileResponse(str(_frontend_dir / "index.html"))
+
+            logger.info(f"Local UI mounted at / from {_frontend_dir}  (KREXION_MODE=local)")
+        else:
+            logger.info("No bundled frontend (index.html) found - backend serves API only.")
+except Exception as _spa_err:  # noqa: BLE001
+    logger.warning(f"Local UI mount skipped: {_spa_err}")
