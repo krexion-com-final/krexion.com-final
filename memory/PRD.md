@@ -1213,3 +1213,97 @@ version bump.
   `chrome-win/`, RUT will fail with browser-launch error — a
   separate self-heal that re-downloads chromium on demand would
   guard against that. Out-of-scope for this iteration.
+
+
+---
+
+## v1.0.19 / v1.0.20 — Stateful Bridge + Installer UX — 2026-02
+
+### v1.0.19 fixes
+1. **Legacy PowerShell `KrexionBridge` race condition** — old paired
+   PCs had a Scheduled Task that polled `/api/sync/jobs/pull` every
+   5 s with NO feature filter. It atomically claimed heavy jobs
+   like `visual-recorder/start` and failed them with "feature not
+   supported by the PowerShell bridge worker."
+   Fix:
+   - `bridge_module.enqueue_bridge_job` now pre-marks any
+     non-adspower/* job with `excluded_workers=['powershell']`.
+   - `/api/sync/jobs/pull` accepts `worker_type` param; legacy PS
+     pulls default to `powershell` and get filtered out.
+   - Failed PS jobs auto-requeue (max 3x) so the Python worker
+     picks them up next cycle.
+   - `sync_client.start_if_local()` `schtasks /Delete` the legacy
+     KrexionBridge + KrexionHeartbeat tasks on startup
+     (idempotent).
+
+### v1.0.20 fixes
+2. **RUT toast "undefined visit(s) queued"** — `require_local_mode`
+   used `HTTPException(status=200, detail=body)` which made FastAPI
+   wrap the body under `{detail: ...}`, so frontend's `data.total`
+   / `data.job_id` were undefined. Replaced with a custom
+   `_BridgeDone` exception + handler that returns the body verbatim
+   as top-level JSON.
+3. **Visual Recorder stuck on "Spinning up Chromium directly..."** —
+   Only `/start` was bridged. Subsequent stateful calls
+   (`/screenshot`, `/state`, `/click`, `/scroll`, etc) hit the
+   cloud which has no session → silent 404 → spinner forever.
+   Fix: new `@app.middleware('http')` `_vr_bridge_middleware` that
+   transparently bridges every `/api/visual-recorder/*` request to
+   the user's online desktop. Handles:
+   - JWT from `Authorization: Bearer` header OR `?t=` query param
+     (screenshot uses `?t=` so `<img src>` works without fetch).
+   - Raw body + content-type forwarding (multipart, JSON, urlencoded).
+   - Binary response support — sync_client base64-encodes non-JSON
+     responses (e.g. `image/jpeg` screenshots) under
+     `__binary_b64__` and the middleware re-decodes them, returning
+     the original media type to the browser.
+4. **VPS disk full → deploy timeouts** — VPS hit 100% disk with
+   709 MB free. `docker builder prune -af` was unbounded and timed
+   out at 30 min. Fix: timeboxed cleanup steps (60 s container/image
+   prune, 5 min builder prune), nuclear fallback if `<3 GB` free,
+   hard fail with `::error::` if still `<2 GB`.
+5. **UX: Replaced PowerShell "Pair my PC" flow with installer CTA**
+   - `LocalPCStatusBadge` now leads with a "Download Krexion-Setup.exe"
+     button pointing to GitHub Releases.
+   - License key still prominently displayed for paste into
+     installer on first launch.
+   - Legacy PowerShell snippet kept under collapsible
+     "Advanced: PowerShell-only setup" with a warning that it only
+     supports adspower/*.
+   - This removes the future possibility of customers re-introducing
+     the v1.0.19 race condition.
+
+### Files changed
+- `backend/server.py` — `_BridgeDone` exception + handler,
+  `_vr_bridge_middleware`, raw-body + Authorization forwarding in
+  `require_local_mode`, PowerShell template adds
+  `feature_prefix=adspower/`.
+- `backend/bridge_module.py` — `worker_type` filter,
+  `excluded_workers` pre-mark, auto-requeue on PS feature-not-
+  supported, verbose INFO logs.
+- `backend/sync_client.py` — multipart+auth replay, base64 binary
+  response support, `worker_type=python` on pull, startup cleanup
+  of legacy KrexionBridge / KrexionHeartbeat scheduled tasks.
+- `backend/VERSION` → `1.0.20`.
+- `.github/workflows/deploy.yml` — aggressive timeboxed cleanup,
+  nuclear fallback, fail-fast if disk still full.
+- `.github/workflows/build-windows-release.yml` — auto-trigger on
+  `backend/VERSION` change; tag derived from VERSION file.
+- `frontend/src/components/LocalPCStatusBadge.js` — Download-first
+  CTA, legacy PowerShell snippet collapsed under `<details>`.
+- `frontend/src/pages/AdsPowerPage.js` — toast text updated.
+
+### Released
+- `Krexion-Setup-v1.0.18.exe` → cosmetic (multipart bridge)
+- `Krexion-Setup-v1.0.19.exe` → kills race condition, adds
+  KrexionBridge cleanup
+- `Krexion-Setup-v1.0.20.exe` → full Visual Recorder bridging
+  (binary response support) + UI changes
+
+### What's verified
+- ✅ Cloud deploy SUCCESS (commit `a247667`).
+- ✅ `https://krexion.com/health` returns `{status:ok, mongo:true}`.
+- ✅ All three Windows .exe installers published in
+  https://github.com/dennisedmaartins9-sudo/krexion.com/releases
+- 🟡 E2E heavy job test on customer's Windows VM pending.
+
