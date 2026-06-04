@@ -116,6 +116,28 @@ jobs:
             docker compose build --no-cache --pull frontend
             docker compose build backend
 
+            # v1.0.18: explicitly stop + remove the backend container
+            # before `docker compose up -d backend`. Previous deploy
+            # (run 26969956510) failed with:
+            #   "Conflict. The container name "/xxxxx_krexion-backend"
+            #    is already in use by container ..."
+            # which happens whenever a previous deploy aborted mid-
+            # recreate (leaving a renamed-but-not-removed stale
+            # container behind). `compose up` then refuses to recreate
+            # because the old name is still occupied. Force-removing it
+            # by name BEFORE bringing the new one up is idempotent
+            # (succeeds whether or not such a container exists).
+            echo ">> Force-cleaning stale backend containers..."
+            docker compose stop backend || true
+            docker compose rm -f backend || true
+            # Catch the renamed-prefix variants compose creates when a
+            # previous recreate aborted (e.g. /01d805f6c91e_krexion-backend).
+            STALE=$(docker ps -aq --filter "name=krexion-backend" 2>/dev/null || true)
+            if [ -n "$STALE" ]; then
+              echo "   Removing stale backend containers: $STALE"
+              docker rm -f $STALE 2>/dev/null || true
+            fi
+
             # Bring everything up
             echo ">> Starting containers..."
             docker compose up -d frontend backend

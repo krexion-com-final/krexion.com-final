@@ -14,6 +14,21 @@ on:
         description: 'Release tag (e.g. v1.0.0). Leave empty for nightly build (no GH Release).'
         required: false
         default: ''
+  # v1.0.18: auto-trigger on push to main whenever backend/VERSION
+  # changes. Previously the Windows installer had to be manually
+  # triggered from the Actions tab after every fix push, which led to
+  # 2 separate failure modes on customer testing:
+  #   1. Cloud deploy lands, customer reinstalls old installer →
+  #      reports "still broken" because the desktop fix wasn't built.
+  #   2. Admin forgets to dispatch the workflow at all → no new .exe
+  #      gets cut for hours.
+  # Trigger key = a change to backend/VERSION (single source of truth
+  # the build itself reads). Tag derived from the version file so the
+  # GitHub Release lands automatically without a manual tag input.
+  push:
+    branches: [main]
+    paths:
+      - 'backend/VERSION'
 
 concurrency:
   group: krexion-native-build-${{ github.ref }}
@@ -49,8 +64,24 @@ jobs:
           # `version` = human/display tag - used for filenames, GitHub
           # Release title, and AppVersion in installer branding. Can be
           # anything (e.g. "v1.0.5", "nightly-20260602-1430").
+          #
+          # v1.0.18: auto-derive tag from backend/VERSION when the
+          # workflow is push-triggered (no manual input). Falls back
+          # to nightly only if VERSION is missing or empty.
           if [ -n "${{ github.event.inputs.release_tag }}" ]; then
             VER="${{ github.event.inputs.release_tag }}"
+          elif [ -f "backend/VERSION" ] && [ -s "backend/VERSION" ]; then
+            FILE_VER=$(tr -d '[:space:]' < backend/VERSION)
+            if [ -n "$FILE_VER" ]; then
+              # Prepend `v` if not already present so the tag follows
+              # the GitHub convention "v1.0.18" (matches existing tags).
+              case "$FILE_VER" in
+                v*) VER="$FILE_VER" ;;
+                *)  VER="v$FILE_VER" ;;
+              esac
+            else
+              VER="nightly-$(date +%Y%m%d-%H%M)"
+            fi
           else
             VER="nightly-$(date +%Y%m%d-%H%M)"
           fi
@@ -432,11 +463,18 @@ jobs:
           if-no-files-found: warn
 
       - name: Create GitHub Release
-        if: github.event.inputs.release_tag != ''
+        # Publish whenever we have a real version (i.e. not a nightly
+        # placeholder). Covers BOTH triggers:
+        #   - workflow_dispatch with release_tag → uses the input
+        #   - push to main on backend/VERSION change → uses VERSION
+        # v1.0.18: previously gated only on the manual input which
+        # broke the new auto-trigger path (build ran but no Release
+        # was created so the customer couldn't download the .exe).
+        if: startsWith(needs.build-backend.outputs.version, 'v')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.release_tag }}
-          name: Krexion ${{ github.event.inputs.release_tag }}
+          tag_name: ${{ needs.build-backend.outputs.version }}
+          name: Krexion ${{ needs.build-backend.outputs.version }}
           draft: false
           prerelease: false
           files: |
