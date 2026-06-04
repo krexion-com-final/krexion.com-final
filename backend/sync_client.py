@@ -77,11 +77,26 @@ LOCAL_API_BASE = (os.environ.get("LOCAL_API_BASE") or "http://localhost:8001").r
 _running = False
 
 
+def _current_license_key() -> str:
+    """v1.0.15: re-resolve the license on every request so a license
+    activated AFTER the daemon started (or replaced via auto-takeover)
+    is picked up automatically. Previously LICENSE_KEY was a module-
+    level constant captured ONCE at import, so the daemon would
+    heartbeat with an empty header forever and the cloud would
+    return 401 every time -> dashboard's krexion.com link pill
+    stuck on 'no recent heartbeat' until the customer restarted
+    the backend service."""
+    global LICENSE_KEY
+    if not LICENSE_KEY:
+        LICENSE_KEY = _resolve_license_key()
+    return LICENSE_KEY
+
+
 def _headers() -> dict:
     return {
-        "X-Krexion-License": LICENSE_KEY,
+        "X-Krexion-License": _current_license_key(),
         "Content-Type": "application/json",
-        "User-Agent": "Krexion-Local/1.1.0",
+        "User-Agent": "Krexion-Local/1.0.15",
     }
 
 

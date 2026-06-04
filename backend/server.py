@@ -16929,7 +16929,14 @@ while ((Get-Date) -lt $endTime) {
           $result.result = $r
           $result.Remove("error") | Out-Null
         } else {
-          $result.error = "feature '$feature' needs the full Krexion install (Docker)."
+          # v1.0.15: don't fail unknown features with the misleading 'needs
+          # Docker install' message. Modern Krexion native installs ship a
+          # full Python sync_client (backend/sync_client.py) that does
+          # generic replay against the local backend. If we somehow end up
+          # here (PowerShell stub running on a Krexion-Light install
+          # without the full python daemon) we report a less-confusing
+          # error so the cloud frontend can show the right next step.
+          $result.error = "feature '$feature' is not supported by the PowerShell bridge worker. Open the Krexion dashboard on this PC to use the full Python bridge."
         }
       } catch {
         $result.error = "$_"
