@@ -464,7 +464,7 @@ export default function AdsPowerPage() {
                                   badge.scrollIntoView({ behavior: "smooth", block: "center" });
                                   setTimeout(() => badge.click(), 350);
                                 } else {
-                                  toast.info("Open the green/amber 'PC' badge at the top of the page → click 'Pair my PC' and re-run the latest PowerShell command as Administrator.");
+                                  toast.info("Open the green/amber 'PC' badge at the top of the page → install or launch the Krexion Desktop app to pair this PC.");
                                 }
                               }}
                               data-testid={`repair-pc-${c.id}`}
