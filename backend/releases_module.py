@@ -555,14 +555,26 @@ def _build_customer_endpoints(get_user_dep):
             "mode": (os.environ.get("KREXION_MODE") or "local").lower(),
         }
 
+    # v1.0.11 fix: filter that excludes orphan release records (those
+    # without a real GitHub Releases .exe URL). Pre-1.0.11 the cloud DB
+    # had a "v1.1.20" record marked as published from a prior session
+    # that was never actually built / released - it kept poisoning
+    # the cloud dashboard's "Update available" badge with a phantom
+    # version. We require the download_url to be a github.com
+    # /releases/download/.../*.exe URL before considering the row.
+    _REAL_RELEASE_FILTER = {
+        "published": True,
+        "download_url": {"$regex": r"^https?://[^\s]+/releases/download/[^\s]+\.exe(\?|$)"},
+    }
+
     @router.get("/api/system/latest-version")
     async def latest_version(x_krexion_license: Optional[str] = Header(None)):
-        """License-authenticated — returns the latest published release plus
+        """License-authenticated - returns the latest published release plus
         whether the caller is behind."""
         await _validate_license(x_krexion_license)
         local = await _displayed_current_version()
         rel = await _db.app_releases.find_one(
-            {"published": True}, sort=[("created_at", -1)], projection={"_id": 0}
+            _REAL_RELEASE_FILTER, sort=[("created_at", -1)], projection={"_id": 0}
         )
         if not rel:
             return {"current": local, "latest": None, "update_available": False}
@@ -575,9 +587,9 @@ def _build_customer_endpoints(get_user_dep):
     @router.get("/api/system/public-latest")
     async def public_latest():
         """No-auth lite endpoint for the local dashboard banner so it can
-        decide whether to nag the user — does not expose download URL."""
+        decide whether to nag the user - does not expose download URL."""
         rel = await _db.app_releases.find_one(
-            {"published": True},
+            _REAL_RELEASE_FILTER,
             sort=[("created_at", -1)],
             projection={"_id": 0, "version": 1, "title": 1, "severity": 1, "created_at": 1, "notes": 1},
         )
