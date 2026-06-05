@@ -326,12 +326,101 @@ def main() -> int:
     # Start tray in background thread BEFORE the GUI blocks the main thread.
     threading.Thread(target=_start_tray, daemon=True, name="krexion-tray").start()
 
+    # v1.0.21: auto-update check (non-blocking daemon).
+    threading.Thread(target=_check_for_updates, daemon=True, name="krexion-update-check").start()
+
     if _launch_pywebview_window():
         return 0
     # PyWebView failed - fallback so customer ALWAYS sees a window
     logger.warning("Falling back to native Win32 MessageBox compatibility dialog.")
     _launch_native_messagebox_fallback()
     return 0
+
+
+def _check_for_updates() -> None:
+    """Hit GitHub Releases API, compare latest tag to bundled VERSION.
+    If newer, show a Win32 MessageBoxW with "Download v1.0.X" so the
+    customer can one-click open the installer download. Runs in a
+    daemon thread; failures are logged and silently ignored — the app
+    keeps working regardless."""
+    # 5 s delay so the dashboard window finishes opening first
+    import time as _t
+    _t.sleep(5)
+    try:
+        # Find bundled VERSION file. Same lookup as installer/PS1.
+        version_paths = [
+            HERE / "VERSION",
+            HERE.parent / "VERSION",
+            HERE.parent.parent / "backend" / "VERSION",
+            HERE.parent.parent.parent / "backend" / "VERSION",
+            HERE.parent.parent.parent.parent / "backend" / "VERSION",
+        ]
+        current = None
+        for p in version_paths:
+            try:
+                if p.exists():
+                    current = p.read_text(encoding="utf-8").strip()
+                    break
+            except Exception:  # noqa: BLE001
+                continue
+        if not current:
+            logger.info("[update] no VERSION file found; skipping update check")
+            return
+        # Normalise (drop leading "v")
+        current_norm = current.lstrip("vV")
+        logger.info(f"[update] current version: {current_norm}")
+
+        import urllib.request, json as _json
+        req = urllib.request.Request(
+            "https://api.github.com/repos/dennisedmaartins9-sudo/krexion.com/releases/latest",
+            headers={"User-Agent": f"Krexion-Desktop/{current_norm}"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        latest_tag = (data.get("tag_name") or "").strip()
+        latest_norm = latest_tag.lstrip("vV")
+        if not latest_norm:
+            logger.info("[update] no latest tag; skipping")
+            return
+        logger.info(f"[update] latest GitHub release: {latest_norm}")
+
+        # Compare as tuple-of-ints
+        def _parse(v: str):
+            parts = []
+            for chunk in v.split("."):
+                num = ""
+                for c in chunk:
+                    if c.isdigit():
+                        num += c
+                    else:
+                        break
+                parts.append(int(num) if num else 0)
+            return tuple(parts)
+
+        if _parse(latest_norm) <= _parse(current_norm):
+            logger.info("[update] already up to date")
+            return
+
+        logger.info(f"[update] NEW version available: {latest_norm} (currently {current_norm})")
+        # Show MessageBoxW prompt — minimal modal, non-blocking-ish.
+        try:
+            import ctypes
+            MB_FLAGS = 0x00000001 | 0x00000040  # OK|CANCEL | INFO icon
+            title = "Krexion - Update Available"
+            body = (
+                f"A new version of Krexion is available!\n\n"
+                f"  Current : v{current_norm}\n"
+                f"  Latest  : v{latest_norm}\n\n"
+                f"Press OK to open the download page in your browser, or\n"
+                f"Cancel to skip (you can update later from krexion.com)."
+            )
+            rv = ctypes.windll.user32.MessageBoxW(None, body, title, MB_FLAGS)
+            if rv == 1:
+                webbrowser.open(f"{KREXION_CLOUD}/download")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[update] could not show MessageBox: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[update] check failed (will retry next launch): {exc}")
 
 
 if __name__ == "__main__":

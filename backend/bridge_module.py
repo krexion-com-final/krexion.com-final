@@ -70,7 +70,18 @@ def _now_iso() -> str:
 # ─────────────────────────────────────────────────────────────────────
 async def is_user_local_online(user_id: str) -> dict:
     """Returns {online: bool, hostname, ram_gb, last_seen_sec_ago}."""
-    hb = await _db.sync_heartbeats.find_one({"user_id": user_id}, {"_id": 0})
+    # v1.0.21: sort by last_seen DESC so we always pick the FRESHEST
+    # heartbeat document. Previously find_one returned ANY match —
+    # and because sync_heartbeats is keyed on license_key (one doc
+    # per license), a user who re-paired/re-installed could end up
+    # with multiple heartbeat docs and the cloud might pick a stale
+    # one, declaring the user offline even though the new install
+    # was happily heartbeating every 5 s.
+    hb = await _db.sync_heartbeats.find_one(
+        {"user_id": user_id},
+        {"_id": 0},
+        sort=[("last_seen", -1)],
+    )
     if not hb or not hb.get("last_seen"):
         return {"online": False, "reason": "no_heartbeat_ever"}
     try:

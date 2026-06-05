@@ -132,7 +132,7 @@ export default function LocalPCStatusBadge() {
           <MonitorOff size={14} />
           <span className="hidden sm:inline">PC offline</span>
           <span className="hidden md:inline text-amber-400/80 font-semibold underline">
-            - Install Desktop
+            - Reconnect
           </span>
         </button>
       )}
@@ -174,6 +174,67 @@ export default function LocalPCStatusBadge() {
               )}
               {!pairLoading && pair && (
                 <>
+                  {/* v1.0.21: "Already installed?" reconnect card.
+                      Most repeat users hitting this modal already
+                      have the desktop app installed — the badge
+                      is just showing stale offline because of a
+                      heartbeat timing glitch or because the
+                      desktop's tray app got closed. Give them a
+                      ONE-CLICK reconnect path instead of forcing
+                      a reinstall. */}
+                  <div className="mb-4 p-4 rounded-xl bg-amber-500/5 border border-amber-500/30">
+                    <div className="text-[10px] uppercase tracking-widest font-bold mb-1.5 inline-block px-2 py-0.5 rounded bg-amber-500/25 text-amber-200">
+                      Already installed?
+                    </div>
+                    <h4 className="text-white font-bold text-base mb-1.5">
+                      Reconnect your PC
+                    </h4>
+                    <p className="text-[#D4D4D8] text-xs mb-3 leading-relaxed">
+                      Krexion desktop app already chal rahi hai? 1) System tray
+                      me Krexion icon check karein — agar nahi to Start menu
+                      se launch karein. 2) Niche button click karke status
+                      refresh karein. 3) Status 30 sec me green ho jayega.
+                    </p>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button
+                        type="button"
+                        data-testid="pair-reconnect-refresh"
+                        onClick={async () => {
+                          setLoading(true);
+                          try {
+                            const r = await axios.get(
+                              `${BACKEND_URL}/api/bridge/me/local-status`,
+                              { headers: { Authorization: `Bearer ${localStorage.getItem("token") || ""}` } }
+                            );
+                            setStatus(r.data);
+                            if (r.data?.online) {
+                              toast.success("PC reconnected!");
+                              setShowPair(false);
+                            } else {
+                              toast.info(
+                                `Still offline — last heartbeat ${r.data?.last_seen_sec_ago ?? "?"}s ago. Launch Krexion from Start menu.`
+                              );
+                            }
+                          } catch (e) {
+                            toast.error("Status refresh failed");
+                          } finally {
+                            setLoading(false);
+                          }
+                        }}
+                        className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500 text-black font-bold text-sm hover:bg-amber-400 transition"
+                      >
+                        <MonitorCheck size={15} /> Refresh PC status
+                      </button>
+                      <span className="text-[11px] text-amber-300/80">
+                        Last seen:{" "}
+                        {status?.last_seen_sec_ago != null
+                          ? `${status.last_seen_sec_ago}s ago`
+                          : "never"}
+                        {status?.hostname ? ` · ${status.hostname}` : ""}
+                      </span>
+                    </div>
+                  </div>
+
                   {/* v1.0.20: PRIMARY path — download the native
                       installer. The legacy PowerShell flow has been
                       retired because the KrexionBridge scheduled task
@@ -184,7 +245,7 @@ export default function LocalPCStatusBadge() {
                       proper Python bridge. */}
                   <div className="mb-5 p-4 rounded-xl bg-gradient-to-br from-[#3B82F6]/15 to-emerald-500/10 border border-[#3B82F6]/40">
                     <div className="text-[10px] uppercase tracking-widest font-bold mb-1.5 inline-block px-2 py-0.5 rounded bg-emerald-500/30 text-emerald-200">
-                      Recommended
+                      First-time install
                     </div>
                     <h4 className="text-white font-bold text-base mb-1.5">
                       Install Krexion Desktop (Windows)
@@ -195,7 +256,7 @@ export default function LocalPCStatusBadge() {
                       Heavy jobs from krexion.com run on YOUR machine.
                     </p>
                     <a
-                      href="https://github.com/dennisedmaartins9-sudo/krexion.com/releases/latest"
+                      href="/download"
                       target="_blank"
                       rel="noopener noreferrer"
                       data-testid="pair-download-installer"
