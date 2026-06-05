@@ -95,6 +95,50 @@ let installed = false;
 function installInterceptors() {
   if (installed) return;
   installed = true;
+  // v2.1.6: ALSO patch window.fetch so RUT submit (which uses raw
+  // fetch, not axios) is captured in the Debug Console.
+  if (typeof window !== "undefined" && window.fetch && !window.__krexion_fetch_patched) {
+    const _orig = window.fetch.bind(window);
+    window.__krexion_fetch_patched = true;
+    window.fetch = async function patched(input, init = {}) {
+      const start = Date.now();
+      const url = typeof input === "string" ? input : (input?.url || "");
+      const method = (init.method || (typeof input !== "string" && input?.method) || "GET").toUpperCase();
+      // Skip our own debug log
+      if (url.includes("/api/debug/log")) return _orig(input, init);
+      let respClone = null, status = 0, errMsg = null;
+      try {
+        const resp = await _orig(input, init);
+        respClone = resp.clone();
+        status = resp.status;
+        let body = null;
+        try { body = await respClone.json(); } catch { try { body = await resp.clone().text(); } catch {} }
+        pushEvent({
+          ts: new Date().toISOString(),
+          method,
+          url,
+          status,
+          duration_ms: Date.now() - start,
+          request_headers: redactHeaders(init.headers || {}),
+          request_body: bodyPreview(init.body),
+          response_body: body,
+          ok: resp.ok,
+        });
+        return resp;
+      } catch (e) {
+        errMsg = e.message || String(e);
+        pushEvent({
+          ts: new Date().toISOString(),
+          method, url, status: 0,
+          duration_ms: Date.now() - start,
+          request_headers: redactHeaders(init.headers || {}),
+          request_body: bodyPreview(init.body),
+          response_body: null, error: errMsg, ok: false,
+        });
+        throw e;
+      }
+    };
+  }
   axios.interceptors.request.use((cfg) => {
     cfg.__start = Date.now();
     return cfg;

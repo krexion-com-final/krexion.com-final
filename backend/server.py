@@ -600,35 +600,50 @@ async def require_local_mode(request: Request):
                 # (it would otherwise 401 because sync_client only sets
                 # X-Krexion-License which most heavy endpoints don't read).
                 import base64 as _b64
-                try:
-                    raw_body = await request.body()
-                except Exception:
-                    raw_body = b""
-                # v2.1.4: Starlette caches body bytes in request._body
-                # after the first await request.body(). FastAPI's
-                # Form() parser uses request.form() which reads from
-                # request.stream() — and on SOME starlette versions
-                # the stream is exhausted after our await. Explicitly
-                # re-stuff the cache so any downstream Form() parsing
-                # (e.g. when bridge falls through and the endpoint
-                # runs on cloud) still works.
-                try:
-                    request._body = raw_body  # type: ignore[attr-defined]
-                except Exception:  # noqa: BLE001
-                    pass
+                # v2.1.6: DO NOT await request.body() — Starlette
+                # caches the bytes in _body but FastAPI Form() parser
+                # reads from request.stream() which is then EXHAUSTED
+                # → server returns 422 "Field required (body.link_id)".
+                # Instead capture via request.form() for multipart (it
+                # populates _form cache so downstream Form() parser
+                # uses the same data) and serialise back to raw bytes
+                # for bridge replay.
                 content_type = request.headers.get("content-type", "")
                 auth_hdr = request.headers.get("Authorization", "")
-                # Try to parse JSON for legacy callers (proxies/bulk-test
-                # etc.) — fall back to {} on multipart/binary.
+                raw_body = b""
                 body_json: dict = {}
-                if "application/json" in content_type.lower():
-                    try:
-                        import json as _json
-                        body_json = _json.loads(raw_body.decode("utf-8") or "{}")
+                ct_lower = content_type.lower()
+                try:
+                    if "multipart/form-data" in ct_lower or "application/x-www-form-urlencoded" in ct_lower:
+                        form = await request.form()
+                        # Rebuild a tiny urlencoded representation for the
+                        # bridge - desktop side reconstructs FormData from
+                        # body_json fields. Files in multipart are best-effort.
+                        from urllib.parse import urlencode as _urlencode
+                        kv = []
+                        for k, v in form.multi_items():
+                            if hasattr(v, "filename") and v.filename:
+                                # skip files - they should pre-upload anyway
+                                continue
+                            kv.append((k, str(v)))
+                        # Both raw_body (urlencoded) AND body_json (dict)
+                        # so the bridge replay can decide which to use.
+                        raw_body = _urlencode(kv).encode("utf-8")
+                        body_json = {k: v for k, v in kv}
+                        # Force content-type to urlencoded for the replay
+                        # since we just rebuilt it that way.
+                        content_type = "application/x-www-form-urlencoded"
+                    elif "application/json" in ct_lower:
+                        try:
+                            body_json = await request.json()
+                        except Exception:
+                            body_json = {}
                         if not isinstance(body_json, dict):
                             body_json = {}
-                    except Exception:
-                        body_json = {}
+                        import json as _j
+                        raw_body = _j.dumps(body_json).encode("utf-8")
+                except Exception as _bc_err:
+                    logger.warning(f"[bridge] body capture failed: {_bc_err}")
                 # Use the URL path (minus /api/) as the feature key so
                 # the desktop bridge worker knows which local endpoint
                 # to replay against.
