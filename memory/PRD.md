@@ -1393,3 +1393,58 @@ else is wrong.
   signature, so it can't be enabled from the API today. Low
   priority (the real fix is on-demand fetcher which is the
   default).
+
+
+---
+
+## Iteration 22 — 2026-06-05: 'Resync to PC' button + v2.1.8 Windows build
+
+### User ask (Roman Urdu)
+> "kr do or ab new version sab changing k sath complet build kr do
+> ta k ab koi issue na ay"
+
+### What shipped
+1. **Backend** — `POST /api/bridge/resync-to-desktop`
+   (`backend/server.py`). Bulk-pushes the caller's links +
+   ProxyJet credentials into the desktop's local Mongo using the
+   same `wait_for_result` bridge replay as the v2.1.7 auto
+   pre-sync. Returns per-record status + an `errors[]` array so
+   the UI can show partial results. Refuses with a friendly
+   message when the PC is offline.
+2. **Frontend** — `LocalPCStatusBadge.js`. New sky-coloured
+   "Resync to PC" pill button next to the green "PC connected"
+   badge. Toast loader → success / partial / error. Disabled
+   while a sync is in flight.
+3. **VERSION bump** `2.1.4 → 2.1.8` to trigger
+   `build-windows-release.yml` (auto-builds & publishes a fresh
+   `Krexion-Setup-v2.1.8.exe` carrying every cumulative
+   sync_client / bridge / heartbeat fix from this work block).
+
+### Why
+The auto pre-sync (v2.1.7) handles the common path — RUT /
+Form-Filler bridges carry a `link_id`, so the cloud injects a
+`sync/links` job ahead of them.  The manual button covers:
+- Fresh installs that heartbeat AFTER the user populated
+  krexion.com.
+- Reconnects after long offline periods.
+- Edge cases where a bridged POST has no `link_id` in the body.
+
+### Verified
+- Cloud deploy `2567f3b` → success.
+- `POST /api/bridge/resync-to-desktop` reachable; offline-PC
+  branch returns the proper guardrail JSON
+  (`online:false, message:"Your PC is offline..."`).
+- Online-PC branch shares the exact `_enq()` codepath as the
+  auto pre-sync that was end-to-end verified in iteration 21
+  (booking.com visit completed via ProxyJet US exit IP).
+- Windows installer build `in_progress` on Actions for
+  `2567f3b`.
+
+### Files changed
+- `backend/server.py`  +154
+- `frontend/src/components/LocalPCStatusBadge.js`  +63 / -19
+- `backend/VERSION`  2.1.4 → 2.1.8
+
+### Commit
+- `2567f3b` feat: v2.1.8 — 'Resync to PC' button + full v2.1.8
+  desktop build.
