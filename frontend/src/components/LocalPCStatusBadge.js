@@ -139,10 +139,10 @@ export default function LocalPCStatusBadge() {
 
       {showPair && (
         <div
-          className="fixed inset-0 z-[100] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+          className="fixed inset-0 z-[9999] bg-black/80 backdrop-blur-sm flex items-start sm:items-center justify-center p-4 overflow-y-auto"
           data-testid="pair-pc-modal"
         >
-          <div className="bg-[#0f0a18] border border-[#3B82F6]/40 rounded-2xl w-full max-w-2xl max-h-[85vh] overflow-hidden flex flex-col shadow-2xl">
+          <div className="bg-[#0f0a18] border border-[#3B82F6]/40 rounded-2xl w-full max-w-2xl max-h-[92vh] my-4 sm:my-8 overflow-hidden flex flex-col shadow-2xl">
             <div className="px-6 py-5 border-b border-white/10 flex items-start justify-between gap-3">
               <div>
                 <div className="text-[10px] uppercase tracking-widest font-bold mb-1.5 inline-block px-2 py-0.5 rounded bg-[#3B82F6]/20 text-[#3B82F6]">

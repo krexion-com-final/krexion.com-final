@@ -201,6 +201,9 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
   Tasks: startupTray; Flags: uninsdeletevalue
 
 [Run]
+; ─── v1.0.22: restart services AFTER we overwrite files ──────────────
+; (Services were stopped in PrepareToInstall before file copy — see
+; [Code] section below. Here we just make sure they're running.)
 ; ─── Install Microsoft VC++ 2015-2022 Redistributable (silent, idempotent) ──
 ; MongoDB 7.0 needs VCRUNTIME140_1.dll which only ships with this runtime.
 ; /install /quiet /norestart returns exit code 1638 when the runtime is
@@ -438,4 +441,40 @@ function InitializeSetup(): Boolean;
 begin
   // Future hook for OS version / disk space pre-flight checks.
   Result := True;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  // v1.0.22 FIX: stop existing Krexion services + processes BEFORE
+  // file copy. Without this, over-installing on a running v1.0.17
+  // left the OLD Python process in memory holding the OLD code —
+  // the customer "installed v1.0.21" but the dashboard kept showing
+  // v1.0.17 and heartbeats kept using the stale logic.
+  //
+  // We swallow exit codes via cmd /C and ignore failures: the
+  // services / processes may simply not exist on a fresh install.
+  Exec(ExpandConstant('{cmd}'),
+       '/C sc stop KrexionBackend',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{cmd}'),
+       '/C sc stop KrexionDatabase',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // Kill any leftover tray / dashboard / Python launcher processes
+  // that might hold open desktop\*.py via PyWebView import.
+  Exec(ExpandConstant('{cmd}'),
+       '/C taskkill /F /IM krexion-coreapp.exe /T',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{cmd}'),
+       '/C taskkill /F /IM krexion-tray.exe /T',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{cmd}'),
+       '/C taskkill /F /IM krexion-core.exe /T',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // Give the OS 3 s to release file handles before [Files] starts.
+  Exec(ExpandConstant('{cmd}'),
+       '/C timeout /t 3 /nobreak',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Result := '';
 end;

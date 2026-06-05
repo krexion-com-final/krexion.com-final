@@ -102,7 +102,7 @@ def _headers() -> dict:
     return {
         "X-Krexion-License": _current_license_key(),
         "Content-Type": "application/json",
-        "User-Agent": "Krexion-Local/1.0.21",
+        "User-Agent": "Krexion-Local/1.0.22",
     }
 
 
@@ -145,7 +145,7 @@ async def _heartbeat() -> None:
     try:
         body = {
             "hostname": socket.gethostname(),
-            "version": "1.0.21",
+            "version": "1.0.22",
             "platform": "native-windows" if sys.platform.startswith("win") else "docker",
         }
         body.update(_hardware_info())
@@ -188,7 +188,7 @@ async def _heartbeat() -> None:
                         json.dumps({
                             "last_heartbeat_at": time.time(),
                             "cloud_url": CLOUD_URL,
-                            "version": "1.0.21",
+                            "version": "1.0.22",
                         }),
                         encoding="utf-8",
                     )
@@ -335,7 +335,7 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
             generic_path = str(payload["path"])
             generic_body = payload.get("body") or {}
             generic_query = payload.get("query") or {}
-            # v1.0.21: faithful raw-body + content-type + auth replay so
+            # v1.0.22: faithful raw-body + content-type + auth replay so
             # multipart/form-data heavy jobs (RUT, Form Filler) actually
             # execute on the desktop backend. Previously sync_client only
             # POSTed the parsed JSON body, which was always {} for
@@ -404,7 +404,7 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
                 try:
                     body_back = r.json()
                 except Exception:
-                    # v1.0.21: when response isn't JSON (e.g.
+                    # v1.0.22: when response isn't JSON (e.g.
                     # /visual-recorder/{id}/screenshot returns
                     # image/jpeg), base64-encode the raw bytes so the
                     # cloud can decode + forward as binary. Previously
@@ -658,7 +658,7 @@ def start_if_local(main_db, get_db_for_user) -> bool:
     if not CLOUD_URL:
         logger.info("[sync] disabled - KREXION_CLOUD_URL not set")
         return False
-    # v1.0.21: kill the legacy PowerShell `KrexionBridge` scheduled task
+    # v1.0.22: kill the legacy PowerShell `KrexionBridge` scheduled task
     # if it exists. Older installs (pre-native bundle, or PCs that ever
     # ran the cloud's "Pair my PC" PowerShell snippet) have a Scheduled
     # Task that polls /api/sync/jobs/pull every 5 s with NO feature
@@ -666,7 +666,7 @@ def start_if_local(main_db, get_db_for_user) -> bool:
     # heavy jobs like visual-recorder/start, only to immediately mark
     # them failed with "feature not supported by the PowerShell bridge
     # worker." That is exactly what the customer is reporting in
-    # v1.0.21 logs. Deleting the task on startup is idempotent
+    # v1.0.22 logs. Deleting the task on startup is idempotent
     # (schtasks /Delete returns non-zero if task absent — fine).
     if sys.platform.startswith("win"):
         try:

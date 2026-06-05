@@ -440,7 +440,15 @@ def copy_backend_source() -> None:
             continue
         if src.name in skip_files:
             continue
-        if src.is_file() and src.suffix in {".py", ".json", ".html", ".txt", ".md", ".yml", ".yaml", ".ico", ".png"}:
+        # v1.0.22 fix: include extension-less filenames like `VERSION`
+        # explicitly. Previously the suffix-allowlist skipped VERSION,
+        # so the bundled backend had NO version file and _read_version
+        # fell back to the hardcoded 1.0.17 in desktop/__init__.py.
+        # That's why the customer's v1.0.21 install kept showing v1.0.17
+        # in the dashboard top-right pill.
+        allowed_suffix = src.suffix in {".py", ".json", ".html", ".txt", ".md", ".yml", ".yaml", ".ico", ".png"}
+        allowed_no_suffix = src.is_file() and src.suffix == "" and src.name in {"VERSION"}
+        if src.is_file() and (allowed_suffix or allowed_no_suffix):
             rel = src.relative_to(BACKEND_DIR)
             dest = app_dir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -522,6 +530,27 @@ def copy_desktop_package() -> None:
     shutil.copytree(src, dest, ignore=shutil.ignore_patterns(
         "__pycache__", "*.pyc", ".pytest_cache",
     ))
+    # v1.0.22 fix: overwrite the bundled desktop/__init__.py so its
+    # __version__ matches the CURRENT VERSION file (was hardcoded
+    # 1.0.17 before, and that hardcode is what every fallback path
+    # used → customer always saw "v1.0.17" in the dashboard pill).
+    try:
+        version_file = BACKEND_DIR / "VERSION"
+        if version_file.exists():
+            current_ver = version_file.read_text(encoding="utf-8").strip()
+            init_path = dest / "__init__.py"
+            if init_path.exists():
+                txt = init_path.read_text(encoding="utf-8")
+                import re as _re
+                new_txt = _re.sub(
+                    r'__version__\s*=\s*["\'][^"\']*["\']',
+                    f'__version__ = "{current_ver}"',
+                    txt,
+                )
+                init_path.write_text(new_txt, encoding="utf-8")
+                log(f"Patched desktop/__init__.__version__ = {current_ver}")
+    except Exception as exc:  # noqa: BLE001
+        log(f"Could not sync desktop/__init__.__version__: {exc}")
     log(f"Bundled desktop dashboard at {dest}")
 
 
