@@ -1527,6 +1527,60 @@ def create_access_token(data: dict):
     return encoded_jwt
 
 async def get_current_user(request: Request):
+    # v2.1.0: bridge-mode bypass. Sync_client replays cloud heavy
+    # jobs by POSTing to its OWN local backend with X-Krexion-Bridge-Job
+    # header. The forwarded Authorization JWT was signed with the
+    # CLOUD's SECRET_KEY which differs from the local SECRET_KEY, so
+    # naive JWT verification 401's even though the request is
+    # legitimate (it physically came from the local sync_client
+    # process). We trust the header when:
+    #   1) KREXION_MODE != cloud   (only the local install honours it)
+    #   2) Request source is loopback (127.0.0.1 / ::1)
+    #   3) X-Krexion-License header is present and validates
+    # In that case we resolve the user from the license_key and return
+    # immediately (skips JWT verification entirely).
+    if (
+        not IS_CLOUD
+        and request.headers.get("X-Krexion-Bridge-Job") == "1"
+    ):
+        client_host = (getattr(request.client, "host", "") or "").lower()
+        if client_host in {"127.0.0.1", "localhost", "::1"}:
+            br_lic = request.headers.get("X-Krexion-License", "").strip()
+            if br_lic:
+                lic_doc = await db.licenses.find_one(
+                    {"license_key": br_lic}, {"_id": 0}
+                )
+                if lic_doc:
+                    # Find user by license user_id OR email
+                    uid = lic_doc.get("user_id")
+                    lic_email = lic_doc.get("email")
+                    user = None
+                    if uid:
+                        user = await db.users.find_one({"id": uid}, {"_id": 0})
+                    if not user and lic_email:
+                        user = await db.users.find_one({"email": lic_email}, {"_id": 0})
+                    if not user and lic_email:
+                        # Auto-create local user mirror for first-ever
+                        # bridge call before the heartbeat mirror runs.
+                        import uuid as _uuid
+                        new_uid = uid or _uuid.uuid4().hex
+                        new_user = {
+                            "id": new_uid,
+                            "email": lic_email,
+                            "name": lic_email.split("@")[0],
+                            "is_admin": False,
+                            "status": "active",
+                            "created_at": datetime.utcnow().isoformat(),
+                            "bridge_synced": True,
+                        }
+                        await db.users.insert_one(new_user)
+                        user = new_user
+                    if user:
+                        logger.info(
+                            f"[bridge] get_current_user via license_key for {user.get('email')}"
+                        )
+                        return user
+
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Not authenticated")
@@ -2545,6 +2599,55 @@ def check_user_feature(user: dict, feature: str):
 
 async def get_current_user_with_fresh_data(request: Request) -> dict:
     """Get current user with fresh data from database (for feature checks)"""
+    # v2.1.0: bridge-mode bypass mirror — same logic as get_current_user.
+    # Heavy job endpoints use get_current_user_with_fresh_data so this
+    # MUST also accept the X-Krexion-Bridge-Job + X-Krexion-License
+    # combo from loopback (sync_client).
+    if (
+        not IS_CLOUD
+        and request.headers.get("X-Krexion-Bridge-Job") == "1"
+    ):
+        client_host = (getattr(request.client, "host", "") or "").lower()
+        if client_host in {"127.0.0.1", "localhost", "::1"}:
+            br_lic = request.headers.get("X-Krexion-License", "").strip()
+            if br_lic:
+                lic_doc = await main_db.licenses.find_one(
+                    {"license_key": br_lic}, {"_id": 0}
+                )
+                if lic_doc:
+                    uid = lic_doc.get("user_id")
+                    lic_email = lic_doc.get("email")
+                    user = None
+                    if uid:
+                        user = await main_db.users.find_one({"id": uid}, {"_id": 0, "password_hash": 0})
+                    if not user and lic_email:
+                        user = await main_db.users.find_one({"email": lic_email}, {"_id": 0, "password_hash": 0})
+                    if not user and lic_email:
+                        import uuid as _uuid
+                        new_uid = uid or _uuid.uuid4().hex
+                        new_user = {
+                            "id": new_uid,
+                            "email": lic_email,
+                            "name": lic_email.split("@")[0],
+                            "is_admin": False,
+                            "status": "active",
+                            "features": {},
+                            "created_at": datetime.utcnow().isoformat(),
+                            "bridge_synced": True,
+                        }
+                        await main_db.users.insert_one(new_user)
+                        user = new_user
+                    if user:
+                        # Grant ALL heavy-job feature flags by default
+                        # for bridge-resolved users (they paid for the
+                        # license; cloud already authorised the call).
+                        user.setdefault("features", {})
+                        for feat in ("real_user_traffic", "form_filler",
+                                     "visual_recorder", "proxies", "links",
+                                     "clicks", "import_traffic"):
+                            user["features"].setdefault(feat, True)
+                        return user
+
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Not authenticated")
