@@ -10,6 +10,7 @@
  * Hidden when running on a local install (no need - everything is local).
  */
 import React, { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import axios from "axios";
 import {
   Cpu,
@@ -20,6 +21,7 @@ import {
   Check,
   Loader2,
   Link2,
+  RefreshCw,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useMode } from "../context/ModeContext";
@@ -138,10 +140,12 @@ export default function LocalPCStatusBadge() {
         </button>
       )}
 
-      {showPair && (
+      {showPair && createPortal(
         <div
-          className="fixed inset-0 z-[9999] bg-black/80 backdrop-blur-sm flex items-start sm:items-center justify-center p-4 overflow-y-auto"
+          className="fixed inset-0 z-[2147483647] bg-black/85 backdrop-blur-md flex items-start sm:items-center justify-center p-4 overflow-y-auto"
           data-testid="pair-pc-modal"
+          onClick={(e)=>{ if(e.target === e.currentTarget) setShowPair(false); }}
+          style={{position:"fixed", top:0, left:0, right:0, bottom:0}}
         >
           <div className="bg-[#0f0a18] border border-[#3B82F6]/40 rounded-2xl w-full max-w-2xl max-h-[92vh] my-4 sm:my-8 overflow-hidden flex flex-col shadow-2xl">
             <div className="px-6 py-5 border-b border-white/10 flex items-start justify-between gap-3">
@@ -350,7 +354,8 @@ export default function LocalPCStatusBadge() {
               )}
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   );

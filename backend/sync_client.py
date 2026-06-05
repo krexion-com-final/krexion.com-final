@@ -102,8 +102,13 @@ def _headers() -> dict:
     return {
         "X-Krexion-License": _current_license_key(),
         "Content-Type": "application/json",
-        "User-Agent": "Krexion-Local/1.0.23",
+        "User-Agent": "Krexion-Local/2.1.0",
     }
+
+
+def _now_iso_local() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _hardware_info() -> dict:
@@ -145,7 +150,7 @@ async def _heartbeat() -> None:
     try:
         body = {
             "hostname": socket.gethostname(),
-            "version": "1.0.23",
+            "version": "2.1.0",
             "platform": "native-windows" if sys.platform.startswith("win") else "docker",
         }
         body.update(_hardware_info())
@@ -171,6 +176,46 @@ async def _heartbeat() -> None:
                     )
                 _HB_OKS += 1
                 _HB_FAILS = 0  # reset failure counter on success
+                # v2.1: cloud now returns {user:{id,email}, license:{...}}.
+                # Mirror these into the LOCAL DB so bridge replay can mint
+                # a local-side JWT that the LOCAL backend's
+                # get_current_user can verify (cloud JWT has wrong
+                # SECRET_KEY → "Invalid token" before this fix).
+                try:
+                    hb_resp = r.json() if r.content else {}
+                    cloud_user = (hb_resp or {}).get("user") or {}
+                    cloud_lic = (hb_resp or {}).get("license") or {}
+                    if cloud_user.get("email") and cloud_user.get("id"):
+                        try:
+                            from server import db as _local_db  # type: ignore
+                            await _local_db.users.update_one(
+                                {"email": cloud_user["email"]},
+                                {"$set": {
+                                    "id": cloud_user["id"],
+                                    "email": cloud_user["email"],
+                                    "bridge_synced": True,
+                                }, "$setOnInsert": {
+                                    "name": cloud_user["email"].split("@")[0],
+                                    "is_admin": False,
+                                    "created_at": _now_iso_local(),
+                                }},
+                                upsert=True,
+                            )
+                            if cloud_lic.get("license_key"):
+                                await _local_db.licenses.update_one(
+                                    {"license_key": cloud_lic["license_key"]},
+                                    {"$set": {
+                                        "license_key": cloud_lic["license_key"],
+                                        "user_id": cloud_user["id"],
+                                        "email": cloud_user["email"],
+                                        "status": cloud_lic.get("status", "active"),
+                                    }},
+                                    upsert=True,
+                                )
+                        except Exception as _mirror_err:  # noqa: BLE001
+                            logger.debug(f"[sync] local mirror skipped: {_mirror_err}")
+                except Exception:  # noqa: BLE001
+                    pass
                 # v1.0.17: write the sync-status file the desktop dashboard
                 # polls for the krexion.com link pill. desktop_module's
                 # _cloud_link_status() reads last_heartbeat_at from this
@@ -188,7 +233,7 @@ async def _heartbeat() -> None:
                         json.dumps({
                             "last_heartbeat_at": time.time(),
                             "cloud_url": CLOUD_URL,
-                            "version": "1.0.23",
+                            "version": "2.1.0",
                         }),
                         encoding="utf-8",
                     )
@@ -335,7 +380,7 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
             generic_path = str(payload["path"])
             generic_body = payload.get("body") or {}
             generic_query = payload.get("query") or {}
-            # v1.0.23: faithful raw-body + content-type + auth replay so
+            # v2.1.0: faithful raw-body + content-type + auth replay so
             # multipart/form-data heavy jobs (RUT, Form Filler) actually
             # execute on the desktop backend. Previously sync_client only
             # POSTed the parsed JSON body, which was always {} for
@@ -359,9 +404,82 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
                 headers = {
                     "X-Krexion-Bridge-Job": "1",
                 }
-                # Pass through user's JWT so local get_current_user works
-                if auth_hdr:
+                # v2.1.0 / v2.1: cloud forwards its own JWT but the
+                # local backend has a DIFFERENT SECRET_KEY (each
+                # FastAPI instance auto-generates its own on boot),
+                # so the cloud JWT fails signature verification on the
+                # local side → "Invalid token" on every heavy job.
+                # FIX: mint a LOCAL JWT signed with the LOCAL backend's
+                # secret. We resolve the user from the heartbeat /
+                # license validate flow already running in-process and
+                # call into the local server.create_access_token().
+                local_jwt = None
+                try:
+                    # Import lazily to avoid circular imports at boot
+                    from server import create_access_token, db as _local_db, SECRET_KEY as _SK  # type: ignore  # noqa
+                    # Find the user that owns this license on the LOCAL
+                    # backend's DB. The license / user pair is mirrored
+                    # by the sync_loop on first license-validate.
+                    lic_doc = await _local_db.licenses.find_one(
+                        {"license_key": LICENSE_KEY}, {"_id": 0, "user_id": 1, "email": 1}
+                    )
+                    if lic_doc:
+                        # v2.1 IMPORTANT: the local DB is empty on a
+                        # fresh install — only the heartbeat / license
+                        # rows exist. The cloud user record does NOT
+                        # exist locally yet, so create_access_token
+                        # would succeed but get_current_user would
+                        # 401 because users.find_one({email}) returns
+                        # None. We auto-upsert the user here from the
+                        # license email so JWT verification on the
+                        # very next replay attempt succeeds.
+                        lic_email = lic_doc.get("email")
+                        if not lic_email:
+                            # Try cloud user-id lookup
+                            uid = lic_doc.get("user_id")
+                            if uid:
+                                u = await _local_db.users.find_one(
+                                    {"id": uid}, {"_id": 0, "email": 1}
+                                )
+                                lic_email = (u or {}).get("email")
+                        if lic_email:
+                            existing = await _local_db.users.find_one(
+                                {"email": lic_email}, {"_id": 0, "id": 1}
+                            )
+                            if not existing:
+                                import uuid as _uuid
+                                from datetime import datetime as _dt, timezone as _tz
+                                user_id_new = lic_doc.get("user_id") or _uuid.uuid4().hex
+                                await _local_db.users.insert_one({
+                                    "id": user_id_new,
+                                    "email": lic_email,
+                                    "name": lic_email.split("@")[0],
+                                    "is_admin": False,
+                                    "created_at": _dt.now(_tz.utc).isoformat(),
+                                    "bridge_synced": True,
+                                })
+                                logger.info(
+                                    f"[bridge] auto-created local user {lic_email} "
+                                    f"(id={user_id_new[:8]}) for JWT bridge replay"
+                                )
+                            local_jwt = create_access_token({"sub": lic_email})
+                            logger.info(
+                                f"[bridge] minted local JWT for {lic_email} "
+                                f"(replacing cloud JWT for replay)"
+                            )
+                except Exception as _mint_err:  # noqa: BLE001
+                    logger.warning(f"[bridge] could not mint local JWT: {_mint_err}")
+
+                if local_jwt:
+                    headers["Authorization"] = f"Bearer {local_jwt}"
+                elif auth_hdr:
+                    # Fallback: forward the cloud JWT. Will fail
+                    # signature on local backend but useful for endpoints
+                    # that do their own auth (license-based).
                     headers["Authorization"] = auth_hdr
+                # ALWAYS include the license header so any endpoint that
+                # supports license auth can use it as a secondary path.
+                headers["X-Krexion-License"] = LICENSE_KEY
                 # Pass through the original Content-Type when we have
                 # raw bytes (multipart, urlencoded, etc.). For empty raw
                 # body fall back to JSON.
@@ -404,7 +522,7 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
                 try:
                     body_back = r.json()
                 except Exception:
-                    # v1.0.23: when response isn't JSON (e.g.
+                    # v2.1.0: when response isn't JSON (e.g.
                     # /visual-recorder/{id}/screenshot returns
                     # image/jpeg), base64-encode the raw bytes so the
                     # cloud can decode + forward as binary. Previously
@@ -658,7 +776,7 @@ def start_if_local(main_db, get_db_for_user) -> bool:
     if not CLOUD_URL:
         logger.info("[sync] disabled - KREXION_CLOUD_URL not set")
         return False
-    # v1.0.23: kill the legacy PowerShell `KrexionBridge` scheduled task
+    # v2.1.0: kill the legacy PowerShell `KrexionBridge` scheduled task
     # if it exists. Older installs (pre-native bundle, or PCs that ever
     # ran the cloud's "Pair my PC" PowerShell snippet) have a Scheduled
     # Task that polls /api/sync/jobs/pull every 5 s with NO feature
@@ -666,7 +784,7 @@ def start_if_local(main_db, get_db_for_user) -> bool:
     # heavy jobs like visual-recorder/start, only to immediately mark
     # them failed with "feature not supported by the PowerShell bridge
     # worker." That is exactly what the customer is reporting in
-    # v1.0.23 logs. Deleting the task on startup is idempotent
+    # v2.1.0 logs. Deleting the task on startup is idempotent
     # (schtasks /Delete returns non-zero if task absent — fine).
     if sys.platform.startswith("win"):
         try:

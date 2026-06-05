@@ -207,7 +207,19 @@ async def heartbeat(
         {"$set": update_doc},
         upsert=True,
     )
-    return {"ok": True, "server_time": _now_iso()}
+    # v2.1: return identity so the desktop's sync_client can mirror the
+    # user + license records into its LOCAL DB. Bridge replay needs
+    # those rows to mint a local-side JWT (cloud JWT can't be verified
+    # locally because each FastAPI instance has its own SECRET_KEY).
+    return {
+        "ok": True,
+        "server_time": _now_iso(),
+        "user": {"id": user["id"], "email": user.get("email")},
+        "license": {
+            "license_key": lic["license_key"],
+            "status": lic.get("status"),
+        },
+    }
 
 
 @sync_router.get("/status")
