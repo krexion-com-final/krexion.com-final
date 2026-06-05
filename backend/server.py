@@ -17781,16 +17781,29 @@ async def _vr_bridge_middleware(request: Request, call_next):
         if not IS_CLOUD:
             return await call_next(request)
         path = request.url.path or ""
-        if not path.startswith("/api/visual-recorder/"):
+        # v2.1.8: extend to also bridge real-user-traffic job
+        # polling endpoints. After v2.1.7 the bridged RUT job is
+        # created in the DESKTOP's local DB only, so the cloud's
+        # GET /api/real-user-traffic/jobs/{id}* returns 404 for
+        # the user's own job. Bridge them.
+        is_vr = path.startswith("/api/visual-recorder/")
+        is_rut_job = (
+            path.startswith("/api/real-user-traffic/jobs/")
+            or path.rstrip("/") == "/api/real-user-traffic/jobs"
+        )
+        if not (is_vr or is_rut_job):
             return await call_next(request)
-        # Don't bridge the listing endpoint — cloud serves its OWN
+        # Don't bridge the VR listing endpoint — cloud serves its OWN
         # listing from MongoDB-replicated session metadata (or returns
         # empty list, which is correct from cloud's POV).
         if path.rstrip("/") == "/api/visual-recorder/sessions":
             return await call_next(request)
-        # /start is already gated by Depends(require_local_mode) which
-        # bridges via _BridgeDone — let it through unchanged.
+        # /start (VR) and /jobs (POST RUT) are already gated by
+        # Depends(require_local_mode) which bridges via _BridgeDone —
+        # let them through unchanged.
         if path.endswith("/visual-recorder/start"):
+            return await call_next(request)
+        if path.rstrip("/") == "/api/real-user-traffic/jobs" and request.method.upper() == "POST":
             return await call_next(request)
         # Resolve user from header OR ?t= query param (screenshot uses
         # ?t= so <img src> can load without a custom fetch).
