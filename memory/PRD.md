@@ -1307,3 +1307,89 @@ version bump.
   https://github.com/dennisedmaartins9-sudo/krexion.com/releases
 - 🟡 E2E heavy job test on customer's Windows VM pending.
 
+
+---
+
+## Iteration 21 — 2026-06-05: RUT bridging E2E — final completion (v2.1.7 + v2.1.8)
+
+### User ask (Roman Urdu)
+> "ab complete fix kr do login mein ne diya hai or proxy jet b fix kr k
+> doabara test kr lena ab mujai proper working chahye ... ab koi masla
+> ni ana chahye or rut job proper chalna chahye"
+
+### Symptom chain that surfaced one-by-one
+1. **Cloud edge 422 "Field required (body.link_id)"** —  already
+   fixed in previous iteration (v2.1.6) via `request.form()` cache
+   inside `require_local_mode`. Confirmed gone.
+2. **Desktop returned 404 "Link not found"** — root cause: link was
+   created on krexion.com UI so it landed in the cloud Mongo only;
+   `sync_client` never pulls links cloud → desktop, so the desktop's
+   local `db.links.find_one({id, user_id})` had nothing.
+3. **Desktop returned 400 "ProxyJet Auto Mode … credentials not
+   configured"** — same root cause: ProxyJet creds saved on
+   krexion.com sit in the cloud's `proxyjet_credentials` only; the
+   desktop's local DB had none.
+4. **Cloud GET /api/real-user-traffic/jobs/{id} returned 404** —
+   the bridged job was created on the desktop DB only; the cloud's
+   `real_user_traffic_jobs` doesn't know about it, so polling for
+   live progress, screenshots, stop button, etc. all 404'd.
+
+### Fixes (cloud-only — NO desktop / installer rebuild)
+- **v2.1.7 (a)** `backend/server.py` `require_local_mode`:
+  before enqueueing the main heavy bridge job, if the body carries
+  a `link_id`, fetch the link from the cloud DB and enqueue a tiny
+  `POST /api/sync/links` bridge job first. The desktop's existing
+  `sync_module._upsert_link` (already bundled in v2.1.4) writes it
+  to the local DB with the same `id`/`short_code`/`user_id`.
+- **v2.1.7 (b)** Same idea for ProxyJet creds: when the body has
+  `use_proxyjet_auto=true`, fetch from `proxyjet_credentials` and
+  pre-enqueue a `POST /api/proxyjet/credentials` bridge job. The
+  bridge worker mints a local JWT so the local `get_current_user`
+  dep succeeds.
+- **v2.1.8** Extend `_vr_bridge_middleware` to also bridge every
+  `GET/POST /api/real-user-traffic/jobs/*` (excluding the POST
+  /jobs path which already bridges via `require_local_mode`). Now
+  the cloud UI's polls for job detail, live-log, live-visits,
+  diagnostics, screenshots, and stop reach the desktop.
+
+Both pre-sync jobs are best-effort — failures log + continue so
+the main job still runs and surfaces a clear error if anything
+else is wrong.
+
+### Files changed
+- `backend/server.py` (+183 / -16, three commits)
+
+### Verified end-to-end (under aadspower301@gmail.com)
+- `POST /api/real-user-traffic/jobs` (cloud) → `200` + `job_id` ✅
+- Bridge job ledger shows the auto-injected sequence:
+  `sync/links → 200`, `proxyjet/credentials → 200`,
+  `real-user-traffic/jobs → 200` ✅
+- `GET /api/real-user-traffic/jobs/{id}` (cloud) → `200` with
+  desktop's live job state ✅
+- Job ran on desktop with ProxyJet US exit IP, visited
+  `https://www.booking.com/`, returned **status=completed
+  succeeded=1 failed=0** ✅
+- live_steps include `geo/ok: Exit 100.1.222.78 · United States,
+  Freehold`, `browser/ok: Page loaded (HTTP 202)`,
+  `done/ok: Visit complete` ✅
+
+### What was NOT touched
+- Desktop bundle, `backend/VERSION`, installer (v2.1.4 stays in
+  field — pre-sync uses endpoints that already exist in v2.1.4)
+- No GitHub-Actions Windows-build trigger
+- No frontend changes
+
+### Commits
+- `b8fe2dc` v2.1.7 (a) link pre-sync
+- `56b7481` v2.1.7 (b) ProxyJet creds pre-sync
+- `460399e` v2.1.8 bridge RUT GET endpoints
+
+### Open / backlog
+- ROW-FIRST ProxyJet mode without form-fill data still fails with
+  "data file required" — pre-existing user-config requirement, not
+  a bug. User workflow already uses form-fill + data file.
+- `proxyjet_legacy_pregen=true` form param is read inside
+  `_rut_prepare_and_run` but not declared in the `/jobs` POST
+  signature, so it can't be enabled from the API today. Low
+  priority (the real fix is on-demand fetcher which is the
+  default).
