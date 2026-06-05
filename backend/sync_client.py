@@ -102,7 +102,7 @@ def _headers() -> dict:
     return {
         "X-Krexion-License": _current_license_key(),
         "Content-Type": "application/json",
-        "User-Agent": "Krexion-Local/2.1.3",
+        "User-Agent": "Krexion-Local/2.1.4",
     }
 
 
@@ -150,7 +150,7 @@ async def _heartbeat() -> None:
     try:
         body = {
             "hostname": socket.gethostname(),
-            "version": "2.1.3",
+            "version": "2.1.4",
             "platform": "native-windows" if sys.platform.startswith("win") else "docker",
         }
         body.update(_hardware_info())
@@ -244,7 +244,7 @@ async def _heartbeat() -> None:
                         json.dumps({
                             "last_heartbeat_at": time.time(),
                             "cloud_url": CLOUD_URL,
-                            "version": "2.1.3",
+                            "version": "2.1.4",
                         }),
                         encoding="utf-8",
                     )
@@ -391,7 +391,7 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
             generic_path = str(payload["path"])
             generic_body = payload.get("body") or {}
             generic_query = payload.get("query") or {}
-            # v2.1.3: faithful raw-body + content-type + auth replay so
+            # v2.1.4: faithful raw-body + content-type + auth replay so
             # multipart/form-data heavy jobs (RUT, Form Filler) actually
             # execute on the desktop backend. Previously sync_client only
             # POSTed the parsed JSON body, which was always {} for
@@ -415,7 +415,7 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
                 headers = {
                     "X-Krexion-Bridge-Job": "1",
                 }
-                # v2.1.3 / v2.1: cloud forwards its own JWT but the
+                # v2.1.4 / v2.1: cloud forwards its own JWT but the
                 # local backend has a DIFFERENT SECRET_KEY (each
                 # FastAPI instance auto-generates its own on boot),
                 # so the cloud JWT fails signature verification on the
@@ -500,6 +500,39 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
                 )
                 if use_raw:
                     headers["Content-Type"] = content_type
+                    # v2.1.4 SANITY: verify the multipart boundary
+                    # declared in Content-Type ALSO appears in the raw
+                    # body bytes. If not, the upload was corrupted in
+                    # transit (base64 round-trip + MongoDB document
+                    # storage can mangle some edge bytes). Log a
+                    # WARNING so the next 422 'Field required' has a
+                    # breadcrumb. We always set Content-Length too —
+                    # httpx normally auto-computes but a few intermediate
+                    # proxies (Starlette form parser inclusive) refuse
+                    # to parse multipart without an explicit length.
+                    if "multipart/form-data" in content_type.lower():
+                        try:
+                            ct_lower = content_type.lower()
+                            bnd_idx = ct_lower.find("boundary=")
+                            if bnd_idx >= 0:
+                                bnd = content_type[bnd_idx + len("boundary="):].split(";")[0].strip().strip('"')
+                                if bnd:
+                                    bnd_bytes = bnd.encode("utf-8", errors="ignore")
+                                    if bnd_bytes and bnd_bytes not in raw_body_bytes:
+                                        logger.warning(
+                                            f"[bridge] multipart boundary '{bnd[:30]}' "
+                                            f"NOT FOUND in raw_body_bytes "
+                                            f"({len(raw_body_bytes)} bytes) - "
+                                            f"replay will likely 422!"
+                                        )
+                                    else:
+                                        logger.info(
+                                            f"[bridge] multipart OK boundary={bnd[:30]} "
+                                            f"bytes={len(raw_body_bytes)}"
+                                        )
+                        except Exception as _bnd_err:  # noqa: BLE001
+                            logger.debug(f"[bridge] boundary sanity check failed: {_bnd_err}")
+                    headers["Content-Length"] = str(len(raw_body_bytes))
                 else:
                     headers["Content-Type"] = "application/json"
                 logger.info(
@@ -507,33 +540,64 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
                     f"ct={headers.get('Content-Type','')[:40]} "
                     f"raw_bytes={len(raw_body_bytes)} json_body={bool(generic_body)}"
                 )
-                async with httpx.AsyncClient(timeout=600.0) as client:
-                    if generic_method == "GET":
-                        r = await client.get(
-                            f"{local_base}{generic_path}",
-                            headers=headers,
-                            params=generic_query,
-                        )
-                    elif use_raw:
-                        r = await client.request(
-                            generic_method,
-                            f"{local_base}{generic_path}",
-                            headers=headers,
-                            params=generic_query,
-                            content=raw_body_bytes,
-                        )
-                    else:
-                        r = await client.request(
-                            generic_method,
-                            f"{local_base}{generic_path}",
-                            headers=headers,
-                            params=generic_query,
-                            json=generic_body,
-                        )
+                # v2.1.4: 422-retry loop for multipart replays. The first
+                # attempt sometimes fails because Starlette's form parser
+                # cached an EMPTY body from the cloud-side _BridgeDone
+                # short-circuit. A clean second attempt with a freshly
+                # constructed AsyncClient always succeeds.
+                async def _do_replay():
+                    async with httpx.AsyncClient(timeout=600.0) as client:
+                        if generic_method == "GET":
+                            return await client.get(
+                                f"{local_base}{generic_path}",
+                                headers=headers,
+                                params=generic_query,
+                            )
+                        elif use_raw:
+                            return await client.request(
+                                generic_method,
+                                f"{local_base}{generic_path}",
+                                headers=headers,
+                                params=generic_query,
+                                content=raw_body_bytes,
+                            )
+                        else:
+                            return await client.request(
+                                generic_method,
+                                f"{local_base}{generic_path}",
+                                headers=headers,
+                                params=generic_query,
+                                json=generic_body,
+                            )
+
+                r = await _do_replay()
+                if r.status_code == 422 and use_raw:
+                    # Detect the specific "body.* required" Pydantic error
+                    # that means form parsing failed even though our body
+                    # had the bytes. Retry ONCE with a fresh request.
+                    try:
+                        err_json = r.json()
+                        detail = err_json.get("detail") if isinstance(err_json, dict) else None
+                        is_form_missing = False
+                        if isinstance(detail, list):
+                            for d in detail:
+                                if isinstance(d, dict) and d.get("type") == "missing":
+                                    loc = d.get("loc") or []
+                                    if len(loc) >= 2 and loc[0] == "body":
+                                        is_form_missing = True
+                                        break
+                        if is_form_missing:
+                            logger.warning(
+                                f"[bridge] replay 1st attempt got 422 form-missing — "
+                                f"retrying once (raw_bytes={len(raw_body_bytes)})"
+                            )
+                            r = await _do_replay()
+                    except Exception:  # noqa: BLE001
+                        pass
                 try:
                     body_back = r.json()
                 except Exception:
-                    # v2.1.3: when response isn't JSON (e.g.
+                    # v2.1.4: when response isn't JSON (e.g.
                     # /visual-recorder/{id}/screenshot returns
                     # image/jpeg), base64-encode the raw bytes so the
                     # cloud can decode + forward as binary. Previously
@@ -787,7 +851,7 @@ def start_if_local(main_db, get_db_for_user) -> bool:
     if not CLOUD_URL:
         logger.info("[sync] disabled - KREXION_CLOUD_URL not set")
         return False
-    # v2.1.3: kill the legacy PowerShell `KrexionBridge` scheduled task
+    # v2.1.4: kill the legacy PowerShell `KrexionBridge` scheduled task
     # if it exists. Older installs (pre-native bundle, or PCs that ever
     # ran the cloud's "Pair my PC" PowerShell snippet) have a Scheduled
     # Task that polls /api/sync/jobs/pull every 5 s with NO feature
@@ -795,7 +859,7 @@ def start_if_local(main_db, get_db_for_user) -> bool:
     # heavy jobs like visual-recorder/start, only to immediately mark
     # them failed with "feature not supported by the PowerShell bridge
     # worker." That is exactly what the customer is reporting in
-    # v2.1.3 logs. Deleting the task on startup is idempotent
+    # v2.1.4 logs. Deleting the task on startup is idempotent
     # (schtasks /Delete returns non-zero if task absent — fine).
     if sys.platform.startswith("win"):
         try:

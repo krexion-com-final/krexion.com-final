@@ -604,6 +604,18 @@ async def require_local_mode(request: Request):
                     raw_body = await request.body()
                 except Exception:
                     raw_body = b""
+                # v2.1.4: Starlette caches body bytes in request._body
+                # after the first await request.body(). FastAPI's
+                # Form() parser uses request.form() which reads from
+                # request.stream() — and on SOME starlette versions
+                # the stream is exhausted after our await. Explicitly
+                # re-stuff the cache so any downstream Form() parsing
+                # (e.g. when bridge falls through and the endpoint
+                # runs on cloud) still works.
+                try:
+                    request._body = raw_body  # type: ignore[attr-defined]
+                except Exception:  # noqa: BLE001
+                    pass
                 content_type = request.headers.get("content-type", "")
                 auth_hdr = request.headers.get("Authorization", "")
                 # Try to parse JSON for legacy callers (proxies/bulk-test
