@@ -738,6 +738,73 @@ async def get_mode():
     }
 
 
+# v2.1.2: public status page endpoint - no auth required so it can be
+# used as a customer-facing trust signal and for global launch.
+@app.get("/api/public/status")
+async def public_status():
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    # API ok if we got this far
+    api_ok = True
+    # Mongo ok if we can ping
+    mongo_ok = False
+    try:
+        await db.command("ping")
+        mongo_ok = True
+    except Exception:  # noqa: BLE001
+        mongo_ok = False
+    # Online PCs - heartbeats in last 90 s
+    online_pcs = 0
+    try:
+        cutoff = now - timedelta(seconds=90)
+        online_pcs = await db.sync_heartbeats.count_documents({
+            "last_seen": {"$gte": cutoff}
+        })
+    except Exception:  # noqa: BLE001
+        pass
+    # Active users 24h - users who logged in in last day
+    active_users_24h = 0
+    try:
+        cutoff_24h = (now - timedelta(hours=24)).isoformat()
+        active_users_24h = await db.users.count_documents({
+            "last_login_at": {"$gte": cutoff_24h}
+        })
+    except Exception:  # noqa: BLE001
+        pass
+    # Bridge job buckets - last 24h
+    bridge_jobs_24h = {"pending": 0, "running": 0, "done": 0, "failed": 0}
+    try:
+        cutoff_24h_iso = (now - timedelta(hours=24)).isoformat()
+        for st in bridge_jobs_24h.keys():
+            bridge_jobs_24h[st] = await db.bridge_jobs.count_documents({
+                "status": st,
+                "created_at": {"$gte": cutoff_24h_iso},
+            })
+    except Exception:  # noqa: BLE001
+        pass
+    # Version
+    version_str = "unknown"
+    try:
+        from pathlib import Path as _P
+        for p in (_P(__file__).parent / "VERSION", _P("/app/backend/VERSION")):
+            if p.exists():
+                version_str = p.read_text(encoding="utf-8").strip()
+                break
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "api_ok": api_ok,
+        "mongo_ok": mongo_ok,
+        "online_pcs": online_pcs,
+        "active_users_24h": active_users_24h,
+        "bridge_jobs_24h": bridge_jobs_24h,
+        "bridge_workers": online_pcs,  # alias
+        "version": version_str,
+        "now": now.isoformat(),
+    }
+
+
+
 # Debug endpoint to search for a specific IP in ALL databases
 @app.get("/debug-search-ip/{ip}")
 @app.get("/api/debug-search-ip/{ip}")
@@ -2631,7 +2698,16 @@ async def get_current_user_with_fresh_data(request: Request) -> dict:
                             "name": lic_email.split("@")[0],
                             "is_admin": False,
                             "status": "active",
-                            "features": {},
+                            "features": {f: True for f in (
+                                "real_user_traffic", "form_filler",
+                                "visual_recorder", "proxies", "links",
+                                "clicks", "import_traffic",
+                                "email_checker", "separate_data",
+                                "ua_generator", "ua_checker",
+                                "real_traffic", "import_data",
+                                "adspower", "uploaded_things",
+                                "profile_builder", "traffic_sources",
+                            )},
                             "created_at": datetime.utcnow().isoformat(),
                             "bridge_synced": True,
                         }
@@ -2641,11 +2717,36 @@ async def get_current_user_with_fresh_data(request: Request) -> dict:
                         # Grant ALL heavy-job feature flags by default
                         # for bridge-resolved users (they paid for the
                         # license; cloud already authorised the call).
+                        # v2.1.2: ALSO force-set status='active'. The
+                        # local user record may have been auto-created
+                        # by the heartbeat-mirror without a status
+                        # field, which check_user_feature reads as
+                        # 'pending' -> 403 'Account pending activation'.
+                        # The license itself is the source of truth
+                        # here — if the license is valid and matches,
+                        # the user IS active on the cloud side. Mirror.
+                        user["status"] = "active"
                         user.setdefault("features", {})
                         for feat in ("real_user_traffic", "form_filler",
                                      "visual_recorder", "proxies", "links",
-                                     "clicks", "import_traffic"):
+                                     "clicks", "import_traffic",
+                                     "email_checker", "separate_data",
+                                     "ua_generator", "ua_checker",
+                                     "real_traffic", "import_data",
+                                     "adspower", "uploaded_things",
+                                     "profile_builder", "traffic_sources"):
                             user["features"].setdefault(feat, True)
+                        # Persist the active flag so subsequent NON-bridge
+                        # calls (e.g. user opens krexion-local in a
+                        # browser) also see them as active.
+                        try:
+                            await main_db.users.update_one(
+                                {"id": user["id"]},
+                                {"$set": {"status": "active",
+                                          "features": user["features"]}},
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
                         return user
 
     auth_header = request.headers.get("Authorization")

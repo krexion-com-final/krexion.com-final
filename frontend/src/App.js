@@ -43,6 +43,7 @@ import OrderStatusPage from "./pages/OrderStatusPage";
 import CryptoOrdersPage from "./pages/CryptoOrdersPage";
 import HomePage from "./pages/HomePage";
 import DownloadPage from "./pages/DownloadPage";
+import StatusPage from "./pages/StatusPage";
 import GuidePage from "./pages/GuidePage";
 import SyncHeartbeatsPage from "./pages/SyncHeartbeatsPage";
 import ReleasesAdminPage from "./pages/ReleasesAdminPage";
@@ -142,6 +143,7 @@ function App() {
             <Route path="/bg-preview" element={<BackgroundPreviewPage />} />
             <Route path="/pricing" element={<PricingPage />} />
             <Route path="/download" element={<DownloadPage />} />
+            <Route path="/status" element={<StatusPage />} />
             <Route path="/guide" element={<GuidePage />} />
             <Route path="/checkout/:planId" element={<CheckoutPage />} />
             <Route path="/order/:orderId" element={<OrderStatusPage />} />
