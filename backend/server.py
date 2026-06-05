@@ -17367,6 +17367,160 @@ try:
     async def _bridge_list_jobs(limit: int = 50, user: dict = Depends(get_current_user)):
         return {"jobs": await list_jobs_for(user["id"], limit)}
 
+    @_bridge_router.post("/resync-to-desktop")
+    async def _bridge_resync_to_desktop(user: dict = Depends(get_current_user)):
+        """v2.1.8 'Resync from Cloud' — bulk-push the user's cloud-side
+        config (links + ProxyJet credentials) into the desktop's local
+        Mongo via the existing bridge replay mechanism.
+
+        Useful for:
+          • Fresh installs whose first heartbeat happened AFTER the
+            user already created links on krexion.com
+          • Reconnect after long offline period
+          • Manual recovery when a bridged heavy job 404s with
+            'Link not found' because pre-sync didn't fire (e.g. very
+            old bridge POSTs that never carry link_id in the body)
+
+        Best-effort: each per-record sync runs through the same
+        wait-for-result bridge as the auto pre-sync.  Failures are
+        captured and returned in the response so the UI can show
+        partial results.
+        """
+        uid = user["id"]
+
+        # 1. Check the user actually has an online PC, otherwise the
+        # whole flow is pointless and would just queue dead jobs.
+        try:
+            status = await get_my_local_status_for(uid)
+        except Exception:  # noqa: BLE001
+            status = {"online": False}
+        if not status.get("online"):
+            return {
+                "ok": False,
+                "online": False,
+                "message": "Your PC is offline — start the Krexion desktop app and try again.",
+                "synced": {"links": 0, "proxyjet": False},
+                "errors": [],
+            }
+
+        import json as _resync_json
+        import base64 as _resync_b64
+
+        from bridge_module import enqueue_bridge_job as _enq2
+
+        synced_links = 0
+        errors = []
+
+        # 2. Push every active link the user owns into the desktop DB
+        # via /api/sync/links. We chunk into a single POST per link to
+        # keep the bridge payload tiny and easy to debug; on a typical
+        # account this is at most a handful of links.
+        link_cursor = db.links.find(
+            {"user_id": uid, "status": {"$ne": "deleted"}},
+            {"_id": 0},
+        )
+        async for link in link_cursor:
+            try:
+                body = {
+                    "links": [{
+                        "id": link.get("id"),
+                        "short_code": link.get("short_code"),
+                        "offer_url": link.get("offer_url") or link.get("destination_url") or "",
+                        "name": link.get("name", ""),
+                        "status": link.get("status", "active"),
+                        "allowed_countries": link.get("allowed_countries", []) or [],
+                        "allowed_os": link.get("allowed_os", []) or [],
+                        "block_vpn": bool(link.get("block_vpn", False)),
+                    }]
+                }
+                raw = _resync_json.dumps(body).encode("utf-8")
+                payload = {
+                    "method": "POST",
+                    "path": "/api/sync/links",
+                    "body": body,
+                    "query": {},
+                    "raw_body_b64": _resync_b64.b64encode(raw).decode("ascii"),
+                    "content_type": "application/json",
+                    "authorization": "",
+                }
+                resp = await _enq2(
+                    {"id": uid, "email": user.get("email")},
+                    "sync/links",
+                    payload,
+                    wait_for_result=True,
+                    wait_timeout=15,
+                )
+                if (resp or {}).get("status") == 200:
+                    synced_links += 1
+                else:
+                    errors.append(
+                        f"link {link.get('short_code','?')}: "
+                        f"status={(resp or {}).get('status','?')}"
+                    )
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"link {link.get('short_code','?')}: {e}")
+
+        # 3. Push ProxyJet credentials (single doc per user).
+        proxyjet_synced = False
+        try:
+            from proxyjet_module import get_credentials as _pj_get2
+            creds = await _pj_get2(db, uid)
+            if creds and creds.get("username") and creds.get("password"):
+                pj_body = {
+                    "username": creds.get("username", ""),
+                    "password": creds.get("password", ""),
+                    "server": creds.get("server") or "proxy-jet.io",
+                    "port": int(creds.get("port") or 1010),
+                    "default_country": (creds.get("default_country") or "US"),
+                    "default_state": creds.get("default_state") or "",
+                    "gateway": creds.get("gateway") or "ca",
+                    "product": creds.get("product") or "resi",
+                }
+                pj_raw = _resync_json.dumps(pj_body).encode("utf-8")
+                # We need a Bearer JWT for the local
+                # POST /api/proxyjet/credentials endpoint.  The bridge
+                # worker on the desktop *mints* a local JWT for the
+                # same user when it sees an `authorization` value, so
+                # forwarding the caller's cloud token is enough — the
+                # worker just needs SOMETHING in that field to
+                # trigger the mint step.
+                cloud_token = "Bearer cloud-resync"  # marker
+                pj_payload = {
+                    "method": "POST",
+                    "path": "/api/proxyjet/credentials",
+                    "body": pj_body,
+                    "query": {},
+                    "raw_body_b64": _resync_b64.b64encode(pj_raw).decode("ascii"),
+                    "content_type": "application/json",
+                    "authorization": cloud_token,
+                }
+                pj_resp = await _enq2(
+                    {"id": uid, "email": user.get("email")},
+                    "proxyjet/credentials",
+                    pj_payload,
+                    wait_for_result=True,
+                    wait_timeout=15,
+                )
+                proxyjet_synced = (pj_resp or {}).get("status") == 200
+                if not proxyjet_synced:
+                    errors.append(
+                        f"proxyjet creds: status={(pj_resp or {}).get('status','?')}"
+                    )
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"proxyjet creds: {e}")
+
+        return {
+            "ok": len(errors) == 0,
+            "online": True,
+            "message": (
+                f"Resynced {synced_links} link(s)"
+                + (", ProxyJet credentials" if proxyjet_synced else "")
+                + " to your PC."
+            ),
+            "synced": {"links": synced_links, "proxyjet": proxyjet_synced},
+            "errors": errors,
+        }
+
     @_bridge_router.post("/pair")
     async def _bridge_pair_pc(user: dict = Depends(get_current_user)):
         """One-click 'Pair my PC' — returns the user's license key plus

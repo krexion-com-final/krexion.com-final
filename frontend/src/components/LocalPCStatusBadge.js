@@ -37,6 +37,7 @@ export default function LocalPCStatusBadge() {
   const [pairLoading, setPairLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [refreshResult, setRefreshResult] = useState(null);
+  const [resyncing, setResyncing] = useState(false);
 
   useEffect(() => {
     if (!isCloud) return;
@@ -97,6 +98,41 @@ export default function LocalPCStatusBadge() {
     setTimeout(() => setCopied(false), 2500);
   }
 
+  async function resyncToPC(e) {
+    // Stop propagation so we don't open the pair modal too
+    if (e?.stopPropagation) e.stopPropagation();
+    if (resyncing) return;
+    setResyncing(true);
+    const t = toast.loading("Pushing config to your PC…");
+    try {
+      const token = localStorage.getItem("token");
+      const r = await axios.post(
+        `${BACKEND_URL}/api/bridge/resync-to-desktop`,
+        {},
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      toast.dismiss(t);
+      if (r.data?.ok) {
+        toast.success(r.data.message || "PC resync complete");
+      } else if (r.data?.online === false) {
+        toast.error(r.data.message || "PC is offline");
+      } else {
+        toast.warning(
+          `Partial sync: ${r.data?.message || "see console"}`
+        );
+        // eslint-disable-next-line no-console
+        console.warn("[resync-to-desktop] errors:", r.data?.errors);
+      }
+    } catch (err) {
+      toast.dismiss(t);
+      toast.error(
+        err?.response?.data?.detail || err?.message || "Resync failed"
+      );
+    } finally {
+      setResyncing(false);
+    }
+  }
+
   if (!loaded || !isCloud || loading) return null;
 
   const online = status?.online;
@@ -107,24 +143,41 @@ export default function LocalPCStatusBadge() {
   return (
     <>
       {online ? (
-        <button
-          data-testid="local-pc-badge-online"
-          onClick={openPair}
-          className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-medium hover:bg-emerald-500/20 hover:border-emerald-500/50 transition cursor-pointer"
-          title={`Bridge active — click to re-pair or view setup. PC: ${host || "your computer"}`}
-          type="button"
-        >
-          <MonitorCheck size={14} />
-          <span className="hidden sm:inline">PC connected</span>
-          {ram && (
-            <span className="hidden md:inline text-emerald-400/70 font-normal">
-              <Cpu size={11} className="inline mr-0.5" />
-              {ram} GB
-              {cpu ? ` / ${cpu} cores` : ""}
-            </span>
-          )}
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-        </button>
+        <span className="inline-flex items-center gap-1">
+          <button
+            data-testid="local-pc-badge-online"
+            onClick={openPair}
+            className="inline-flex items-center gap-2 px-3 py-1.5 rounded-md bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-medium hover:bg-emerald-500/20 hover:border-emerald-500/50 transition cursor-pointer"
+            title={`Bridge active — click to re-pair or view setup. PC: ${host || "your computer"}`}
+            type="button"
+          >
+            <MonitorCheck size={14} />
+            <span className="hidden sm:inline">PC connected</span>
+            {ram && (
+              <span className="hidden md:inline text-emerald-400/70 font-normal">
+                <Cpu size={11} className="inline mr-0.5" />
+                {ram} GB
+                {cpu ? ` / ${cpu} cores` : ""}
+              </span>
+            )}
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+          </button>
+          <button
+            data-testid="local-pc-resync-btn"
+            onClick={resyncToPC}
+            disabled={resyncing}
+            className="inline-flex items-center gap-1 px-2 py-1.5 rounded-md bg-sky-500/10 border border-sky-500/30 text-sky-300 text-xs font-medium hover:bg-sky-500/20 hover:border-sky-500/50 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Push links & ProxyJet credentials from cloud to your PC's local database"
+            type="button"
+          >
+            {resyncing ? (
+              <Loader2 size={13} className="animate-spin" />
+            ) : (
+              <RefreshCw size={13} />
+            )}
+            <span className="hidden lg:inline">Resync to PC</span>
+          </button>
+        </span>
       ) : (
         <button
           data-testid="local-pc-badge-offline"
