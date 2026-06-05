@@ -749,6 +749,70 @@ async def require_local_mode(request: Request):
                     except Exception as _link_lookup_err:  # noqa: BLE001
                         logger.warning(f"[bridge] link lookup failed: {_link_lookup_err}")
 
+                # v2.1.7 PRE-SYNC PROXYJET CREDENTIALS: when the
+                # bridged heavy job toggles use_proxyjet_auto=true,
+                # the desktop's RUT endpoint checks
+                # db.proxyjet_credentials.find_one({user_id}) which
+                # is empty on a fresh customer install — the
+                # credentials live ONLY in the cloud DB after the
+                # user saved them on krexion.com → Proxies. Mirror
+                # them across via the existing
+                # /api/proxyjet/credentials POST (JWT-authed; the
+                # bridge replay mints a local JWT for the same
+                # user).
+                _use_pj_auto = str((body_json or {}).get("use_proxyjet_auto", "")).lower() in ("true", "1", "yes")
+                if _use_pj_auto:
+                    try:
+                        from proxyjet_module import get_credentials as _pj_get  # type: ignore
+                        _pj_creds = await _pj_get(db, _uid)
+                        if _pj_creds and _pj_creds.get("username") and _pj_creds.get("password"):
+                            _pj_body = {
+                                "username": _pj_creds.get("username", ""),
+                                "password": _pj_creds.get("password", ""),
+                                "server": _pj_creds.get("server") or "proxy-jet.io",
+                                "port": int(_pj_creds.get("port") or 1010),
+                                "default_country": (_pj_creds.get("default_country") or "US"),
+                                "default_state": _pj_creds.get("default_state") or "",
+                                "gateway": _pj_creds.get("gateway") or "ca",
+                                "product": _pj_creds.get("product") or "resi",
+                            }
+                            import json as _j3
+                            _pj_raw = _j3.dumps(_pj_body).encode("utf-8")
+                            _pj_sync_payload = {
+                                "method": "POST",
+                                "path": "/api/proxyjet/credentials",
+                                "body": _pj_body,
+                                "query": {},
+                                "raw_body_b64": _b64.b64encode(_pj_raw).decode("ascii"),
+                                "content_type": "application/json",
+                                # Forward the cloud JWT — sync_client
+                                # will replace it with a local-minted
+                                # JWT for the same user before replay,
+                                # so the local get_current_user
+                                # dependency succeeds.
+                                "authorization": auth_hdr,
+                            }
+                            logger.info(
+                                f"[bridge] pre-sync ProxyJet creds for user={_uid[:8]} "
+                                f"(username={_pj_creds.get('username','')[:8]}...)"
+                            )
+                            try:
+                                _pj_presync_resp = await _enq(
+                                    {"id": _uid, "email": local_status.get("email")},
+                                    "proxyjet/credentials",
+                                    _pj_sync_payload,
+                                    wait_for_result=True,
+                                    wait_timeout=15,
+                                )
+                                logger.info(
+                                    f"[bridge] pre-sync ProxyJet creds done "
+                                    f"status={(_pj_presync_resp or {}).get('status')}"
+                                )
+                            except Exception as _pjps_err:  # noqa: BLE001
+                                logger.warning(f"[bridge] pre-sync ProxyJet creds failed (continuing): {_pjps_err}")
+                    except Exception as _pj_lookup_err:  # noqa: BLE001
+                        logger.warning(f"[bridge] ProxyJet creds lookup failed: {_pj_lookup_err}")
+
                 bridge_resp = await _enq(
                     {"id": _uid, "email": local_status.get("email")},
                     feature,
