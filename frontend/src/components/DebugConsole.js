@@ -64,6 +64,12 @@ function bodyPreview(body) {
 }
 
 function pushEvent(ev) {
+  // v2.1.6: skip our OWN debug-log calls so we don't create an
+  // infinite recursion (every captured event would POST to
+  // /api/debug/log which would itself be captured -> POST -> ...
+  // and the ring buffer would fill with debug_log entries instead
+  // of the real call the customer wants to inspect).
+  if ((ev.url || "").includes("/api/debug/log")) return;
   EVENTS.unshift(ev);
   if (EVENTS.length > MAX_EVENTS) EVENTS.pop();
   LISTENERS.forEach((fn) => fn([...EVENTS]));
