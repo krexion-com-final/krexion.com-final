@@ -44,6 +44,7 @@ import CryptoOrdersPage from "./pages/CryptoOrdersPage";
 import HomePage from "./pages/HomePage";
 import DownloadPage from "./pages/DownloadPage";
 import StatusPage from "./pages/StatusPage";
+import DebugConsole from "./components/DebugConsole";
 import GuidePage from "./pages/GuidePage";
 import SyncHeartbeatsPage from "./pages/SyncHeartbeatsPage";
 import ReleasesAdminPage from "./pages/ReleasesAdminPage";
@@ -314,6 +315,7 @@ function App() {
           </Routes>
         </BrowserRouter>
         <Toaster position="top-center" richColors closeButton style={{zIndex:99999}} />
+        <DebugConsole />
         {/* 2026-05: Global modal for "your PC is offline" — pops up
             whenever a heavy-feature request is gated. See
             components/LocalPCOfflineDialog.js + utils/cloudGateInterceptor.js. */}

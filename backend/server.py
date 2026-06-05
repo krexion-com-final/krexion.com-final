@@ -810,10 +810,77 @@ async def public_status():
         "online_pcs": online_pcs,
         "active_users_24h": active_users_24h,
         "bridge_jobs_24h": bridge_jobs_24h,
-        "bridge_workers": online_pcs,  # alias
+        "bridge_workers": online_pcs,
         "version": version_str,
         "now": now.isoformat(),
     }
+
+
+# v2.1.5: TEMPORARY debug log endpoint. Frontend axios interceptor
+# mirrors every request/response here so admin can inspect remotely.
+# Stored in `debug_events` collection with 24h TTL. NO auth strictly
+# required (interceptor sends Authorization opportunistically) — we
+# accept the call regardless so failed-auth events also get captured.
+@app.post("/api/debug/log")
+async def debug_log(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {"raw": str(body)[:1000]}
+    # Try to resolve the user from the auth header (best-effort, no raise)
+    user_email = None
+    try:
+        auth = request.headers.get("Authorization") or ""
+        if auth.startswith("Bearer "):
+            tok = auth.split(" ", 1)[1]
+            from jose import jwt as _jwt
+            payload = _jwt.decode(tok, SECRET_KEY, algorithms=[ALGORITHM])
+            user_email = payload.get("sub")
+    except Exception:  # noqa: BLE001
+        pass
+    from datetime import datetime as _dt, timezone as _tz
+    doc = {
+        "ts": _dt.now(_tz.utc),
+        "user_email": user_email,
+        "client_ip": getattr(request.client, "host", None),
+        "method": str(body.get("method", ""))[:10],
+        "url": str(body.get("url", ""))[:500],
+        "status": int(body.get("status") or 0),
+        "duration_ms": int(body.get("duration_ms") or 0),
+        "error": str(body.get("error") or "")[:500],
+        "request_body": body.get("request_body"),
+        "response_body": body.get("response_body"),
+    }
+    try:
+        await db.debug_events.insert_one(doc)
+        # Best-effort TTL index — ignore failures if already exists.
+        try:
+            await db.debug_events.create_index("ts", expireAfterSeconds=86400)
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception as _e:  # noqa: BLE001
+        logger.warning(f"[debug_log] insert failed: {_e}")
+    return {"ok": True}
+
+
+@app.get("/api/debug/events")
+async def debug_events_list(request: Request, limit: int = 100):
+    """Admin-only readout of the last N debug events for the current
+    user. Use this to inspect what a remote customer is seeing."""
+    user = await get_current_user(request)
+    cursor = db.debug_events.find(
+        {"user_email": user.get("email")},
+        {"_id": 0},
+    ).sort("ts", -1).limit(min(limit, 500))
+    items = []
+    async for d in cursor:
+        # Stringify the timestamp for JSON serialisation
+        if hasattr(d.get("ts"), "isoformat"):
+            d["ts"] = d["ts"].isoformat()
+        items.append(d)
+    return {"items": items}
 
 
 
