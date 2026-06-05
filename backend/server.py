@@ -667,6 +667,88 @@ async def require_local_mode(request: Request):
                     f"method={payload['method']} ct={content_type[:40]} "
                     f"body_bytes={len(raw_body)}"
                 )
+
+                # v2.1.7 PRE-SYNC: The desktop's local Mongo is a
+                # separate DB from the cloud. When a user creates a
+                # link on the krexion.com UI it lands ONLY in the
+                # cloud DB. The desktop's RUT/Form-Filler endpoint
+                # then 404s with "Link not found" because the link
+                # doesn't exist locally yet. Sync_client only PUSHES
+                # links cloud-ward, never the other way.
+                #
+                # Fix: when the bridged request carries a `link_id`,
+                # FIRST enqueue a tiny /api/sync/links POST bridge
+                # job so the desktop's local DB is populated, THEN
+                # enqueue the actual heavy job. Both run on the same
+                # desktop worker that's already heartbeating, total
+                # added latency is ~1 polling cycle (~5s).
+                _link_id = (body_json or {}).get("link_id")
+                if _link_id and isinstance(_link_id, str):
+                    try:
+                        _link = await db.links.find_one(
+                            {"id": _link_id, "user_id": _uid},
+                            {"_id": 0},
+                        )
+                        if _link and _link.get("short_code"):
+                            # Build a minimal link doc with the cloud's
+                            # `id` so the desktop's lookup
+                            # (db.links.find_one({"id": link_id,
+                            # "user_id": user.id})) matches exactly.
+                            _sync_body = {
+                                "links": [{
+                                    "id": _link.get("id"),
+                                    "short_code": _link.get("short_code"),
+                                    "offer_url": _link.get("offer_url") or _link.get("destination_url") or "",
+                                    "name": _link.get("name", ""),
+                                    "status": _link.get("status", "active"),
+                                    "allowed_countries": _link.get("allowed_countries", []) or [],
+                                    "allowed_os": _link.get("allowed_os", []) or [],
+                                    "block_vpn": bool(_link.get("block_vpn", False)),
+                                }]
+                            }
+                            import json as _j2
+                            _sync_raw = _j2.dumps(_sync_body).encode("utf-8")
+                            _sync_payload = {
+                                "method": "POST",
+                                "path": "/api/sync/links",
+                                "body": _sync_body,
+                                "query": {},
+                                "raw_body_b64": _b64.b64encode(_sync_raw).decode("ascii"),
+                                "content_type": "application/json",
+                                # No JWT — the desktop's /api/sync/links
+                                # authenticates via X-Krexion-License,
+                                # which sync_client always attaches.
+                                "authorization": "",
+                            }
+                            logger.info(
+                                f"[bridge] pre-sync link {_link.get('short_code')} "
+                                f"(id={str(_link.get('id'))[:8]}) to desktop for user={_uid[:8]}"
+                            )
+                            try:
+                                _presync_resp = await _enq(
+                                    {"id": _uid, "email": local_status.get("email")},
+                                    "sync/links",
+                                    _sync_payload,
+                                    wait_for_result=True,
+                                    wait_timeout=15,
+                                )
+                                logger.info(
+                                    f"[bridge] pre-sync link done status={(_presync_resp or {}).get('status')}"
+                                )
+                            except Exception as _ps_err:  # noqa: BLE001
+                                # Pre-sync failures should NOT block
+                                # the main job — desktop might already
+                                # have the link from a prior push or
+                                # the user could be running an older
+                                # client that doesn't have /api/sync/
+                                # links bound. Best-effort, log and
+                                # carry on; main job will surface the
+                                # 404 if the link genuinely isn't
+                                # there.
+                                logger.warning(f"[bridge] pre-sync link failed (continuing): {_ps_err}")
+                    except Exception as _link_lookup_err:  # noqa: BLE001
+                        logger.warning(f"[bridge] link lookup failed: {_link_lookup_err}")
+
                 bridge_resp = await _enq(
                     {"id": _uid, "email": local_status.get("email")},
                     feature,
