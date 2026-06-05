@@ -1116,24 +1116,34 @@ manager = ConnectionManager()
 
 # Default feature permissions for new users
 DEFAULT_FEATURES = {
-    "links": False,
-    "clicks": False,
-    "conversions": False,
-    "proxies": False,
-    "import_data": False,
-    # Granular sub-features (previously gated under import_data)
-    "import_traffic": False,
-    "real_traffic": False,
-    "ua_generator": False,
-    "email_checker": False,
-    "separate_data": False,
-    "form_filler": False,
-    "real_user_traffic": False,
-    "profile_builder": False,
-    "settings": True,  # Settings access - default ON for main users
-    "max_links": 0,
-    "max_clicks": 0,
-    "max_sub_users": 0
+    # v2.1.3: for global launch, default all heavy features to True.
+    # Tier / plan gating now happens via `status` (pending / active /
+    # blocked) and license expiry, NOT per-feature flags. Admins can
+    # still selectively disable features for a specific user via the
+    # admin UI — those edits override these defaults. The previous
+    # "everything False by default" model was making every newly
+    # registered (but already paid) user hit "Feature not enabled".
+    "links": True,
+    "clicks": True,
+    "conversions": True,
+    "proxies": True,
+    "import_data": True,
+    "import_traffic": True,
+    "real_traffic": True,
+    "ua_generator": True,
+    "email_checker": True,
+    "separate_data": True,
+    "form_filler": True,
+    "real_user_traffic": True,
+    "profile_builder": True,
+    "visual_recorder": True,
+    "adspower": True,
+    "uploaded_things": True,
+    "traffic_sources": True,
+    "settings": True,
+    "max_links": 100000,
+    "max_clicks": 100000000,
+    "max_sub_users": 100,
 }
 
 # ── Sub-user permissions ↔ features mapping (2026-01) ─────────────────
@@ -2652,6 +2662,29 @@ def check_user_feature(user: dict, feature: str):
         raise HTTPException(status_code=403, detail=f"Your account is pending activation. Contact admin at {ADMIN_CONTACT_EMAIL} for access.")
     
     features = user.get("features", {})
+    # v2.1.3: existing users created BEFORE the DEFAULT_FEATURES = True
+    # change have many features set to False explicitly. For an ACTIVE
+    # account, we now auto-grant any feature that's missing or False
+    # from the DEFAULT_FEATURES allowlist (i.e. anything that's True
+    # in the current defaults). This unblocks every customer paying
+    # for an active license without requiring a DB migration.
+    if not features.get(feature, False):
+        default_val = DEFAULT_FEATURES.get(feature)
+        if default_val is True:
+            # Auto-grant in-memory so this request succeeds.
+            features[feature] = True
+            user["features"] = features
+            # Best-effort async persist (don't block).
+            try:
+                asyncio.create_task(
+                    main_db.users.update_one(
+                        {"id": user.get("id")},
+                        {"$set": {f"features.{feature}": True}},
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return True
     # Backward compat: new granular features (email_checker, separate_data, import_traffic,
     # real_traffic, ua_generator) fall back to the legacy "import_data" flag when not set
     # explicitly. That way users created before these features existed keep access.

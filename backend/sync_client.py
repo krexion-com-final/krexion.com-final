@@ -102,7 +102,7 @@ def _headers() -> dict:
     return {
         "X-Krexion-License": _current_license_key(),
         "Content-Type": "application/json",
-        "User-Agent": "Krexion-Local/2.1.2",
+        "User-Agent": "Krexion-Local/2.1.3",
     }
 
 
@@ -150,7 +150,7 @@ async def _heartbeat() -> None:
     try:
         body = {
             "hostname": socket.gethostname(),
-            "version": "2.1.2",
+            "version": "2.1.3",
             "platform": "native-windows" if sys.platform.startswith("win") else "docker",
         }
         body.update(_hardware_info())
@@ -244,7 +244,7 @@ async def _heartbeat() -> None:
                         json.dumps({
                             "last_heartbeat_at": time.time(),
                             "cloud_url": CLOUD_URL,
-                            "version": "2.1.2",
+                            "version": "2.1.3",
                         }),
                         encoding="utf-8",
                     )
@@ -391,7 +391,7 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
             generic_path = str(payload["path"])
             generic_body = payload.get("body") or {}
             generic_query = payload.get("query") or {}
-            # v2.1.2: faithful raw-body + content-type + auth replay so
+            # v2.1.3: faithful raw-body + content-type + auth replay so
             # multipart/form-data heavy jobs (RUT, Form Filler) actually
             # execute on the desktop backend. Previously sync_client only
             # POSTed the parsed JSON body, which was always {} for
@@ -415,7 +415,7 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
                 headers = {
                     "X-Krexion-Bridge-Job": "1",
                 }
-                # v2.1.2 / v2.1: cloud forwards its own JWT but the
+                # v2.1.3 / v2.1: cloud forwards its own JWT but the
                 # local backend has a DIFFERENT SECRET_KEY (each
                 # FastAPI instance auto-generates its own on boot),
                 # so the cloud JWT fails signature verification on the
@@ -533,7 +533,7 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
                 try:
                     body_back = r.json()
                 except Exception:
-                    # v2.1.2: when response isn't JSON (e.g.
+                    # v2.1.3: when response isn't JSON (e.g.
                     # /visual-recorder/{id}/screenshot returns
                     # image/jpeg), base64-encode the raw bytes so the
                     # cloud can decode + forward as binary. Previously
@@ -787,7 +787,7 @@ def start_if_local(main_db, get_db_for_user) -> bool:
     if not CLOUD_URL:
         logger.info("[sync] disabled - KREXION_CLOUD_URL not set")
         return False
-    # v2.1.2: kill the legacy PowerShell `KrexionBridge` scheduled task
+    # v2.1.3: kill the legacy PowerShell `KrexionBridge` scheduled task
     # if it exists. Older installs (pre-native bundle, or PCs that ever
     # ran the cloud's "Pair my PC" PowerShell snippet) have a Scheduled
     # Task that polls /api/sync/jobs/pull every 5 s with NO feature
@@ -795,7 +795,7 @@ def start_if_local(main_db, get_db_for_user) -> bool:
     # heavy jobs like visual-recorder/start, only to immediately mark
     # them failed with "feature not supported by the PowerShell bridge
     # worker." That is exactly what the customer is reporting in
-    # v2.1.2 logs. Deleting the task on startup is idempotent
+    # v2.1.3 logs. Deleting the task on startup is idempotent
     # (schtasks /Delete returns non-zero if task absent — fine).
     if sys.platform.startswith("win"):
         try:
