@@ -77,12 +77,41 @@ async def is_user_local_online(user_id: str) -> dict:
     # with multiple heartbeat docs and the cloud might pick a stale
     # one, declaring the user offline even though the new install
     # was happily heartbeating every 5 s.
+    #
+    # v1.0.23: ALSO match by every license_key owned by this user.
+    # Customer reported: desktop logs show heartbeat POST 200 OK every
+    # 5 s against krexion.com (verified in logs.zip), but cloud says
+    # "last seen 12614 s ago". That mathematically requires the cloud
+    # to be reading a DIFFERENT heartbeat doc than the one the desktop
+    # is writing — i.e. user_id mismatch. Most likely cause: customer
+    # paired the desktop with license_key K when on account A, later
+    # logged into account B which now owns license K (admin re-issued
+    # or license was reassigned), but the heartbeat doc still has the
+    # OLD user_id of account A. The desktop is happily heartbeating
+    # to K, the cloud reads "show me heartbeats for B's user_id" —
+    # finds nothing (or finds a STALE doc from a previous pair).
+    # Fix: query by ($or user_id OR license_key in user's licenses).
+    license_keys: list[str] = []
+    try:
+        async for lic in _db.licenses.find({"user_id": user_id}, {"license_key": 1, "_id": 0}):
+            lk = (lic or {}).get("license_key")
+            if lk:
+                license_keys.append(lk)
+    except Exception:  # noqa: BLE001
+        pass
+    or_clauses: list[dict] = [{"user_id": user_id}]
+    if license_keys:
+        or_clauses.append({"license_key": {"$in": license_keys}})
     hb = await _db.sync_heartbeats.find_one(
-        {"user_id": user_id},
+        {"$or": or_clauses},
         {"_id": 0},
         sort=[("last_seen", -1)],
     )
     if not hb or not hb.get("last_seen"):
+        logger.info(
+            f"[bridge] is_user_local_online user_id={user_id[:8]} "
+            f"licenses={len(license_keys)} → no heartbeat doc found"
+        )
         return {"online": False, "reason": "no_heartbeat_ever"}
     try:
         last = datetime.fromisoformat(str(hb["last_seen"]).replace("Z", "+00:00"))

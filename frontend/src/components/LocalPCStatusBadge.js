@@ -34,6 +34,7 @@ export default function LocalPCStatusBadge() {
   const [pair, setPair] = useState(null);
   const [pairLoading, setPairLoading] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [refreshResult, setRefreshResult] = useState(null);
 
   useEffect(() => {
     if (!isCloud) return;
@@ -201,6 +202,7 @@ export default function LocalPCStatusBadge() {
                         data-testid="pair-reconnect-refresh"
                         onClick={async () => {
                           setLoading(true);
+                          setRefreshResult(null);
                           try {
                             const r = await axios.get(
                               `${BACKEND_URL}/api/bridge/me/local-status`,
@@ -208,15 +210,17 @@ export default function LocalPCStatusBadge() {
                             );
                             setStatus(r.data);
                             if (r.data?.online) {
+                              setRefreshResult({type:"ok", text:`PC reconnected! Hostname: ${r.data.hostname || "?"}`});
                               toast.success("PC reconnected!");
-                              setShowPair(false);
+                              setTimeout(()=>setShowPair(false), 1200);
                             } else {
-                              toast.info(
-                                `Still offline — last heartbeat ${r.data?.last_seen_sec_ago ?? "?"}s ago. Launch Krexion from Start menu.`
-                              );
+                              setRefreshResult({
+                                type:"warn",
+                                text:`Still offline — last heartbeat ${r.data?.last_seen_sec_ago ?? "never"} sec ago. Make sure Krexion is running in the system tray.`
+                              });
                             }
                           } catch (e) {
-                            toast.error("Status refresh failed");
+                            setRefreshResult({type:"err", text:"Status refresh failed - try again."});
                           } finally {
                             setLoading(false);
                           }
@@ -233,6 +237,20 @@ export default function LocalPCStatusBadge() {
                         {status?.hostname ? ` · ${status.hostname}` : ""}
                       </span>
                     </div>
+                    {refreshResult && (
+                      <div
+                        data-testid="pair-refresh-result"
+                        className={`mt-3 p-3 rounded-lg text-sm font-medium border ${
+                          refreshResult.type === "ok"
+                            ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-200"
+                            : refreshResult.type === "warn"
+                            ? "bg-amber-500/15 border-amber-500/40 text-amber-200"
+                            : "bg-rose-500/15 border-rose-500/40 text-rose-200"
+                        }`}
+                      >
+                        {refreshResult.text}
+                      </div>
+                    )}
                   </div>
 
                   {/* v1.0.20: PRIMARY path — download the native

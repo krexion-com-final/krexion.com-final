@@ -194,6 +194,14 @@ async def heartbeat(
             update_doc["recommended_concurrency"] = int(body.get("recommended_concurrency"))
         except (TypeError, ValueError):
             pass
+    # v1.0.23: ALSO heal any sync_heartbeats document whose user_id is
+    # stale. Customer reported that the desktop POSTs heartbeat 200 OK
+    # every 5 s but the cloud said "12614 s ago" because the heartbeat
+    # doc was matched on user_id of a previous account that no longer
+    # owns the license. We update by license_key (the canonical key for
+    # this doc) AND we force-overwrite the user_id field so the next
+    # is_user_local_online query (which now matches by license_key OR
+    # user_id with sort by last_seen) returns the FRESH doc.
     await _db.sync_heartbeats.update_one(
         {"license_key": lic["license_key"]},
         {"$set": update_doc},

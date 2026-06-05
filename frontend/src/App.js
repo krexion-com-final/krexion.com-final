@@ -311,7 +311,7 @@ function App() {
             />
           </Routes>
         </BrowserRouter>
-        <Toaster position="bottom-left" />
+        <Toaster position="top-center" richColors closeButton style={{zIndex:99999}} />
         {/* 2026-05: Global modal for "your PC is offline" — pops up
             whenever a heavy-feature request is gated. See
             components/LocalPCOfflineDialog.js + utils/cloudGateInterceptor.js. */}
