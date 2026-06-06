@@ -67,4 +67,22 @@ nsis:
   deleteAppDataOnUninstall: false
 
 # Build is local-only; CI uploads the artifact to a GitHub Release explicitly.
-publish: null
+# We do NOT want electron-builder itself to push to GitHub during the build
+# step (we use --publish never on the CLI). BUT we still need a `publish`
+# block here so that electron-builder generates the `latest.yml` update
+# manifest in dist/ — that file is what electron-updater (running inside
+# the installed customer app) reads to detect new versions.
+#
+# The GitHub workflow then uploads BOTH the .exe AND latest.yml to the
+# GitHub Release. Once a release is published, every customer running an
+# Electron build will, on next launch, fetch:
+#
+#   https://github.com/dennisedmaartins9-sudo/krexion.com/releases/latest/download/latest.yml
+#
+# compare versions, silently background-download the new .exe, and prompt
+# to restart-and-install.
+publish:
+  - provider: github
+    owner: dennisedmaartins9-sudo
+    repo: krexion.com
+    releaseType: release

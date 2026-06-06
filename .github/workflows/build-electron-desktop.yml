@@ -85,11 +85,31 @@ jobs:
         working-directory: electron-desktop
         run: npx electron-builder --win --x64 --publish never
 
+      - name: List dist artifacts (debug)
+        working-directory: electron-desktop
+        shell: bash
+        run: |
+          echo "=== dist/ contents ==="
+          ls -la dist/
+          echo "=== latest.yml (auto-update manifest) ==="
+          if [ -f dist/latest.yml ]; then
+            cat dist/latest.yml
+          else
+            echo "::error::dist/latest.yml NOT produced — auto-update will not work"
+            exit 1
+          fi
+
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: Krexion-Desktop-Setup-${{ steps.version.outputs.version }}
-          path: electron-desktop/dist/Krexion-Desktop-Setup-*.exe
+          # Upload BOTH the installer .exe AND the latest.yml manifest.
+          # latest.yml is what electron-updater (inside the installed
+          # customer app) reads to detect new versions.
+          path: |
+            electron-desktop/dist/Krexion-Desktop-Setup-*.exe
+            electron-desktop/dist/Krexion-Desktop-Setup-*.exe.blockmap
+            electron-desktop/dist/latest.yml
           if-no-files-found: error
           retention-days: 30
 
@@ -100,15 +120,25 @@ jobs:
           tag_name: ${{ inputs.release_tag }}
           name: Krexion Desktop ${{ steps.version.outputs.version }}
           body: |
-            Krexion Desktop — fully-local edition.
+            Krexion Desktop — fully-local edition (auto-update enabled).
 
             • Local MongoDB on 127.0.0.1:27117
             • Local FastAPI backend on 127.0.0.1:8088
             • React dashboard packaged inside Electron
             • Heavy workload data never leaves the PC.
+            • **Auto-update**: installed clients running this version or
+              newer will silently detect future releases and prompt to
+              install on next launch.
 
             This is the parallel Electron build. The classic Inno-Setup
             installer (`Krexion-Setup-<version>.exe`) is unaffected.
-          files: electron-desktop/dist/Krexion-Desktop-Setup-*.exe
+          # IMPORTANT: latest.yml MUST be uploaded alongside the .exe for
+          # electron-updater to detect this release. The .blockmap file
+          # enables delta updates (smaller downloads for incremental
+          # updates), which electron-updater also looks for automatically.
+          files: |
+            electron-desktop/dist/Krexion-Desktop-Setup-*.exe
+            electron-desktop/dist/Krexion-Desktop-Setup-*.exe.blockmap
+            electron-desktop/dist/latest.yml
           draft: false
           prerelease: false
