@@ -1,0 +1,29 @@
+{
+  "name": "krexion-desktop",
+  "productName": "Krexion Desktop",
+  "version": "2.1.8",
+  "description": "Krexion — fully local desktop application (Database + Backend + Frontend on customer PC, like AdsPower).",
+  "author": {
+    "name": "Krexion",
+    "email": "support@krexion.com",
+    "url": "https://krexion.com"
+  },
+  "homepage": "https://krexion.com",
+  "license": "UNLICENSED",
+  "private": true,
+  "main": "src/main.js",
+  "scripts": {
+    "prepare-resources": "node scripts/prepare-resources.js",
+    "start": "electron .",
+    "build:win": "node scripts/prepare-resources.js && electron-builder --win --x64 --publish never",
+    "pack:win": "electron-builder --win --x64 --dir --publish never",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "devDependencies": {
+    "electron": "31.3.1",
+    "electron-builder": "24.13.3"
+  },
+  "dependencies": {
+    "electron-log": "5.1.7"
+  }
+}

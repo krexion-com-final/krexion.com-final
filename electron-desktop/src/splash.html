@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Krexion — Starting…</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; padding: 0; height: 100%;
+        background: radial-gradient(120% 100% at 0% 0%, #1b1b22 0%, #0b0b0d 60%);
+        color: #e7e7ea;
+        font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+        overflow: hidden; user-select: none;
+      }
+      .wrap {
+        height: 100%; padding: 36px 40px;
+        display: flex; flex-direction: column; justify-content: space-between;
+      }
+      .brand { display: flex; align-items: center; gap: 14px; }
+      .dot {
+        width: 14px; height: 14px; border-radius: 50%;
+        background: #c2ff3d;
+        box-shadow: 0 0 24px #c2ff3d80;
+      }
+      .name { font-size: 22px; letter-spacing: 0.12em; font-weight: 600; }
+      .tag { color: #9b9ba3; font-size: 12px; letter-spacing: 0.22em; text-transform: uppercase; }
+      h1 {
+        margin: 0 0 8px; font-size: 34px; font-weight: 700; line-height: 1.05;
+      }
+      .sub { color: #b6b6bd; font-size: 13px; max-width: 380px; line-height: 1.55; }
+      .bar {
+        margin-top: 22px; height: 4px; width: 100%;
+        background: #1f1f26; border-radius: 999px; overflow: hidden;
+        position: relative;
+      }
+      .bar::before {
+        content: ""; position: absolute; inset: 0;
+        background: linear-gradient(90deg, transparent, #c2ff3d, transparent);
+        animation: slide 1.6s linear infinite;
+      }
+      @keyframes slide {
+        0%   { transform: translateX(-100%); }
+        100% { transform: translateX(100%);  }
+      }
+      .foot { display: flex; justify-content: space-between; font-size: 11px; color: #6b6b73; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="brand">
+        <div class="dot"></div>
+        <div>
+          <div class="name">KREXION</div>
+          <div class="tag">Desktop · Local Edition</div>
+        </div>
+      </div>
+
+      <div>
+        <h1>Starting your<br/>local workspace…</h1>
+        <p class="sub">
+          Booting the embedded database, backend, and dashboard on your PC.
+          Nothing leaves this machine except license &amp; release checks.
+        </p>
+        <div class="bar"></div>
+      </div>
+
+      <div class="foot">
+        <span>127.0.0.1 · offline-first</span>
+        <span>v2.1.8</span>
+      </div>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,70 @@
+# ────────────────────────────────────────────────────────────────────────────
+# electron-builder configuration for Krexion Desktop (parallel native build)
+# ────────────────────────────────────────────────────────────────────────────
+# Produces a different artifact name than the existing Inno-Setup installer:
+#
+#   dist/Krexion-Desktop-Setup-<version>.exe
+#
+# The classic installer (installer/Output/Krexion-Setup-X.X.X.exe) is NOT
+# touched. Both can coexist on GitHub Releases without overwriting each other.
+# ────────────────────────────────────────────────────────────────────────────
+
+appId: com.krexion.desktop
+productName: Krexion Desktop
+copyright: Copyright © 2026 Krexion
+
+directories:
+  output: dist
+  buildResources: build
+
+# Only ship the Electron source, not the (huge) cached downloads.
+files:
+  - "src/**/*"
+  - "package.json"
+  - "node_modules/**/*"
+  - "!node_modules/electron/dist/**"
+  - "!.cache/**"
+
+# `resources/krexion/**` is large (Python + MongoDB + frontend + backend).
+# We mark it as `extraResources` so electron-builder copies it into the
+# packaged app under `resources/krexion/`, exactly where main.js expects it.
+extraResources:
+  - from: "resources/krexion"
+    to: "krexion"
+    filter:
+      - "**/*"
+
+asar: true
+asarUnpack:
+  - "node_modules/electron-log/**"
+
+# Single-arch Windows x64 build — matches the customer base of the existing
+# Inno-Setup installer.
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: build/icon.ico
+  artifactName: "Krexion-Desktop-Setup-${version}.exe"
+  publisherName: Krexion
+  requestedExecutionLevel: asInvoker
+  signAndEditExecutable: false
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  allowElevation: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Krexion Desktop
+  uninstallDisplayName: Krexion Desktop
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  include: build/installer.nsh
+  artifactName: "Krexion-Desktop-Setup-${version}.exe"
+  deleteAppDataOnUninstall: false
+
+# Build is local-only; CI uploads the artifact to a GitHub Release explicitly.
+publish: null

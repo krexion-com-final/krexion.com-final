@@ -1,0 +1,110 @@
+name: Build Krexion Desktop (Electron)
+
+# ────────────────────────────────────────────────────────────────────────────
+# Parallel Electron build pipeline. Completely independent of the existing
+# Inno-Setup workflow (`build-windows-release.yml`). Produces:
+#
+#     Krexion-Desktop-Setup-<version>.exe
+#
+# which does NOT collide with the classic `Krexion-Setup-<version>.exe`.
+# ────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional release tag (e.g. desktop-v2.1.8). Empty = artifact only, no GH Release.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: krexion-electron-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Electron installer (Windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: yarn
+          cache-dependency-path: electron-desktop/yarn.lock
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Compute version
+        id: version
+        shell: bash
+        run: |
+          v=$(tr -d '[:space:]' < backend/VERSION)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Building Krexion Desktop v$v"
+
+      - name: Sync package.json version
+        shell: pwsh
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          $pkgPath = "electron-desktop/package.json"
+          $pkg = Get-Content $pkgPath -Raw | ConvertFrom-Json
+          $pkg.version = $v
+          ($pkg | ConvertTo-Json -Depth 50) | Set-Content $pkgPath -Encoding UTF8
+
+      - name: Cache resource downloads
+        uses: actions/cache@v4
+        with:
+          path: electron-desktop/.cache
+          key: krexion-desktop-cache-py3.11.9-mongo7.0.14-v1
+
+      - name: Install Electron deps
+        working-directory: electron-desktop
+        run: yarn install --frozen-lockfile
+
+      - name: Prepare resources (Python + MongoDB + frontend + backend)
+        working-directory: electron-desktop
+        run: yarn prepare-resources
+
+      - name: Build NSIS installer
+        working-directory: electron-desktop
+        run: npx electron-builder --win --x64 --publish never
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Krexion-Desktop-Setup-${{ steps.version.outputs.version }}
+          path: electron-desktop/dist/Krexion-Desktop-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create GitHub Release (only when release_tag provided)
+        if: ${{ inputs.release_tag != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: Krexion Desktop ${{ steps.version.outputs.version }}
+          body: |
+            Krexion Desktop — fully-local edition.
+
+            • Local MongoDB on 127.0.0.1:27117
+            • Local FastAPI backend on 127.0.0.1:8088
+            • React dashboard packaged inside Electron
+            • Heavy workload data never leaves the PC.
+
+            This is the parallel Electron build. The classic Inno-Setup
+            installer (`Krexion-Setup-<version>.exe`) is unaffected.
+          files: electron-desktop/dist/Krexion-Desktop-Setup-*.exe
+          draft: false
+          prerelease: false

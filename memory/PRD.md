@@ -99,11 +99,33 @@ Inno Setup `installer/krexion-setup.iss` already packages and the new shell ship
 2. Once pushed, VPS auto-deploys updated code; cloud customers see no change (DashboardLayout intact).
 3. To produce a new installer with the NativeShell, user must approve Phase 2 + 3 in a follow-up session.
 
+### 2026-02 — Iteration 2: Parallel Electron Desktop Build (AdsPower-style, additive)
+**New folder (zero impact on existing code):**
+- `electron-desktop/package.json` — Electron 31 + electron-builder 24 metadata
+- `electron-desktop/src/main.js` — spawns local MongoDB (127.0.0.1:27117) + FastAPI backend (127.0.0.1:8088), loads packaged React build inside Electron BrowserWindow, tray icon, single-instance lock
+- `electron-desktop/src/preload.js` — minimal contextBridge surface (`window.krexion`)
+- `electron-desktop/src/splash.html` — dark splash screen while services boot
+- `electron-desktop/scripts/prepare-resources.js` — at build time downloads Python 3.11 embed + MongoDB 7.0.14 portable, installs `backend/requirements.txt`, builds `frontend/` with `REACT_APP_BACKEND_URL=http://127.0.0.1:8088` + `PUBLIC_URL=.`, copies all into `resources/krexion/`
+- `electron-desktop/electron-builder.yml` — NSIS x64, output `dist/Krexion-Desktop-Setup-<version>.exe`, `extraResources` maps `resources/krexion/**` → `resources/krexion/**`
+- `electron-desktop/build/installer.nsh` — adds Windows Firewall loopback rule for ports 27117/8088 on install, removes on uninstall
+- `electron-desktop/.gitignore` — ignores `node_modules/`, `dist/`, `resources/krexion/`, `.cache/`
+- `electron-desktop/README.md` — full Roman Urdu + English documentation
+
+**New workflow (parallel pipeline):**
+- `.github/workflows/build-electron-desktop.yml` — manual `workflow_dispatch` only, runs on `windows-latest`, optional `release_tag` input to publish a GitHub Release with the `Krexion-Desktop-Setup-*.exe` artifact (different name from existing Inno-Setup `Krexion-Setup-*.exe` → no collision)
+
+**Verification done in pod:**
+- `node -c` on all three JS files: syntax clean
+- `python3 -c "yaml.safe_load(...)"` on both YAML files: valid
+- `npx electron-builder --win --x64 --dir` dry run with stub resources: produced `dist/win-unpacked/Krexion Desktop.exe` + correctly nested `resources/krexion/` — config proven to work end-to-end
+- `git status` confirms ONLY two new entries (`electron-desktop/`, `.github/workflows/build-electron-desktop.yml`). Zero existing files modified.
+
 ## Files NOT Touched (must remain so unless explicitly requested)
 - `installer/krexion-setup.iss`
 - `Build-Krexion-Windows.ps1`, `BUILD-KREXION.bat`
 - `build/build-backend.py`
-- `.github/workflows/*.yml`
+- `.github/workflows/build-windows-release.yml`, `deploy.yml`
 - `Krexion-User-Package/` (legacy Docker bundle for back-compat)
-- `desktop/krexion_dashboard.py` (Phase 2 will modify)
-- `backend/sync_client.py` (already perfect for our needs)
+- `desktop/krexion_dashboard.py`
+- `backend/sync_client.py`, `backend/server.py`, all backend modules
+- `frontend/` source tree (only consumed read-only by `prepare-resources.js` at CI time)
