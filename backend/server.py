@@ -10722,6 +10722,7 @@ def _find_device_by_id(device_id: str):
 @api_router.get("/user-agents/options")
 async def get_ua_options(user: dict = Depends(get_current_user)):
     """Return the list of available apps, platforms, devices and versions so the UI can show pickers."""
+    check_user_feature(user, "ua_generator")
     return {
         "apps": ["instagram", "facebook", "tiktok", "pinterest", "snapchat", "youtube", "whatsapp", "gsearch", "gchrome", "chrome"],
         "platforms": ["any", "android", "ios", "desktop"],
