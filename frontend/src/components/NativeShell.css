@@ -1,0 +1,456 @@
+/* ════════════════════════════════════════════════════════════════════════
+   Krexion Native Shell — AdsPower-style desktop window UI
+   ════════════════════════════════════════════════════════════════════════
+
+   This stylesheet wraps the existing Krexion customer pages inside a
+   native desktop window shell (title-bar + sidebar + top header) WHEN
+   AND ONLY WHEN the running install is detected as `KREXION_MODE=native`
+   (i.e. the customer's PC, not the cloud/web view).
+
+   Cloud customers continue to receive the old DashboardLayout exactly
+   as before — this file has zero effect on them. Admin routes are also
+   never wrapped (they are mounted outside the PrivateRoute block).
+
+   Z-INDEX MAP:
+     • backdrop / app body : auto
+     • sidebar             : 50
+     • top header          : 40
+     • title bar           : 60   (always on top)
+     • dropdowns / toasts  : 9999 (handled by sonner / shadcn separately)
+   ════════════════════════════════════════════════════════════════════════ */
+
+/* ── Root container (covers whole viewport) ─────────────────────────── */
+.knative-root {
+  /* Bullet-proof viewport sizing; tested in PyWebView 5 / WebView2 / Chrome */
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: #0a0e1a;
+  color: #e5e7eb;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* ── Title bar (decorative; PyWebView gives real OS chrome) ─────────── */
+.knative-titlebar {
+  flex-shrink: 0;
+  height: 36px;
+  background: #0a0e1a;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  -webkit-app-region: drag;  /* future: enable when frameless=True */
+  z-index: 60;
+}
+.knative-titlebar-title {
+  flex: 1;
+  font-size: 12px;
+  color: #94a3b8;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  pointer-events: none;
+}
+.knative-titlebar-title .brand-mark {
+  font-weight: 700;
+  color: #e2e8f0;
+  letter-spacing: -0.2px;
+}
+.knative-titlebar-title .ver {
+  color: #64748b;
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  font-size: 11px;
+}
+.knative-titlebar-controls {
+  display: flex;
+  gap: 14px;
+  -webkit-app-region: no-drag;
+}
+.knative-titlebar-controls button {
+  background: transparent;
+  border: 0;
+  color: #64748b;
+  font-size: 12px;
+  cursor: pointer;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 3px;
+  transition: color .12s, background .12s;
+}
+.knative-titlebar-controls button:hover { color: #e5e7eb; background: rgba(255,255,255,0.05); }
+.knative-titlebar-controls button.close:hover { color: #fca5a5; background: rgba(239,68,68,0.18); }
+
+/* ── Menubar (cosmetic; tracks AdsPower aesthetic) ──────────────────── */
+.knative-menubar {
+  flex-shrink: 0;
+  background: #0a0e1a;
+  height: 30px;
+  display: flex;
+  gap: 4px;
+  padding: 0 8px;
+  align-items: center;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+.knative-menubar button {
+  background: transparent;
+  border: 0;
+  font-size: 12px;
+  color: #94a3b8;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 5px;
+  font-family: inherit;
+  transition: background .12s, color .12s;
+}
+.knative-menubar button:hover { background: rgba(255,255,255,0.05); color: #e2e8f0; }
+
+/* ── Main app body (sidebar + content) ──────────────────────────────── */
+.knative-app {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  min-height: 0;
+}
+@media (max-width: 900px) {
+  .knative-app { grid-template-columns: 1fr; }
+  .knative-sidebar { display: none; }   /* TODO: drawer for mobile */
+}
+
+/* ── Sidebar ────────────────────────────────────────────────────────── */
+.knative-sidebar {
+  background: #0a0e1a;
+  border-right: 1px solid rgba(255, 255, 255, 0.05);
+  display: flex;
+  flex-direction: column;
+  padding: 14px 10px 12px 10px;
+  overflow-y: auto;
+  z-index: 50;
+}
+.knative-sidebar::-webkit-scrollbar { width: 6px; }
+.knative-sidebar::-webkit-scrollbar-track { background: transparent; }
+.knative-sidebar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 3px; }
+.knative-sidebar::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.12); }
+
+.knative-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 8px 16px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  margin-bottom: 12px;
+}
+.knative-brand-logo {
+  width: 32px; height: 32px;
+  background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-weight: 800;
+  font-size: 16px;
+  letter-spacing: -0.5px;
+  box-shadow: 0 4px 12px rgba(6, 182, 212, 0.25);
+  flex-shrink: 0;
+  overflow: hidden;
+}
+.knative-brand-logo img {
+  width: 100%; height: 100%; object-fit: contain;
+}
+.knative-brand-name {
+  font-size: 17px;
+  font-weight: 700;
+  color: #f1f5f9;
+  letter-spacing: -0.3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Quick-action button under brand */
+.knative-cta {
+  width: 100%;
+  background: linear-gradient(135deg, #06b6d4 0%, #0284c7 100%);
+  color: white;
+  border: 0;
+  border-radius: 8px;
+  padding: 11px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  box-shadow: 0 4px 16px rgba(6, 182, 212, 0.22);
+  transition: transform .15s, box-shadow .15s;
+  font-family: inherit;
+}
+.knative-cta:hover { transform: translateY(-1px); box-shadow: 0 6px 22px rgba(6, 182, 212, 0.38); }
+.knative-cta:active { transform: translateY(0); }
+
+/* Section headings (Main / Tools / CPI etc.) */
+.knative-nav-section {
+  font-size: 10px;
+  text-transform: uppercase;
+  color: #475569;
+  letter-spacing: 1.5px;
+  padding: 14px 10px 6px 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  user-select: none;
+}
+.knative-nav-section .chev { font-size: 9px; transition: transform .2s; }
+.knative-nav-section.collapsed .chev { transform: rotate(-90deg); }
+
+/* Individual nav links */
+.knative-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: background .15s, color .15s, transform .15s;
+  position: relative;
+  text-decoration: none;
+  margin-bottom: 1px;
+}
+.knative-nav-item:hover {
+  background: rgba(255, 255, 255, 0.03);
+  color: #e2e8f0;
+}
+.knative-nav-item.active {
+  background: linear-gradient(90deg, rgba(6,182,212,0.18) 0%, rgba(6,182,212,0.04) 100%);
+  color: #67e8f9;
+  box-shadow: inset 2px 0 0 #06b6d4;
+}
+.knative-nav-item svg, .knative-nav-item .ki {
+  width: 16px; height: 16px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.knative-nav-item .label {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.knative-nav-item .badge {
+  margin-left: auto;
+  background: #ef4444;
+  color: white;
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+/* Bottom account card */
+.knative-account {
+  margin-top: auto;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  transition: background .12s;
+}
+.knative-account:hover { background: rgba(255,255,255,0.045); }
+.knative-account-avatar {
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #f59e0b, #ef4444);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-weight: 700;
+  font-size: 13px;
+  flex-shrink: 0;
+  text-transform: uppercase;
+}
+.knative-account-info { flex: 1; min-width: 0; }
+.knative-account-name {
+  font-size: 12px;
+  color: #e2e8f0;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.knative-account-plan {
+  font-size: 10px;
+  color: #67e8f9;
+  margin-top: 1px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ── Content area ───────────────────────────────────────────────────── */
+.knative-content {
+  background: #0e1320;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  position: relative;
+}
+
+.knative-topbar {
+  flex-shrink: 0;
+  height: 60px;
+  display: flex;
+  align-items: center;
+  padding: 0 28px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  gap: 14px;
+  background: #0e1320;
+  z-index: 40;
+}
+.knative-page-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: #f1f5f9;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.knative-page-title small {
+  color: #64748b;
+  font-weight: 400;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Live engine pill */
+.knative-pill {
+  background: rgba(34, 197, 94, 0.12);
+  border: 1px solid rgba(34, 197, 94, 0.28);
+  color: #4ade80;
+  font-size: 11px;
+  padding: 5px 11px;
+  border-radius: 20px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.knative-pill.offline {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.28);
+  color: #fca5a5;
+}
+.knative-pill .dot {
+  width: 6px; height: 6px;
+  background: currentColor;
+  border-radius: 50%;
+  box-shadow: 0 0 8px currentColor;
+  animation: knative-pulse 2s ease-in-out infinite;
+}
+@keyframes knative-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* Top icon buttons */
+.knative-topicon {
+  width: 34px; height: 34px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #94a3b8;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+  position: relative;
+  flex-shrink: 0;
+  padding: 0;
+}
+.knative-topicon:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: #e2e8f0;
+}
+.knative-topicon .red-dot {
+  position: absolute;
+  top: 7px; right: 7px;
+  width: 6px; height: 6px;
+  background: #ef4444;
+  border-radius: 50%;
+  border: 2px solid #0e1320;
+}
+
+/* Scrollable main area */
+.knative-body {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 22px 28px 28px 28px;
+}
+.knative-body::-webkit-scrollbar { width: 10px; }
+.knative-body::-webkit-scrollbar-track { background: transparent; }
+.knative-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 5px; }
+.knative-body::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.12); }
+
+/* ── User dropdown menu (inside topbar) ─────────────────────────────── */
+.knative-usermenu {
+  position: absolute;
+  top: 50px;
+  right: 28px;
+  background: #0f1626;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 10px;
+  padding: 6px;
+  min-width: 180px;
+  z-index: 9999;
+  box-shadow: 0 24px 60px rgba(0,0,0,0.55);
+}
+.knative-usermenu button {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  color: #cbd5e1;
+  font-size: 13px;
+  padding: 8px 10px;
+  text-align: left;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: inherit;
+  transition: background .12s, color .12s;
+}
+.knative-usermenu button:hover { background: rgba(255,255,255,0.06); color: #f1f5f9; }
+.knative-usermenu .sep {
+  height: 1px;
+  background: rgba(255,255,255,0.06);
+  margin: 4px 0;
+}

@@ -6,7 +6,7 @@ import { PageTransition } from "./components/PageTransitions";
 import LoginPage from "./pages/LoginPage";
 import ForgotPasswordPage from "./pages/ForgotPasswordPage";
 import ResetPasswordPage from "./pages/ResetPasswordPage";
-import DashboardLayout from "./components/DashboardLayout";
+import CustomerLayout from "./components/CustomerLayout";
 import Dashboard from "./pages/Dashboard";
 import LinksPage from "./pages/LinksPage";
 import ClicksPage from "./pages/ClicksPage";
@@ -188,7 +188,7 @@ function App() {
               path="/*"
               element={
                 <PrivateRoute>
-                  <DashboardLayout>
+                  <CustomerLayout>
                     <Routes>
                       <Route path="/dashboard" element={<Dashboard />} />
                       <Route path="/links" element={
@@ -308,7 +308,7 @@ function App() {
                       } />
                       <Route path="/system-health" element={<SystemHealthPage />} />
                     </Routes>
-                  </DashboardLayout>
+                  </CustomerLayout>
                 </PrivateRoute>
               }
             />
