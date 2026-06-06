@@ -38,12 +38,132 @@ const MONGO_VERSION = '7.0.14';
 const MONGO_URL =
   `https://fastdl.mongodb.org/windows/mongodb-windows-x86_64-${MONGO_VERSION}.zip`;
 
+// ── Packages to EXCLUDE from the Electron bundle ─────────────────────────────
+// These are Unix-only / Linux-only packages pulled in by backend/requirements.txt
+// that either have NO Windows wheel OR fail to build from source on Windows.
+// On the customer's Windows machine the backend (uvicorn) automatically falls
+// back to the default asyncio loop (no `--loop uvloop` flag is used by the
+// Electron launcher in src/main.js), so excluding these is functionally safe.
+//
+// Same approach as `build/build-backend.py` for the Inno-Setup native bundle —
+// keeping the two excluder lists aligned avoids "works in native, fails in
+// Electron" surprises.
+//
+// IMPORTANT: We do NOT modify backend/requirements.txt — VPS Linux deploy
+// continues to install uvloop etc. as before. The exclusion only happens
+// for the Electron Windows build via a filtered requirements file written
+// to .cache/requirements-electron.txt.
+const EXCLUDE_PACKAGES = new Set([
+  'uvloop',         // libuv asyncio loop — no Windows support (THE root cause of run #4 failure)
+  'daemonize',      // uses os.fork — Unix only
+  'pexpect',        // pty/fcntl-based — Unix only
+  'ptyprocess',     // transitive of pexpect — Unix only
+  'pytun-pmd3',     // TUN/TAP networking — Unix only
+  'sslpsk-pmd3',    // PSK SSL — C build issues on Windows
+  'librt',          // Linux real-time POSIX library
+  'plumbum',        // SSH/local exec — Windows half-broken, transitive only
+].map((p) => p.toLowerCase().replace(/-/g, '_')));
+
+function normalisePkgName(name) {
+  return name.toLowerCase().replace(/-/g, '_');
+}
+
 // ── tiny helpers ─────────────────────────────────────────────────────────────
 function log(msg) { console.log(`[prepare] ${msg}`); }
 function run(cmd, args, opts = {}) {
   log(`$ ${cmd} ${args.join(' ')}`);
   const r = spawnSync(cmd, args, { stdio: 'inherit', shell: false, ...opts });
   if (r.status !== 0) throw new Error(`${cmd} failed with exit code ${r.status}`);
+}
+// Same as run() but returns the exit code instead of throwing — used for the
+// per-package install fallback where we WANT to continue on individual failures.
+function runStatus(cmd, args, opts = {}) {
+  log(`$ ${cmd} ${args.join(' ')}`);
+  const r = spawnSync(cmd, args, { stdio: 'inherit', shell: false, ...opts });
+  return r.status === null ? 1 : r.status;
+}
+
+// ── Write a filtered requirements file ───────────────────────────────────────
+// Reads backend/requirements.txt and writes .cache/requirements-electron.txt
+// with EXCLUDE_PACKAGES removed. Returns the path to the filtered file.
+function writeFilteredRequirements() {
+  const src = path.join(REPO, 'backend', 'requirements.txt');
+  const dst = path.join(CACHE, 'requirements-electron.txt');
+  const raw = fs.readFileSync(src, 'utf8').split(/\r?\n/);
+  const keep = [];
+  const skipped = [];
+  for (const rawLine of raw) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) { keep.push(rawLine); continue; }
+    // Parse package name — strip version / extras / markers
+    const pkg = line.split('==')[0].split('>=')[0].split('<=')[0]
+      .split('[')[0].split(';')[0].trim();
+    if (EXCLUDE_PACKAGES.has(normalisePkgName(pkg))) {
+      skipped.push(pkg);
+    } else {
+      keep.push(rawLine);
+    }
+  }
+  fs.writeFileSync(dst, keep.join('\n') + '\n');
+  log(`requirements: ${keep.length} keep, ${skipped.length} excluded → ${path.basename(dst)}`);
+  for (const s of skipped) log(`   excluded (Unix-only): ${s}`);
+  return dst;
+}
+
+// ── Install backend deps with bulk-then-per-package fallback ─────────────────
+// Pass 1: bulk install of the filtered requirements file (fast path).
+// Pass 2: if bulk fails, install per-line and skip individual failures — so a
+//         single new transitive incompatibility doesn't tank the whole build.
+function installBackendRequirements(pythonExe, reqFile) {
+  const baseArgs = [
+    '-m', 'pip', 'install',
+    '--no-warn-script-location',
+    '--prefer-binary',
+    '--extra-index-url', 'https://d33sy5i8bnduwe.cloudfront.net/simple/',
+  ];
+
+  // Pass 1: bulk
+  log('Pass 1: bulk install of filtered requirements');
+  const bulkStatus = runStatus(pythonExe, [...baseArgs, '-r', reqFile]);
+  if (bulkStatus === 0) {
+    log('  bulk install OK');
+    return;
+  }
+  log(`  bulk install returned exit ${bulkStatus} — falling back to per-package install`);
+
+  // Pass 2: per-package
+  const lines = fs.readFileSync(reqFile, 'utf8').split(/\r?\n/)
+    .map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+  log(`Pass 2: installing ${lines.length} packages individually (skip-on-failure)`);
+  let okCount = 0;
+  const failed = [];
+  for (const line of lines) {
+    const pkg = line.split('==')[0].split('>=')[0].split('<=')[0]
+      .split('[')[0].split(';')[0].trim();
+    const status = runStatus(pythonExe, [...baseArgs, line]);
+    if (status === 0) okCount += 1;
+    else failed.push(pkg);
+  }
+  log(`Pass 2 done: ${okCount} installed, ${failed.length} skipped`);
+  for (const p of failed) log(`   skipped: ${p}`);
+
+  // Verify the CORE Krexion runtime imports — these MUST be present or the
+  // packaged Electron app will crash on first launch.
+  const core = [
+    'fastapi', 'uvicorn', 'starlette', 'pydantic', 'pydantic_core',
+    'motor', 'pymongo', 'bcrypt', 'cryptography', 'httpx',
+    'passlib', 'jose', 'playwright',
+  ];
+  log(`Verifying core packages importable: ${core.join(', ')}`);
+  const code = core.map((p) => `import ${p}`).join('; ');
+  const verifyStatus = runStatus(pythonExe, ['-c', code]);
+  if (verifyStatus !== 0) {
+    throw new Error(
+      `Core backend package import failed after install. ` +
+      `Skipped packages: ${failed.join(', ') || '(none)'}`
+    );
+  }
+  log('  all core packages OK');
 }
 
 function download(url, dest) {
@@ -128,18 +248,19 @@ async function preparePython() {
   await download(PIP_BOOTSTRAP_URL, getPip);
   if (process.platform === 'win32') {
     run(path.join(pyDir, 'python.exe'), [getPip, '--no-warn-script-location']);
-    // Install backend requirements.
-    //   The backend pins `emergentintegrations==0.1.0`, which lives on
-    //   Emergent's private index (not on PyPI). We add that index as an
-    //   `--extra-index-url` so pip can resolve it while still pulling the
-    //   rest from PyPI.
-    const req = path.join(REPO, 'backend', 'requirements.txt');
-    run(path.join(pyDir, 'python.exe'), [
-      '-m', 'pip', 'install',
-      '--no-warn-script-location',
-      '--extra-index-url', 'https://d33sy5i8bnduwe.cloudfront.net/simple/',
-      '-r', req,
-    ]);
+    // Install backend requirements via the FILTERED list (.cache/
+    // requirements-electron.txt) so Unix-only packages like uvloop don't
+    // abort the entire install. Uses a robust 2-pass strategy:
+    //   Pass 1: bulk install of the filtered file.
+    //   Pass 2: if bulk fails, install per-package and skip individual
+    //           failures, then verify CORE imports (fastapi, uvicorn,
+    //           motor, pymongo, pydantic, etc.) succeed.
+    // The backend pins `emergentintegrations==0.1.0`, which lives on
+    // Emergent's private index (not on PyPI). We add that index as an
+    // `--extra-index-url` so pip can resolve it while still pulling the
+    // rest from PyPI.
+    const reqFiltered = writeFilteredRequirements();
+    installBackendRequirements(path.join(pyDir, 'python.exe'), reqFiltered);
   } else {
     log('python: non-Windows host — skipping pip install (resources will be incomplete).');
   }
