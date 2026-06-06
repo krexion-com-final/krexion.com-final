@@ -471,6 +471,113 @@ CLOUD_HEAVY_BLOCKED_MSG = (
 )
 
 
+async def _inline_upload_refs(user_id: str, kv: list) -> list:
+    """v2.1.9 — Resolve any `upload_ua_id` / `upload_ua_ids` /
+    `upload_proxy_id` / `upload_proxy_ids` references in a bridge-
+    bound form payload by loading the underlying text items from the
+    cloud's USER-scoped `uploaded_resources` Mongo collection and
+    inlining them as newline-separated `user_agents` / `proxies`
+    form values.  The upload-id fields are then DROPPED from the
+    payload so the desktop's RUT endpoint takes the paste-text
+    branch instead of trying (and failing) to look up the upload in
+    its empty local DB.
+
+    Returns the new (key, value) list — order-preserving for
+    everything that wasn't touched, with `user_agents` / `proxies`
+    appended/merged at the end.  Best-effort: a missing upload or a
+    DB error is logged and the original kv is left alone.
+    """
+    try:
+        # Find all keys we care about
+        d = dict(kv)
+        ua_ids: list = []
+        if d.get("upload_ua_ids"):
+            ua_ids.extend([s.strip() for s in d["upload_ua_ids"].split(",") if s.strip()])
+        if d.get("upload_ua_id"):
+            ua_ids.append(d["upload_ua_id"].strip())
+        px_ids: list = []
+        if d.get("upload_proxy_ids"):
+            px_ids.extend([s.strip() for s in d["upload_proxy_ids"].split(",") if s.strip()])
+        if d.get("upload_proxy_id"):
+            px_ids.append(d["upload_proxy_id"].strip())
+
+        if not ua_ids and not px_ids:
+            return kv
+
+        user_db = get_user_db(user_id)
+
+        async def _load(upload_id: str, expected_type: str) -> list:
+            if not upload_id:
+                return []
+            doc = await user_db["uploaded_resources"].find_one(
+                {"id": upload_id, "user_id": user_id, "type": expected_type},
+                {"_id": 0},
+            )
+            if not doc:
+                return []
+            # Live Google Sheet → re-fetch first column
+            gsheet_url = (doc.get("gsheet_url") or "").strip()
+            if gsheet_url:
+                try:
+                    items = await _fetch_gsheet_first_column(gsheet_url)
+                except Exception:  # noqa: BLE001
+                    items = []
+            else:
+                items = doc.get("items") or []
+            return [str(x).strip() for x in items if str(x).strip()]
+
+        ua_items: list = []
+        for uid_ in ua_ids:
+            ua_items.extend(await _load(uid_, "user_agents"))
+        # de-dupe while preserving order
+        seen = set()
+        ua_items = [x for x in ua_items if not (x in seen or seen.add(x))]
+
+        px_items: list = []
+        for uid_ in px_ids:
+            px_items.extend(await _load(uid_, "proxies"))
+        seen = set()
+        px_items = [x for x in px_items if not (x in seen or seen.add(x))]
+
+        # Rebuild kv: drop the upload_*_id keys, merge inline lines
+        # into user_agents / proxies.
+        DROP = {"upload_ua_id", "upload_ua_ids", "upload_proxy_id", "upload_proxy_ids"}
+        new_kv = []
+        merged_user_agents_pushed = False
+        merged_proxies_pushed = False
+        for k, v in kv:
+            if k in DROP:
+                continue
+            if k == "user_agents" and ua_items:
+                # merge paste lines + inlined upload lines
+                existing = [ln.strip() for ln in (v or "").splitlines() if ln.strip()]
+                combined = list(dict.fromkeys(existing + ua_items))
+                new_kv.append(("user_agents", "\n".join(combined)))
+                merged_user_agents_pushed = True
+                continue
+            if k == "proxies" and px_items:
+                existing = [ln.strip() for ln in (v or "").splitlines() if ln.strip()]
+                combined = list(dict.fromkeys(existing + px_items))
+                new_kv.append(("proxies", "\n".join(combined)))
+                merged_proxies_pushed = True
+                continue
+            new_kv.append((k, v))
+        if ua_items and not merged_user_agents_pushed:
+            new_kv.append(("user_agents", "\n".join(ua_items)))
+        if px_items and not merged_proxies_pushed:
+            new_kv.append(("proxies", "\n".join(px_items)))
+
+        logger.info(
+            f"[bridge] inlined uploads for user={user_id[:8]} "
+            f"ua_ids={len(ua_ids)} ua_items={len(ua_items)} "
+            f"px_ids={len(px_ids)} px_items={len(px_items)}"
+        )
+        return new_kv
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[bridge] _inline_upload_refs error: {e}")
+        return kv
+
+
 async def require_local_mode(request: Request):
     """FastAPI dependency for heavy operations (RUT, Form Filler, etc).
 
@@ -626,6 +733,27 @@ async def require_local_mode(request: Request):
                                 # skip files - they should pre-upload anyway
                                 continue
                             kv.append((k, str(v)))
+
+                        # v2.1.9 INLINE-UPLOADS: the cloud's
+                        # `uploaded_resources` collection lives in
+                        # USER-scoped Mongo on the cloud only.  The
+                        # desktop's bundled v2.1.4 server.py has NO
+                        # /api/sync/uploads endpoint, so we can't push
+                        # the upload doc across.  Instead, RESOLVE the
+                        # upload contents here at the cloud edge and
+                        # inline them as `user_agents` / `proxies`
+                        # text lines, then strip the
+                        # `upload_*_id(s)` fields.  The desktop's RUT
+                        # endpoint already accepts paste-text input,
+                        # so it sees a fully self-contained payload
+                        # and never queries its own (empty) uploads
+                        # collection.  Works against ANY desktop
+                        # client version, no rebuild needed.
+                        try:
+                            kv = await _inline_upload_refs(_uid, kv)
+                        except Exception as _inline_err:  # noqa: BLE001
+                            logger.warning(f"[bridge] upload inline failed: {_inline_err}")
+
                         # Both raw_body (urlencoded) AND body_json (dict)
                         # so the bridge replay can decide which to use.
                         raw_body = _urlencode(kv).encode("utf-8")
