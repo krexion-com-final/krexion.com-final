@@ -211,7 +211,7 @@ function prepareFrontend() {
     PUBLIC_URL: '.', // produce relative asset URLs so file:// loading works
   };
   log('frontend: yarn install');
-  run('yarn', ['install', '--frozen-lockfile'], { cwd: frontDir, env, shell: true });
+  run('yarn', ['install', '--network-timeout', '600000'], { cwd: frontDir, env, shell: true });
   log('frontend: yarn build');
   run('yarn', ['build'], { cwd: frontDir, env, shell: true });
 

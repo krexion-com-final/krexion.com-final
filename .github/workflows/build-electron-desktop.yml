@@ -38,8 +38,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: yarn
-          cache-dependency-path: electron-desktop/yarn.lock
+
+      - name: Enable Yarn (Corepack)
+        run: |
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate
+          yarn --version
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -71,7 +75,7 @@ jobs:
 
       - name: Install Electron deps
         working-directory: electron-desktop
-        run: yarn install --frozen-lockfile
+        run: yarn install --network-timeout 600000
 
       - name: Prepare resources (Python + MongoDB + frontend + backend)
         working-directory: electron-desktop
