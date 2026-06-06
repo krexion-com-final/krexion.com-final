@@ -18,11 +18,12 @@
 // Inno-Setup installer or web app. Both ship side-by-side.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const { app, BrowserWindow, Menu, Tray, dialog, shell, nativeImage } = require('electron');
+const { app, BrowserWindow, Menu, Tray, dialog, shell, nativeImage, protocol, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
 const http = require('http');
+const { pathToFileURL } = require('url');
 const log = require('electron-log/main');
 const { autoUpdater } = require('electron-updater');
 
@@ -76,6 +77,37 @@ app.on('second-instance', () => {
     mainWindow.focus();
   }
 });
+
+// ── Register custom `app://` protocol as PRIVILEGED ──────────────────────────
+// Why: the React frontend uses BrowserRouter (HTML5 history API). Under the
+// `file://` protocol, `window.location.pathname` becomes something like
+//   /C:/Program%20Files/Krexion%20Desktop/resources/krexion/frontend/index.html
+// which doesn't match any of the app's React routes ("/", "/login", etc.)
+// — so the route outlet renders empty and the customer sees a black window
+// with only the floating DebugConsole button in the bottom-right.
+//
+// Custom protocols give us a clean URL space we control. We register `app`
+// here with `standard: true` (URL parsing follows http rules) and
+// `secure: true` (treated as a secure origin so service workers, crypto,
+// localStorage, etc. behave like https). `supportFetchAPI: true` lets the
+// React app's own fetch() calls work, although note that fetches to the
+// FastAPI backend on http://127.0.0.1:8088 still go over normal HTTP and
+// rely on the backend's CORS middleware (which is already set to '*').
+//
+// MUST be called BEFORE app.whenReady(). The actual request handler is
+// installed inside whenReady() — see `registerAppProtocol()`.
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'app',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+      corsEnabled: true,
+    },
+  },
+]);
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function logFileStream(name) {
@@ -243,17 +275,33 @@ function createMainWindow() {
     },
   });
 
-  // Load the local backend URL so the React app (built with
-  // REACT_APP_BACKEND_URL=http://127.0.0.1:8088) talks to localhost only.
-  // The bundled frontend is served by the backend itself via a static mount,
-  // OR we load the file://-based index.html and let the SPA call the backend.
-  const indexHtml = path.join(frontendDir, 'index.html');
-  if (fs.existsSync(indexHtml)) {
-    mainWindow.loadFile(indexHtml);
+  // Load via our custom `app://` protocol (see registerAppProtocol below).
+  //
+  // We deliberately do NOT use `mainWindow.loadFile(indexHtml)` here even
+  // though the file exists — under `file://`, React's BrowserRouter sees
+  // a pathname like "/C:/Program Files/Krexion Desktop/..." which matches
+  // no defined route, leaving the user with a black window. Loading via
+  // `app://krexion/` gives the SPA a clean root URL ("/") that
+  // BrowserRouter happily resolves to PublicHome → /login or /dashboard.
+  //
+  // If the protocol handler isn't ready (very unlikely — we register it
+  // before this window is ever created) we fall back to the FastAPI
+  // backend root.
+  if (fs.existsSync(path.join(frontendDir, 'index.html'))) {
+    mainWindow.loadURL('app://krexion/');
   } else {
-    // Fallback: load backend root (assumes backend serves /).
     mainWindow.loadURL(`${BACKEND_URL}/`);
   }
+
+  // Surface page-load failures (eg. protocol not registered, frontend
+  // directory missing, etc.) into the log file so support can debug a
+  // customer's machine remotely from %APPDATA%\Krexion-Desktop\logs.
+  mainWindow.webContents.on('did-fail-load', (_evt, errorCode, errorDescription, validatedURL) => {
+    log.error(`[window] did-fail-load url=${validatedURL} code=${errorCode} desc=${errorDescription}`);
+  });
+  mainWindow.webContents.on('render-process-gone', (_evt, details) => {
+    log.error(`[window] render-process-gone reason=${details.reason} exitCode=${details.exitCode}`);
+  });
 
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
@@ -458,8 +506,68 @@ function checkForUpdatesManual() {
 }
 
 // ── Lifecycle ────────────────────────────────────────────────────────────────
+// Install the `app://` protocol request handler. Runs once `app` is ready
+// (otherwise `protocol.handle` throws). The handler resolves URLs like:
+//
+//   app://krexion/                  → resources/krexion/frontend/index.html
+//   app://krexion/static/js/foo.js  → resources/krexion/frontend/static/js/foo.js
+//   app://krexion/login             → resources/krexion/frontend/index.html  (SPA fallback)
+//   app://krexion/dashboard         → resources/krexion/frontend/index.html  (SPA fallback)
+//
+// Any path that doesn't map to a real file inside `frontendDir` falls back
+// to index.html so React's BrowserRouter can handle client-side routing for
+// every route the user navigates to (including initial deep-links from a
+// `app://krexion/some/route` direct load).
+//
+// Symlink / path-traversal hardening: we resolve the candidate file to its
+// absolute path and refuse anything outside frontendDir. Otherwise a
+// malicious URL like `app://krexion/../../../../Windows/System32/cmd.exe`
+// could read arbitrary files from the customer's machine.
+function registerAppProtocol() {
+  const frontendDirReal = fs.realpathSync.native
+    ? fs.realpathSync.native(frontendDir)
+    : fs.realpathSync(frontendDir);
+
+  protocol.handle('app', async (request) => {
+    try {
+      const url = new URL(request.url);
+      // url.host = 'krexion', url.pathname starts with '/'.
+      const rawPath = decodeURIComponent(url.pathname);
+      // Strip a leading slash so path.join doesn't treat it as absolute.
+      const relPath = rawPath.replace(/^[\\/]+/, '');
+
+      let filePath = path.join(frontendDir, relPath);
+      // Resolve symlinks etc. to a real on-disk path, then verify it's still
+      // inside frontendDir. If not, force SPA fallback.
+      let isFile = false;
+      try {
+        const real = fs.realpathSync.native
+          ? fs.realpathSync.native(filePath)
+          : fs.realpathSync(filePath);
+        if (real.toLowerCase().startsWith(frontendDirReal.toLowerCase())) {
+          const stat = fs.statSync(real);
+          isFile = stat.isFile();
+          filePath = real;
+        }
+      } catch {
+        // not exist → falls through to index.html
+      }
+      if (!isFile) {
+        filePath = path.join(frontendDir, 'index.html');
+      }
+      return net.fetch(pathToFileURL(filePath).toString());
+    } catch (err) {
+      log.error('[app://] handler error', err);
+      // Last-resort fallback: try index.html.
+      return net.fetch(pathToFileURL(path.join(frontendDir, 'index.html')).toString());
+    }
+  });
+  log.info(`[app://] protocol handler registered, frontendDir=${frontendDir}`);
+}
+
 async function boot() {
   try {
+    registerAppProtocol();
     createSplash();
     await startMongo();
     log.info('[boot] mongo ready');
