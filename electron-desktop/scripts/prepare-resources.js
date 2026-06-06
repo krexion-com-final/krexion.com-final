@@ -129,10 +129,15 @@ async function preparePython() {
   if (process.platform === 'win32') {
     run(path.join(pyDir, 'python.exe'), [getPip, '--no-warn-script-location']);
     // Install backend requirements.
+    //   The backend pins `emergentintegrations==0.1.0`, which lives on
+    //   Emergent's private index (not on PyPI). We add that index as an
+    //   `--extra-index-url` so pip can resolve it while still pulling the
+    //   rest from PyPI.
     const req = path.join(REPO, 'backend', 'requirements.txt');
     run(path.join(pyDir, 'python.exe'), [
       '-m', 'pip', 'install',
       '--no-warn-script-location',
+      '--extra-index-url', 'https://d33sy5i8bnduwe.cloudfront.net/simple/',
       '-r', req,
     ]);
   } else {
