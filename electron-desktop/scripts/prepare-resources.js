@@ -354,11 +354,17 @@ function prepareBackend() {
   });
   // Write a minimal .env so the backend has sane defaults even before the
   // installer drops a real one in %PROGRAMDATA%\Krexion-Desktop.
+  //
+  // 2026-02 — v2.1.13: KREXION_MODE=native flips the React shell into the
+  // AdsPower-style sidebar/topbar (NativeShell.js). Electron main.js also
+  // sets this in the spawn env, but we mirror it here so a customer who
+  // launches uvicorn manually (e.g. KREXION-LOGS.bat) still gets the
+  // native UI.
   const envFile = path.join(dest, '.env');
   fs.writeFileSync(envFile,
     'MONGO_URL=mongodb://127.0.0.1:27117\n' +
     'DB_NAME=krexion_local\n' +
-    'KREXION_MODE=local\n' +
+    'KREXION_MODE=native\n' +
     'KREXION_DESKTOP=1\n'
   );
   log('backend: copied');

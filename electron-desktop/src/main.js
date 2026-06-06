@@ -195,7 +195,13 @@ function startBackend() {
     ...process.env,
     MONGO_URL,
     DB_NAME,
-    KREXION_MODE: 'local',
+    // 2026-02 — v2.1.13: report 'native' so the React shell switches to
+    // the AdsPower-style NativeShell (sidebar + topbar + title-bar
+    // chrome) only inside the packaged desktop app. The cloud
+    // (krexion.com) keeps its existing DashboardLayout untouched
+    // because it sets KREXION_MODE=cloud. Backend treats 'native' the
+    // same as 'local' for every other purpose (IS_CLOUD is False).
+    KREXION_MODE: 'native',
     KREXION_DESKTOP: '1',
     PORT: String(BACKEND_PORT),
     HOST: '127.0.0.1',

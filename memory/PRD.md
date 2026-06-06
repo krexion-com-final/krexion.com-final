@@ -129,3 +129,56 @@ Inno Setup `installer/krexion-setup.iss` already packages and the new shell ship
 - `desktop/krexion_dashboard.py`
 - `backend/sync_client.py`, `backend/server.py`, all backend modules
 - `frontend/` source tree (only consumed read-only by `prepare-resources.js` at CI time)
+
+
+---
+
+### 2026-02 — v2.1.13: Activate AdsPower-style NativeShell in Electron Desktop
+
+**Problem:** Customer requested an AdsPower-style native desktop UI for the
+Electron build. The `NativeShell.js` component (sidebar + topbar + title-bar
+chrome) already existed in `frontend/src/components/` but was never reaching
+customers because the desktop build was reporting `KREXION_MODE='local'` and
+the frontend gates the native shell on `mode === 'native'`. As a result, the
+shipped Krexion-Desktop-Setup-2.1.11.exe was still rendering the cloud
+`DashboardLayout`.
+
+**Fix (single, minimal, additive — no page logic touched):**
+- `electron-desktop/src/main.js`: backend spawn env now sets
+  `KREXION_MODE: 'native'` (was `'local'`).
+- `electron-desktop/scripts/prepare-resources.js`: bundled fallback `.env`
+  mirrors the same value so manual uvicorn launches (KREXION-LOGS.bat, etc.)
+  also pick up the native UI.
+- `backend/VERSION`: bumped 2.1.12 → 2.1.13.
+- `electron-desktop/package.json`: version synced to 2.1.13.
+
+**Why this is safe:**
+- `NativeShell.js` is a pure visual wrapper around `{children}` — every
+  existing customer page (Links, Clicks, Conversions, Real-User Traffic,
+  CPI, Settings, etc.) renders byte-for-byte identical inside the new
+  chrome. No form field, button, or feature is removed.
+- `CustomerLayout.js` continues to switch between `DashboardLayout` and
+  `NativeShell` based on `useMode().isNative`, so the **cloud web app
+  (krexion.com) is completely untouched** — it still sees
+  `mode === 'cloud'` and renders the existing dashboard.
+- Backend treats `'native'` the same as `'local'` everywhere; only
+  `IS_CLOUD = KREXION_MODE == 'cloud'` is checked, so all gating logic
+  is identical to a `local` install.
+- Admin routes (`/admin/*`) are mounted outside `CustomerLayout`, so the
+  admin panel is unaffected.
+
+**How to ship:**
+1. Push to `main`.
+2. Trigger workflow `Build Krexion Desktop (Electron)` on GitHub with
+   `release_tag = desktop-v2.1.13`.
+3. Existing installs running ≥ v2.1.11 will auto-update via
+   `electron-updater` reading `latest.yml` from the new release.
+
+**Verification (in CI / on first install):**
+- App launches → splash → main window → AdsPower-style sidebar visible.
+- All 26+ existing pages reachable from the new sidebar groups (Main,
+  Traffic Engine, Tools, CPI, System).
+- Title-bar Min/Max/Close buttons present (frameless behaviour wired in
+  NativeShell.js).
+- Cloud web app (krexion.com) shows unchanged DashboardLayout.
+
