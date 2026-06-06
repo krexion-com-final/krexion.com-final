@@ -338,8 +338,17 @@ function prepareFrontend() {
   };
   log('frontend: yarn install');
   run('yarn', ['install', '--network-timeout', '600000'], { cwd: frontDir, env, shell: true });
-  log('frontend: yarn build');
-  run('yarn', ['build'], { cwd: frontDir, env, shell: true });
+  // Cross-platform craco build.
+  //
+  // frontend/package.json's "build" script uses the Unix-shell-only
+  // syntax `CI=false craco build`, which Windows cmd / PowerShell
+  // can't parse and dies with `'CI' is not recognized as an internal
+  // or external command`. We don't want to touch frontend/package.json
+  // (any change there would also flow through to the VPS deploy
+  // pipeline). Instead, we set CI=false via the spawn `env` above and
+  // invoke craco DIRECTLY via npx, bypassing the broken yarn script.
+  log('frontend: npx craco build (bypass package.json script for Windows)');
+  run('npx', ['--no-install', 'craco', 'build'], { cwd: frontDir, env, shell: true });
 
   const built = path.join(frontDir, 'build');
   if (!fs.existsSync(built)) throw new Error('frontend: build/ not produced');
