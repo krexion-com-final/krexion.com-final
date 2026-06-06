@@ -1448,3 +1448,89 @@ Form-Filler bridges carry a `link_id`, so the cloud injects a
 ### Commit
 - `2567f3b` feat: v2.1.8 — 'Resync to PC' button + full v2.1.8
   desktop build.
+
+
+---
+
+## Iteration 23 — 2026-06-06: Uploaded UA / Proxy batches inline-resolve (v2.1.9)
+
+### User report (Roman Urdu)
+> "job start kr raha hun pr faild ho raha hai es mein useragent ka
+> error a raha hai jab k useragent add hian emty ni hain ye sab
+> kuch proper fast ni chal raha jab k mere pc ki ram 32 gb hai"
+
+Failure on the RUT detail page:
+> "Job failed — Selected user-agent upload(s) are empty or not
+> found"
+
+### Root cause (third instance of the same family pattern)
+Same as v2.1.7 (Link not found) and v2.1.7-b (ProxyJet creds not
+configured): the cloud's `uploaded_resources` collection lives in
+the user-scoped Mongo on the cloud only.  The desktop's local DB
+has zero upload docs because `sync_client` only pushes data
+cloud-ward, never the other way.
+
+When the user picks a saved UA batch on the cloud UI, the request
+body carries `upload_ua_id=<uuid>`, the bridge replays it
+unchanged onto the desktop, the desktop's RUT endpoint queries
+its EMPTY local `uploaded_resources`, finds nothing, and bails
+with the user-agent error.
+
+### Why we can't pre-sync the doc itself
+Unlike links / ProxyJet (which already have `/api/sync/links` and
+`/api/proxyjet/credentials` POSTs on the desktop's v2.1.4
+bundle), there is NO `/api/sync/uploads` endpoint in v2.1.4.
+Pushing the doc across would require a desktop rebuild + every
+field client re-installing — defeats the cloud-only-fix
+principle.
+
+### Fix
+**`backend/server.py` — new helper `_inline_upload_refs()`.**
+Called from `require_local_mode` BEFORE the bridge payload is
+serialised.  It:
+1. Scans the parsed form payload for `upload_ua_id`,
+   `upload_ua_ids`, `upload_proxy_id`, `upload_proxy_ids`.
+2. Loads the underlying text items from the cloud's
+   user-scoped `uploaded_resources` (handles static-paste AND
+   live Google-Sheet uploads via the existing
+   `_fetch_gsheet_first_column`).
+3. DROPS the upload-id keys from the payload and merges the
+   resolved lines into the existing `user_agents` /
+   `proxies` form fields, de-duplicated while preserving
+   order.
+4. Best-effort: any failure logs + leaves the original kv
+   alone so the main job still attempts.
+
+Net effect: the desktop's RUT endpoint sees a fully self-
+contained paste-text payload, hits the `paste_ua_lines` /
+`proxy_lines` branch directly, and never queries its (empty)
+local uploads collection.  Works against ANY client version.
+
+### Verified E2E
+- Bridge ledger shows `body.user_agents` length=13905 and
+  `body.upload_ua_id` empty for jobs submitted with
+  `upload_ua_id=<50-UA batch>`.
+- Two consecutive RUT jobs returned `status=completed
+  processed=1 succeeded=1 failed=0` against `booking.com`.
+- Pre-fix jobs (older) all errored with the UA upload message.
+
+### Slow-app observation (separate issue, logged for backlog)
+While the user had a Visual Recorder session tab open, the
+frontend's per-second `/state` poll spawned >40 pending bridge
+jobs, swamping the desktop worker (pull cap 5 / cycle 5s).  RUT
+submissions queued behind them and felt slow.  Closing the VR
+tab drained the queue in <30s and RUT then completed in normal
+time.  Action item (NOT this PR): debounce VR `/state` polling
+or cache the state for ~1s on the cloud edge.
+
+### Files changed
+- `backend/server.py` (+128).
+- Commit `74ff0d0`.
+
+### What's still unhandled (backlog)
+- Inlining DATA-file uploads (Excel/CSV/Google Sheet rows used
+  by Form Filler + ROW-FIRST ProxyJet).  Binary + structured →
+  needs a real `/api/sync/uploads/upsert` endpoint added to the
+  desktop in v2.1.8+ build, or chunked-base64 inline (heavy).
+- Automation JSON uploads — same shape, same plan.
+- VR `/state` poll debounce / cache.
