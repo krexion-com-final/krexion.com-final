@@ -255,6 +255,22 @@ function createSplash() {
     webPreferences: { contextIsolation: true, nodeIntegration: false },
   });
   splashWindow.loadFile(path.join(__dirname, 'splash.html'));
+  // Inject the real installed app version into the splash footer so the
+  // customer never sees a stale hard-coded "v2.1.8" while they're actually
+  // running, say, v2.1.12. The HTML side has <span id="appVersion">…</span>
+  // as a placeholder; we replace its textContent right after the page
+  // loads. Failure here is non-fatal — the splash still functions even
+  // if the inject misses.
+  splashWindow.webContents.once('did-finish-load', () => {
+    try {
+      const v = app.getVersion();
+      splashWindow.webContents.executeJavaScript(
+        `(() => { const el = document.getElementById('appVersion'); if (el) el.textContent = 'v${v}'; })();`
+      ).catch((err) => log.warn('[splash] version inject failed (non-fatal)', err?.message || err));
+    } catch (err) {
+      log.warn('[splash] version inject error', err);
+    }
+  });
 }
 
 function createMainWindow() {
@@ -272,6 +288,28 @@ function createMainWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       preload: path.join(__dirname, 'preload.js'),
+      // Why these two flags matter — login-hang fix:
+      //
+      // We register the `app://` protocol as `secure: true` (so the React
+      // app gets a secure-context origin and things like crypto.subtle /
+      // localStorage / service-workers behave correctly). Chromium then
+      // treats it as an https-equivalent origin.
+      //
+      // The frontend's API calls go to `http://127.0.0.1:8088/api/...`,
+      // which from a "secure" origin is treated as MIXED CONTENT. Most
+      // modern Chromium versions allow http://localhost and http://127.0.0.1
+      // from secure contexts (they're considered "potentially trustworthy"),
+      // BUT Electron's local-resource handling can still surprise the
+      // request — most commonly observable as a login form stuck on
+      // "Signing in..." forever because the POST never completes.
+      //
+      // `allowRunningInsecureContent: true` explicitly unblocks the
+      // http://127.0.0.1 calls from our secure `app://` origin, and
+      // `webSecurity: true` is left on so we don't broaden any other
+      // browser security boundary. Net effect: login + every other
+      // backend API call now resolves promptly instead of hanging.
+      allowRunningInsecureContent: true,
+      webSecurity: true,
     },
   });
 
@@ -337,7 +375,31 @@ function createTray() {
   const menu = Menu.buildFromTemplate([
     { label: 'Open Krexion', click: () => mainWindow && mainWindow.show() },
     { label: 'Check for Updates…', click: () => checkForUpdatesManual() },
+    { type: 'separator' },
+    {
+      // Lets the customer pop the Chromium DevTools open without needing
+      // to know the F12 / Ctrl+Shift+I shortcut. Support uses this to
+      // ask customers to share the Console / Network tab when something
+      // misbehaves (e.g. login hang, dashboard not loading).
+      label: 'Toggle DevTools',
+      click: () => {
+        if (!mainWindow) return;
+        if (mainWindow.webContents.isDevToolsOpened()) {
+          mainWindow.webContents.closeDevTools();
+        } else {
+          mainWindow.webContents.openDevTools({ mode: 'detach' });
+        }
+      },
+    },
     { label: 'Open Logs Folder', click: () => shell.openPath(logsDir) },
+    {
+      // Direct shortcut to https://krexion.com/pricing for renewals,
+      // upgrades, or buying additional seats. Opens in the customer's
+      // default browser (not inside the Electron window) so they keep
+      // their Krexion Desktop session running while they pay.
+      label: 'Buy / Renew License…',
+      click: () => shell.openExternal('https://krexion.com/pricing'),
+    },
     { type: 'separator' },
     { label: 'Quit Krexion', click: () => { isQuitting = true; app.quit(); } },
   ]);
@@ -573,6 +635,12 @@ async function boot() {
     log.info('[boot] mongo ready');
     await startBackend();
     log.info('[boot] backend ready');
+    // Diagnostic probe: confirm the backend really answers a real auth
+    // endpoint (not just /api/ or /docs). Hitting /api/auth/login with a
+    // bogus payload should return 401 within ~50 ms. Anything slower or
+    // a non-2xx/4xx response is logged so support can spot pathological
+    // states (mongo deadlock, blocking imports, etc.) from main.log.
+    void backendHealthProbe();
     createMainWindow();
     createTray();
     // Configure auto-updater AFTER UI is up. We delay the actual network
@@ -591,6 +659,47 @@ async function boot() {
     );
     isQuitting = true;
     app.quit();
+  }
+}
+
+// Fire a couple of test requests at the freshly-started backend to surface
+// latency / failure modes in main.log. Never throws — purely diagnostic.
+async function backendHealthProbe() {
+  const probes = [
+    { name: 'GET /api/',           method: 'GET',  path: '/api/' },
+    { name: 'POST /api/auth/login (probe)', method: 'POST', path: '/api/auth/login',
+      body: JSON.stringify({ email: '__health_probe__@krexion.local', password: '__probe__' }) },
+  ];
+  for (const p of probes) {
+    const started = Date.now();
+    await new Promise((resolve) => {
+      const req = http.request(
+        {
+          host: '127.0.0.1', port: BACKEND_PORT, path: p.path, method: p.method,
+          headers: { 'Content-Type': 'application/json' },
+          timeout: 10_000,
+        },
+        (res) => {
+          let body = '';
+          res.on('data', (c) => { body += c.toString(); if (body.length > 400) body = body.slice(0, 400); });
+          res.on('end', () => {
+            log.info(`[healthprobe] ${p.name} -> ${res.statusCode} in ${Date.now() - started} ms`);
+            resolve();
+          });
+        }
+      );
+      req.on('error', (err) => {
+        log.error(`[healthprobe] ${p.name} FAILED after ${Date.now() - started} ms: ${err.message}`);
+        resolve();
+      });
+      req.on('timeout', () => {
+        log.error(`[healthprobe] ${p.name} TIMED OUT after ${Date.now() - started} ms`);
+        try { req.destroy(); } catch (_) {}
+        resolve();
+      });
+      if (p.body) req.write(p.body);
+      req.end();
+    });
   }
 }
 

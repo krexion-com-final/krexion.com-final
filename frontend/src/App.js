@@ -76,6 +76,13 @@ function PublicHome() {
   // bounce them to /dashboard and they'd never see the live editor.
   // Allow the redirect to be skipped when ?edit=1 + adminToken are
   // present so the in-place editor on HomePage can mount.
+  // Desktop (Electron) builds skip the marketing HomePage entirely: the
+  // bundled app is installed locally, so a customer landing on "/" should
+  // be taken straight to the login form, not to the public marketing site.
+  // Cloud builds keep the original HomePage behavior.
+  if (process.env.REACT_APP_DESKTOP_BUILD === '1') {
+    return token ? <Navigate to="/dashboard" replace /> : <Navigate to="/login" replace />;
+  }
   try {
     const params = new URLSearchParams(window.location.search);
     if (params.get("edit") === "1" && localStorage.getItem("adminToken")) {

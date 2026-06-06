@@ -180,16 +180,34 @@ export default function LoginPage() {
     }
   };
 
+  // Desktop builds (Electron-packaged) hide the marketing left column and
+  // center the login form. They also expose a "Buy License" / "Pricing"
+  // shortcut that opens the user's default browser to krexion.com so the
+  // customer can purchase or renew their license from inside the app.
+  const isDesktop = process.env.REACT_APP_DESKTOP_BUILD === '1';
+
   return (
     <div className="min-h-screen relative overflow-hidden bg-black">
       <WavyBackground />
       
-      <div className="absolute top-4 right-4 z-20">
+      <div className="absolute top-4 right-4 z-20 flex items-center gap-3">
+        {isDesktop && (
+          <a
+            href="https://krexion.com/pricing"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs uppercase tracking-widest text-gray-400 hover:text-white transition-colors px-3 py-1.5 border border-gray-700 rounded-full"
+            data-testid="desktop-buy-license-link"
+          >
+            Buy License
+          </a>
+        )}
         <ThemeToggle />
       </div>
 
-      <div className="relative z-10 min-h-screen flex items-center justify-between px-8 lg:px-20">
-        {/* Left Side */}
+      <div className={`relative z-10 min-h-screen flex items-center px-8 lg:px-20 ${isDesktop ? 'justify-center' : 'justify-between'}`}>
+        {/* Left Side — marketing (cloud only). Hidden on desktop builds. */}
+        {!isDesktop && (
         <div className="hidden lg:flex flex-col justify-center w-1/2 pr-12 animate-fadeIn">
           <div className="mb-4">
             <h1 className="text-white text-6xl font-bold mb-2">
@@ -209,6 +227,7 @@ export default function LoginPage() {
             Join us in turning community of marketers scaling their projects.
           </p>
         </div>
+        )}
 
         {/* Right Side - Login Form */}
         <div className="w-full lg:w-1/2 max-w-md mx-auto animate-slideUp">

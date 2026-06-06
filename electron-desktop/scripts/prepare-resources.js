@@ -372,9 +372,19 @@ function prepareFrontend() {
 
   // Build with REACT_APP_BACKEND_URL pinned to the local backend so the
   // packaged app never talks to the cloud for app data.
+  //
+  // REACT_APP_DESKTOP_BUILD=1 flips the React app into "desktop mode":
+  //   * the marketing HomePage at "/" is bypassed and the customer lands
+  //     directly on the login form;
+  //   * LoginPage hides the cloud-marketing left panel and shows a
+  //     "Buy License" link that opens krexion.com/pricing in the user's
+  //     default browser.
+  // The flag is read once at build time (Create-React-App inlines it).
+  // Cloud builds never set this var, so their behavior is unchanged.
   const env = {
     ...process.env,
     REACT_APP_BACKEND_URL: 'http://127.0.0.1:8088',
+    REACT_APP_DESKTOP_BUILD: '1',
     CI: 'false',
     GENERATE_SOURCEMAP: 'false',
     INLINE_RUNTIME_CHUNK: 'false',
