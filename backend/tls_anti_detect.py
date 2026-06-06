@@ -69,6 +69,28 @@ except Exception as _import_err:  # pragma: no cover
     )
 
 
+# 2026-02 v2.1.14 — Anti-detect fallback UAs. NEVER send the bare
+# "Mozilla/5.0" bot signature when a caller forgets to pass a UA.
+# Pool intentionally tiny + recent so it always blends into residential
+# Windows-Chrome traffic. Real per-visit UAs (the common case) bypass
+# this entirely.
+import random as _random_fb
+_FALLBACK_UAS = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+)
+
+
+def _fallback_ua() -> str:
+    return _random_fb.choice(_FALLBACK_UAS)
+
+
+
+
 def is_available() -> bool:
     """Return True if curl_cffi is usable on this host."""
     return _CURL_CFFI_AVAILABLE
@@ -209,7 +231,7 @@ async def get_json(
     impersonate = impersonate_for_ua(ua) if ua else "chrome131"
 
     req_headers = {
-        "User-Agent": ua or "Mozilla/5.0",
+        "User-Agent": ua or _fallback_ua(),
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9",
     }
@@ -257,7 +279,7 @@ async def get_text(
     impersonate = impersonate_for_ua(ua) if ua else "chrome131"
 
     req_headers = {
-        "User-Agent": ua or "Mozilla/5.0",
+        "User-Agent": ua or _fallback_ua(),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Cache-Control": "no-cache",
@@ -301,7 +323,7 @@ async def head_or_get_status(
     impersonate = impersonate_for_ua(ua) if ua else "chrome131"
 
     req_headers = {
-        "User-Agent": ua or "Mozilla/5.0",
+        "User-Agent": ua or _fallback_ua(),
         "Accept": "*/*",
         "Accept-Language": "en-US,en;q=0.9",
     }

@@ -46,14 +46,16 @@ license_router = APIRouter(prefix="/api", tags=["license"])
 # ─── State injected from server.py via _bind() ────────────────────────
 _db: Any = None
 _get_current_admin: Any = None
+_get_current_user: Any = None
 _send_email: Any = None  # optional email helper (notifications.py)
 
 
-def _bind(*, main_db, get_current_admin, send_email=None) -> None:
+def _bind(*, main_db, get_current_admin, get_current_user=None, send_email=None) -> None:
     """Wire up dependencies. Called once from server.py."""
-    global _db, _get_current_admin, _send_email
+    global _db, _get_current_admin, _get_current_user, _send_email
     _db = main_db
     _get_current_admin = get_current_admin
+    _get_current_user = get_current_user
     _send_email = send_email
 
 
@@ -434,6 +436,151 @@ async def validate(body: ValidateRequest):
         # Hardening telemetry is best-effort; never break the heartbeat.
         logger.debug(f"hardening telemetry update skipped: {_hd_err}")
     return {"ok": True, "status": lic.get("status"), "license": _public_license(lic)}
+
+
+# ═════════════════════════════════════════════════════════════════════
+# CUSTOMER-FACING LICENSE DASHBOARD (v2.1.14)
+# ─────────────────────────────────────────────────────────────────────
+# These endpoints let the logged-in customer SEE their own license
+# (status, days remaining, currently-bound PC) and DEACTIVATE the
+# current PC from inside the desktop app — so they don't have to email
+# support to move their seat to a different machine.
+#
+# Auth: standard customer JWT (same dependency used by every other
+# /api/* customer endpoint). Lookup happens on `lic.email ==
+# user.email` (case-insensitive) — the same key used everywhere else
+# in the license module.
+# ═════════════════════════════════════════════════════════════════════
+def _user_dep():
+    """Resolve the bound customer-auth dependency. Same pattern as
+    `_admin_dep()` so we don't import server-level helpers at module
+    load time."""
+    async def _resolved(request: Request):
+        if _get_current_user is None:
+            raise HTTPException(503, "Customer auth not wired into license module.")
+        return await _get_current_user(request)
+    return Depends(_resolved)
+
+
+def _days_remaining(lic: Dict[str, Any]) -> Optional[int]:
+    """Return the integer days remaining for whichever clock applies
+    (subscription if present, else trial). None when neither is set."""
+    end = _as_aware(lic.get("subscription_ends_at") or lic.get("trial_ends_at"))
+    if not end:
+        return None
+    delta = end - _now()
+    return max(0, int(delta.total_seconds() // 86400))
+
+
+def _customer_view(lic: Dict[str, Any]) -> Dict[str, Any]:
+    """Customer-safe license view. Hides admin-only fields (stripe ids,
+    hardening telemetry, raw machine fingerprints). Adds the
+    `days_remaining` convenience field the dashboard renders directly."""
+    return {
+        "license_key": lic.get("license_key"),
+        "email": lic.get("email"),
+        "status": lic.get("status"),
+        "trial_ends_at": _iso(lic.get("trial_ends_at")),
+        "subscription_ends_at": _iso(lic.get("subscription_ends_at")),
+        "activated_at": _iso(lic.get("activated_at")),
+        "last_validated_at": _iso(lic.get("last_validated_at")),
+        "machine_label": lic.get("machine_label"),
+        "machine_id_short": (lic.get("machine_id") or "")[:8] or None,
+        "machines_used": len(lic.get("machines") or
+                              ([lic.get("machine_id")] if lic.get("machine_id") else [])),
+        "days_remaining": _days_remaining(lic),
+    }
+
+
+@license_router.get("/license/me")
+async def my_license(user: dict = _user_dep()):
+    """Return the logged-in customer's own license info.
+    Returns ``{license: null}`` if no license is tied to this email yet."""
+    cfg = await get_config()
+    if not cfg.get("enabled", True):
+        return {"ok": True, "licensing_enabled": False, "license": None,
+                "max_pcs": int(cfg.get("max_pcs_per_license", 1))}
+
+    email = (user.get("email") or "").lower().strip()
+    if not email:
+        raise HTTPException(400, "Current user has no email — cannot look up license.")
+
+    lic = await _db.licenses.find_one({"email": email}, {"_id": 0})
+    return {
+        "ok": True,
+        "licensing_enabled": True,
+        "max_pcs": int(cfg.get("max_pcs_per_license", 1)),
+        "license": _customer_view(lic) if lic else None,
+    }
+
+
+class DeactivateMeRequest(BaseModel):
+    # Optional, lets the dashboard double-confirm which PC is being released.
+    # If omitted we release whatever machine is currently bound.
+    machine_id: Optional[str] = None
+
+
+@license_router.post("/license/deactivate-me")
+async def deactivate_me(body: DeactivateMeRequest, user: dict = _user_dep()):
+    """Release the current PC binding so the customer can re-activate
+    on another machine. Does NOT cancel the license, expire it, or
+    refund — purely clears the seat. The auto-takeover model in
+    `/license/activate` already allows seamless PC switching, so this
+    is mostly used when a customer is decommissioning a PC and wants
+    to remove it cleanly from their account."""
+    cfg = await get_config()
+    if not cfg.get("enabled", True):
+        return {"ok": True, "status": "licensing_disabled"}
+
+    email = (user.get("email") or "").lower().strip()
+    if not email:
+        raise HTTPException(400, "Current user has no email.")
+
+    lic = await _db.licenses.find_one({"email": email}, {"_id": 0})
+    if not lic:
+        raise HTTPException(404, "No license is tied to your account.")
+
+    max_pcs = max(1, int(cfg.get("max_pcs_per_license", 1)))
+    old_id = lic.get("machine_id")
+    old_label = lic.get("machine_label")
+
+    if max_pcs == 1:
+        # Single-seat: just blank the bound machine
+        update = {
+            "machine_id": None,
+            "machine_label": None,
+            "machines": [],
+        }
+    else:
+        # Multi-seat: drop only the specified machine_id (or the currently-bound one)
+        target = (body.machine_id or old_id or "").strip()
+        if not target:
+            raise HTTPException(400, "No machine to release.")
+        machines = [m for m in (lic.get("machines") or []) if m and m != target]
+        update = {
+            "machines": machines,
+            # If we removed the primary, clear the singular pointer too
+            "machine_id": (None if target == old_id else old_id),
+            "machine_label": (None if target == old_id else old_label),
+        }
+
+    await _db.licenses.update_one({"email": email}, {"$set": update})
+    await _db.license_events.insert_one({
+        "license_key": lic.get("license_key"),
+        "type": "customer_deactivate",
+        "email": email,
+        "old_machine_id": old_id,
+        "old_machine_label": old_label,
+        "at": _now(),
+    })
+    await _maybe_notify(
+        subject=f"[Krexion] Customer self-deactivated: {email}",
+        body=f"Key: {lic.get('license_key')}\nReleased PC: {old_label or (old_id or '')[:12]}",
+    )
+
+    # Return fresh view
+    fresh = await _db.licenses.find_one({"email": email}, {"_id": 0})
+    return {"ok": True, "license": _customer_view(fresh) if fresh else None}
 
 
 # ═════════════════════════════════════════════════════════════════════

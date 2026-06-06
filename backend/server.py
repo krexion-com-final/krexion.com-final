@@ -17382,9 +17382,16 @@ try:
     async def _license_admin(request: Request):
         return await get_current_admin(request)
 
+    # Customer-facing endpoints (v2.1.14: /license/me + /license/deactivate-me)
+    # use this dependency so the dashboard can show the logged-in user
+    # their own license + let them release the current PC.
+    async def _license_user(request: Request):
+        return await get_current_user(request)
+
     _license_bind(
         main_db=main_db,
         get_current_admin=_license_admin,
+        get_current_user=_license_user,
         send_email=None,  # send_email integration is optional
     )
     app.include_router(license_router)

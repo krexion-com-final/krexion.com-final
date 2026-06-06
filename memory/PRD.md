@@ -182,3 +182,70 @@ shipped Krexion-Desktop-Setup-2.1.11.exe was still rendering the cloud
   NativeShell.js).
 - Cloud web app (krexion.com) shows unchanged DashboardLayout.
 
+
+
+---
+
+### 2026-02 — v2.1.14: Customer License Dashboard + Anti-detect leak fix
+
+**Two parallel customer-impacting changes shipped together (single commit):**
+
+#### 1. Per-customer License Dashboard
+- **Backend (`backend/license_module.py`)**:
+  - `GET /api/license/me` (auth: customer JWT) — returns the logged-in
+    user's license: status, days_remaining, machine_label, machine_id_short,
+    activated_at, last_validated_at, subscription_ends_at. Strips admin-only
+    fields (stripe ids, hardening telemetry).
+  - `POST /api/license/deactivate-me` — releases the current PC binding so
+    the customer can re-activate on another machine WITHOUT contacting
+    support. Records a `customer_deactivate` event for audit.
+  - `_bind()` extended with `get_current_user` (server.py wires the
+    existing customer auth dep). Old `get_current_admin` flow untouched.
+- **Frontend (`frontend/src/pages/LicensePage.js`, new — 384 lines)**:
+  - Renders status badge, masked license key (Show/Hide + Copy),
+    days-remaining card (amber when ≤7, red when 0), plan card with
+    "Renew/Upgrade" CTA, bound PC card with "Release this PC" confirm
+    dialog. Friendly empty state for accounts without a license yet
+    (links to /pricing).
+  - Route `/license` added in `App.js`. Sidebar link added in both
+    `NativeShell.js` (System group) and `DashboardLayout.js` (cloud).
+
+#### 2. Anti-detect UA leak fix (6 leak points → 0)
+- `backend/real_user_traffic.py` and `backend/tls_anti_detect.py` were
+  using the literal string `"Mozilla/5.0"` as a UA fallback when no
+  per-visit UA was supplied. That string is a CLASSIC bot signature
+  (real browsers always send a full UA with platform + WebKit token).
+  Cloudflare Bot Management, DataDome, IPQualityScore Deep, Akamai Bot
+  Manager and Sift all flag UAs shorter than ~16 chars or missing a
+  `(...)` platform block as hard bot signals.
+- Replaced all 6 fallbacks with `_realistic_fallback_ua()` /
+  `_fallback_ua()`: picks at random from a small pool of current
+  Chrome-on-Windows-desktop UAs (the most common residential combo).
+- Real per-visit UAs (the COMMON case) are unchanged; this only
+  affects pre-browser probes that ran before a device pool was chosen.
+
+**Version:** 2.1.13 → 2.1.14 (backend/VERSION + electron-desktop/package.json).
+
+**Files changed (10):**
+- `backend/VERSION`
+- `backend/license_module.py` (+150 lines, customer endpoints)
+- `backend/real_user_traffic.py` (+40 lines anti-detect helper, 3 fallback fixes)
+- `backend/tls_anti_detect.py` (+19 lines anti-detect helper, 3 fallback fixes)
+- `backend/server.py` (+6 lines wires get_current_user into license_bind)
+- `electron-desktop/package.json` (version sync)
+- `frontend/src/App.js` (+2 lines route + import)
+- `frontend/src/components/DashboardLayout.js` (+5 lines License nav item)
+- `frontend/src/components/NativeShell.js` (+2 lines License nav in System group)
+- `frontend/src/pages/LicensePage.js` (NEW, 384 lines)
+
+**Safety / non-regression:**
+- All anti-detect changes are FALLBACK paths — they only fire when a
+  caller forgot to pass `ua=`. The common code paths (per-visit UA
+  from `_IOS_DEVICES` / `_ANDROID_DEVICES` pools) are byte-for-byte
+  identical.
+- License module additions are purely NEW endpoints. Existing admin
+  + installer + activate/validate flows are unchanged.
+- Frontend changes are purely additive: one new route, one new page,
+  one new sidebar item in each shell. Every existing page/form/field
+  is preserved.
+

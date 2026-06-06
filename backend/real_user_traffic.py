@@ -33,6 +33,40 @@ if not os.environ.get("PLAYWRIGHT_BROWSERS_PATH") and os.path.isdir("/pw-browser
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/pw-browsers"
 
 
+# ──────────────────────────────────────────────────────────────────────
+# 2026-02 v2.1.14 — Anti-detect leak fix.
+# Earlier code used the bare string "Mozilla/5.0" as a UA fallback when
+# no UA was provided. That literal string is a classic bot signature
+# (real browsers send a full UA — version, platform, WebKit token).
+# Detectors like Cloudflare Bot Management, DataDome, IPQualityScore,
+# Akamai and Sift treat any UA whose length is <= 16 chars or that
+# lacks a `(...)` platform block as a hard bot signal.
+#
+# `_realistic_fallback_ua()` returns one of a small pool of CURRENT
+# Chrome-on-Windows-desktop UAs. Windows + Chrome is by far the most
+# common combo in residential traffic, so blending in is automatic.
+# This function is ONLY called when `ua` is None / empty / "" — when
+# a real per-visit UA exists (the common case) it is always used as-is.
+# ──────────────────────────────────────────────────────────────────────
+_REALISTIC_FALLBACK_UAS = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0",
+)
+
+
+def _realistic_fallback_ua() -> str:
+    """Pick a real-looking Chrome-on-Windows UA. Used ONLY when callers
+    supply no per-visit UA (probes that run before a device pool is
+    chosen). NEVER returns the bare 'Mozilla/5.0' bot signature."""
+    return random.choice(_REALISTIC_FALLBACK_UAS)
+
+
 # v1.0.12 fix: cross-platform helpers for Playwright Chromium paths.
 # Pre-1.0.12 these were hardcoded to Linux conventions (chrome-linux/
 # headless_shell). On native Windows installs (krexion-Setup-v1.0.x.exe
@@ -2023,7 +2057,7 @@ async def _probe_proxy_target_reachable(
             return False, "Malformed proxy server string"
 
     headers = {
-        "User-Agent": ua or "Mozilla/5.0",
+        "User-Agent": ua or _realistic_fallback_ua(),
         # Tiny range so even servers that don't support HEAD return cheaply
         "Range": "bytes=0-0",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -3385,7 +3419,7 @@ async def _probe_offer_duplicate_via_proxy(
             return False, "", ""
 
     headers = {
-        "User-Agent": ua or "Mozilla/5.0",
+        "User-Agent": ua or _realistic_fallback_ua(),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         # Hint we want full HTML so the offer renders its real page
@@ -4001,7 +4035,7 @@ async def _resolve_tracker_via_localhost(
         # that header with the request's real source IP (so our
         # value would be ignored anyway). For non-CF setups, the
         # other four headers above cover the common cases.
-        "User-Agent": user_agent or "Mozilla/5.0",
+        "User-Agent": user_agent or _realistic_fallback_ua(),
         "Accept": (
             "text/html,application/xhtml+xml,application/xml;q=0.9,"
             "image/avif,image/webp,*/*;q=0.8"

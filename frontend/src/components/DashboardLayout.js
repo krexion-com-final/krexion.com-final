@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { LayoutDashboard, Link2, MousePointerClick, DollarSign, Server, Menu, LogOut, User, Settings, TrendingUp, Upload, Mail, Filter, Smartphone, Search, ClipboardCheck, Fingerprint, Package, Apple, Cpu, Briefcase, ChevronDown, ChevronRight, Link as LinkIcon, Activity, Camera, UserPlus } from "lucide-react";
+import { LayoutDashboard, Link2, MousePointerClick, DollarSign, Server, Menu, LogOut, User, Settings, TrendingUp, Upload, Mail, Filter, Smartphone, Search, ClipboardCheck, Fingerprint, Package, Apple, Cpu, Briefcase, ChevronDown, ChevronRight, Link as LinkIcon, Activity, Camera, UserPlus, KeyRound } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "./ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "./ui/dropdown-menu";
@@ -122,6 +122,11 @@ export default function DashboardLayout({ children }) {
   // No feature flag — every owner should be able to check the stack
   // before launching a job, and one-click auto-repair if needed.
   navigation.push({ name: "System Health", path: "/system-health", icon: Activity, feature: null });
+
+  // v2.1.14 — License dashboard: always visible to every logged-in user
+  // so they can see remaining days, copy their key, and release their
+  // current PC without contacting support.
+  navigation.push({ name: "License", path: "/license", icon: KeyRound, feature: null });
 
   const handleLogout = () => {
     localStorage.removeItem("token");

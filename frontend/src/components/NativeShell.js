@@ -28,7 +28,7 @@ import {
   User, Settings, TrendingUp, Upload, Mail, Filter, Smartphone, Search,
   Fingerprint, Package, Camera, UserPlus, Activity, ChevronDown, Bell,
   CloudUpload, HelpCircle, Plus, Crown, Minus, Square, X as XIcon,
-  ListChecks, Tag, Layers, FileText, Wrench
+  ListChecks, Tag, Layers, FileText, Wrench, KeyRound
 } from "lucide-react";
 import axios from "axios";
 import { useBranding } from "../context/BrandingContext";
@@ -107,6 +107,7 @@ const NAV_GROUPS = [
     id: "system",
     label: "System",
     items: [
+      { name: "License",       path: "/license",       icon: KeyRound, feature: null },
       { name: "System Health", path: "/system-health", icon: Activity, feature: null },
       { name: "Settings",      path: "/settings",      icon: Settings, feature: "settings" }, // hidden for sub-users below
     ],

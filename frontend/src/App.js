@@ -50,6 +50,7 @@ import SyncHeartbeatsPage from "./pages/SyncHeartbeatsPage";
 import ReleasesAdminPage from "./pages/ReleasesAdminPage";
 import SystemMaintenancePage from "./pages/SystemMaintenancePage";
 import SiteContentAdminPage from "./pages/SiteContentAdminPage";
+import LicensePage from "./pages/LicensePage";
 import { Toaster } from "./components/ui/sonner";
 import { BrandingProvider } from "./context/BrandingContext";
 import { ThemeProvider } from "./context/ThemeContext";
@@ -314,6 +315,8 @@ function App() {
                         </FeatureRoute>
                       } />
                       <Route path="/system-health" element={<SystemHealthPage />} />
+                      {/* v2.1.14 — customer-facing license dashboard */}
+                      <Route path="/license" element={<LicensePage />} />
                     </Routes>
                   </CustomerLayout>
                 </PrivateRoute>
