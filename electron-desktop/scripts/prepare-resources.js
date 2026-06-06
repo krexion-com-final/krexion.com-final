@@ -285,9 +285,53 @@ async function prepareMongo() {
   fs.renameSync(path.join(tmp, inner), mongoDir);
   rimraf(tmp);
 
-  // Keep only what we actually need (mongod + minimal deps) to shrink the
-  // installer. We keep `bin/` fully — `mongod.exe` plus its sibling DLLs.
-  // No further trimming for safety.
+  // ── Trim MongoDB to just what we actually need ───────────────────────────
+  // The MongoDB Community 7.0.14 Windows zip contains a bunch of binaries
+  // and debug symbols that Krexion Desktop never uses:
+  //
+  //   bin/mongos.exe          — cluster routing (we run a single mongod)
+  //   bin/mongod.pdb          — debug symbols for mongod (~400 MB!)
+  //   bin/mongos.pdb          — debug symbols for mongos (~400 MB!)
+  //   bin/install_compass.ps1 — installer for the optional Compass GUI
+  //
+  // Removing these saves ~700 MB+ of disk space, which directly reduces
+  // both the installer size AND the temporary space the NSIS installer
+  // needs to extract into %TEMP% on the customer's machine. The actual
+  // mongod.exe (the database daemon Krexion uses) is left untouched.
+  //
+  // Anything we can't find (e.g. MongoDB changed its packaging) is skipped
+  // silently — defensive code so a future MongoDB release doesn't break
+  // the Electron build.
+  const trimTargets = [
+    'mongos.exe',
+    'mongod.pdb',
+    'mongos.pdb',
+    'install_compass.ps1',
+  ];
+  const binDir = path.join(mongoDir, 'bin');
+  let bytesFreed = 0;
+  for (const fname of trimTargets) {
+    const fpath = path.join(binDir, fname);
+    if (fs.existsSync(fpath)) {
+      const sz = fs.statSync(fpath).size;
+      try {
+        fs.unlinkSync(fpath);
+        bytesFreed += sz;
+        log(`mongodb: removed ${fname} (${(sz / 1024 / 1024).toFixed(1)} MB)`);
+      } catch (err) {
+        log(`mongodb: WARNING failed to remove ${fname}: ${err.message}`);
+      }
+    }
+  }
+  log(`mongodb: trim freed ${(bytesFreed / 1024 / 1024).toFixed(1)} MB`);
+
+  // Sanity check — make sure mongod.exe is still there. If the trim went
+  // sideways and somehow deleted the daemon, fail loudly NOW (during
+  // build) rather than later when the customer's installed app fails to
+  // start with a confusing "ENOENT mongod.exe".
+  if (!fs.existsSync(path.join(binDir, 'mongod.exe'))) {
+    throw new Error('mongodb: mongod.exe missing after trim — refusing to package broken build');
+  }
 }
 
 // ── 3. Backend snapshot ──────────────────────────────────────────────────────
