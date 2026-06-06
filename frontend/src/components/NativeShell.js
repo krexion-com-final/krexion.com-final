@@ -334,10 +334,9 @@ export default function NativeShell({ children }) {
               <span>{currentPage.name}</span>
             </div>
 
-            <div className={`knative-pill${engineStatus === "offline" ? " offline" : ""}`} data-testid="native-engine-pill">
-              <span className="dot"></span>
-              {engineStatus === "offline" ? "Local engine offline" : "Local engine running"}
-            </div>
+            {/* Engine status pill intentionally hidden from customer-facing UI.
+                The status is still tracked in `engineStatus` for internal
+                diagnostics (System Health page) but never rendered here. */}
 
             <button className="knative-topicon" title="Sync to cloud" data-testid="native-icon-cloud">
               <CloudUpload size={16} />

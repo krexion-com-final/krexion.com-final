@@ -3030,13 +3030,21 @@ def check_user_feature(user: dict, feature: str):
         raise HTTPException(status_code=403, detail=f"Your account is pending activation. Contact admin at {ADMIN_CONTACT_EMAIL} for access.")
     
     features = user.get("features", {})
-    # v2.1.3: existing users created BEFORE the DEFAULT_FEATURES = True
-    # change have many features set to False explicitly. For an ACTIVE
-    # account, we now auto-grant any feature that's missing or False
-    # from the DEFAULT_FEATURES allowlist (i.e. anything that's True
-    # in the current defaults). This unblocks every customer paying
-    # for an active license without requiring a DB migration.
-    if not features.get(feature, False):
+    # v2.2.0 admin-controlled gating:
+    #   • If the feature is EXPLICITLY set to False in the user document
+    #     → DENY. The admin has intentionally disabled this feature for
+    #     this customer; we must respect that choice.
+    #   • If the feature key is ABSENT from the user's features dict
+    #     AND DEFAULT_FEATURES has it as True → auto-grant (this is the
+    #     pre-existing migration path for legacy users created before
+    #     a new feature was added, and is the only safe auto-grant case).
+    #   • Otherwise → deny.
+    if feature in features and features[feature] is False:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Feature '{feature}' is not enabled for your account. Contact admin for access.",
+        )
+    if feature not in features:
         default_val = DEFAULT_FEATURES.get(feature)
         if default_val is True:
             # Auto-grant in-memory so this request succeeds.
@@ -5583,6 +5591,7 @@ async def form_filler_create_job(
     OR `target_url` must be provided.
     `data_source` = "excel" requires `file`; `data_source` = "gsheet" requires `gsheet_url`.
     """
+    check_user_feature(user, "form_filler")
     # Resolve target URL
     final_url = (target_url or "").strip()
     if target_link_id and not final_url:
@@ -5711,6 +5720,7 @@ async def form_filler_create_job(
 @api_router.get("/form-filler/jobs")
 async def form_filler_list_jobs(user: dict = Depends(get_current_user)):
     """List this user's form-filler jobs (hot cache + persisted)."""
+    check_user_feature(user, "form_filler")
     # Merge in-memory + persisted
     persisted = await db.form_filler_jobs.find(
         {"user_id": user["id"]}, {"_id": 0, "report": 0}
@@ -5729,6 +5739,7 @@ async def form_filler_list_jobs(user: dict = Depends(get_current_user)):
 @api_router.get("/form-filler/jobs/{job_id}")
 async def form_filler_get_job(job_id: str, user: dict = Depends(get_current_user)):
     """Progress + report for one job."""
+    check_user_feature(user, "form_filler")
     j = _FF_JOBS.get(job_id)
     if not j:
         j = await db.form_filler_jobs.find_one({"job_id": job_id, "user_id": user["id"]}, {"_id": 0})
@@ -5742,6 +5753,7 @@ async def form_filler_get_job(job_id: str, user: dict = Depends(get_current_user
 @api_router.get("/form-filler/jobs/{job_id}/download")
 async def form_filler_download(job_id: str, user: dict = Depends(get_current_user)):
     """Download the ZIP (screenshots + report.csv)."""
+    check_user_feature(user, "form_filler")
     j = _FF_JOBS.get(job_id) or await db.form_filler_jobs.find_one({"job_id": job_id, "user_id": user["id"]}, {"_id": 0})
     if not j or j.get("user_id") != user["id"]:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -5759,6 +5771,7 @@ async def form_filler_download(job_id: str, user: dict = Depends(get_current_use
 
 @api_router.delete("/form-filler/jobs/{job_id}")
 async def form_filler_delete(job_id: str, user: dict = Depends(get_current_user)):
+    check_user_feature(user, "form_filler")
     j = _FF_JOBS.get(job_id) or await db.form_filler_jobs.find_one({"job_id": job_id, "user_id": user["id"]}, {"_id": 0})
     if not j or j.get("user_id") != user["id"]:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -9324,6 +9337,7 @@ async def check_email_profile_pics(request: EmailCheckRequest, user: dict = Depe
       Gravatar, Libravatar, Google s2). Higher hit rate but not 100% accurate.
     Returns results as a stream for real-time updates.
     """
+    check_user_feature(user, "email_checker")
     emails = list(dict.fromkeys([e.lower().strip() for e in request.emails if e and "@" in e]))
 
     if len(emails) == 0:
@@ -9417,6 +9431,7 @@ async def upload_email_file(file: UploadFile = File(...), user: dict = Depends(g
     user's full data (all columns/rows), just appended with check results.
     Supports .xlsx, .xls, .csv, .txt files with any column headers.
     """
+    check_user_feature(user, "email_checker")
     import pandas as pd
     import io
     import re
@@ -9552,6 +9567,7 @@ async def download_email_results(
     * If `rows` is empty (user pasted emails directly), the export falls back to
       a simple three-column format.
     """
+    check_user_feature(user, "email_checker")
     import pandas as pd
     import io
     import re
@@ -9656,6 +9672,7 @@ async def preview_email_file(
     Returns columns, total row count, detected email column, and the first
     few rows so the UI can show a preview.
     """
+    check_user_feature(user, "separate_data")
     import pandas as pd
     import io
     import re
@@ -9731,6 +9748,7 @@ async def filter_rows_by_emails(
         - Sheet "Summary":      counts.
     * `email_column` is optional — if not provided, it is auto-detected.
     """
+    check_user_feature(user, "separate_data")
     import pandas as pd
     import io
     import re
@@ -10939,6 +10957,7 @@ async def check_user_agent(payload: UACheckRequest, user: dict = Depends(get_cur
     browser, OS, device, in-app detection, TikTok metadata, realism verdict,
     and a one-line human summary.
     """
+    check_user_feature(user, "ua_generator")
     # Bulk mode
     if payload.user_agents:
         uas = [u for u in payload.user_agents if u and u.strip()]
@@ -10958,6 +10977,7 @@ async def check_user_agent(payload: UACheckRequest, user: dict = Depends(get_cur
 @api_router.post("/user-agents/generate")
 async def generate_user_agents(payload: UAGenerateRequest, user: dict = Depends(get_current_user)):
     """Generate realistic user agents. Returns JSON or XLSX based on payload.format."""
+    check_user_feature(user, "ua_generator")
     count = max(1, min(int(payload.count or 10), 50000))
     app = (payload.app or "instagram").lower().strip()
     platform = (payload.platform or "any").lower().strip()
@@ -12533,6 +12553,7 @@ async def get_referrer_breakdown(
 
 @api_router.get("/conversions", response_model=List[ConversionResponse])
 async def get_conversions(user: dict = Depends(get_current_user), limit: int = 100):
+    check_user_feature(user, "conversions")
     user_links = await db.links.find({"user_id": user["id"]}, {"_id": 0, "id": 1}).to_list(100000)
     link_ids = [link["id"] for link in user_links]
     

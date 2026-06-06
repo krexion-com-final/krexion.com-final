@@ -1,0 +1,41 @@
+{
+  "summary": "Iteration 12 - Krexion NativeShell + feature-gating regression. Backend: 28/28 pytest cases pass (12 feature-flags × disable→403 + enable→non-403, plus 3 smoke + 1 restore). Frontend: NativeShell renders correctly with all 15 required data-testids, engine pill removed from topbar, sidebar groups (Main/Traffic Engine/Tools/CPI/System) all present, ?ui=native gate works, /admin route is NOT wrapped in NativeShell even with ?ui=native, admin login works, user menu Logout exposed, sidebar correctly hides features when admin disables them (verified: features.links=false → Links nav hidden; features.cpi=false → entire CPI section hidden). 0 page errors. Test user features restored to all-true at end of run.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/user-agents/options", "issue": "Endpoint is NOT gated by check_user_feature(user,'ua_generator'). Returns 200 even when feature is disabled. Review request item explicitly lists this endpoint as gated (server.py:10954,10976), but only /user-agents/check and /user-agents/generate (POSTs) actually call check_user_feature. The GET /options is what populates the UA Generator picker UI — disabled users could still load picker options. Consider adding check_user_feature at line 10722."},
+      {"endpoint": "POST /api/emails/check-profile-pics, /emails/filter-rows, /user-agents/check", "issue": "Pydantic body validation (422) runs BEFORE check_user_feature, so a disabled user sending an invalid payload gets 422 instead of 403. Not a security issue (gating still works with valid payloads), but the error surface leaks 'feature unavailable' vs 'bad request' inconsistently to UI."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration12_feature_gating.py",
+    "/app/test_reports/pytest/iter12_results.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: Gate GET /api/user-agents/options with check_user_feature(user,'ua_generator') at server.py:10722 for consistency with /check and /generate. Currently the picker options leak to disabled users (low severity — no data leakage, only UI dropdown contents)."
+  ],
+  "critical_code_review_comments": [
+    "NativeShell.js: engine pill correctly removed per spec (line ~337-339 has comment-only block). engineStatus state still tracked for System Health page — clean separation, no dead UI.",
+    "CustomerLayout.js / ModeContext.js: ?ui=native + localStorage flag + KREXION_MODE all OR'd together — gives three orthogonal activation paths. Cloud preview default (no flag) renders DashboardLayout untouched ✓.",
+    "App.js: AdminRoute wrapper is OUTSIDE CustomerLayout so admin pages can never be wrapped in NativeShell. Verified empirically at /admin?ui=native.",
+    "NativeShell sidebar feature-filter logic uses LEGACY_IMPORT_GROUP fallback (email_checker, separate_data, ua_generator etc. inherit from import_data=true if undefined) — matches DashboardLayout 1:1, no behavioral drift between layouts.",
+    "Backend check_user_feature() correctly respects explicit False per E1's bug-fix (was auto-granting before) — verified across 12 features.",
+    "cpi_module.py uses a single FEATURE_KEY constant + _check_user_feature dependency — clean, no per-route duplication.",
+    "Order-of-execution gotcha: in FastAPI, body parsing happens before route function, so check_user_feature() returns 403 only if payload schema-validates. Endpoints with file uploads (multipart) and POSTs with required fields will return 422 for empty body of disabled user. Low-impact since real UI sends valid payloads."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration12_feature_gating.py (NEW - 28 parametrized pytest cases)"
+  ],
+  "success_rate": {"backend": "100% (28/28)", "frontend": "100% (all native-shell, engine-pill-removed, admin-route-not-wrapped, sidebar-feature-hide, logout, navigation checks pass)"},
+  "test_credentials": "Admin: admin@krexion.local / admin123 at POST /api/admin/login (NOT /api/auth/login - that returns 401). Customer: test@krexion.local / test1234 at /api/auth/login (user_id 6a0402d8-aa47-4924-a5e8-92b748e7a08b).",
+  "seed_data_creation": "No persistent data created. Feature flags toggled and restored to all-true by the final test_zz_restore_all_features case + post-frontend cleanup PUT. Verified test user ends iteration with links=true, cpi=true, all flags=true.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "test_iteration12_feature_gating.py is parametrized across 12 features and uses a _do_request helper that supports POST_FORM for multipart endpoints (separate_data). Admin login uses /api/admin/login NOT /api/auth/login (this env's admin user isn't reachable via the standard auth endpoint). REACT_APP_BACKEND_URL = https://krexion-build-3.preview.emergentagent.com (review_request mentions a different 98e7b8f0 host — the frontend/.env value is the source of truth). NativeShell testids confirmed: native-shell-root, native-titlebar/menubar/sidebar/topbar/body/account-card/quick-new-job, native-nav-section-{main,engine,tools,cpi,system}, native-nav-<feature-slug>, native-icon-{cloud,bell,help,user}, native-usermenu-{settings,health,logout}, native-titlebar-{min,max,close}.",
+  "rca of the issue": "n/a — this is a verification iteration for E1's NativeShell + feature-gating implementation. All review_request items 1-8 verified passing. Two minor backend observations logged (ua_generator GET endpoint not gated; pydantic 422 precedes feature check for some POSTs) — non-blocking, optional polish."
+}
