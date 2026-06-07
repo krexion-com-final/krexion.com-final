@@ -74,6 +74,15 @@ jobs:
             # self-heal without admin intervention.
             echo ">> Disk-space self-heal..."
             df -h / | tail -1
+
+            # 2026-02 — ensure self-hosted Krexion Desktop CDN folder
+            # exists BEFORE docker compose mounts it into the frontend
+            # nginx container. The Electron-build workflow SCPs the
+            # installer + latest.yml here; nginx serves the folder at
+            # https://krexion.com/downloads/desktop/.
+            mkdir -p /opt/krexion/downloads/desktop
+            chmod 755 /opt/krexion/downloads /opt/krexion/downloads/desktop
+
             # 1. Trim RUT screenshot results older than 7 days (keeps recent for forensics)
             if [ -d "/opt/krexion/backend/real_user_traffic_results" ]; then
               FOUND=$(find /opt/krexion/backend/real_user_traffic_results -maxdepth 1 -mindepth 1 -type d -mtime +7 2>/dev/null | wc -l)

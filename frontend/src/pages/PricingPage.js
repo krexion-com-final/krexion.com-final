@@ -92,12 +92,29 @@ export default function PricingPage() {
                     MOST POPULAR
                   </div>
                 )}
+                {plan.badge_text && !plan.is_popular && (
+                  <div className="absolute -top-3 left-1/2 -translate-x-1/2 bg-pink-500 text-white text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wide">
+                    {plan.badge_text}
+                  </div>
+                )}
                 <div className="mb-4">
                   <h3 className="text-xl font-bold mb-1">{plan.name}</h3>
                   <p className="text-xs text-[#A1A1AA] min-h-[32px]">{plan.description}</p>
                 </div>
 
                 <div className="mb-5">
+                  {plan.original_price_usdt && Number(plan.original_price_usdt) > Number(plan.price_usdt) && (
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-sm text-[#71717A] line-through">
+                        {plan.original_price_usdt} USDT
+                      </span>
+                      {plan.discount_percent ? (
+                        <span className="bg-pink-500/20 text-pink-300 text-[10px] font-bold px-2 py-0.5 rounded">
+                          −{plan.discount_percent}% OFF
+                        </span>
+                      ) : null}
+                    </div>
+                  )}
                   <div className="flex items-baseline gap-1">
                     <span className="text-4xl font-bold">{plan.price_usdt}</span>
                     <span className="text-[#A1A1AA] text-sm">USDT</span>

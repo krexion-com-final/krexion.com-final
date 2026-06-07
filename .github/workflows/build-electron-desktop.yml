@@ -142,3 +142,56 @@ jobs:
             electron-desktop/dist/latest.yml
           draft: false
           prerelease: false
+
+      # ────────────────────────────────────────────────────────────
+      # 2026-02 — SELF-HOSTED MIRROR on the production VPS.
+      # After the optional GitHub Release (above) succeeds — OR
+      # whenever this workflow runs at all — we SCP the installer +
+      # latest.yml + blockmap to the krexion.com VPS at
+      # /opt/krexion/downloads/desktop/. The frontend nginx container
+      # serves /downloads/desktop/* publicly, so:
+      #
+      #   • Public download:   https://krexion.com/downloads/desktop/Krexion-Desktop-Setup-latest.exe
+      #   • Auto-update feed:  https://krexion.com/downloads/desktop/latest.yml
+      #
+      # This is the channel electron-updater reads (configured in
+      # electron-builder.yml → publish: generic). The GitHub release
+      # is now a backup mirror only.
+      #
+      # Required secrets (same as deploy.yml):
+      #   VPS_HOST, VPS_USER, VPS_PORT (optional), VPS_SSH_KEY
+      - name: Mirror installer + latest.yml to VPS (self-hosted CDN)
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          source: "electron-desktop/dist/Krexion-Desktop-Setup-*.exe,electron-desktop/dist/Krexion-Desktop-Setup-*.exe.blockmap,electron-desktop/dist/latest.yml"
+          target: "/opt/krexion/downloads/desktop/"
+          strip_components: 2
+          overwrite: true
+
+      - name: Update "latest" symlink + permissions on VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          timeout: 5m
+          script: |
+            set -e
+            cd /opt/krexion/downloads/desktop
+            V="${{ steps.version.outputs.version }}"
+            # Stable filename so the public homepage button can point to
+            # a single URL forever ("Krexion-Desktop-Setup-latest.exe").
+            # We hard-copy (cp -f) instead of symlink because the nginx
+            # docker volume mount serves files, not links, and copies
+            # work identically on every filesystem.
+            cp -f "Krexion-Desktop-Setup-${V}.exe" "Krexion-Desktop-Setup-latest.exe"
+            # Don't symlink latest.yml — electron-builder already produces
+            # a single "latest.yml" per build, overwriting the previous.
+            ls -la
+            chmod -R a+r .
+            echo "Self-hosted CDN updated: https://krexion.com/downloads/desktop/Krexion-Desktop-Setup-latest.exe"

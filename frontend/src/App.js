@@ -49,6 +49,7 @@ import DebugConsole from "./components/DebugConsole";
 import GuidePage from "./pages/GuidePage";
 import SyncHeartbeatsPage from "./pages/SyncHeartbeatsPage";
 import ReleasesAdminPage from "./pages/ReleasesAdminPage";
+import PlansAdminPage from "./pages/PlansAdminPage";
 import SystemMaintenancePage from "./pages/SystemMaintenancePage";
 import SiteContentAdminPage from "./pages/SiteContentAdminPage";
 import LicensePage from "./pages/LicensePage";
@@ -170,6 +171,11 @@ function App() {
             <Route path="/admin/releases" element={
               <AdminRoute>
                 <ReleasesAdminPage />
+              </AdminRoute>
+            } />
+            <Route path="/admin/plans" element={
+              <AdminRoute>
+                <PlansAdminPage />
               </AdminRoute>
             } />
             <Route path="/admin/system-maintenance" element={

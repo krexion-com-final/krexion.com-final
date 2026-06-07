@@ -634,6 +634,28 @@ def _build_customer_endpoints(get_user_dep):
                 "min_windows": "Windows 10 64-bit",
                 "released_at": rel.get("created_at"),
             }
+        # 2026-02 — Self-hosted Electron Desktop fallback. Even when no
+        # admin-curated release row exists yet, we always advertise the
+        # Electron Desktop installer that the build workflow has SCPed
+        # to https://krexion.com/downloads/desktop/. This means a fresh
+        # VPS deploy serves the latest Krexion build to customers from
+        # day one, no manual admin action required.
+        try:
+            current_version = (VERSION_FILE.read_text(encoding="utf-8").strip()
+                               if VERSION_FILE.exists() else "")
+        except Exception:  # noqa: BLE001
+            current_version = ""
+        if current_version:
+            return {
+                "kind": "native-exe",
+                "version": current_version,
+                # 414 MB Electron Desktop (approx). We don't have the live
+                # byte-count without HEADing the mirror, so we ship a sane
+                # default — the UI uses this only for the "~XXX MB" label.
+                "size_bytes": 414 * 1024 * 1024,
+                "min_windows": "Windows 10 64-bit",
+                "released_at": None,
+            }
         # No native release yet — fall back to legacy ZIP advertising.
         local = await _displayed_current_version()
         return {

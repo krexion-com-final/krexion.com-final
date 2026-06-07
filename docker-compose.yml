@@ -219,6 +219,16 @@ services:
       - "3000:80"
     networks:
       - krexion-net
+    # 2026-02 — self-hosted Electron Desktop installer CDN. The GitHub
+    # Actions workflow `build-electron-desktop.yml` SCPs the latest
+    # installer + latest.yml manifest to `/opt/krexion/downloads/` on
+    # the VPS host. By mounting that folder into the nginx container
+    # at `/usr/share/nginx/html/downloads`, the frontend exposes:
+    #   • https://krexion.com/downloads/desktop/Krexion-Desktop-Setup-latest.exe
+    #   • https://krexion.com/downloads/desktop/latest.yml          (auto-update feed)
+    # Customers download direct (no GitHub redirect, no rate-limits).
+    volumes:
+      - ./downloads:/usr/share/nginx/html/downloads:ro
     deploy:
       resources:
         limits:

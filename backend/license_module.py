@@ -703,6 +703,25 @@ async def download_installer_with_key(license_key: str, request: Request):
     except Exception:
         latest_rel = None
 
+    # 2026-02 — Self-hosted Electron Desktop fallback. If the admin
+    # hasn't manually published a release row yet, we still serve the
+    # canonical Electron Desktop installer from the VPS-mirrored CDN
+    # (https://krexion.com/downloads/desktop/Krexion-Desktop-Setup-latest.exe).
+    # Env var KREXION_DESKTOP_INSTALLER_URL lets the operator override
+    # this default without touching the DB.
+    if not latest_rel or not latest_rel.get("download_url"):
+        fallback_url = os.environ.get("KREXION_DESKTOP_INSTALLER_URL") or \
+            "https://krexion.com/downloads/desktop/Krexion-Desktop-Setup-latest.exe"
+        # Read current VERSION file for analytics tagging
+        try:
+            from pathlib import Path as _P
+            fallback_version = (
+                _P(__file__).resolve().parent / "VERSION"
+            ).read_text(encoding="utf-8").strip() or "2.1.24"
+        except Exception:  # noqa: BLE001
+            fallback_version = "2.1.24"
+        latest_rel = {"download_url": fallback_url, "version": fallback_version}
+
     if latest_rel and latest_rel.get("download_url"):
         # Soft analytics — same fields the ZIP path writes, so the
         # admin "downloads" counter keeps incrementing regardless of

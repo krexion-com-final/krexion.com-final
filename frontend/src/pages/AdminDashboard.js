@@ -732,6 +732,16 @@ export default function AdminDashboard() {
             <Button
               variant="outline"
               size="sm"
+              onClick={() => window.location.href = "/admin/plans"}
+              data-testid="goto-plans-btn"
+              className="border-pink-500/40 text-pink-400 hover:bg-pink-500/10"
+            >
+              <DollarSign size={16} className="mr-2" />
+              Pricing &amp; Discounts
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
               onClick={() => window.location.href = "/admin/sync-heartbeats"}
               data-testid="goto-sync-heartbeats-btn"
               className="border-[var(--brand-border)]"
@@ -798,6 +808,10 @@ export default function AdminDashboard() {
                 <DropdownMenuItem onClick={() => window.location.href = "/admin/releases"} data-testid="mobile-goto-releases">
                   <Settings size={16} className="mr-2 text-[#A78BFA]" />
                   Releases
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => window.location.href = "/admin/plans"} data-testid="mobile-goto-plans">
+                  <DollarSign size={16} className="mr-2 text-pink-400" />
+                  Pricing &amp; Discounts
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => window.location.href = "/admin/sync-heartbeats"} data-testid="mobile-goto-sync-heartbeats">
                   <RefreshCw size={16} className="mr-2" />

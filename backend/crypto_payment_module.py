@@ -84,6 +84,13 @@ class PlanCreate(BaseModel):
     is_popular: bool = False
     enabled: bool = True
     sort_order: int = 0
+    # 2026-02 — admin-editable discount metadata. `original_price_usdt`
+    # is shown struck-through next to `price_usdt`; `discount_percent`
+    # drives the "-25%" badge; `badge_text` lets the admin override the
+    # default "LIMITED TIME" copy without touching code.
+    original_price_usdt: Optional[float] = Field(None, gt=0)
+    discount_percent: Optional[int] = Field(None, ge=0, le=100)
+    badge_text: Optional[str] = None
 
 
 class PlanUpdate(BaseModel):
@@ -95,6 +102,9 @@ class PlanUpdate(BaseModel):
     is_popular: Optional[bool] = None
     enabled: Optional[bool] = None
     sort_order: Optional[int] = None
+    original_price_usdt: Optional[float] = None
+    discount_percent: Optional[int] = None
+    badge_text: Optional[str] = None
 
 
 class WalletCreate(BaseModel):
@@ -620,10 +630,20 @@ async def admin_list_plans(admin: dict = _admin_dep()):
 
 
 @crypto_router.post("/admin/crypto/plans")
-async def admin_add_plan(body: PlanCreate, admin: dict = _admin_dep()):
-    plan_id = body.name.lower().replace(" ", "-")[:30]
+async def admin_add_plan(body: PlanCreate, request: Request, admin: dict = _admin_dep()):
+    # 2026-02 — accept an explicit `id` from the request body so admins
+    # can choose URL-friendly slugs (e.g. "pro-annual" instead of
+    # "pro-annual-plan-2026" auto-derived from the display name).
+    raw_body = await request.json() if hasattr(request, "json") else {}
+    explicit_id = (raw_body.get("id") if isinstance(raw_body, dict) else None) or ""
+    if explicit_id:
+        plan_id = "".join(c for c in explicit_id.lower() if c.isalnum() or c == "-")[:30]
+    else:
+        plan_id = body.name.lower().replace(" ", "-")[:30]
+    if not plan_id:
+        raise HTTPException(status_code=400, detail="Invalid plan id")
     if await _db.crypto_plans.find_one({"id": plan_id}):
-        raise HTTPException(status_code=409, detail="Plan with this name already exists")
+        raise HTTPException(status_code=409, detail="Plan with this id already exists")
     doc = {
         "id": plan_id,
         **body.dict(),
@@ -631,6 +651,7 @@ async def admin_add_plan(body: PlanCreate, admin: dict = _admin_dep()):
         "updated_at": _now().isoformat(),
     }
     await _db.crypto_plans.insert_one(doc)
+    doc.pop("_id", None)
     return doc
 
 
