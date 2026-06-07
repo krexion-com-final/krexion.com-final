@@ -36,7 +36,7 @@ jobs:
       - name: Sync source code to VPS via rsync
         uses: burnett01/rsync-deployments@7.0.1
         with:
-          switches: -avzr --delete --exclude='.env' --exclude='node_modules' --exclude='__pycache__' --exclude='*.pyc' --exclude='.git' --exclude='build' --exclude='dist' --exclude='_backup_*' --exclude='visual_recorder_sessions' --exclude='uploads' --exclude='form_filler_screenshots' --exclude='*.zip' --exclude-from='.deployignore'
+          switches: -avzr --delete --exclude='.env' --exclude='node_modules' --exclude='__pycache__' --exclude='*.pyc' --exclude='.git' --exclude='build' --exclude='dist' --exclude='_backup_*' --exclude='visual_recorder_sessions' --exclude='uploads' --exclude='form_filler_screenshots' --exclude='*.zip' --exclude='downloads' --exclude-from='.deployignore'
           path: ./
           remote_path: /opt/krexion/
           remote_host: ${{ secrets.VPS_HOST }}
