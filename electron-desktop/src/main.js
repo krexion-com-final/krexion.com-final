@@ -203,6 +203,12 @@ function startBackend() {
     // same as 'local' for every other purpose (IS_CLOUD is False).
     KREXION_MODE: 'native',
     KREXION_DESKTOP: '1',
+    // 2026-02 — v2.1.15: Cloud-Auth bridge. The embedded Python
+    // backend's cloud-proxy middleware forwards /api/auth/*,
+    // /api/admin/*, /api/license/*, /api/links/* to this URL.
+    // Everything else (clicks, RUT, conversions, automation) is
+    // handled locally. See cloud_proxy_module.py.
+    KREXION_CLOUD_URL: process.env.KREXION_CLOUD_URL || 'https://krexion.com',
     PORT: String(BACKEND_PORT),
     HOST: '127.0.0.1',
     // Help embedded Python find site-packages under <python>\Lib\site-packages

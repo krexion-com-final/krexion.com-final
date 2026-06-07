@@ -249,3 +249,109 @@ shipped Krexion-Desktop-Setup-2.1.11.exe was still rendering the cloud
   one new sidebar item in each shell. Every existing page/form/field
   is preserved.
 
+
+
+---
+
+### 2026-02 — v2.1.15: Cloud-Auth Bridge (architectural shift)
+
+**Problem:** Until v2.1.14 the desktop app ran 100% offline — its embedded
+Python backend + embedded MongoDB held auth, users, links, clicks, RUT
+jobs, everything. As a result:
+- A user who signs up in the desktop app never appears in the
+  `krexion.com/admin/dashboard` for approval.
+- Centralized admin management is impossible.
+- A customer using two PCs sees two independent accounts.
+
+**User's chosen architecture (Hybrid):**
+| Cloud (krexion.com VPS)        | Local desktop PC               |
+|---------------------------------|--------------------------------|
+| Auth / login / register / me   | Clicks data (heavy)           |
+| Admin dashboard + approvals    | Conversions                    |
+| License management             | RUT jobs / browser automation |
+| Links (CRUD + redirect uptime) | User profiles / fingerprints  |
+|                                | UA gen, visual recorder, etc. |
+
+VPS only holds links + users + license + admin metadata → minimal load
+even with thousands of customers. All heavy work runs on the customer's
+own PC.
+
+**Implementation (single-file proxy, frontend untouched):**
+
+1. **`backend/cloud_proxy_module.py` (NEW, ~280 lines)**
+   - `CloudProxyMiddleware`: starlette BaseHTTPMiddleware that
+     intercepts every request. If the path matches an explicit
+     allowlist AND `KREXION_MODE != "cloud"`, forwards to
+     `KREXION_CLOUD_URL` via shared `httpx.AsyncClient`.
+   - Allowlist (prefix): `/api/auth/`, `/api/admin/`, `/api/license/`,
+     `/api/links/`. Allowlist (exact): `/api/links`,
+     `/api/customer-signup`. Everything else stays local.
+   - Strips hop-by-hop + `content-encoding`/`content-length` headers
+     on both directions so the response isn't double-decoded.
+   - `verify_cloud_token(authorization_header)`: helper used by
+     `get_current_user` to resolve cloud-issued JWTs (different
+     SECRET_KEY than local) against `krexion.com/api/auth/me`. 5-min
+     cache to avoid hammering cloud.
+   - Clear error mapping: cloud unreachable → 502 with
+     `{"detail": "Cloud unreachable. Check your internet connection."}`;
+     cloud timeout → 504. No infinite buffering.
+   - On `KREXION_MODE=cloud` the middleware stays **inert** —
+     prevents the cloud from looping into itself.
+
+2. **`backend/server.py`** (+~70 lines)
+   - Imports + installs `install_cloud_proxy(app)` right after `IS_CLOUD`
+     is computed. Wrapped in try/except so an import failure can't
+     bring down the backend.
+   - `get_current_user()`: when local `jwt.decode()` fails with
+     `JWTError` (the COMMON case on desktop because the JWT was
+     signed by cloud's `SECRET_KEY`), falls through to
+     `verify_cloud_token()`. On success, mirrors the cloud user into
+     local Mongo (`cloud_synced: True`) so other local endpoints
+     (clicks, RUT, conversions) keep joining on `user_id` without a
+     network round-trip per request.
+
+3. **`electron-desktop/src/main.js`** (+5 lines)
+   - Backend spawn env now also sets `KREXION_CLOUD_URL` (override
+     via OS env still respected).
+
+4. **`electron-desktop/scripts/prepare-resources.js`** (+1 line)
+   - Bundled fallback `.env` mirrors `KREXION_CLOUD_URL=https://krexion.com`
+     so manual `uvicorn` launches (KREXION-LOGS.bat) work too.
+
+5. **`backend/VERSION` + `electron-desktop/package.json`** → 2.1.15.
+
+**Smoke tests passed:**
+- `ast.parse` clean on server.py + cloud_proxy_module.py + license_module.py.
+- Cloud-proxy module imports cleanly with `KREXION_MODE=native`.
+- Route-matching matrix verified (17 paths tested, 0 fails):
+  cloud-routed paths (auth/admin/license/links) match; local paths
+  (clicks/rut/conversions/settings/system) correctly stay local;
+  prefix discipline correct (`/api/auth` alone does NOT match —
+  only `/api/auth/` prefix does).
+
+**End-to-end flow (what the customer experiences):**
+1. Customer opens fresh desktop app → lands on cloud-backed
+   login screen (Electron loads localhost frontend, frontend POSTs
+   `/api/auth/login` → proxy → `krexion.com/api/auth/login`).
+2. Customer registers → cloud Mongo gets the new user → admin sees
+   it instantly on `krexion.com/admin/dashboard`.
+3. Admin approves the user (status: pending → active) on cloud.
+4. Customer logs in → cloud JWT returned → stored in
+   `localStorage.token`.
+5. Customer creates a link in the desktop UI → POST `/api/links`
+   → proxy → cloud → link saved in cloud Mongo (uptime
+   guaranteed independent of customer's PC).
+6. Customer starts RUT job → POST `/api/rut/start` → stays LOCAL
+   → local backend's `get_current_user` falls back to
+   `verify_cloud_token` → cloud confirms the user → local mirror
+   created → RUT runs on customer's PC consuming customer's CPU.
+
+**Safety:**
+- Cloud (`krexion.com`) untouched at runtime — proxy is inert there.
+- All paths NOT in the allowlist behave EXACTLY as before
+  (RUT, clicks, conversions, settings, every existing form / field
+  / button preserved byte-for-byte).
+- Auth pass-through preserves every header verbatim.
+- The 5-min token cache means cloud receives ~12 verify calls/hour
+  per active customer at most.
+

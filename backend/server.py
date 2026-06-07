@@ -397,6 +397,24 @@ api_router = APIRouter(prefix=api_prefix)
 KREXION_MODE = os.environ.get("KREXION_MODE", "local").lower().strip()
 IS_CLOUD = KREXION_MODE == "cloud"
 
+# ─── v2.1.15: Cloud-Auth Bridge ───────────────────────────────────────
+# On the DESKTOP install (KREXION_MODE in {"native","local"}) we install
+# a middleware that intercepts /api/auth/*, /api/admin/*, /api/license/*,
+# /api/links/* and forwards them to krexion.com. Everything else
+# (clicks, RUT, conversions, settings, heavy automation) stays local.
+# The middleware short-circuits on the cloud itself (no infinite loop).
+# See cloud_proxy_module.py for the full design rationale.
+try:
+    from cloud_proxy_module import install_cloud_proxy, verify_cloud_token
+    install_cloud_proxy(app)
+except Exception as _cp_err:  # noqa: BLE001
+    # Never let a proxy import error kill the whole backend — the
+    # local engine still has value even if cloud auth is down.
+    logging.getLogger("krexion.cloud_proxy").error(
+        f"[cloud_proxy] install failed: {_cp_err}"
+    )
+    verify_cloud_token = None  # type: ignore
+
 # 2026-05 — strict mode for cloud edge. When true (the NEW DEFAULT as
 # of 2026-05 after VPS overload incidents), heavy endpoints (RUT, Form
 # Filler, Visual Recorder, bulk proxy tests, bulk click imports) refuse
@@ -2039,6 +2057,53 @@ async def get_current_user(request: Request):
         if email is None:
             raise HTTPException(status_code=401, detail="Invalid token")
     except JWTError:
+        # ─── v2.1.15: Cloud-Auth Bridge fallback ────────────────────
+        # The JWT couldn't be verified with the LOCAL SECRET_KEY. On a
+        # desktop install this is the COMMON case: the token was
+        # issued by krexion.com (different secret) when the user
+        # logged in via the cloud-proxy. Verify it against the cloud
+        # `/api/auth/me` endpoint — `verify_cloud_token` is imported
+        # from cloud_proxy_module at startup; it has a built-in
+        # 5-minute cache so we don't hammer the cloud.
+        if not IS_CLOUD and verify_cloud_token is not None:
+            try:
+                cloud_user = await verify_cloud_token(auth_header)
+            except Exception:  # noqa: BLE001
+                cloud_user = None
+            if cloud_user:
+                # Mirror the cloud user into local Mongo so other
+                # local endpoints (clicks, RUT, conversions) that
+                # join on user_id keep working without a network
+                # round-trip on every request.
+                local_user = await db.users.find_one(
+                    {"id": cloud_user.get("id")}, {"_id": 0}
+                )
+                if not local_user and cloud_user.get("email"):
+                    # Also try by email — older mirrors used different ids
+                    local_user = await db.users.find_one(
+                        {"email": cloud_user.get("email")}, {"_id": 0}
+                    )
+                if not local_user:
+                    # First time we see this cloud user on this PC —
+                    # insert a thin mirror. The cloud is the source of
+                    # truth; we never write back to it from here.
+                    local_user = {
+                        "id": cloud_user.get("id"),
+                        "email": cloud_user.get("email"),
+                        "name": cloud_user.get("name") or (cloud_user.get("email") or "").split("@")[0],
+                        "is_admin": bool(cloud_user.get("is_admin")),
+                        "status": cloud_user.get("status") or "active",
+                        "created_at": cloud_user.get("created_at") or datetime.utcnow().isoformat(),
+                        "cloud_synced": True,
+                    }
+                    try:
+                        await db.users.insert_one(local_user)
+                    except Exception:  # noqa: BLE001
+                        # Race / duplicate — try fetching once more
+                        local_user = await db.users.find_one(
+                            {"id": cloud_user.get("id")}, {"_id": 0}
+                        ) or cloud_user
+                return local_user
         raise HTTPException(status_code=401, detail="Invalid token")
     
     if is_sub_user:

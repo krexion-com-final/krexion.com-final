@@ -360,12 +360,19 @@ function prepareBackend() {
   // sets this in the spawn env, but we mirror it here so a customer who
   // launches uvicorn manually (e.g. KREXION-LOGS.bat) still gets the
   // native UI.
+  //
+  // 2026-02 — v2.1.15: KREXION_CLOUD_URL points the in-app cloud proxy
+  // at the public krexion.com edge. /api/auth/*, /api/admin/*,
+  // /api/license/* and /api/links/* are forwarded there; everything
+  // else (clicks, RUT, conversions, settings, automation) stays local.
+  // See backend/cloud_proxy_module.py for the full design.
   const envFile = path.join(dest, '.env');
   fs.writeFileSync(envFile,
     'MONGO_URL=mongodb://127.0.0.1:27117\n' +
     'DB_NAME=krexion_local\n' +
     'KREXION_MODE=native\n' +
-    'KREXION_DESKTOP=1\n'
+    'KREXION_DESKTOP=1\n' +
+    'KREXION_CLOUD_URL=https://krexion.com\n'
   );
   log('backend: copied');
 }
