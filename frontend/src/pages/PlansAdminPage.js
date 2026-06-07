@@ -28,7 +28,13 @@ const BLANK_PLAN = {
 };
 
 const auth = () => {
-  const t = localStorage.getItem("token");
+  // 2026-02 — admin endpoints expect the dedicated `adminToken` saved by
+  // AdminLoginPage. We also fall back to other token keys so the page
+  // keeps working in development / mixed-session scenarios.
+  const t =
+    localStorage.getItem("adminToken") ||
+    localStorage.getItem("admin_token") ||
+    localStorage.getItem("token");
   return t ? { Authorization: `Bearer ${t}` } : {};
 };
 

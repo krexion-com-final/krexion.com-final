@@ -202,6 +202,27 @@ export default function DownloadPage() {
           This installer is only needed if you want to run heavy local features like Real User Traffic, Form Filler, or CPI Worker on your own PC.
         </p>
 
+        {/* 2026-02 — Direct (no license) download CTA. The .exe is
+            self-hosted at krexion.com/downloads/desktop/ so this link
+            is stable forever — every new release overwrites the
+            "latest" copy on the VPS. Customers who haven't bought yet
+            can grab the trial-mode installer right here without a key. */}
+        <a
+          href="https://krexion.com/downloads/desktop/Krexion-Desktop-Setup-latest.exe"
+          download
+          data-testid="direct-download-btn"
+          className="inline-flex items-center gap-2 bg-[#3B82F6] hover:bg-[#60A5FA] text-black font-semibold px-7 py-3.5 rounded-lg transition shadow-xl shadow-[#3B82F6]/30 mb-12"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Download Krexion Desktop (.exe)
+          <span className="ml-2 text-xs font-normal bg-black/20 px-2 py-0.5 rounded">~414 MB</span>
+        </a>
+        <p className="text-xs text-[#71717A] -mt-8 mb-10">
+          No login required — first launch activates trial mode.
+          Already have a license? Use the form below to embed your key
+          into the installer.
+        </p>
+
         {/* License-gated download card */}
         <div
           data-testid="license-gate-card"

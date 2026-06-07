@@ -4,7 +4,7 @@ import axios from "axios";
 import { motion } from "framer-motion";
 import {
   Globe, Activity, Layers, Cpu, Shield, MailCheck,
-  ArrowRight, Check, ChevronDown, Zap, Lock, Sparkles,
+  ArrowRight, Check, ChevronDown, Zap, Lock, Sparkles, Download,
 } from "lucide-react";
 import WavyBackground from "../components/WavyBackground";
 import PublicMobileMenu from "../components/PublicMobileMenu";
@@ -314,6 +314,20 @@ export default function HomePage() {
             <EditableText section="hero" field="cta_label" value={content.hero.cta_label} as="span" />
             <ArrowRight size={16} className="group-hover:translate-x-1 transition-transform" />
           </Link>
+          {/* 2026-02 — Direct-download CTA pointing to the stable VPS CDN
+              URL. The .exe is self-hosted at krexion.com, so the link
+              never goes stale: every new release ships to the same path
+              (Krexion-Desktop-Setup-latest.exe). Customers click → .exe
+              downloads instantly → no license gate, no GitHub redirect. */}
+          <a
+            href="https://krexion.com/downloads/desktop/Krexion-Desktop-Setup-latest.exe"
+            className="group bg-white/95 text-zinc-900 font-semibold px-7 py-3.5 rounded-lg hover:bg-white transition inline-flex items-center gap-2 shadow-xl"
+            data-testid="hero-cta-direct-download"
+            download
+          >
+            <Download size={16} />
+            Download for Windows
+          </a>
           <a
             href="#features"
             className="border border-white/15 px-7 py-3.5 rounded-lg hover:bg-white/5 transition text-sm backdrop-blur-sm"
