@@ -10158,6 +10158,190 @@ async def _execute_automation_steps(
                         else:
                             _no_change_count = 0
                             _last_url = _cur
+                elif action == "branch":
+                    # ── 2026-02: Conditional branching ─────────────────
+                    # User-facing JSON shape:
+                    #   {
+                    #     "action": "branch",
+                    #     "name": "After email submit",
+                    #     "timeout_ms": 10000,
+                    #     "branches": [
+                    #       {
+                    #         "name": "Phone path",
+                    #         "condition": {
+                    #             "type": "selector_visible",
+                    #             "selector": "input[name=phone]",
+                    #             "timeout_ms": 8000   # optional per-branch override
+                    #         },
+                    #         "steps": [ {...nested steps...} ]
+                    #       },
+                    #       {
+                    #         "name": "Birthday path",
+                    #         "condition": {"type":"text_visible", "text":"Birthday"},
+                    #         "steps": [...]
+                    #       }
+                    #     ],
+                    #     "default_steps": [...]   # ran when no branch matched
+                    #   }
+                    #
+                    # Other supported condition types:
+                    #   {"type":"url_contains", "value":"/phone"}
+                    #   {"type":"url_matches",  "pattern":"thank-?you"}
+                    #
+                    # Branches RACE in parallel — first condition to become
+                    # true wins. That's what the user asked for: "agar
+                    # phone-page aya to ye chalein, agar birthday aya to
+                    # wo chalein". When none match within timeout we fall
+                    # back to default_steps (if provided) — no hard fail,
+                    # because branches are inherently best-effort.
+                    branches_def = step.get("branches") or []
+                    default_steps = step.get("default_steps") or []
+                    branch_timeout_ms = int(step.get("timeout_ms") or step.get("timeout") or 12000)
+
+                    chosen_steps: List[Dict[str, Any]] = []
+                    chosen_name: str = ""
+                    chosen_idx: int = -1
+
+                    async def _eval_branch(_b: Dict[str, Any], _b_idx: int):
+                        cond = _b.get("condition") or {}
+                        ct = (cond.get("type") or "").strip().lower()
+                        tmo_ms = int(cond.get("timeout_ms") or cond.get("timeout") or branch_timeout_ms)
+                        try:
+                            if ct in ("selector_visible", "selector", "wait_for_selector"):
+                                sel = (cond.get("selector") or "").strip()
+                                if not sel:
+                                    return None
+                                # Use the smart helper so token-aliases also help us pick
+                                resolved = await _smart_wait_for_selector(
+                                    page, sel, state="visible", timeout=tmo_ms,
+                                    extra_alts=_alias_alts_for(sel),
+                                )
+                                if not resolved:
+                                    return None
+                                return (_b_idx, _b)
+                            elif ct in ("selector_attached",):
+                                sel = (cond.get("selector") or "").strip()
+                                if not sel:
+                                    return None
+                                resolved = await _smart_wait_for_selector(
+                                    page, sel, state="attached", timeout=tmo_ms,
+                                    extra_alts=_alias_alts_for(sel),
+                                )
+                                if not resolved:
+                                    return None
+                                return (_b_idx, _b)
+                            elif ct in ("text_visible", "text"):
+                                txt = (cond.get("text") or "").strip()
+                                if not txt:
+                                    return None
+                                # Playwright text engine — case-insensitive substring match
+                                try:
+                                    await page.locator(f"text={txt}").first.wait_for(
+                                        state="visible", timeout=tmo_ms
+                                    )
+                                    return (_b_idx, _b)
+                                except Exception:
+                                    return None
+                            elif ct in ("url_contains", "url"):
+                                needle = (cond.get("value") or cond.get("url") or "").strip().lower()
+                                if not needle:
+                                    return None
+                                _deadline = _time_mod.perf_counter() + (tmo_ms / 1000.0)
+                                while _time_mod.perf_counter() < _deadline:
+                                    try:
+                                        if needle in (page.url or "").lower():
+                                            return (_b_idx, _b)
+                                    except Exception:
+                                        pass
+                                    await asyncio.sleep(0.15)
+                                return None
+                            elif ct in ("url_matches", "url_regex"):
+                                pat = (cond.get("pattern") or "").strip()
+                                if not pat:
+                                    return None
+                                import re as _re_branch
+                                try:
+                                    _rx = _re_branch.compile(pat, _re_branch.IGNORECASE)
+                                except _re_branch.error:
+                                    return None
+                                _deadline = _time_mod.perf_counter() + (tmo_ms / 1000.0)
+                                while _time_mod.perf_counter() < _deadline:
+                                    try:
+                                        if _rx.search(page.url or ""):
+                                            return (_b_idx, _b)
+                                    except Exception:
+                                        pass
+                                    await asyncio.sleep(0.15)
+                                return None
+                        except Exception:
+                            return None
+                        return None
+
+                    if branches_def:
+                        _tasks = [
+                            asyncio.create_task(_eval_branch(b, i))
+                            for i, b in enumerate(branches_def)
+                            if isinstance(b, dict)
+                        ]
+                        if _tasks:
+                            try:
+                                # Race — first to succeed wins. We still time
+                                # out hard at branch_timeout_ms + 1s ceiling
+                                # so a misconfigured branch can't stall us.
+                                _hard_ceiling = (branch_timeout_ms / 1000.0) + 1.5
+                                _winner = None
+                                _deadline_b = _time_mod.perf_counter() + _hard_ceiling
+                                while _tasks and _time_mod.perf_counter() < _deadline_b:
+                                    _done, _pending = await asyncio.wait(
+                                        _tasks, timeout=max(0.1, _deadline_b - _time_mod.perf_counter()),
+                                        return_when=asyncio.FIRST_COMPLETED,
+                                    )
+                                    if not _done:
+                                        break
+                                    for _t in _done:
+                                        try:
+                                            _r = _t.result()
+                                        except Exception:
+                                            _r = None
+                                        if _r is not None:
+                                            _winner = _r
+                                            break
+                                    if _winner is not None:
+                                        break
+                                    _tasks = list(_pending)
+                                if _winner is not None:
+                                    chosen_idx, _b = _winner
+                                    chosen_steps = list(_b.get("steps") or [])
+                                    chosen_name = (_b.get("name") or f"branch[{chosen_idx}]")
+                            finally:
+                                for _t in _tasks:
+                                    if not _t.done():
+                                        _t.cancel()
+                                try:
+                                    await asyncio.gather(*_tasks, return_exceptions=True)
+                                except Exception:
+                                    pass
+
+                    if not chosen_steps and default_steps:
+                        chosen_steps = list(default_steps)
+                        chosen_name = "default"
+
+                    branch_label = step.get("name") or "branch"
+                    if chosen_steps:
+                        # Splice resolved sub-steps right after the current
+                        # step. enumerate() over the same list object means
+                        # the loop will naturally pick them up next.
+                        steps[idx + 1:idx + 1] = chosen_steps
+                        logger.info(
+                            f"[branch] '{branch_label}' → '{chosen_name}' "
+                            f"inserted {len(chosen_steps)} step(s)"
+                        )
+                        if collect_timings:
+                            _step_note = f"branch matched: {chosen_name} (+{len(chosen_steps)} steps)"
+                    else:
+                        logger.info(f"[branch] '{branch_label}' → no path matched (skipped)")
+                        if collect_timings:
+                            _step_note = "branch matched: none (skipped)"
                 else:
                     if not optional:
                         if collect_timings:

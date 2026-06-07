@@ -1262,14 +1262,71 @@ export default function VisualRecorderPage() {
   const insertStepAt = async (position) => {
     if (!sessionId) return;
     const action = window.prompt(
-      "Step action to insert? Options: click, fill, type, select, check, uncheck, wait, wait_for_selector, wait_for_text, wait_for_url, press, scroll, screenshot, hover, dismiss_popups, extract",
+      "Step action to insert? Options: click, fill, type, select, check, uncheck, wait, wait_for_selector, wait_for_text, wait_for_url, press, scroll, screenshot, hover, dismiss_popups, extract, branch",
       "wait"
     );
     if (!action || !action.trim()) return;
     const cleanAction = action.trim().toLowerCase();
     let stepDraft = { action: cleanAction };
     // Action-specific prompts
-    if (["click", "fill", "type", "select", "check", "uncheck", "hover", "wait_for_selector"].includes(cleanAction)) {
+    if (cleanAction === "branch") {
+      // ── Conditional branch scaffold (2026-02) ───────────────────
+      // We scaffold a template with TWO empty branches + an empty
+      // default. User then opens "Edit Raw JSON" on the new step to
+      // wire up real selectors / nested steps. This keeps the prompt
+      // flow short (5 window.prompts is already a lot) while still
+      // giving a working template.
+      const label = (window.prompt(
+        "Branch step name (e.g. 'After email submit page picker'):",
+        "Page picker"
+      ) || "Page picker").trim();
+      const tmoMs = Math.max(
+        1000,
+        Number(window.prompt("Overall race timeout in milliseconds (how long to wait for ANY branch's page to appear):", "12000")) || 12000
+      );
+      const condA = (window.prompt(
+        "BRANCH A — CSS selector that ONLY appears when path A loads (e.g. 'input[name=phone]'):",
+        "input[name=phone]"
+      ) || "").trim();
+      const condB = (window.prompt(
+        "BRANCH B — CSS selector that ONLY appears when path B loads (e.g. 'input[name=birthday]'):",
+        "input[name=birthday]"
+      ) || "").trim();
+      stepDraft = {
+        action: "branch",
+        name: label,
+        timeout_ms: tmoMs,
+        branches: [
+          {
+            name: "Path A",
+            condition: condA
+              ? { type: "selector_visible", selector: condA, timeout_ms: tmoMs }
+              : { type: "selector_visible", selector: "", timeout_ms: tmoMs },
+            steps: [
+              {
+                action: "wait",
+                ms: 500,
+                source: "manual",
+              },
+            ],
+          },
+          {
+            name: "Path B",
+            condition: condB
+              ? { type: "selector_visible", selector: condB, timeout_ms: tmoMs }
+              : { type: "selector_visible", selector: "", timeout_ms: tmoMs },
+            steps: [
+              {
+                action: "wait",
+                ms: 500,
+                source: "manual",
+              },
+            ],
+          },
+        ],
+        default_steps: [],
+      };
+    } else if (["click", "fill", "type", "select", "check", "uncheck", "hover", "wait_for_selector"].includes(cleanAction)) {
       const sel = window.prompt("CSS selector (or XPath e.g. //input[@name='x']):", "");
       if (!sel || !sel.trim()) return;
       stepDraft.selector = sel.trim();
@@ -3569,6 +3626,7 @@ export default function VisualRecorderPage() {
                     evaluate: { icon: "⚡", color: "text-yellow-400", bg: "bg-yellow-700/30 border-yellow-500/30" },
                     auto_continue: { icon: "🔄", color: "text-violet-400", bg: "bg-violet-700/30 border-violet-500/30" },
                     auto_continue_survey: { icon: "🔄", color: "text-violet-400", bg: "bg-violet-700/30 border-violet-500/30" },
+                    branch: { icon: "🔀", color: "text-fuchsia-400", bg: "bg-fuchsia-700/30 border-fuchsia-500/30" },
                   };
                   const sm = stepIconMap[s.action] || { icon: "•", color: "text-zinc-400", bg: "bg-zinc-700/30 border-zinc-500/30" };
                   const isDragSrc = dragSrc === i;
@@ -3662,6 +3720,20 @@ export default function VisualRecorderPage() {
                         {s.timeout && !s.ms && <span>tout: {s.timeout}</span>}
                         {s.key && <span>key: <code className="text-zinc-400">{s.key}</code></span>}
                         {s.script && !s.name && <span title={s.script}>{s.script.slice(0, 50)}…</span>}
+                        {s.action === "branch" && Array.isArray(s.branches) && (
+                          <span className="text-fuchsia-300">
+                            {s.branches.length} branch{s.branches.length === 1 ? "" : "es"}
+                            {Array.isArray(s.default_steps) && s.default_steps.length > 0 ? " + default" : ""}
+                            {" — "}
+                            {s.branches
+                              .map((b, _i) =>
+                                (b?.name || `branch[${_i}]`) +
+                                (Array.isArray(b?.steps) ? ` (${b.steps.length})` : "")
+                              )
+                              .join(" | ")
+                              .slice(0, 80)}
+                          </span>
+                        )}
                       </div>
                     </div>
                     {/* Step actions — visible on hover */}

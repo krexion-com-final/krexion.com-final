@@ -2686,6 +2686,9 @@ _EDITABLE_STEP_FIELDS = {
     # an existing evaluate step to add per-option selector/xpath
     # fallbacks. See _build_random_pick_advanced.
     "pick_options",
+    # 2026-02 — branch step (conditional if/else-if/else). Nested step
+    # arrays are passed through verbatim by the dict-validator below.
+    "branches", "default_steps", "timeout_ms",
 }
 
 
@@ -2852,6 +2855,8 @@ _MANUAL_STEP_ACTIONS = {
     # 2026-01 additive — new step types from automation_extensions
     "wait_for_text", "wait_for_url", "extract", "dismiss_popups",
     "auto_continue", "auto_continue_survey",
+    # 2026-02 additive — conditional branching (if/else-if/else)
+    "branch",
 }
 
 
@@ -2905,6 +2910,19 @@ def add_manual_step(sess: RecorderSession, step: Dict[str, Any], position: Optio
         clean["wait_nav"] = bool(step["wait_nav"])
     if "optional" in step:
         clean["optional"] = bool(step["optional"])
+    # 2026-02 — `branch` action carries nested step lists & per-branch
+    # conditions. Preserve them verbatim so raw-JSON authors can paste
+    # arbitrary branch trees without losing data on round-trip.
+    if action == "branch":
+        if isinstance(step.get("branches"), list):
+            clean["branches"] = step["branches"]
+        if isinstance(step.get("default_steps"), list):
+            clean["default_steps"] = step["default_steps"]
+        if "timeout_ms" in step:
+            try:
+                clean["timeout_ms"] = max(0, int(step["timeout_ms"]))
+            except (TypeError, ValueError):
+                pass
     # Tag this step so the UI can show a small "manual" badge — purely
     # cosmetic, doesn't affect replay.
     clean["source"] = "manual"
