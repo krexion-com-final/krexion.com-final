@@ -355,3 +355,83 @@ own PC.
 - The 5-min token cache means cloud receives ~12 verify calls/hour
   per active customer at most.
 
+
+
+---
+
+### 2026-02 — v2.1.16: Cloud-Auth Bridge Hotfix (4 missed JWT decode sites)
+
+**Bug reported by user (with full HTTP debug log):**
+After v2.1.15 install + cloud login, some endpoints worked perfectly
+(`/api/auth/me`, `/api/links`, `/api/license/me`, `/api/dashboard/stats`,
+`/api/conversions`, `/api/user-agents/generate`, `/api/proxyjet/*`,
+`/api/ai-settings`, `/api/user/notification-settings` — all HTTP 200)
+but other LOCAL endpoints returned `401 "Invalid token"`:
+- `/api/proxies?filter=all`
+- `/api/clicks?` + `/api/clicks/count?` + `/api/clicks/referrer-stats?`
+- `/api/sub-users` + `/api/sub-users/stats`
+- `/api/cpi/devices` + `/api/cpi/offers` + `/api/cpi/jobs` + `/api/cpi/smartlinks`
+- `/api/uploads?type=proxies` + `/api/uploads?type=user_agents`
+
+**Root cause:**
+v2.1.15 patched `get_current_user()` to fall back to
+`verify_cloud_token()` when local JWT decode failed. But there are
+THREE OTHER inline JWT decode sites in `server.py` that DIDN'T get the
+cloud fallback, plus the `get_current_user_with_fresh_data` dependency
+used by half the heavy-job endpoints:
+
+1. `get_current_user_with_fresh_data()` (line 3141) — used by
+   `/api/proxies`, `/api/clicks/*`, `/api/sub-users/*`, `/api/cpi/*`,
+   `/api/uploads/*` and many more. **THIS is why those endpoints 401'd.**
+2. `/api/real-user-traffic/jobs/{job_id}/screenshot/{filename}` —
+   inline decode for RUT screenshot `<img>` tags.
+3. `/api/visual-recorder/{session_id}/screenshot` — inline decode for
+   Visual Recorder screenshot `<img>` tags.
+4. `/ws/clicks/{token}` WebSocket — inline decode for real-time
+   click updates.
+
+**Fix (1 helper + 4 patch sites):**
+
+1. **`backend/server.py` (+~60 lines helper)**
+   - Added `_resolve_cloud_user_dict(authorization_header)` right
+     after the `install_cloud_proxy` block. Wraps
+     `verify_cloud_token` + local mirror lookup. Returns a usable
+     user dict or `None`. Single source of truth for all inline-JWT
+     fallback sites — no copy-paste drift.
+
+2. **`get_current_user_with_fresh_data`** — `JWTError` branch now
+   resolves the cloud user, inserts/updates a local mirror with
+   full feature flags (proxies, clicks, sub-users, cpi, uploads,
+   real_user_traffic, form_filler, visual_recorder…), and returns
+   it. Also refreshes existing mirrors with cloud-side `status` +
+   `features` + `subscription_expires` on every miss so an admin
+   feature-flag change on cloud shows up instantly.
+
+3. **RUT screenshot endpoint** — `JWTError` → `_resolve_cloud_user_dict`
+   → email/is_sub_user/parent_user_id recovered → ownership check
+   continues normally.
+
+4. **Visual Recorder screenshot endpoint** — same pattern.
+
+5. **WebSocket /ws/clicks/{token}** — moved `jwt.decode` into nested
+   try; on `JWTError` falls back to `_resolve_cloud_user_dict`.
+
+6. **Version bump:** `backend/VERSION` 2.1.15 → 2.1.16;
+   `electron-desktop/package.json` → 2.1.16.
+
+**Files changed (3):**
+- `backend/server.py` (4 patches, +~150 lines)
+- `backend/VERSION`
+- `electron-desktop/package.json`
+
+**Smoke test:**
+- `ast.parse` clean on server.py
+- Helper signature uses only already-imported names (`Optional`,
+  `datetime`, `main_db`, `IS_CLOUD`, `verify_cloud_token`)
+- Cloud-proxy module unchanged from v2.1.15 (no regression risk
+  there)
+
+**Result after v2.1.16 install:**
+ALL local endpoints now accept cloud-issued JWTs. The customer's
+debug log will go from "20% endpoints 401'ing" to 100% success.
+

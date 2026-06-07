@@ -415,6 +415,56 @@ except Exception as _cp_err:  # noqa: BLE001
     )
     verify_cloud_token = None  # type: ignore
 
+
+async def _resolve_cloud_user_dict(authorization_header: str) -> Optional[dict]:
+    """v2.1.16 — Cloud-Auth Bridge helper for INLINE JWT decode sites
+    (RUT screenshot endpoint, Visual Recorder screenshot endpoint,
+    WebSocket /ws/clicks). Wraps `verify_cloud_token` + local-mirror
+    lookup so each call site stays a one-liner.
+
+    Returns the mirrored local user dict on success, else None. Safe to
+    call on the cloud itself (returns None — local JWT path handles it)."""
+    if IS_CLOUD or verify_cloud_token is None:
+        return None
+    try:
+        cloud_user = await verify_cloud_token(authorization_header)
+    except Exception:  # noqa: BLE001
+        return None
+    if not cloud_user:
+        return None
+    try:
+        local_user = await main_db.users.find_one(
+            {"id": cloud_user.get("id")},
+            {"_id": 0, "password_hash": 0},
+        )
+        if not local_user and cloud_user.get("email"):
+            local_user = await main_db.users.find_one(
+                {"email": cloud_user.get("email")},
+                {"_id": 0, "password_hash": 0},
+            )
+        if local_user:
+            return local_user
+        # First sighting on this PC — thin mirror with cloud features.
+        mirror = {
+            "id": cloud_user.get("id"),
+            "email": cloud_user.get("email"),
+            "name": cloud_user.get("name") or (cloud_user.get("email") or "").split("@")[0],
+            "is_admin": bool(cloud_user.get("is_admin")),
+            "status": cloud_user.get("status") or "active",
+            "features": cloud_user.get("features") or {},
+            "subscription_expires": cloud_user.get("subscription_expires"),
+            "created_at": cloud_user.get("created_at") or datetime.utcnow().isoformat(),
+            "cloud_synced": True,
+        }
+        try:
+            await main_db.users.insert_one(mirror.copy())
+        except Exception:  # noqa: BLE001
+            pass
+        return mirror
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # 2026-05 — strict mode for cloud edge. When true (the NEW DEFAULT as
 # of 2026-05 after VPS overload incidents), heavy endpoints (RUT, Form
 # Filler, Visual Recorder, bulk proxy tests, bulk click imports) refuse
@@ -3236,8 +3286,89 @@ async def get_current_user_with_fresh_data(request: Request) -> dict:
         if not email:
             raise HTTPException(status_code=401, detail="Invalid token")
     except JWTError:
+        # ─── v2.1.16: Cloud-Auth Bridge fallback ────────────────────
+        # The JWT couldn't be verified with the LOCAL SECRET_KEY. On a
+        # desktop install this is the COMMON case (the token was
+        # issued by krexion.com via the cloud-proxy). Verify it
+        # against the cloud `/api/auth/me` endpoint and use the same
+        # local-mirror pattern as `get_current_user`. `verify_cloud_token`
+        # is imported at startup and has a 5-min cache so we don't
+        # hammer the cloud on every heavy-job request.
+        if not IS_CLOUD and verify_cloud_token is not None:
+            try:
+                cloud_user = await verify_cloud_token(auth_header)
+            except Exception:  # noqa: BLE001
+                cloud_user = None
+            if cloud_user:
+                local_user = await main_db.users.find_one(
+                    {"id": cloud_user.get("id")},
+                    {"_id": 0, "password_hash": 0},
+                )
+                if not local_user and cloud_user.get("email"):
+                    local_user = await main_db.users.find_one(
+                        {"email": cloud_user.get("email")},
+                        {"_id": 0, "password_hash": 0},
+                    )
+                if not local_user:
+                    # First time seeing this cloud user — mirror into
+                    # local Mongo with all heavy-job feature flags
+                    # ON. The cloud is the source of truth.
+                    local_user = {
+                        "id": cloud_user.get("id"),
+                        "email": cloud_user.get("email"),
+                        "name": cloud_user.get("name") or (cloud_user.get("email") or "").split("@")[0],
+                        "is_admin": bool(cloud_user.get("is_admin")),
+                        "status": "active",  # cloud already authorised
+                        "features": cloud_user.get("features") or {f: True for f in (
+                            "real_user_traffic", "form_filler",
+                            "visual_recorder", "proxies", "links",
+                            "clicks", "import_traffic",
+                            "email_checker", "separate_data",
+                            "ua_generator", "ua_checker",
+                            "real_traffic", "import_data",
+                            "adspower", "uploaded_things",
+                            "profile_builder", "traffic_sources",
+                            "cpi", "settings",
+                        )},
+                        "subscription_type": cloud_user.get("subscription_type"),
+                        "subscription_expires": cloud_user.get("subscription_expires"),
+                        "max_sub_users": cloud_user.get("max_sub_users"),
+                        "max_links": cloud_user.get("max_links"),
+                        "max_clicks": cloud_user.get("max_clicks"),
+                        "created_at": cloud_user.get("created_at") or datetime.utcnow().isoformat(),
+                        "cloud_synced": True,
+                    }
+                    try:
+                        await main_db.users.insert_one(local_user.copy())
+                    except Exception:  # noqa: BLE001
+                        # Race — fetch fresh
+                        local_user = await main_db.users.find_one(
+                            {"id": cloud_user.get("id")},
+                            {"_id": 0, "password_hash": 0},
+                        ) or local_user
+                else:
+                    # Existing mirror — refresh feature flags + status
+                    # from cloud so a recent admin-side change shows
+                    # up immediately (we already paid the cloud call).
+                    updates = {}
+                    if cloud_user.get("status"):
+                        updates["status"] = cloud_user["status"]
+                    if cloud_user.get("features"):
+                        updates["features"] = cloud_user["features"]
+                    if cloud_user.get("subscription_expires"):
+                        updates["subscription_expires"] = cloud_user["subscription_expires"]
+                    if updates:
+                        try:
+                            await main_db.users.update_one(
+                                {"id": local_user["id"]},
+                                {"$set": updates},
+                            )
+                            local_user.update(updates)
+                        except Exception:  # noqa: BLE001
+                            pass
+                return local_user
         raise HTTPException(status_code=401, detail="Invalid token")
-    
+
     # If sub-user, get parent user data
     if is_sub_user and parent_user_id:
         sub_user = await main_db.sub_users.find_one({"email": email}, {"_id": 0, "password_hash": 0})
@@ -7853,7 +7984,15 @@ async def rut_screenshot(
         if not email:
             raise HTTPException(status_code=401, detail="Invalid token")
     except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        # v2.1.16 — Cloud-Auth Bridge fallback for inline JWT decode.
+        # On desktop installs the token was signed by krexion.com so
+        # local decode fails. Resolve via cloud /api/auth/me.
+        cloud_user = await _resolve_cloud_user_dict(f"Bearer {token_value}")
+        if not cloud_user:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        email = cloud_user.get("email")
+        is_sub_user = False
+        parent_user_id = None
 
     # Resolve user id (main or sub-user)
     user_id = None
@@ -16453,7 +16592,11 @@ async def vr_screenshot(
         if not email:
             raise HTTPException(status_code=401, detail="Invalid token")
     except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        # v2.1.16 — Cloud-Auth Bridge fallback for inline JWT decode.
+        cloud_user = await _resolve_cloud_user_dict(f"Bearer {token_str}")
+        if not cloud_user:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        email = cloud_user.get("email")
     user_doc = await db.users.find_one({"email": email}, {"_id": 0})
     if not user_doc:
         raise HTTPException(status_code=401, detail="User not found")
@@ -19239,14 +19382,22 @@ async def shutdown_db_client():
 async def websocket_clicks(websocket: WebSocket, token: str):
     """WebSocket endpoint for real-time click updates"""
     try:
-        # Verify token
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email = payload.get("sub")
-        if not email:
-            await websocket.close(code=4001)
-            return
-        
-        user = await db.users.find_one({"email": email}, {"_id": 0})
+        # Verify token — try local JWT first, then v2.1.16 cloud fallback.
+        user = None
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            email = payload.get("sub")
+            if not email:
+                await websocket.close(code=4001)
+                return
+            user = await db.users.find_one({"email": email}, {"_id": 0})
+        except JWTError:
+            cloud_user = await _resolve_cloud_user_dict(f"Bearer {token}")
+            if not cloud_user:
+                await websocket.close(code=4003)
+                return
+            user = cloud_user
+
         if not user or user.get("status") != "active":
             await websocket.close(code=4002)
             return
