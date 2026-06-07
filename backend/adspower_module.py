@@ -290,6 +290,81 @@ async def test_adspower_config(user: dict, cid: str, *, wait_timeout: int = 18) 
     if not cfg:
         raise HTTPException(404, "AdsPower config not found")
 
+    # ── v2.1.18 Local-mode direct test ───────────────────────────────
+    # On the customer's desktop install (KREXION_MODE != "cloud") this
+    # very Python process IS already running on the same PC as
+    # AdsPower. The cloud-bridge model (heartbeat + bridge_jobs queue)
+    # is OVERKILL here — we can call AdsPower's local HTTP API
+    # directly and answer in <500ms. Before v2.1.18 the bridge check
+    # always failed because the desktop install doesn't write to the
+    # cloud's `sync_heartbeats` collection, leaving customers stuck on
+    # "Your PC is not connected to Krexion" forever even though
+    # AdsPower was running fine.
+    import os as _os
+    if (_os.environ.get("KREXION_MODE") or "local").lower().strip() != "cloud":
+        try:
+            import httpx as _httpx
+            host = (cfg.get("host") or "http://local.adspower.net:50325").rstrip("/")
+            api_key = cfg.get("api_key") or ""
+            async with _httpx.AsyncClient(timeout=8.0) as _c:
+                # AdsPower's `/api/v1/user/list` is the canonical reachability
+                # ping — returns code=0 + a (possibly empty) `data.list` when
+                # the local API is enabled and the key is valid.
+                resp = await _c.get(
+                    f"{host}/api/v1/user/list",
+                    params={"api_key": api_key, "page": 1, "page_size": 1},
+                )
+            if resp.status_code == 200:
+                body = resp.json()
+                if body.get("code") == 0:
+                    return {
+                        "ok": True,
+                        "reachable": True,
+                        "message": "AdsPower reachable on this PC",
+                        "local_online": True,
+                        "needs_repair": False,
+                        "via": "direct_local",
+                    }
+                # AdsPower returned an error envelope — surface its msg.
+                return {
+                    "ok": False,
+                    "reachable": True,
+                    "message": (body.get("msg") or "AdsPower rejected the API key. "
+                                "Open AdsPower → Settings → API and copy the key again."),
+                    "local_online": True,
+                    "needs_repair": False,
+                    "via": "direct_local",
+                }
+            return {
+                "ok": False,
+                "reachable": False,
+                "message": (
+                    f"AdsPower local API returned HTTP {resp.status_code}. "
+                    "Make sure AdsPower is running and 'Local API' is enabled "
+                    "(AdsPower → Settings → Local API)."
+                ),
+                "local_online": False,
+                "needs_repair": False,
+                "via": "direct_local",
+            }
+        except (_httpx.ConnectError, _httpx.ConnectTimeout):
+            return {
+                "ok": False,
+                "reachable": False,
+                "message": (
+                    "Can't reach AdsPower on this PC. Open AdsPower (the app), "
+                    "make sure 'Local API' is enabled in Settings, then click "
+                    "Test again."
+                ),
+                "local_online": False,
+                "needs_repair": False,
+                "via": "direct_local",
+            }
+        except Exception as _e:  # noqa: BLE001 - last-resort fallback to bridge
+            logger.warning(f"[adspower] direct local test failed, falling back to bridge: {_e}")
+            # Fall through to bridge logic below.
+
+    # ── Cloud-bridge model (unchanged from pre-v2.1.18) ──────────────
     # Check if user has a local heartbeat (PC online)
     hb = await _db.sync_heartbeats.find_one({"user_id": user["id"]}, {"_id": 0})
     online = False

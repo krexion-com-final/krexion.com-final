@@ -16505,11 +16505,50 @@ async def _consume_uploads(
 # Visual Recorder — interactive Playwright session that records the
 # user's clicks/typing as a Krexion automation JSON.
 # ─────────────────────────────────────────────────────────────────────
+# v2.1.18 — Persist the EXACT import error so /diagnostics can surface
+# it to the customer (and the support team) instead of the generic
+# "Visual recorder unavailable" message they were seeing. Also try a
+# second import path that works when the backend is launched from a
+# different cwd (common on Windows installs where the spawn cwd is
+# %APPDATA%\Krexion-Desktop instead of the resources folder).
+_VR_IMPORT_ERROR: Optional[str] = None
 try:
     import visual_recorder as vr
 except Exception as _e:
+    _VR_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
     logger.warning(f"visual_recorder import failed: {_e}")
-    vr = None
+    # Retry with explicit sys.path injection — the desktop installer
+    # places visual_recorder.py next to server.py, so __file__ is the
+    # most reliable anchor when the spawn cwd differs.
+    try:
+        import sys as _sys
+        _backend_dir = str(Path(__file__).resolve().parent)
+        if _backend_dir not in _sys.path:
+            _sys.path.insert(0, _backend_dir)
+        import visual_recorder as vr  # type: ignore  # noqa: F811
+        _VR_IMPORT_ERROR = None
+        logger.info("visual_recorder loaded via explicit sys.path fallback")
+    except Exception as _e2:
+        _VR_IMPORT_ERROR = f"{_VR_IMPORT_ERROR}  |  retry: {type(_e2).__name__}: {_e2}"
+        logger.warning(f"visual_recorder retry also failed: {_e2}")
+        vr = None
+
+
+@api_router.get("/visual-recorder/diagnostics")
+async def vr_diagnostics(user: dict = Depends(get_current_user)):
+    """v2.1.18 — Expose the actual import error so the customer (and
+    support) can see WHY visual_recorder is unavailable instead of
+    just 'Visual recorder unavailable'. Common causes are missing
+    Playwright (`pip install playwright`) or a corrupted install."""
+    import sys as _sys
+    return {
+        "module_loaded": vr is not None,
+        "import_error": _VR_IMPORT_ERROR,
+        "python_executable": _sys.executable,
+        "python_version": _sys.version.split()[0],
+        "backend_dir": str(Path(__file__).resolve().parent),
+        "sys_path_head": _sys.path[:5],
+    }
 
 
 class VRStartReq(BaseModel):
@@ -18766,9 +18805,10 @@ async def diagnostics_repair(current_user: dict = Depends(get_current_user)):
         else:
             # Fire the existing installer in a background thread so the
             # request returns fast.
-            import subprocess
+            # v2.1.18 — use sys.executable -m playwright (Windows-safe).
+            import subprocess, sys as _sys
             proc = await asyncio.create_subprocess_exec(
-                "playwright", "install", "chromium-headless-shell",
+                _sys.executable, "-m", "playwright", "install", "chromium-headless-shell",
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
             try:

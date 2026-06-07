@@ -294,8 +294,15 @@ async def _ensure_chromium_available() -> bool:
                 f"installing now (this may take ~60s)…"
             )
             try:
+                # v2.1.18 — Use `python -m playwright` instead of bare
+                # `playwright` so the install works on Windows desktop
+                # installs where the embedded Python's Scripts/ folder
+                # isn't on the spawn-process PATH. `sys.executable` is
+                # always the correct Python interpreter we're running
+                # inside.
+                import sys as _sys
                 proc = await asyncio.create_subprocess_exec(
-                    "playwright", "install", "chromium-headless-shell",
+                    _sys.executable, "-m", "playwright", "install", "chromium-headless-shell",
                     env={**os.environ, "PLAYWRIGHT_BROWSERS_PATH": browsers_root},
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
