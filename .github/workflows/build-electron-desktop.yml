@@ -29,6 +29,8 @@ jobs:
     name: Build Electron installer (Windows x64)
     runs-on: windows-latest
     timeout-minutes: 45
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
       - name: Checkout
@@ -143,36 +145,48 @@ jobs:
           draft: false
           prerelease: false
 
-      # ────────────────────────────────────────────────────────────
-      # 2026-02 — SELF-HOSTED MIRROR on the production VPS.
-      # After the optional GitHub Release (above) succeeds — OR
-      # whenever this workflow runs at all — we SCP the installer +
-      # latest.yml + blockmap to the krexion.com VPS at
-      # /opt/krexion/downloads/desktop/. The frontend nginx container
-      # serves /downloads/desktop/* publicly, so:
-      #
-      #   • Public download:   https://krexion.com/downloads/desktop/Krexion-Desktop-Setup-latest.exe
-      #   • Auto-update feed:  https://krexion.com/downloads/desktop/latest.yml
-      #
-      # This is the channel electron-updater reads (configured in
-      # electron-builder.yml → publish: generic). The GitHub release
-      # is now a backup mirror only.
-      #
-      # Required secrets (same as deploy.yml):
-      #   VPS_HOST, VPS_USER, VPS_PORT (optional), VPS_SSH_KEY
-      - name: Mirror installer + latest.yml to VPS (self-hosted CDN)
+  # ─────────────────────────────────────────────────────────────────
+  # 2026-02 — SELF-HOSTED MIRROR on the production VPS.
+  #
+  # MUST run in a SEPARATE Linux job because appleboy/scp-action is a
+  # Docker container action and Docker container actions only run on
+  # Linux runners (fix for: "Container action is only supported on
+  # Linux" — that error blew up when we tried to SCP straight from the
+  # Windows build runner).
+  #
+  # Approach: build job uploads installer + latest.yml as a GitHub
+  # Actions artifact → this job downloads it on Ubuntu → SCPs to VPS.
+  # Required secrets (same as deploy.yml):
+  #   VPS_HOST, VPS_USER, VPS_PORT (optional), VPS_SSH_KEY
+  # ─────────────────────────────────────────────────────────────────
+  mirror-to-vps:
+    name: Mirror to krexion.com VPS (self-hosted CDN)
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ needs.build.result == 'success' }}
+    steps:
+      - name: Download installer artifact from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: Krexion-Desktop-Setup-${{ needs.build.outputs.version }}
+          path: dist
+
+      - name: List downloaded artifacts (debug)
+        run: ls -lah dist/
+
+      - name: SCP installer + latest.yml to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT || 22 }}
-          source: "electron-desktop/dist/Krexion-Desktop-Setup-*.exe,electron-desktop/dist/Krexion-Desktop-Setup-*.exe.blockmap,electron-desktop/dist/latest.yml"
+          source: "dist/Krexion-Desktop-Setup-*.exe,dist/Krexion-Desktop-Setup-*.exe.blockmap,dist/latest.yml"
           target: "/opt/krexion/downloads/desktop/"
-          strip_components: 2
+          strip_components: 1
           overwrite: true
 
-      - name: Update "latest" symlink + permissions on VPS
+      - name: Update "latest" copy + permissions on VPS
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -182,16 +196,23 @@ jobs:
           timeout: 5m
           script: |
             set -e
+            mkdir -p /opt/krexion/downloads/desktop
             cd /opt/krexion/downloads/desktop
-            V="${{ steps.version.outputs.version }}"
+            V="${{ needs.build.outputs.version }}"
             # Stable filename so the public homepage button can point to
             # a single URL forever ("Krexion-Desktop-Setup-latest.exe").
             # We hard-copy (cp -f) instead of symlink because the nginx
-            # docker volume mount serves files, not links, and copies
-            # work identically on every filesystem.
-            cp -f "Krexion-Desktop-Setup-${V}.exe" "Krexion-Desktop-Setup-latest.exe"
-            # Don't symlink latest.yml — electron-builder already produces
-            # a single "latest.yml" per build, overwriting the previous.
+            # docker volume mount serves files; copies behave identically
+            # across filesystems and work without follow-symlinks tweaks.
+            if [ -f "Krexion-Desktop-Setup-${V}.exe" ]; then
+              cp -f "Krexion-Desktop-Setup-${V}.exe" "Krexion-Desktop-Setup-latest.exe"
+            else
+              echo "::warning::Expected Krexion-Desktop-Setup-${V}.exe but not found — picking newest .exe instead"
+              NEWEST=$(ls -t Krexion-Desktop-Setup-*.exe 2>/dev/null | grep -v latest | head -1)
+              [ -n "$NEWEST" ] && cp -f "$NEWEST" "Krexion-Desktop-Setup-latest.exe" || true
+            fi
             ls -la
             chmod -R a+r .
-            echo "Self-hosted CDN updated: https://krexion.com/downloads/desktop/Krexion-Desktop-Setup-latest.exe"
+            echo "Self-hosted CDN updated:"
+            echo "  https://krexion.com/downloads/desktop/Krexion-Desktop-Setup-latest.exe"
+            echo "  https://krexion.com/downloads/desktop/latest.yml"
