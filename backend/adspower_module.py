@@ -307,12 +307,17 @@ async def test_adspower_config(user: dict, cid: str, *, wait_timeout: int = 18) 
             host = (cfg.get("host") or "http://local.adspower.net:50325").rstrip("/")
             api_key = cfg.get("api_key") or ""
             async with _httpx.AsyncClient(timeout=8.0) as _c:
-                # AdsPower's `/api/v1/user/list` is the canonical reachability
-                # ping — returns code=0 + a (possibly empty) `data.list` when
-                # the local API is enabled and the key is valid.
+                # v2.1.21 — AdsPower V2 API uses Authorization: Bearer header,
+                # not the legacy ?api_key= query param. Customer's CMD test
+                # showed: GET /api/v1/user/list?api_key=... returned
+                # {"code":-1,"msg":"Require api-key"} even though the key
+                # was correct. Sending BOTH forms (header + query) for
+                # max compatibility with V1 (query) and V2 (header) clients.
+                _headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
                 resp = await _c.get(
                     f"{host}/api/v1/user/list",
                     params={"api_key": api_key, "page": 1, "page_size": 1},
+                    headers=_headers,
                 )
             if resp.status_code == 200:
                 body = resp.json()
