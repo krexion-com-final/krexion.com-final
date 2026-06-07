@@ -7180,8 +7180,32 @@ async def rut_create_job(
     """
     check_user_feature(user, "real_user_traffic")
 
-    # 1. Link ownership + target URL (fast)
+    # 1. Link ownership + target URL (fast).
+    #    v2.1.17: Cloud is the source of truth for links (per the
+    #    v2.1.15 hybrid architecture — links live cloud-side so they
+    #    keep redirecting even when the customer's PC is off). When
+    #    the link isn't in local Mongo yet, fall back to cloud and
+    #    mirror the result locally so future RUT visits avoid the
+    #    round-trip.
     link = await db.links.find_one({"id": link_id, "user_id": user["id"]}, {"_id": 0})
+    if not link and not IS_CLOUD:
+        try:
+            from cloud_proxy_module import fetch_link_from_cloud
+            auth_header = request.headers.get("Authorization") or ""
+            cloud_link = await fetch_link_from_cloud(link_id, auth_header)
+            if cloud_link:
+                cloud_link["user_id"] = user["id"]
+                try:
+                    await db.links.update_one(
+                        {"id": link_id},
+                        {"$set": cloud_link},
+                        upsert=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                link = cloud_link
+        except Exception as _e:  # noqa: BLE001
+            logger.warning(f"[rut] cloud link fallback failed: {_e}")
     if not link:
         raise HTTPException(status_code=404, detail="Link not found")
     target = _rut_build_target_url(request, link, target_url, force_tracker=force_tracker_url)

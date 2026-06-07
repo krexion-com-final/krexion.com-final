@@ -266,8 +266,40 @@ async def verify_cloud_token(authorization_header: Optional[str]) -> Optional[di
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Middleware
+# Single-resource cloud fetchers (v2.1.17)
 # ══════════════════════════════════════════════════════════════════════
+# Local endpoints (RUT job creation, Visual Recorder warmup, etc.) need
+# to look up data that lives ONLY on the cloud (links, sub-users,
+# admin metadata). Instead of forwarding the whole request via the
+# proxy, the call site fetches just the resource it needs and mirrors
+# it into local Mongo for offline reuse.
+#
+# Each fetcher takes the user's Authorization header verbatim and
+# returns the cloud's JSON body (or None on 4xx/5xx/network errors).
+# Errors are intentionally swallowed → call site decides whether
+# missing data is fatal (404 to user) or recoverable (use local
+# cache).
+# ══════════════════════════════════════════════════════════════════════
+
+async def fetch_link_from_cloud(link_id: str, authorization_header: str) -> Optional[dict]:
+    """Fetch a single link by id from krexion.com. Used as a fallback
+    when the local RUT engine doesn't find the link in its local Mongo
+    (because links now live cloud-side per the v2.1.15 architecture).
+
+    Returns the cloud LinkResponse dict or None."""
+    if _is_cloud() or not authorization_header:
+        return None
+    try:
+        client = await _get_client()
+        r = await client.get(
+            f"{_cloud_url()}/api/links/{link_id}",
+            headers={"Authorization": authorization_header},
+        )
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[cloud_proxy] fetch_link_from_cloud failed: {e}")
+    return None
 class CloudProxyMiddleware(BaseHTTPMiddleware):
     """Sits in front of every route. If the request path matches the
     cloud allowlist AND we're not running ON the cloud, forward to

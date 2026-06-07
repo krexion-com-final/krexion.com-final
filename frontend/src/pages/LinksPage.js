@@ -16,8 +16,18 @@ const API = `${BACKEND_URL}/api`;
 // Host for user-facing tracking links. If REACT_APP_BACKEND_URL is empty
 // (nginx-same-origin deployments like local Docker), fall back to the
 // current window origin so copied links include the full URL.
+// 2026-02 v2.1.17 — Tracking links are PROFESSIONAL and must live on
+// the cloud (krexion.com), NOT on the customer's local PC. Reasons:
+//   1. A shared link must keep working even when the customer's PC is
+//      off — the redirect endpoint lives on cloud Mongo.
+//   2. "http://127.0.0.1:8088/api/t/abcd" looks unprofessional when
+//      pasted into a campaign / shared with a partner.
+//   3. The /api/links/* allowlist forwards CRUD to cloud already, so
+//      every short_code in the dashboard is guaranteed to exist on
+//      krexion.com — the redirect host and the data host match.
+// Override via REACT_APP_KREXION_PUBLIC_HOST if a customer self-hosts.
 const PUBLIC_HOST =
-  (typeof window !== "undefined" && (BACKEND_URL || window.location.origin)) || "";
+  process.env.REACT_APP_KREXION_PUBLIC_HOST || "https://krexion.com";
 
 // Fallback copy function that works over HTTP (not just HTTPS)
 const copyToClipboard = async (text) => {
