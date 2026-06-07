@@ -43,9 +43,45 @@ STARTUP_TIMEOUT_S = 45          # Increased to 45s for slow proxies
 LAUNCH_TIMEOUT_S = 15           # browser launch + context only
 GOTO_TIMEOUT_MS = 35_000        # Increased to 35s for initial page.goto with slow proxies
 
-# Persistent storage for finalized recordings
-SESSIONS_ROOT = Path(__file__).parent / "visual_recorder_sessions"
-SESSIONS_ROOT.mkdir(parents=True, exist_ok=True)
+# Persistent storage for finalized recordings.
+#
+# v2.1.19 — On Windows desktop installs, `__file__` points inside
+# `C:\Program Files\Krexion Desktop\resources\backend\` which the
+# installer sets to READ-ONLY for security. The original code did
+# `Path(__file__).parent / "visual_recorder_sessions"` and then
+# `.mkdir(...)` at module import time — that mkdir raised
+# `PermissionError: [WinError 5] Access denied` which crashed the
+# import. server.py then catches the failure and sets `vr = None`,
+# leaving the customer with "Visual recorder module not available".
+#
+# Fix: prefer a per-user writable data root. Resolution order:
+#   1. KREXION_DATA_DIR env var (set by main.js to %APPDATA%\Krexion-Desktop)
+#   2. %APPDATA%\Krexion-Desktop on Windows
+#   3. ~/.krexion on POSIX
+#   4. fall back to Path(__file__).parent (cloud / dev installs where
+#      the backend dir IS writable).
+import os as _os_vr
+def _resolve_sessions_root() -> Path:
+    env_root = _os_vr.environ.get("KREXION_DATA_DIR")
+    if env_root:
+        return Path(env_root) / "visual_recorder_sessions"
+    appdata = _os_vr.environ.get("APPDATA")  # Windows: %APPDATA%
+    if appdata:
+        return Path(appdata) / "Krexion-Desktop" / "visual_recorder_sessions"
+    return Path.home() / ".krexion" / "visual_recorder_sessions"
+
+
+try:
+    SESSIONS_ROOT = _resolve_sessions_root()
+    SESSIONS_ROOT.mkdir(parents=True, exist_ok=True)
+except PermissionError:
+    # Last-resort: every Windows user has write access to %TEMP%, so
+    # we can still run the recorder there even on a locked-down
+    # install. Recordings will be lost on cleanup but the feature
+    # itself stops being "unavailable".
+    import tempfile as _tempfile_vr
+    SESSIONS_ROOT = Path(_tempfile_vr.gettempdir()) / "krexion-visual-recorder"
+    SESSIONS_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 # ── Proxy parsing ───────────────────────────────────────────────────────

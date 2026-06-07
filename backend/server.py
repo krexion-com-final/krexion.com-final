@@ -6048,23 +6048,39 @@ def _rut_build_target_url(request: Request, link: dict, explicit_target: Optiona
         and not _is_local_or_private_host(offer)
         and not _is_emergent_preview_host(offer)
     )
+    # v2.1.19 — Tracker URL MUST be the cloud (krexion.com), never the
+    # customer's local 127.0.0.1. Reasons:
+    #   1. Links live cloud-side now (v2.1.15 architecture). The cloud's
+    #      /api/t/{code} handler records the click + redirects to the
+    #      offer. Local /api/t/ would record into local Mongo and the
+    #      cloud admin dashboard wouldn't see the visit.
+    #   2. Residential proxies CAN'T reach 127.0.0.1 anyway — they hand
+    #      back ERR_TUNNEL_CONNECTION_FAILED, which is why the old RUT
+    #      target was being auto-swapped to the offer_url, bypassing the
+    #      tracker entirely and losing click attribution.
+    cloud_tracker_base = (
+        os.environ.get("KREXION_CLOUD_URL")
+        or "https://krexion.com"
+    ).rstrip("/")
     if explicit_target and explicit_target.strip():
         tu = explicit_target.strip().rstrip("/")
-        # If user already provided a complete URL (starts with http/https),
-        # use it AS-IS — supports both tracker URLs ("…/t/abc") and direct
-        # offer URLs (bypass tracker for form-fill-only testing).
         if tu.lower().startswith(("http://", "https://")):
-            # Local host OR Emergent preview host — unreachable/blocked
-            # through a public residential proxy; auto-swap to the link's
-            # offer_url so the browser can actually reach the landing page.
-            # UNLESS force_tracker=True → keep the tracker URL (user
-            # explicitly wants strict flow through /api/t/).
-            if not force_tracker and (_is_local_or_private_host(tu) or _is_emergent_preview_host(tu)):
-                if offer_is_public:
+            # If the caller passed a local/preview tracker URL, REWRITE it
+            # to the cloud tracker (unless force_tracker explicitly wants
+            # the literal URL for offer-URL bypass testing).
+            if _is_local_or_private_host(tu) or _is_emergent_preview_host(tu):
+                if not force_tracker and offer_is_public:
                     return offer
+                # Force-tracker case: use the cloud /api/t/{sc} so the
+                # click is at least recorded on cloud.
+                return f"{cloud_tracker_base}/api/t/{sc}"
             return tu
         # Bare host like "yourdomain.com" → append tracker path
         return f"{tu}/api/t/{sc}"
+    # No explicit_target → always prefer cloud tracker (professional URL
+    # + ensures click attribution on the cloud Mongo).
+    return f"{cloud_tracker_base}/api/t/{sc}"
+    # ── Legacy code path kept for reference only (unreachable) ───────
     public_base = os.environ.get("PUBLIC_BASE_URL") or os.environ.get("REACT_APP_BACKEND_URL") or ""
     if public_base and public_base.startswith("http"):
         candidate = f"{public_base.rstrip('/')}/api/t/{sc}"
@@ -14010,7 +14026,25 @@ async def proxyjet_test_credentials(user: dict = Depends(get_current_user)):
             data = r.json()
             exit_ip = data.get("ip")
     except Exception as e:
-        return {"ok": False, "error": str(e)[:300], "session_id": sid}
+        # v2.1.19 — Surface a friendlier message for the very common
+        # "wrong gateway sub-domain" case. The customer typed something
+        # like "not" or "xx" → DNS for "not.proxy-jet.io" fails →
+        # `[Errno 11001] getaddrinfo failed` (Windows) / `nodename nor
+        # servname provided` (Linux). Tell them exactly what to fix.
+        raw = str(e)
+        gw = creds.get("gateway", _pj.DEFAULT_GATEWAY) or ""
+        srv = creds.get("server", _pj.DEFAULT_SERVER) or ""
+        if ("getaddrinfo" in raw or "nodename" in raw
+                or "Name or service not known" in raw):
+            hint = (
+                f"Gateway '{gw}' doesn't resolve on {srv}. "
+                f"Try a real ProxyJet gateway sub-domain like "
+                f"'ca', 'us', 'uk', 'de' (the placeholder example) — "
+                f"the full address must look like '{srv}' or "
+                f"'<gateway>.{srv}'."
+            )
+            return {"ok": False, "error": hint, "raw": raw[:200], "session_id": sid}
+        return {"ok": False, "error": raw[:300], "session_id": sid}
     rt_ms = int((time.time() - started) * 1000)
     return {
         "ok": True,
