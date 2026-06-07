@@ -16,6 +16,7 @@ import SettingsPage from "./pages/SettingsPage";
 import ReferrerStatsPage from "./pages/ReferrerStatsPage";
 import ImportTrafficPage from "./pages/ImportTrafficPage";
 import EmailCheckerPage from "./pages/EmailCheckerPage";
+import PhoneCheckerPage from "./pages/PhoneCheckerPage";
 import SeparateDataPage from "./pages/SeparateDataPage";
 import UserAgentGeneratorPage from "./pages/UserAgentGeneratorPage";
 import UserAgentCheckerPage from "./pages/UserAgentCheckerPage";
@@ -119,7 +120,7 @@ function FeatureRoute({ children, feature }) {
   
   // Backward compat: new granular features fall back to "import_data" legacy flag
   const LEGACY_IMPORT_GROUP = new Set([
-    "email_checker", "separate_data", "import_traffic", "real_traffic", "ua_generator"
+    "email_checker", "phone_checker", "separate_data", "import_traffic", "real_traffic", "ua_generator"
   ]);
 
   // If feature is specified and not enabled, redirect to dashboard
@@ -237,6 +238,11 @@ function App() {
                       <Route path="/email-checker" element={
                         <FeatureRoute feature="email_checker">
                           <EmailCheckerPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/phone-checker" element={
+                        <FeatureRoute feature="phone_checker">
+                          <PhoneCheckerPage />
                         </FeatureRoute>
                       } />
                       <Route path="/separate-data" element={

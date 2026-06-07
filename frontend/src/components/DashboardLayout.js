@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { LayoutDashboard, Link2, MousePointerClick, DollarSign, Server, Menu, LogOut, User, Settings, TrendingUp, Upload, Mail, Filter, Smartphone, Search, ClipboardCheck, Fingerprint, Package, Apple, Cpu, Briefcase, ChevronDown, ChevronRight, Link as LinkIcon, Activity, Camera, UserPlus, KeyRound } from "lucide-react";
+import { LayoutDashboard, Link2, MousePointerClick, DollarSign, Server, Menu, LogOut, User, Settings, TrendingUp, Upload, Mail, Phone, Filter, Smartphone, Search, ClipboardCheck, Fingerprint, Package, Apple, Cpu, Briefcase, ChevronDown, ChevronRight, Link as LinkIcon, Activity, Camera, UserPlus, KeyRound } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "./ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "./ui/dropdown-menu";
@@ -82,6 +82,7 @@ export default function DashboardLayout({ children }) {
     { name: "Traffic Sources", path: "/referrers", icon: TrendingUp, feature: "clicks" },
     { name: "Import Traffic", path: "/import-traffic", icon: Upload, feature: "import_traffic" },
     { name: "Email Checker", path: "/email-checker", icon: Mail, feature: "email_checker" },
+    { name: "Phone Checker", path: "/phone-checker", icon: Phone, feature: "phone_checker" },
     { name: "Separate Data", path: "/separate-data", icon: Filter, feature: "separate_data" },
     { name: "UA Generator", path: "/ua-generator", icon: Smartphone, feature: "ua_generator" },
     { name: "UA Checker", path: "/ua-checker", icon: Search, feature: "ua_generator" },
@@ -94,7 +95,7 @@ export default function DashboardLayout({ children }) {
 
   // Backward compat: new granular features fall back to "import_data" legacy flag
   const LEGACY_IMPORT_GROUP = new Set([
-    "email_checker", "separate_data", "import_traffic", "real_traffic", "ua_generator"
+    "email_checker", "phone_checker", "separate_data", "import_traffic", "real_traffic", "ua_generator"
   ]);
 
   // Filter navigation: show only enabled features (groups + flat items)

@@ -1568,6 +1568,7 @@ DEFAULT_FEATURES = {
     "real_traffic": True,
     "ua_generator": True,
     "email_checker": True,
+    "phone_checker": True,
     "separate_data": True,
     "form_filler": True,
     "real_user_traffic": True,
@@ -1604,6 +1605,7 @@ SUB_USER_PERMISSION_MAP = {
     "real_traffic":         "real_traffic",
     "ua_generator":         "ua_generator",
     "email_checker":        "email_checker",
+    "phone_checker":        "phone_checker",
     "separate_data":        "separate_data",
     "form_filler":          "form_filler",
     "real_user_traffic":    "real_user_traffic",
@@ -1806,6 +1808,7 @@ class UserFeatures(BaseModel):
     real_traffic: bool = False
     ua_generator: bool = False
     email_checker: bool = False
+    phone_checker: bool = False
     separate_data: bool = False
     form_filler: bool = False
     real_user_traffic: bool = False
@@ -3179,7 +3182,7 @@ def check_user_feature(user: dict, feature: str):
     # Backward compat: new granular features (email_checker, separate_data, import_traffic,
     # real_traffic, ua_generator) fall back to the legacy "import_data" flag when not set
     # explicitly. That way users created before these features existed keep access.
-    LEGACY_IMPORT_GROUP = {"email_checker", "separate_data", "import_traffic", "real_traffic", "ua_generator"}
+    LEGACY_IMPORT_GROUP = {"email_checker", "phone_checker", "separate_data", "import_traffic", "real_traffic", "ua_generator"}
     if feature not in features and feature in LEGACY_IMPORT_GROUP:
         if features.get("import_data", False):
             return True
@@ -3226,7 +3229,7 @@ async def get_current_user_with_fresh_data(request: Request) -> dict:
                                 "real_user_traffic", "form_filler",
                                 "visual_recorder", "proxies", "links",
                                 "clicks", "import_traffic",
-                                "email_checker", "separate_data",
+                                "email_checker", "phone_checker", "separate_data",
                                 "ua_generator", "ua_checker",
                                 "real_traffic", "import_data",
                                 "adspower", "uploaded_things",
@@ -3254,7 +3257,7 @@ async def get_current_user_with_fresh_data(request: Request) -> dict:
                         for feat in ("real_user_traffic", "form_filler",
                                      "visual_recorder", "proxies", "links",
                                      "clicks", "import_traffic",
-                                     "email_checker", "separate_data",
+                                     "email_checker", "phone_checker", "separate_data",
                                      "ua_generator", "ua_checker",
                                      "real_traffic", "import_data",
                                      "adspower", "uploaded_things",
@@ -3323,7 +3326,7 @@ async def get_current_user_with_fresh_data(request: Request) -> dict:
                             "real_user_traffic", "form_filler",
                             "visual_recorder", "proxies", "links",
                             "clicks", "import_traffic",
-                            "email_checker", "separate_data",
+                            "email_checker", "phone_checker", "separate_data",
                             "ua_generator", "ua_checker",
                             "real_traffic", "import_data",
                             "adspower", "uploaded_things",
@@ -9903,6 +9906,372 @@ async def download_email_results(
     except Exception as e:
         logger.error(f"Error generating Excel: {e}")
         raise HTTPException(status_code=500, detail=f"Error generating file: {str(e)}")
+
+# ==================== PHONE CHECKER (FREE — offline validation) ====================
+# Uses Google's libphonenumber (Python port) — purely offline, no paid API.
+# Validates format, parses country, region, carrier (where known), line type
+# (mobile/fixed-line/VoIP), and timezone. Works for ANY country.
+
+class PhoneCheckRequest(BaseModel):
+    phones: List[str]
+    default_region: Optional[str] = None  # ISO 3166-1 alpha-2 hint (e.g. "US")
+
+
+class PhoneDownloadRequest(BaseModel):
+    rows: Optional[List[Dict[str, Any]]] = None
+    columns: Optional[List[str]] = None
+    phone_column: Optional[str] = None
+    results: Dict[str, Dict[str, Any]]
+    default_region: Optional[str] = None
+
+
+def _check_one_phone(raw: str, default_region: Optional[str]) -> Dict[str, Any]:
+    """Offline phone validation using libphonenumber. Always returns a dict
+    — never raises — so a single bad number never breaks a batch."""
+    import phonenumbers
+    from phonenumbers import geocoder as _geo, carrier as _car, timezone as _tz
+    from phonenumbers.phonenumberutil import NumberParseException, PhoneNumberType
+
+    cleaned = (raw or "").strip()
+    out: Dict[str, Any] = {
+        "input": cleaned,
+        "valid": False,
+        "possible": False,
+        "e164": "",
+        "national": "",
+        "international": "",
+        "country_code": "",
+        "region": "",
+        "country_name": "",
+        "carrier": "",
+        "line_type": "",
+        "timezones": [],
+        "error": "",
+    }
+    if not cleaned:
+        out["error"] = "empty"
+        return out
+    region_hint = (default_region or "").strip().upper() or None
+    try:
+        # If user typed plain digits without +, fall back to region hint
+        parse_input = cleaned if cleaned.startswith("+") else cleaned
+        num = phonenumbers.parse(parse_input, region_hint)
+    except NumberParseException as e:
+        out["error"] = str(e)
+        return out
+
+    try:
+        out["possible"] = bool(phonenumbers.is_possible_number(num))
+        out["valid"]    = bool(phonenumbers.is_valid_number(num))
+        out["e164"]            = phonenumbers.format_number(num, phonenumbers.PhoneNumberFormat.E164)
+        out["national"]        = phonenumbers.format_number(num, phonenumbers.PhoneNumberFormat.NATIONAL)
+        out["international"]   = phonenumbers.format_number(num, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
+        out["country_code"]    = f"+{num.country_code}"
+        out["region"]          = phonenumbers.region_code_for_number(num) or ""
+        out["country_name"]    = _geo.description_for_number(num, "en") or ""
+        out["carrier"]         = _car.name_for_number(num, "en") or ""
+        out["timezones"]       = list(_tz.time_zones_for_number(num)) or []
+
+        type_map = {
+            PhoneNumberType.MOBILE:                 "mobile",
+            PhoneNumberType.FIXED_LINE:             "fixed_line",
+            PhoneNumberType.FIXED_LINE_OR_MOBILE:   "fixed_or_mobile",
+            PhoneNumberType.TOLL_FREE:              "toll_free",
+            PhoneNumberType.PREMIUM_RATE:           "premium_rate",
+            PhoneNumberType.SHARED_COST:            "shared_cost",
+            PhoneNumberType.VOIP:                   "voip",
+            PhoneNumberType.PERSONAL_NUMBER:        "personal",
+            PhoneNumberType.PAGER:                  "pager",
+            PhoneNumberType.UAN:                    "uan",
+            PhoneNumberType.VOICEMAIL:              "voicemail",
+            PhoneNumberType.UNKNOWN:                "unknown",
+        }
+        # We deliberately use "line_type" (NOT "type") so the field cannot
+        # collide with the streaming JSONL envelope's "type": "result"/"progress"
+        # marker when the result dict is spread into it.
+        out["line_type"] = type_map.get(phonenumbers.number_type(num), "unknown")
+    except Exception as e:  # noqa: BLE001
+        out["error"] = f"parse_meta:{e}"
+    return out
+
+
+@api_router.post("/phones/check")
+async def check_phones(payload: PhoneCheckRequest, user: dict = Depends(get_current_user)):
+    """Validate a batch of phone numbers offline. Returns one result per
+    input. Free — uses libphonenumber, no third-party API calls.
+
+    Streams JSONL so the UI shows progress for large batches.
+    """
+    check_user_feature(user, "phone_checker")
+    inputs = [p for p in (payload.phones or []) if (p or "").strip()]
+    if not inputs:
+        raise HTTPException(status_code=400, detail="No phone numbers provided")
+
+    default_region = (payload.default_region or "").strip().upper() or None
+
+    async def _gen():
+        valid_count = 0
+        invalid_count = 0
+        for i, raw in enumerate(inputs, start=1):
+            res = _check_one_phone(raw, default_region)
+            if res["valid"]:
+                valid_count += 1
+            else:
+                invalid_count += 1
+            yield (json.dumps({"type": "result", **res}) + "\n").encode("utf-8")
+            if i % 10 == 0 or i == len(inputs):
+                yield (json.dumps({
+                    "type": "progress",
+                    "processed": i,
+                    "total": len(inputs),
+                }) + "\n").encode("utf-8")
+            # Yield to event loop every ~50 numbers so the worker stays responsive
+            if i % 50 == 0:
+                await asyncio.sleep(0)
+        yield (json.dumps({
+            "type": "complete",
+            "total": len(inputs),
+            "valid": valid_count,
+            "invalid": invalid_count,
+        }) + "\n").encode("utf-8")
+
+    return StreamingResponse(_gen(), media_type="application/x-ndjson")
+
+
+@api_router.post("/phones/upload-file")
+async def upload_phone_file(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
+    """Upload an .xlsx/.xls/.csv/.txt file and extract phone numbers.
+    Preserves original rows/columns so the export can re-emit the original
+    sheet plus enriched columns.
+    """
+    check_user_feature(user, "phone_checker")
+    import pandas as pd
+    import io
+    import re
+
+    filename = (file.filename or "").lower()
+    if not any(filename.endswith(ext) for ext in [".xlsx", ".xls", ".csv", ".txt"]):
+        raise HTTPException(status_code=400, detail="Supported formats: .xlsx, .xls, .csv, .txt")
+
+    # Anything that looks remotely like a phone — we keep punctuation so
+    # libphonenumber can do the heavy lifting. Min 7 digits, max 20 chars.
+    phone_pattern = re.compile(r"(?:\+?\d[\d\s\-\(\)\.]{5,20}\d)")
+
+    try:
+        contents = await file.read()
+        phones: List[str] = []
+        rows: List[Dict[str, Any]] = []
+        columns: List[str] = []
+        phone_column: Optional[str] = None
+
+        def _df_to_rows(df):
+            df = df.copy()
+            df.columns = [str(c) for c in df.columns]
+            df = df.fillna("")
+            cols = list(df.columns)
+            out = []
+            for _, row in df.iterrows():
+                row_dict = {}
+                for c in cols:
+                    v = row[c]
+                    try:
+                        if hasattr(v, "isoformat"):
+                            row_dict[c] = v.isoformat()
+                        else:
+                            row_dict[c] = str(v) if v != "" else ""
+                    except Exception:
+                        row_dict[c] = ""
+                out.append(row_dict)
+            return out, cols
+
+        def _pick_phone_column(cols, rows_list):
+            # Prefer columns whose header looks phone-ish
+            header_hints = ("phone", "mobile", "cell", "msisdn", "tel", "whatsapp", "number")
+            for c in cols:
+                cl = str(c).lower()
+                if any(h in cl for h in header_hints):
+                    # Confirm the column actually has phone-like values
+                    for r in rows_list[:50]:
+                        v = str(r.get(c, ""))
+                        digits = re.sub(r"\D", "", v)
+                        if 7 <= len(digits) <= 15:
+                            return c
+            # Else: pick column with most phone-shaped values
+            best_col, best_count = None, 0
+            for c in cols:
+                count = 0
+                for r in rows_list[:200]:
+                    v = str(r.get(c, ""))
+                    digits = re.sub(r"\D", "", v)
+                    if 7 <= len(digits) <= 15 and phone_pattern.search(v):
+                        count += 1
+                if count > best_count:
+                    best_count, best_col = count, c
+            return best_col if best_count > 0 else None
+
+        if filename.endswith(".csv") or filename.endswith(".txt"):
+            try:
+                df = pd.read_csv(io.BytesIO(contents), dtype=str, keep_default_na=False)
+                rows, columns = _df_to_rows(df)
+                phone_column = _pick_phone_column(columns, rows)
+                if phone_column:
+                    for r in rows:
+                        for m in phone_pattern.findall(str(r.get(phone_column, ""))):
+                            phones.append(m)
+                else:
+                    for r in rows:
+                        for v in r.values():
+                            phones.extend(phone_pattern.findall(str(v)))
+            except Exception:
+                text = contents.decode("utf-8", errors="ignore")
+                phones = phone_pattern.findall(text)
+                rows, columns, phone_column = [], [], None
+
+        elif filename.endswith(".xlsx") or filename.endswith(".xls"):
+            engine = "openpyxl" if filename.endswith(".xlsx") else "xlrd"
+            df = pd.read_excel(io.BytesIO(contents), engine=engine, dtype=str)
+            rows, columns = _df_to_rows(df)
+            phone_column = _pick_phone_column(columns, rows)
+            if phone_column:
+                for r in rows:
+                    for m in phone_pattern.findall(str(r.get(phone_column, ""))):
+                        phones.append(m)
+            else:
+                for r in rows:
+                    for v in r.values():
+                        phones.extend(phone_pattern.findall(str(v)))
+
+        # Deduplicate, preserve order, drop too-short
+        seen = set()
+        unique_phones = []
+        for p in phones:
+            key = re.sub(r"\D", "", p)
+            if 7 <= len(key) <= 15 and key not in seen:
+                seen.add(key)
+                unique_phones.append(p.strip())
+
+        if not unique_phones:
+            raise HTTPException(status_code=400, detail="No phone numbers detected in the file")
+
+        return {
+            "message": f"Found {len(unique_phones)} phone numbers",
+            "phones": unique_phones,
+            "count": len(unique_phones),
+            "rows": rows,
+            "columns": columns,
+            "phone_column": phone_column,
+            "filename": file.filename,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Phone file parse error: {e}")
+        raise HTTPException(status_code=400, detail=f"Error parsing file: {e}")
+
+
+@api_router.post("/phones/download-results")
+async def download_phone_results(
+    payload: PhoneDownloadRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Re-emit the user's original spreadsheet enriched with phone-check
+    columns. If they pasted phones directly we fall back to a flat sheet.
+    """
+    check_user_feature(user, "phone_checker")
+    import pandas as pd
+    import io
+    import re
+
+    results = payload.results or {}
+    # Normalise result keys by digits-only for robust matching
+    norm_results: Dict[str, Dict[str, Any]] = {}
+    for k, v in results.items():
+        digits = re.sub(r"\D", "", k or "")
+        if digits:
+            norm_results[digits] = v
+
+    def _row_to_digits(value: str) -> str:
+        return re.sub(r"\D", "", str(value or ""))
+
+    EXTRA_COLS = [
+        "Phone Valid", "Phone E.164", "Phone National", "Phone International",
+        "Phone Country Code", "Phone Region", "Phone Country", "Phone Carrier",
+        "Phone Line Type", "Phone Timezones", "Phone Error",
+    ]
+
+    def _row_from_res(res: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if not res:
+            return {c: "" for c in EXTRA_COLS}
+        return {
+            "Phone Valid":         "Yes" if res.get("valid") else "No",
+            "Phone E.164":         res.get("e164") or "",
+            "Phone National":      res.get("national") or "",
+            "Phone International": res.get("international") or "",
+            "Phone Country Code":  res.get("country_code") or "",
+            "Phone Region":        res.get("region") or "",
+            "Phone Country":       res.get("country_name") or "",
+            "Phone Carrier":       res.get("carrier") or "",
+            "Phone Line Type":     res.get("line_type") or "",
+            "Phone Timezones":     ", ".join(res.get("timezones") or []),
+            "Phone Error":         res.get("error") or "",
+        }
+
+    try:
+        rows = payload.rows or []
+        columns = payload.columns or []
+        phone_col = payload.phone_column
+
+        if rows and columns:
+            extended_cols = list(columns)
+            for c in EXTRA_COLS:
+                if c not in extended_cols:
+                    extended_cols.append(c)
+
+            enriched = []
+            for r in rows:
+                new_row = {c: r.get(c, "") for c in columns}
+                phone_val = None
+                if phone_col and r.get(phone_col):
+                    phone_val = _row_to_digits(r.get(phone_col, ""))
+                if not phone_val:
+                    for v in r.values():
+                        d = _row_to_digits(v)
+                        if 7 <= len(d) <= 15:
+                            phone_val = d
+                            break
+                res = norm_results.get(phone_val) if phone_val else None
+                new_row.update(_row_from_res(res))
+                enriched.append(new_row)
+
+            df_all = pd.DataFrame(enriched, columns=extended_cols)
+            df_valid   = df_all[df_all["Phone Valid"] == "Yes"]
+            df_invalid = df_all[df_all["Phone Valid"] == "No"]
+        else:
+            data_all = []
+            for digits, res in norm_results.items():
+                row = {"Phone (input)": res.get("input") or digits}
+                row.update(_row_from_res(res))
+                data_all.append(row)
+            df_all = pd.DataFrame(data_all)
+            df_valid   = df_all[df_all["Phone Valid"] == "Yes"] if "Phone Valid" in df_all.columns else pd.DataFrame()
+            df_invalid = df_all[df_all["Phone Valid"] == "No"]  if "Phone Valid" in df_all.columns else pd.DataFrame()
+
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df_all.to_excel(writer, sheet_name="All Results", index=False)
+            if len(df_valid) > 0:
+                df_valid.to_excel(writer, sheet_name="Valid", index=False)
+            if len(df_invalid) > 0:
+                df_invalid.to_excel(writer, sheet_name="Invalid", index=False)
+        output.seek(0)
+        return Response(
+            content=output.getvalue(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=phone_check_results.xlsx"},
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Phone export error: {e}")
+        raise HTTPException(status_code=500, detail=f"Error generating file: {e}")
 
 # ==================== SEPARATE DATA (EMAIL ROW FILTER) ====================
 

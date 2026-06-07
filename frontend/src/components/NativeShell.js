@@ -25,7 +25,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Link2, MousePointerClick, DollarSign, Server, LogOut,
-  User, Settings, TrendingUp, Upload, Mail, Filter, Smartphone, Search,
+  User, Settings, TrendingUp, Upload, Mail, Phone, Filter, Smartphone, Search,
   Fingerprint, Package, Camera, UserPlus, Activity, ChevronDown, Bell,
   CloudUpload, HelpCircle, Plus, Crown, Minus, Square, X as XIcon,
   ListChecks, Tag, Layers, FileText, Wrench, KeyRound, PanelLeftClose,
@@ -40,7 +40,7 @@ const API = `${BACKEND_URL}/api`;
 
 /* ── Feature → access-flag helpers (same rules as DashboardLayout) ──── */
 const LEGACY_IMPORT_GROUP = new Set([
-  "email_checker", "separate_data", "import_traffic", "real_traffic", "ua_generator",
+  "email_checker", "phone_checker", "separate_data", "import_traffic", "real_traffic", "ua_generator",
 ]);
 
 function hasFeature(features, key) {
@@ -86,6 +86,7 @@ const NAV_GROUPS = [
     label: "Tools",
     items: [
       { name: "Email Checker",  path: "/email-checker",  icon: Mail,     feature: "email_checker" },
+      { name: "Phone Checker",  path: "/phone-checker",  icon: Phone,    feature: "phone_checker" },
       { name: "Separate Data",  path: "/separate-data",  icon: Filter,   feature: "separate_data" },
       { name: "Import Traffic", path: "/import-traffic", icon: Upload,   feature: "import_traffic" },
       { name: "UA Generator",   path: "/ua-generator",   icon: Smartphone, feature: "ua_generator" },

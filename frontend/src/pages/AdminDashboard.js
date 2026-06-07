@@ -2506,6 +2506,7 @@ export default function AdminDashboard() {
                   { key: "real_traffic", label: "Real Traffic (residential proxies)" },
                   { key: "ua_generator", label: "User Agent Generator" },
                   { key: "email_checker", label: "Email Profile Checker" },
+                  { key: "phone_checker", label: "Phone Checker (free libphonenumber)" },
                   { key: "separate_data", label: "Separate Data (row filter)" },
                   { key: "form_filler", label: "Form Filler / Survey Bot" },
                   { key: "real_user_traffic", label: "Real User Traffic (anti-detect)" },
