@@ -118,6 +118,8 @@
   grid-template-columns: 240px 1fr;
   min-height: 0;
 }
+/* v2.1.22 — fullscreen RUT view (sidebar hidden via topbar toggle) */
+.knative-app-no-sidebar { grid-template-columns: 1fr; }
 @media (max-width: 900px) {
   .knative-app { grid-template-columns: 1fr; }
   .knative-sidebar { display: none; }   /* TODO: drawer for mobile */

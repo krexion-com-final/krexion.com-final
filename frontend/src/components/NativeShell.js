@@ -28,7 +28,8 @@ import {
   User, Settings, TrendingUp, Upload, Mail, Filter, Smartphone, Search,
   Fingerprint, Package, Camera, UserPlus, Activity, ChevronDown, Bell,
   CloudUpload, HelpCircle, Plus, Crown, Minus, Square, X as XIcon,
-  ListChecks, Tag, Layers, FileText, Wrench, KeyRound
+  ListChecks, Tag, Layers, FileText, Wrench, KeyRound, PanelLeftClose,
+  PanelLeftOpen, RefreshCw
 } from "lucide-react";
 import axios from "axios";
 import { useBranding } from "../context/BrandingContext";
@@ -142,6 +143,14 @@ export default function NativeShell({ children }) {
   const [version, setVersion] = useState("");
   const [engineStatus, setEngineStatus] = useState("running"); // running | offline
   const [collapsed, setCollapsed] = useState({});  // section -> bool
+  // v2.1.22 — Sidebar hide toggle for fullscreen RUT view. Persisted to
+  // localStorage so the choice survives reloads.
+  const [sidebarHidden, setSidebarHidden] = useState(
+    () => (typeof window !== "undefined" && localStorage.getItem("krexion_sidebar_hidden") === "1")
+  );
+  useEffect(() => {
+    try { localStorage.setItem("krexion_sidebar_hidden", sidebarHidden ? "1" : "0"); } catch (_) { /* localStorage unavailable */ }
+  }, [sidebarHidden]);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef(null);
 
@@ -271,7 +280,8 @@ export default function NativeShell({ children }) {
       </div>
 
       {/* ── Sidebar + content ──────────────────────────────────────── */}
-      <div className="knative-app">
+      <div className={`knative-app ${sidebarHidden ? "knative-app-no-sidebar" : ""}`}>
+        {!sidebarHidden && (
         <aside className="knative-sidebar" data-testid="native-sidebar">
           <div className="knative-brand">
             <div className="knative-brand-logo">
@@ -328,6 +338,7 @@ export default function NativeShell({ children }) {
             </div>
           </div>
         </aside>
+        )}
 
         <div className="knative-content">
           <div className="knative-topbar" data-testid="native-topbar">
@@ -338,6 +349,24 @@ export default function NativeShell({ children }) {
             {/* Engine status pill intentionally hidden from customer-facing UI.
                 The status is still tracked in `engineStatus` for internal
                 diagnostics (System Health page) but never rendered here. */}
+
+            {/* v2.1.22 — Sidebar hide toggle (fullscreen RUT view) + Refresh */}
+            <button
+              className="knative-topicon"
+              title={sidebarHidden ? "Show sidebar" : "Hide sidebar (fullscreen)"}
+              onClick={() => setSidebarHidden((v) => !v)}
+              data-testid="native-icon-sidebar-toggle"
+            >
+              {sidebarHidden ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
+            </button>
+            <button
+              className="knative-topicon"
+              title="Refresh current page"
+              onClick={() => window.location.reload()}
+              data-testid="native-icon-refresh"
+            >
+              <RefreshCw size={16} />
+            </button>
 
             <button className="knative-topicon" title="Sync to cloud" data-testid="native-icon-cloud">
               <CloudUpload size={16} />

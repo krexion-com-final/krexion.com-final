@@ -343,6 +343,25 @@ function createMainWindow() {
     mainWindow.loadURL(`${BACKEND_URL}/`);
   }
 
+  // v2.1.22 — Mandatory login on every cold launch.
+  // Customer requirement: "login b har bar mange ta k automatically login
+  // na ho jay jis user k pas login ho os ka wahi login kr sake".
+  // We clear localStorage.token + user as soon as the page DOM is ready
+  // so the React PrivateRoute redirects to /login. This runs ONCE per
+  // app launch (not on internal route navigations) because did-finish-load
+  // for the main URL fires once. The cleared item only removes auth —
+  // user's stored preferences (sidebar collapse, theme, etc.) survive.
+  mainWindow.webContents.once('did-finish-load', () => {
+    mainWindow.webContents.executeJavaScript(`
+      try {
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        // Surface the new state to React listeners
+        window.dispatchEvent(new Event('storage'));
+      } catch (e) { /* localStorage may be unavailable on file:// — safe to ignore */ }
+    `).catch(() => {});
+  });
+
   // Surface page-load failures (eg. protocol not registered, frontend
   // directory missing, etc.) into the log file so support can debug a
   // customer's machine remotely from %APPDATA%\Krexion-Desktop\logs.
