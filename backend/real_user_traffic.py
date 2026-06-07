@@ -4371,7 +4371,14 @@ async def run_real_user_traffic_job(
     # have a non-empty state; otherwise the whole job fails with a
     # clear error so the operator can fix the data before any visits
     # consume credits.
-    if proxyjet_on_demand:
+    # v2.1.20 — Click-only mode bypass. When the operator is just
+    # generating raw clicks (no form fill, no conversion automation)
+    # they don't need a data file at all. ProxyJet still works in
+    # "single proxy" mode using the configured default_country/state.
+    # Only require the data file when form_fill is enabled OR
+    # state-match was explicitly requested.
+    proxyjet_needs_data_file = bool(form_fill_enabled or state_match_enabled)
+    if proxyjet_on_demand and proxyjet_needs_data_file:
         if not rows:
             await _finalise_and_persist(
                 db, job_id, "failed",
