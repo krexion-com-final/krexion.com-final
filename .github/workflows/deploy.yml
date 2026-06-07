@@ -236,6 +236,28 @@ jobs:
             echo ">> Starting containers..."
             docker compose up -d frontend backend
 
+            # 2026-02 — Verify the new /downloads/ bind mount actually
+            # took effect inside the frontend container. If docker
+            # compose didn't recreate frontend (e.g. only nginx.conf
+            # was baked into the image but the docker-compose.yml
+            # volumes didn't trigger a recreate), the mount is stale.
+            # Force-recreate the frontend in that case so the bind
+            # mount becomes live without needing a full `down`.
+            echo ">> Verifying /downloads bind mount on frontend container..."
+            MOUNT_OK=$(docker exec krexion-frontend ls -la /usr/share/nginx/html/downloads/desktop/ 2>/dev/null | grep -c "Krexion-Desktop-Setup-latest.exe" || echo 0)
+            HOST_OK=$(ls /opt/krexion/downloads/desktop/Krexion-Desktop-Setup-latest.exe 2>/dev/null | wc -l)
+            echo "   host has latest.exe: $HOST_OK  | container sees latest.exe: $MOUNT_OK"
+            if [ "$HOST_OK" = "1" ] && [ "$MOUNT_OK" != "1" ]; then
+              echo "   ⚠ host has file but container does not — force-recreating frontend"
+              docker compose up -d --force-recreate frontend
+              sleep 4
+              docker exec krexion-frontend ls -la /usr/share/nginx/html/downloads/desktop/ 2>/dev/null | head -10 || true
+            fi
+            # Make sure files are world-readable so the nginx 'nginx'
+            # user inside the container can serve them (host UID 1001
+            # vs container UID may not align).
+            chmod -R a+r /opt/krexion/downloads/ 2>/dev/null || true
+
             # Wait for frontend to be healthy
             for i in $(seq 1 15); do
               if curl -fsS http://localhost:3000/ > /dev/null 2>&1; then
