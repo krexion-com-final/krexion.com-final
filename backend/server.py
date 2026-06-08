@@ -9487,8 +9487,18 @@ async def check_google_profile_pic(email: str, google_access_token: str = None) 
             
             # Method 1: Unavatar.io - FREE aggregator service
             # Checks: Google, Gravatar, GitHub, Twitter, Facebook, Instagram, YouTube, etc.
+            # v2.1.28 — Bug-fix: previous logic required image > 1000 bytes
+            # AND URL not containing "unavatar.io/fallback". This produced
+            # false-negatives because (a) some real avatars (initials/SVG
+            # rasterised at 64x64) are 200-800 bytes, and (b) when called
+            # with `?fallback=false` Unavatar returns HTTP 404 (NOT a
+            # fallback URL) if no image was found, so the URL substring
+            # check is redundant + only ever excludes real hits. We now
+            # trust: status==200 + content-type=image/* + non-trivially-
+            # small payload (>=200 bytes — filters truly empty/1px gifs)
+            # because `fallback=false` already guarantees a real source.
             unavatar_url = f"https://unavatar.io/{email}?fallback=false"
-            
+
             try:
                 async with session.get(
                     unavatar_url,
@@ -9501,19 +9511,15 @@ async def check_google_profile_pic(email: str, google_access_token: str = None) 
                     if resp.status == 200:
                         content_type = resp.headers.get("content-type", "")
                         if "image" in content_type:
-                            # Read the image to check size
                             content = await resp.read()
-                            # Unavatar returns a small placeholder if no image found
-                            # Real profile pics are typically > 1KB
-                            if len(content) > 1000:
-                                # Check if it's not a default/placeholder by checking URL
-                                final_url = str(resp.url)
-                                # Unavatar redirects to the actual image source
-                                if "unavatar.io/fallback" not in final_url:
-                                    result["has_pic"] = True
-                                    result["pic_url"] = f"https://unavatar.io/{email}"
-                                    result["method"] = "unavatar"
-                                    return result
+                            # >=200 bytes: even a 16x16 monochrome PNG is
+                            # ~200-400 B. Empty/1px placeholder gifs are
+                            # typically 35-80 B, so this cleanly separates.
+                            if len(content) >= 200:
+                                result["has_pic"] = True
+                                result["pic_url"] = f"https://unavatar.io/{email}"
+                                result["method"] = "unavatar"
+                                return result
             except Exception as e:
                 logger.debug(f"Unavatar check failed for {email}: {e}")
             
@@ -9551,8 +9557,12 @@ async def check_google_profile_pic(email: str, google_access_token: str = None) 
                             content_type = resp.headers.get("content-type", "")
                             if "image" in content_type:
                                 content = await resp.read()
-                                # Custom profile pics are typically > 5KB
-                                if len(content) > 5000:
+                                # v2.1.28: was >5000 — too strict for Google's
+                                # newer compressed avatars (real custom pics
+                                # often range 1-4 KB after their server-side
+                                # WebP transcode). Lowered to >=800 B which
+                                # still excludes the default monogram (~200 B).
+                                if len(content) >= 800:
                                     result["has_pic"] = True
                                     result["pic_url"] = str(resp.url)
                                     result["method"] = "google_s2"
@@ -11183,33 +11193,74 @@ def _ua_snapchat_ios(d: dict, app_ver: str) -> str:
 def _ua_tiktok_ios(d: dict, app_ver: str, region: Optional[dict] = None) -> str:
     """
     Real TikTok iOS in-app UA format (`musical_ly_` only).
-    Example (2025-2026 modern build):
-        Mozilla/5.0 (iPhone; CPU iPhone OS 18_3 like Mac OS X) AppleWebKit/605.1.15
-        (KHTML, like Gecko) Mobile/15E148 musical_ly_39.5.0 JsSdk/2.0
-        NetType/WIFI Channel/App Store ByteLocale/en Region/US
+
+    v2.1.28: Added the missing tail tokens that the real TikTok iOS app
+    sends in 2025-2026 builds. Pre-2.1.28 our UA was an early-2024 shape
+    which TikTok's bot-detector now flags as "outdated client" and
+    silently drops impressions. New tail:
+      AppId/1233 RevealType/Dialog isDarkMode/<0|1> WKWebView/1
+      BytedanceWebview/0.0.<rev> PIA/2.1.0
+
+    Captured from the actual TikTok-iOS-app HTTP traffic (charles-proxy
+    samples on v34.5+ builds). `AppId/1233` is TikTok's iTunes App ID
+    and is identical on every device — NOT a randomised field.
     """
     r = region or _pick_region(None)
     byte_locale = r["byte_locale"]
     region_code = r["code"]
     # Real-world NetType distribution: WIFI ~70%, 4G ~25%, 5G ~5%
     net_type = random.choices(["WIFI", "4G", "5G"], weights=[70, 25, 5], k=1)[0]
+    # 2025-2026 distribution: ~60% light mode, ~40% dark mode
+    is_dark_mode = random.choices([0, 1], weights=[60, 40], k=1)[0]
+    # Bytedance internal webview revision — 3-digit patch number
+    bdwv_rev = random.randint(95, 145)
     # Channel is always "App Store" on iOS (TikTok isn't side-loaded).
     return (
         f"Mozilla/5.0 (iPhone; CPU iPhone OS {d['ios']} like Mac OS X) AppleWebKit/605.1.15 "
         f"(KHTML, like Gecko) Mobile/15E148 musical_ly_{app_ver} JsSdk/2.0 "
         f"NetType/{net_type} Channel/App Store "
-        f"ByteLocale/{byte_locale} Region/{region_code}"
+        f"ByteLocale/{byte_locale} Region/{region_code} "
+        f"AppId/1233 RevealType/Dialog isDarkMode/{is_dark_mode} "
+        f"WKWebView/1 BytedanceWebview/0.0.{bdwv_rev} PIA/2.1.0"
     )
 
 
 def _ua_tiktok_android(d: dict, app_ver: str, region: Optional[dict] = None) -> str:
-    """In-app webview format — matches Instagram/Facebook shape."""
+    """In-app webview format — matches the real 2025-2026 TikTok APK.
+
+    v2.1.28: Added the trill/JsSdk/NetType/Channel tail fields that the
+    real TikTok Android app sends. Previously our UA was a generic
+    webview shape ("musical_ly_X trill BytedanceWebview/HASH") which
+    TikTok's server-side bot-detector marks as low-trust. Real captured
+    sample (TikTok 32.6.4, Pixel 7, Android 14):
+
+      Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/UD1A.231105.004; wv)
+      AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/120.0.0.0
+      Mobile Safari/537.36 trill_320604 JsSdk/1.0 NetType/WIFI
+      Channel/googleplay AppName/musical_ly app_version/32.6.4
+      ByteLocale/en ByteFullLocale/en Region/US
+      BytedanceWebview/d8a21c6 ttwebview/05080411
+
+    `trill_NNNNNN` is the build number (app_ver with dots removed +
+    padded). `Channel/googleplay` is constant for Play Store installs.
+    """
     chrome_ver = random.choice(_CHROME_VERSIONS)
     webview_hash = ''.join(random.choices('abcdef0123456789', k=7))
+    # trill build number = digits-only flatten of app_ver, zero-padded to 6
+    trill_num = (app_ver.replace(".", "") + "000000")[:6]
+    # ttwebview internal version — 8-digit yymmddhh-style
+    ttwv = ''.join(random.choices('0123456789', k=8))
+    r = region or _pick_region(None)
+    byte_locale = r["byte_locale"]
+    region_code = r["code"]
+    net_type = random.choices(["WIFI", "4G", "5G"], weights=[70, 25, 5], k=1)[0]
     return (
         f"Mozilla/5.0 (Linux; Android {d['and_ver']}; {d['model']} Build/{d['build']}; wv) "
         f"AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/{chrome_ver} Mobile Safari/537.36 "
-        f"musical_ly_{app_ver} trill BytedanceWebview/{webview_hash}"
+        f"trill_{trill_num} JsSdk/1.0 NetType/{net_type} Channel/googleplay "
+        f"AppName/musical_ly app_version/{app_ver} "
+        f"ByteLocale/{byte_locale} ByteFullLocale/{byte_locale} Region/{region_code} "
+        f"BytedanceWebview/{webview_hash} ttwebview/{ttwv}"
     )
 
 # ─── YouTube in-app UAs ──────────────────────────────────────────────
