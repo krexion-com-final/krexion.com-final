@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import { toast } from "sonner";
-import { Package, Smartphone, Server, FileSpreadsheet, Trash2, Plus, RefreshCw, FileCode, ExternalLink, Pencil, Camera } from "lucide-react";
+import { Package, Smartphone, Server, FileSpreadsheet, Trash2, Plus, RefreshCw, FileCode, ExternalLink, Pencil, Camera, Download, CheckSquare, Square } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
@@ -58,16 +58,79 @@ const TABS = [
 ];
 
 function TagBadge({ children, color = "indigo" }) {
+  // 2026-06 — added `yellow` + `blue` palette for the "used" + "original"
+  // count badges on the Data-Files tab (and any future tabs that need
+  // additional accent colours). The `indigo` + `emerald` defaults are
+  // unchanged so existing call-sites render identically.
+  const palette = {
+    indigo:  { bg: "rgba(99, 102, 241, 0.15)",  fg: "rgb(165, 180, 252)" },
+    emerald: { bg: "rgba(16, 185, 129, 0.15)",  fg: "rgb(110, 231, 183)" },
+    yellow:  { bg: "rgba(234, 179,   8, 0.15)", fg: "rgb(253, 224,  71)" },
+    blue:    { bg: "rgba( 59, 130, 246, 0.15)", fg: "rgb(147, 197, 253)" },
+  };
+  const c = palette[color] || palette.indigo;
   return (
     <span
       className="inline-block px-2 py-0.5 rounded text-xs font-medium"
-      style={{
-        backgroundColor: color === "indigo" ? "rgba(99, 102, 241, 0.15)" : "rgba(16, 185, 129, 0.15)",
-        color: color === "indigo" ? "rgb(165, 180, 252)" : "rgb(110, 231, 183)",
-      }}
+      style={{ backgroundColor: c.bg, color: c.fg }}
     >
       {children}
     </span>
+  );
+}
+
+// 2026-06 — Bulk action toolbar shown above every list of uploaded
+// resources. Renders a "select-all / N selected / delete / download"
+// row. `showDownload` is opt-in (only Data-Files tab has files behind
+// rows; UA / Proxy / Automation-JSON tabs store inline strings/JSON
+// so there's nothing to "download as file" — only the per-row
+// existing copy-buttons make sense there).
+function BulkActionBar({
+  selectedCount, totalCount, allChecked,
+  onToggleAll, onBulkDelete, onBulkDownload,
+  showDownload = false,
+}) {
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      <button
+        type="button"
+        onClick={onToggleAll}
+        className="flex items-center gap-1.5 text-xs text-zinc-300 hover:text-indigo-300 px-2 py-1 rounded border border-zinc-700 bg-zinc-900/40"
+        data-testid="ut-bulk-toggle-all"
+      >
+        {allChecked
+          ? <CheckSquare size={14} className="text-indigo-400" />
+          : <Square size={14} />}
+        {allChecked ? "Unselect all" : `Select all (${totalCount})`}
+      </button>
+      {selectedCount > 0 && (
+        <>
+          <span className="text-xs text-zinc-400">{selectedCount} selected</span>
+          {showDownload && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onBulkDownload}
+              className="h-7 px-2 text-emerald-300 border-emerald-700/40 hover:bg-emerald-900/20 hover:text-emerald-200"
+              data-testid="ut-bulk-download"
+            >
+              <Download size={13} className="mr-1" />
+              Download
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={onBulkDelete}
+            className="h-7 px-2 text-red-300 border-red-700/40 hover:bg-red-900/20 hover:text-red-200"
+            data-testid="ut-bulk-delete"
+          >
+            <Trash2 size={13} className="mr-1" />
+            Delete
+          </Button>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -461,6 +524,93 @@ export default function UploadedThingsPage() {
     }
   };
 
+  // ── 2026-06 — Bulk selection & bulk delete (all 4 tabs) ──────────
+  // Per-tab Set<id> of currently-checked rows. Bulk delete posts to
+  // /api/uploads/bulk-delete in ONE request (server scopes by user_id
+  // so cross-tenant deletion is structurally impossible).
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  // Helper used by every tab-switch button: changes tab AND clears
+  // selection in one render, so a row checked on tab A can never be
+  // accidentally bulk-deleted from tab B. Returned in place of the
+  // raw setActiveTab so callers keep their existing call signature.
+  const switchTab = useCallback((key) => {
+    setActiveTab(key);
+    setSelectedIds(new Set());
+  }, []);
+
+  const toggleSelect = (id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = (rows) => {
+    setSelectedIds((prev) => {
+      const allOnPage = rows.map((r) => r.id);
+      const everyOneChecked = allOnPage.length > 0 && allOnPage.every((id) => prev.has(id));
+      if (everyOneChecked) return new Set();
+      return new Set(allOnPage);
+    });
+  };
+
+  const bulkDelete = async () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    if (!window.confirm(
+      `Delete ${ids.length} selected item${ids.length === 1 ? "" : "s"}? This cannot be undone.`
+    )) return;
+    try {
+      const r = await axios.post(
+        `${API}/uploads/bulk-delete`,
+        { upload_ids: ids },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      toast.success(`Deleted ${r.data?.deleted_count ?? ids.length} item(s)`);
+      setSelectedIds(new Set());
+      await fetchUploads();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Bulk delete failed");
+    }
+  };
+
+  // Download original Excel/CSV behind the saved upload (data_file
+  // type only). Uses fetch+blob so we can pass the Authorization
+  // header (a plain <a href=...> can't carry headers). Falls back to
+  // the upload's display name if the original filename is gone.
+  const downloadOne = async (u) => {
+    try {
+      const r = await axios.get(`${API}/uploads/${u.id}/download`, {
+        headers: { Authorization: `Bearer ${token}` },
+        responseType: "blob",
+      });
+      const blob = new Blob([r.data]);
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = u.file_name || `${u.name || "data_file"}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Download failed");
+    }
+  };
+
+  const bulkDownload = async (rows) => {
+    const ids = rows.filter((r) => selectedIds.has(r.id) && r.type === "data_file" && !r.gsheet_url);
+    if (ids.length === 0) {
+      toast.info("Select data files (not live-sheet rows) to download");
+      return;
+    }
+    for (const u of ids) {
+      await downloadOne(u);
+    }
+  };
+
   const filtered = uploads.filter((u) => u.type === activeTab);
 
   const inputClass = "bg-zinc-800 border-zinc-700 text-zinc-100";
@@ -495,7 +645,7 @@ export default function UploadedThingsPage() {
           return (
             <button
               key={t.key}
-              onClick={() => setActiveTab(t.key)}
+              onClick={() => switchTab(t.key)}
               className="px-4 py-2 rounded-md text-sm font-medium flex items-center gap-2 transition-colors"
               style={{
                 backgroundColor: active ? "var(--brand-primary)" : "transparent",
@@ -661,17 +811,39 @@ export default function UploadedThingsPage() {
           </Card>
 
           <div className="space-y-3">
-            <h3 className="text-sm font-semibold text-zinc-400 uppercase tracking-wide">
-              Your saved UA batches ({filtered.length})
-            </h3>
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <h3 className="text-sm font-semibold text-zinc-400 uppercase tracking-wide">
+                Your saved UA batches ({filtered.length})
+              </h3>
+              {filtered.length > 0 && (
+                <BulkActionBar
+                  selectedCount={selectedIds.size}
+                  totalCount={filtered.length}
+                  allChecked={filtered.length > 0 && filtered.every((r) => selectedIds.has(r.id))}
+                  onToggleAll={() => toggleSelectAll(filtered)}
+                  onBulkDelete={bulkDelete}
+                />
+              )}
+            </div>
             {filtered.length === 0 && (
               <div className="text-sm text-zinc-500 p-8 text-center border border-dashed border-zinc-800 rounded-lg">
                 No user-agent batches yet. Add your first one on the left.
               </div>
             )}
-            {filtered.map((u) => (
-              <Card key={u.id} className="bg-zinc-900/40 border-zinc-800" data-testid={`ut-item-${u.id}`}>
+            {filtered.map((u) => {
+              const checked = selectedIds.has(u.id);
+              return (
+              <Card key={u.id} className={`bg-zinc-900/40 border-zinc-800 ${checked ? "ring-1 ring-indigo-500/60" : ""}`} data-testid={`ut-item-${u.id}`}>
                 <CardContent className="p-4 flex items-start justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => toggleSelect(u.id)}
+                    className="mt-1 text-zinc-400 hover:text-indigo-300 transition"
+                    aria-label={checked ? "Unselect row" : "Select row"}
+                    data-testid={`ut-check-${u.id}`}
+                  >
+                    {checked ? <CheckSquare size={18} className="text-indigo-400" /> : <Square size={18} />}
+                  </button>
                   <div className="flex-1 min-w-0">
                     <div className="font-medium text-zinc-100 truncate flex items-center gap-2">
                       {u.name}
@@ -713,7 +885,8 @@ export default function UploadedThingsPage() {
                   </Button>
                 </CardContent>
               </Card>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -844,17 +1017,39 @@ export default function UploadedThingsPage() {
           </Card>
 
           <div className="space-y-3">
-            <h3 className="text-sm font-semibold text-zinc-400 uppercase tracking-wide">
-              Your saved proxy batches ({filtered.length})
-            </h3>
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <h3 className="text-sm font-semibold text-zinc-400 uppercase tracking-wide">
+                Your saved proxy batches ({filtered.length})
+              </h3>
+              {filtered.length > 0 && (
+                <BulkActionBar
+                  selectedCount={selectedIds.size}
+                  totalCount={filtered.length}
+                  allChecked={filtered.length > 0 && filtered.every((r) => selectedIds.has(r.id))}
+                  onToggleAll={() => toggleSelectAll(filtered)}
+                  onBulkDelete={bulkDelete}
+                />
+              )}
+            </div>
             {filtered.length === 0 && (
               <div className="text-sm text-zinc-500 p-8 text-center border border-dashed border-zinc-800 rounded-lg">
                 No proxy batches yet.
               </div>
             )}
-            {filtered.map((u) => (
-              <Card key={u.id} className="bg-zinc-900/40 border-zinc-800" data-testid={`ut-item-${u.id}`}>
+            {filtered.map((u) => {
+              const checked = selectedIds.has(u.id);
+              return (
+              <Card key={u.id} className={`bg-zinc-900/40 border-zinc-800 ${checked ? "ring-1 ring-indigo-500/60" : ""}`} data-testid={`ut-item-${u.id}`}>
                 <CardContent className="p-4 flex items-start justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => toggleSelect(u.id)}
+                    className="mt-1 text-zinc-400 hover:text-indigo-300 transition"
+                    aria-label={checked ? "Unselect row" : "Select row"}
+                    data-testid={`ut-check-${u.id}`}
+                  >
+                    {checked ? <CheckSquare size={18} className="text-indigo-400" /> : <Square size={18} />}
+                  </button>
                   <div className="flex-1 min-w-0">
                     <div className="font-medium text-zinc-100 truncate flex items-center gap-2">
                       {u.name}
@@ -896,7 +1091,8 @@ export default function UploadedThingsPage() {
                   </Button>
                 </CardContent>
               </Card>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -1015,17 +1211,43 @@ export default function UploadedThingsPage() {
           </Card>
 
           <div className="space-y-3">
-            <h3 className="text-sm font-semibold text-zinc-400 uppercase tracking-wide">
-              Your saved data files ({filtered.length})
-            </h3>
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <h3 className="text-sm font-semibold text-zinc-400 uppercase tracking-wide">
+                Your saved data files ({filtered.length})
+              </h3>
+              {filtered.length > 0 && (
+                <BulkActionBar
+                  selectedCount={selectedIds.size}
+                  totalCount={filtered.length}
+                  allChecked={filtered.length > 0 && filtered.every((r) => selectedIds.has(r.id))}
+                  onToggleAll={() => toggleSelectAll(filtered)}
+                  onBulkDelete={bulkDelete}
+                  onBulkDownload={() => bulkDownload(filtered)}
+                  showDownload
+                />
+              )}
+            </div>
             {filtered.length === 0 && (
               <div className="text-sm text-zinc-500 p-8 text-center border border-dashed border-zinc-800 rounded-lg">
                 No data files yet.
               </div>
             )}
-            {filtered.map((u) => (
-              <Card key={u.id} className="bg-zinc-900/40 border-zinc-800" data-testid={`ut-item-${u.id}`}>
+            {filtered.map((u) => {
+              const checked = selectedIds.has(u.id);
+              const original = Number(u?.original_item_count ?? ((u?.available_count ?? u?.item_count ?? 0) + (u?.consumed_count ?? 0)));
+              const canDownload = u.type === "data_file" && !u.gsheet_url;
+              return (
+              <Card key={u.id} className={`bg-zinc-900/40 border-zinc-800 ${checked ? "ring-1 ring-indigo-500/60" : ""}`} data-testid={`ut-item-${u.id}`}>
                 <CardContent className="p-4 flex items-start justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => toggleSelect(u.id)}
+                    className="mt-1 text-zinc-400 hover:text-indigo-300 transition"
+                    aria-label={checked ? "Unselect row" : "Select row"}
+                    data-testid={`ut-check-${u.id}`}
+                  >
+                    {checked ? <CheckSquare size={18} className="text-indigo-400" /> : <Square size={18} />}
+                  </button>
                   <div className="flex-1 min-w-0">
                     <div className="font-medium text-zinc-100 truncate flex items-center gap-2">
                       {u.name}
@@ -1042,6 +1264,11 @@ export default function UploadedThingsPage() {
                     </div>
                     <div className="flex flex-wrap gap-1.5 mt-1.5">
                       {u.file_name && <TagBadge>{u.file_name}</TagBadge>}
+                      {original > 0 && (
+                        <TagBadge color="blue">
+                          {original.toLocaleString()} original
+                        </TagBadge>
+                      )}
                       <TagBadge color="emerald">
                         {(u.available_count || u.item_count || 0).toLocaleString()} available
                       </TagBadge>
@@ -1056,18 +1283,33 @@ export default function UploadedThingsPage() {
                       {new Date(u.created_at).toLocaleString()}
                     </div>
                   </div>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => deleteUpload(u.id, u.name)}
-                    className="text-red-400 hover:text-red-300 hover:bg-red-900/20"
-                    data-testid={`ut-del-${u.id}`}
-                  >
-                    <Trash2 size={16} />
-                  </Button>
+                  <div className="flex flex-col gap-1">
+                    {canDownload && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => downloadOne(u)}
+                        className="text-emerald-400 hover:text-emerald-300 hover:bg-emerald-900/20"
+                        data-testid={`ut-dl-${u.id}`}
+                        title="Download original file"
+                      >
+                        <Download size={16} />
+                      </Button>
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => deleteUpload(u.id, u.name)}
+                      className="text-red-400 hover:text-red-300 hover:bg-red-900/20"
+                      data-testid={`ut-del-${u.id}`}
+                    >
+                      <Trash2 size={16} />
+                    </Button>
+                  </div>
                 </CardContent>
               </Card>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -1128,17 +1370,39 @@ export default function UploadedThingsPage() {
           </Card>
 
           <div className="space-y-3">
-            <h3 className="text-sm font-semibold text-zinc-400 uppercase tracking-wide">
-              Your saved automation templates ({filtered.length})
-            </h3>
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <h3 className="text-sm font-semibold text-zinc-400 uppercase tracking-wide">
+                Your saved automation templates ({filtered.length})
+              </h3>
+              {filtered.length > 0 && (
+                <BulkActionBar
+                  selectedCount={selectedIds.size}
+                  totalCount={filtered.length}
+                  allChecked={filtered.length > 0 && filtered.every((r) => selectedIds.has(r.id))}
+                  onToggleAll={() => toggleSelectAll(filtered)}
+                  onBulkDelete={bulkDelete}
+                />
+              )}
+            </div>
             {filtered.length === 0 && (
               <div className="text-sm text-zinc-500 p-8 text-center border border-dashed border-zinc-800 rounded-lg">
                 No automation templates yet. Save your first one on the left.
               </div>
             )}
-            {filtered.map((u) => (
-              <Card key={u.id} className="bg-zinc-900/40 border-zinc-800" data-testid={`ut-item-${u.id}`}>
+            {filtered.map((u) => {
+              const checked = selectedIds.has(u.id);
+              return (
+              <Card key={u.id} className={`bg-zinc-900/40 border-zinc-800 ${checked ? "ring-1 ring-indigo-500/60" : ""}`} data-testid={`ut-item-${u.id}`}>
                 <CardContent className="p-4 flex items-start justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => toggleSelect(u.id)}
+                    className="mt-1 text-zinc-400 hover:text-indigo-300 transition"
+                    aria-label={checked ? "Unselect row" : "Select row"}
+                    data-testid={`ut-check-${u.id}`}
+                  >
+                    {checked ? <CheckSquare size={18} className="text-indigo-400" /> : <Square size={18} />}
+                  </button>
                   <div className="flex-1 min-w-0">
                     <div className="font-medium text-zinc-100 truncate">{u.name}</div>
                     <div className="flex flex-wrap gap-1.5 mt-1.5">
@@ -1191,7 +1455,8 @@ export default function UploadedThingsPage() {
                   </div>
                 </CardContent>
               </Card>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

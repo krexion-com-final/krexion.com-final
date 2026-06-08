@@ -66,6 +66,7 @@ def build_proxy_string(
     port: int = DEFAULT_PORT,
     product: str = DEFAULT_PRODUCT,
     state: Optional[str] = None,
+    sticky_minutes: Optional[int] = None,
 ) -> Tuple[str, str]:
     """Build a single ProxyJet proxy line. Returns ``(proxy_string, session_id)``.
 
@@ -75,12 +76,22 @@ def build_proxy_string(
 
     Optional ``state`` (2-letter US state code like ``CA``, ``TX``) is
     appended via ProxyJet's ``-st-{STATE}`` filter for geo-targeted runs.
+
+    Optional ``sticky_minutes`` (1..120) appends ProxyJet's
+    ``-sessTime-{N}`` token so the same exit-IP is held for N minutes
+    on subsequent connects (sticky session). When None or 0, the proxy
+    is rotating — every connect resolves to a fresh exit-IP within the
+    requested country/state pool.
     """
     sid = session_id or _new_session_id()
     parts = [username, product, country.upper()]
     if state:
         parts.extend(["st", state.upper()])
     parts.extend(["ip", sid])
+    if sticky_minutes and int(sticky_minutes) > 0:
+        # Clamp to ProxyJet's documented sticky-session limit (120 min).
+        sm = max(1, min(int(sticky_minutes), 120))
+        parts.extend(["sessTime", str(sm)])
     full_user = "-".join(parts)
     proxy_str = f"{full_user}:{password}@{gateway}.{server}:{port}"
     return proxy_str, sid
@@ -183,6 +194,7 @@ async def generate_unique_proxies(
     *,
     country: Optional[str] = None,
     state: Optional[str] = None,
+    sticky_minutes: Optional[int] = None,
     job_id: Optional[str] = None,
     max_attempts_per_pick: int = 6,
 ) -> List[str]:
@@ -246,6 +258,7 @@ async def generate_unique_proxies(
             port=int(creds.get("port", DEFAULT_PORT)),
             product=creds.get("product", DEFAULT_PRODUCT),
             state=effective_state,
+            sticky_minutes=sticky_minutes,
         )
         out.append(proxy_str)
         inserts.append({

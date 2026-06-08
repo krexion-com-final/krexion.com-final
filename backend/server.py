@@ -9468,7 +9468,16 @@ async def check_google_profile_pic(email: str, google_access_token: str = None) 
         "email": email,
         "has_pic": False,
         "pic_url": None,
-        "method": None
+        "method": None,
+        # 2026-06 — set on miss so the UI can explain *why* a Gmail
+        # address that the customer can see in their own Gmail inbox
+        # still reports "No Pic" here. Google's public profile-pic
+        # endpoints (s2/photos, Google+ avatars) were deprecated in
+        # 2019; Gmail avatars are now only accessible via OAuth-
+        # authenticated People API. Without an access_token we can
+        # only see avatars exposed by Gravatar / Unavatar's social
+        # aggregator (GitHub / Twitter / Facebook / Instagram / etc).
+        "note": None,
     }
     
     email = email.lower().strip()
@@ -9588,6 +9597,23 @@ async def check_google_profile_pic(email: str, google_access_token: str = None) 
     except Exception as e:
         logger.error(f"Error checking profile for {email}: {e}")
     
+    # 2026-06 — explain why a Gmail/Workspace address with an obvious
+    # picture (when viewed by its owner) still reports "No Pic" here.
+    # See note field docstring above for the full reason.
+    if not result["has_pic"]:
+        if email.endswith("@gmail.com") or email.endswith(
+            ("@googlemail.com",)
+        ):
+            result["note"] = (
+                "No public profile pic — Gmail avatars are private since 2019. "
+                "Connect Google to see your contacts' real pics via the People API."
+            )
+        else:
+            result["note"] = (
+                "No public profile pic across Gravatar / GitHub / Twitter / "
+                "Facebook / Instagram / YouTube / Libravatar."
+            )
+
     return result
 
 @api_router.post("/emails/check-profile-pics")
@@ -9663,6 +9689,7 @@ async def check_email_profile_pics(request: EmailCheckRequest, user: dict = Depe
                 "has_pic": result["has_pic"],
                 "pic_url": result["pic_url"],
                 "method": result.get("method"),
+                "note": result.get("note"),
             }) + "\n"
 
             if (i + 1) % 5 == 0 or i == len(emails) - 1:
@@ -14355,6 +14382,11 @@ class ProxyJetGenerateIn(BaseModel):
     count: int = 10
     country: Optional[str] = None
     state: Optional[str] = None
+    # 2026-06 — sticky/rotating selector. None or 0 = rotating (fresh
+    # exit-IP per request). 1..120 = sticky session lasting N minutes
+    # so the same exit-IP is held for that window — required for funnel
+    # tests that span multi-page flows. Server clamps to 1..120.
+    sticky_minutes: Optional[int] = None
 
 
 @api_router.get("/proxyjet/credentials")
@@ -14497,6 +14529,7 @@ async def proxyjet_generate_batch(payload: ProxyJetGenerateIn,
             count=payload.count,
             country=(payload.country or "").strip().upper() or None,
             state=(payload.state or "").strip().upper() or None,
+            sticky_minutes=(int(payload.sticky_minutes) if payload.sticky_minutes else None),
         )
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -14917,6 +14950,23 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
                             return x
             return None
 
+        # 2026-06 — display-only fallback: when the dup-MATCH happened
+        # via browser_fingerprint (not via IP), both the stored row
+        # AND the current request can be IPv6-only, which the strict
+        # IPv4 helper above rejects → user sees "IP: unknown". For the
+        # *display* (not for matching) we accept any non-sentinel,
+        # non-empty string including IPv6, so the customer's report
+        # always carries the actual IP we matched against.
+        def _first_displayable_ip(*candidates):
+            for c in candidates:
+                if isinstance(c, str) and c and c.strip() and c not in _INVALID_DUP_IPS:
+                    return c.strip()
+                if isinstance(c, (list, tuple)):
+                    for x in c:
+                        if isinstance(x, str) and x and x.strip() and x not in _INVALID_DUP_IPS:
+                            return x.strip()
+            return None
+
         matched_ip = _first_valid_ip(
             existing_click.get("ip_address"),
             existing_click.get("ipv4"),
@@ -14930,23 +14980,45 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         # real IP — we just couldn't pull a historical one.
         if not matched_ip:
             matched_ip = _first_valid_ip(client_ip, ipv4, all_ips, proxy_ips)
+        # 2026-06 LAST-RESORT — accept IPv6 / any non-sentinel string
+        # for display so we never fall to the literal word "unknown".
+        if not matched_ip:
+            matched_ip = _first_displayable_ip(
+                existing_click.get("ip_address"),
+                existing_click.get("ipv4"),
+                existing_click.get("detected_ip"),
+                existing_click.get("all_ips"),
+                existing_click.get("proxy_ips"),
+                client_ip, ipv4, all_ips, proxy_ips,
+            )
         if not matched_ip:
             matched_ip = "unknown"
 
-        matched_link = existing_click.get("link_id", "Unknown")
-        # Compose a single human-readable line so both pieces of info
-        # are visible: matched-IP (the row in DB) and request-IP (what
-        # the browser is presenting right now). If they're identical
-        # we just show one.
+        # 2026-06 — clearer message: surface the matched IP inside the
+        # main heading so customers immediately see *which* IP is the
+        # offender, not just "Access denied" with the IP buried below.
+        # Format: "This IP <X> is already in the database (duplicate)."
+        # If we additionally have the current request IP and it differs
+        # from the matched one (proxy hop / CDN), append it on a 2nd
+        # line. Sanitise via html.escape to avoid HTML injection from
+        # crafted X-Forwarded-For headers.
+        import html as _html
+        _safe_matched = _html.escape(matched_ip)
         if (
             client_ip
             and client_ip != "unknown"
             and client_ip != matched_ip
             and matched_ip != "unknown"
         ):
-            ip_display_line = f"IP: {matched_ip} (your IP: {client_ip})"
+            _safe_client = _html.escape(client_ip)
+            ip_display_line = (
+                f"This IP <strong>{_safe_matched}</strong> is already in the database (duplicate).<br>"
+                f"<span style='color:#71717A'>Your current IP: {_safe_client}</span>"
+            )
         else:
-            ip_display_line = f"IP: {matched_ip}"
+            ip_display_line = (
+                f"This IP <strong>{_safe_matched}</strong> is already in the database (duplicate)."
+            )
         try:
             logger.info(
                 f"[duplicate-block] short_code={short_code} matched_ip={matched_ip} "
@@ -15030,8 +15102,7 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     <div class="container">
         <div class="icon">⛔</div>
         <h1>Duplicate IP</h1>
-        <p class="message">This IP address has already been used.<br>Access denied.</p>
-        <div class="ip-info">{ip_display_line}</div>
+        <p class="message">{ip_display_line}</p>
         <p class="countdown">Closing in <span id="countdown">{timer_seconds}</span> seconds...</p>
     </div>
 </body>
@@ -15071,8 +15142,7 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     <div class="container">
         <div class="icon">⛔</div>
         <h1>Duplicate IP</h1>
-        <p class="message">This IP address has already been used.<br>Access denied.</p>
-        <div class="ip-info">{ip_display_line}</div>
+        <p class="message">{ip_display_line}</p>
     </div>
 </body>
 </html>""",
@@ -16354,6 +16424,85 @@ async def delete_upload(
             pass
     await user_db["uploaded_resources"].delete_one({"id": upload_id, "user_id": current_user["id"]})
     return {"ok": True, "deleted_id": upload_id}
+
+
+# ── 2026-06 — Bulk delete uploaded resources ────────────────────────
+# Customers asked for a "select-all / delete checked" UX on Uploaded
+# Things. This endpoint accepts a list of upload_ids belonging to the
+# caller and deletes them in one round-trip, also cleaning up any
+# on-disk files for data_file rows. Uses an `{"$in": ids}` filter
+# scoped to user_id so a malicious caller cannot delete another
+# tenant's rows.
+class BulkUploadDeleteRequest(BaseModel):
+    upload_ids: List[str]
+
+@api_router.post("/uploads/bulk-delete")
+async def bulk_delete_uploads(
+    payload: BulkUploadDeleteRequest,
+    current_user: dict = Depends(get_current_user_with_fresh_data),
+):
+    check_user_feature(current_user, "real_user_traffic")
+    ids = [i for i in (payload.upload_ids or []) if isinstance(i, str) and i.strip()]
+    if not ids:
+        return {"ok": True, "deleted_count": 0, "deleted_ids": []}
+    user_db = get_user_db(current_user["id"])
+    docs = await user_db["uploaded_resources"].find(
+        {"id": {"$in": ids}, "user_id": current_user["id"]},
+        {"_id": 0, "id": 1, "file_path": 1},
+    ).to_list(length=len(ids))
+    for d in docs:
+        fp = d.get("file_path")
+        if fp:
+            try:
+                Path(fp).unlink(missing_ok=True)
+            except Exception:
+                pass
+    res = await user_db["uploaded_resources"].delete_many(
+        {"id": {"$in": ids}, "user_id": current_user["id"]}
+    )
+    return {
+        "ok": True,
+        "deleted_count": int(res.deleted_count or 0),
+        "deleted_ids": [d["id"] for d in docs],
+    }
+
+
+# ── 2026-06 — Download original uploaded data file ───────────────────
+# Customers asked for a download icon on each saved Data-File row so
+# they can re-grab the original Excel/CSV after uploading. Only valid
+# for `type=data_file` rows that still have a `file_path` on disk
+# (gsheet-based rows have no file). Re-asserts user_id scope so one
+# tenant cannot download another tenant's leads.
+@api_router.get("/uploads/{upload_id}/download")
+async def download_upload(
+    upload_id: str,
+    current_user: dict = Depends(get_current_user_with_fresh_data),
+):
+    check_user_feature(current_user, "real_user_traffic")
+    user_db = get_user_db(current_user["id"])
+    doc = await user_db["uploaded_resources"].find_one(
+        {"id": upload_id, "user_id": current_user["id"]},
+        {"_id": 0},
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Upload not found")
+    if doc.get("type") != "data_file":
+        raise HTTPException(
+            status_code=400,
+            detail="Download is only available for data files (Excel/CSV uploads).",
+        )
+    fp = doc.get("file_path")
+    if not fp or not Path(fp).exists():
+        raise HTTPException(
+            status_code=410,
+            detail="Original file is no longer on disk — please re-upload.",
+        )
+    file_name = doc.get("file_name") or "data_file.xlsx"
+    return FileResponse(
+        path=fp,
+        filename=file_name,
+        media_type="application/octet-stream",
+    )
 
 
 # ── 2026-05: Edit an existing saved Automation-JSON template ─────────

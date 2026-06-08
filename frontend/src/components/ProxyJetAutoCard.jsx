@@ -434,7 +434,218 @@ export default function ProxyJetAutoCard() {
             </div>
           </div>
         )}
+
+        {/* 2026-06 — On-demand proxy generator. Lets the customer
+            grab a fresh batch of unique exit-IPs without launching a
+            RUT job (e.g. for pasting into AdsPower, an external scraper,
+            or saving as an Uploaded-Things batch). Country/state default
+            to the saved credential defaults but can be overridden per
+            generation. Sticky/rotating toggle drives ProxyJet's
+            sessTime parameter. */}
+        {configured && (
+          <ProxyJetGenerator
+            defaultCountry={defaultCountry}
+            defaultState={defaultState}
+            onGenerated={() => fetchUsage()}
+          />
+        )}
       </CardContent>
     </Card>
+  );
+}
+
+// ─── On-demand generator (one-shot batch download) ─────────────────
+function ProxyJetGenerator({ defaultCountry, defaultState, onGenerated }) {
+  const [gCount, setGCount] = useState(10);
+  const [gCountry, setGCountry] = useState(defaultCountry || "US");
+  const [gState, setGState] = useState(defaultState || "");
+  // session_mode: "rotating" => sticky_minutes=null/0
+  //               "sticky"   => sticky_minutes used as-typed
+  const [sessionMode, setSessionMode] = useState("rotating");
+  const [stickyMinutes, setStickyMinutes] = useState(10);
+  const [generating, setGenerating] = useState(false);
+  const [output, setOutput] = useState("");
+
+  const generate = async () => {
+    const n = Math.max(1, Math.min(parseInt(gCount, 10) || 1, 5000));
+    setGenerating(true);
+    setOutput("");
+    try {
+      const token = localStorage.getItem("token");
+      const r = await axios.post(
+        `${API}/proxyjet/generate-batch`,
+        {
+          count: n,
+          country: (gCountry || "").trim().toUpperCase() || null,
+          state: (gState || "").trim().toUpperCase() || null,
+          sticky_minutes: sessionMode === "sticky"
+            ? Math.max(1, Math.min(parseInt(stickyMinutes, 10) || 10, 120))
+            : null,
+        },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const lines = (r.data?.proxies || []).join("\n");
+      setOutput(lines);
+      toast.success(`Generated ${r.data?.count || 0} unique proxies`);
+      if (onGenerated) await onGenerated();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Generation failed");
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const copyOutput = async () => {
+    if (!output) return;
+    try {
+      await navigator.clipboard.writeText(output);
+      toast.success("Copied to clipboard");
+    } catch {
+      toast.error("Copy failed — select & copy manually");
+    }
+  };
+
+  const downloadOutput = () => {
+    if (!output) return;
+    const blob = new Blob([output + "\n"], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `proxyjet-${gCountry}${gState ? "-" + gState : ""}-${sessionMode}-${output.split("\n").length}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="pt-3 mt-3 border-t border-[var(--brand-border)]/50 space-y-3" data-testid="pj-generator">
+      <div className="flex items-center gap-2">
+        <Zap size={14} className="text-amber-300" />
+        <h4 className="text-sm font-semibold text-white">Generate proxies on-demand</h4>
+      </div>
+      <p className="text-[11px] text-[#A1A1AA] leading-relaxed">
+        Pick a country / state / session-type and grab a batch of unique exit-IPs you can paste anywhere.
+        Every IP is recorded so the same one is never returned twice for this account.
+      </p>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div>
+          <Label className="text-xs text-[#A1A1AA]">How many</Label>
+          <Input
+            type="number"
+            min={1}
+            max={5000}
+            value={gCount}
+            onChange={(e) => setGCount(e.target.value)}
+            className="bg-zinc-900/60 border-[var(--brand-border)] text-white"
+            data-testid="pj-gen-count"
+          />
+        </div>
+        <div>
+          <Label className="text-xs text-[#A1A1AA]">Country</Label>
+          <select
+            value={gCountry}
+            onChange={(e) => setGCountry(e.target.value)}
+            className="w-full h-10 px-2 rounded-md bg-zinc-900/60 border border-[var(--brand-border)] text-white text-sm"
+            data-testid="pj-gen-country"
+          >
+            {COUNTRIES.map((c) => (
+              <option key={c.code} value={c.code}>{c.code} — {c.label}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <Label className="text-xs text-[#A1A1AA]">State {gCountry !== "US" && <span className="text-zinc-500">(US only)</span>}</Label>
+          <select
+            value={gState}
+            onChange={(e) => setGState(e.target.value)}
+            disabled={gCountry !== "US"}
+            className="w-full h-10 px-2 rounded-md bg-zinc-900/60 border border-[var(--brand-border)] text-white text-sm disabled:opacity-50"
+            data-testid="pj-gen-state"
+          >
+            <option value="">— Any state —</option>
+            {US_STATES.map((s) => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <Label className="text-xs text-[#A1A1AA]">Session type</Label>
+          <select
+            value={sessionMode}
+            onChange={(e) => setSessionMode(e.target.value)}
+            className="w-full h-10 px-2 rounded-md bg-zinc-900/60 border border-[var(--brand-border)] text-white text-sm"
+            data-testid="pj-gen-session-mode"
+          >
+            <option value="rotating">Rotating (fresh IP / connect)</option>
+            <option value="sticky">Sticky (hold IP X minutes)</option>
+          </select>
+        </div>
+      </div>
+
+      {sessionMode === "sticky" && (
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <Label className="text-xs text-[#A1A1AA]">Sticky duration (minutes, 1–120)</Label>
+            <Input
+              type="number"
+              min={1}
+              max={120}
+              value={stickyMinutes}
+              onChange={(e) => setStickyMinutes(e.target.value)}
+              className="bg-zinc-900/60 border-[var(--brand-border)] text-white"
+              data-testid="pj-gen-sticky-min"
+            />
+          </div>
+          <div className="text-[11px] text-[#A1A1AA] flex items-end pb-2">
+            Same exit-IP is held for this many minutes per session — required for multi-page funnel flows.
+          </div>
+        </div>
+      )}
+
+      <Button
+        onClick={generate}
+        disabled={generating}
+        data-testid="pj-gen-btn"
+        className="bg-amber-600 hover:bg-amber-700 text-white"
+      >
+        {generating
+          ? <><Loader2 className="animate-spin mr-2" size={14} />Generating…</>
+          : <><Zap size={14} className="mr-2" />Generate {gCount} proxies</>}
+      </Button>
+
+      {output && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <Label className="text-xs text-[#A1A1AA]">
+              {output.split("\n").length} proxies ready
+            </Label>
+            <div className="flex gap-2">
+              <Button
+                onClick={copyOutput}
+                variant="outline"
+                size="sm"
+                className="h-7 px-2 text-indigo-300 border-indigo-500/40 hover:bg-indigo-500/10"
+                data-testid="pj-gen-copy"
+              >Copy</Button>
+              <Button
+                onClick={downloadOutput}
+                variant="outline"
+                size="sm"
+                className="h-7 px-2 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/10"
+                data-testid="pj-gen-download"
+              >Download .txt</Button>
+            </div>
+          </div>
+          <textarea
+            value={output}
+            readOnly
+            className="w-full h-40 px-2 py-1 rounded-md bg-zinc-950/70 border border-[var(--brand-border)] text-white font-mono text-xs"
+            data-testid="pj-gen-output"
+          />
+        </div>
+      )}
+    </div>
   );
 }
