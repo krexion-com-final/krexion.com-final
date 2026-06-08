@@ -83,9 +83,67 @@ jobs:
         working-directory: electron-desktop
         run: yarn prepare-resources
 
-      - name: Build NSIS installer
-        working-directory: electron-desktop
-        run: npx electron-builder --win --x64 --publish never
+      # ────────────────────────────────────────────────────────────
+      # 2026-02 — Pre-cache the NSIS binaries from
+      # github.com/electron-userland/electron-builder-binaries before
+      # the actual electron-builder run. GitHub's release CDN keeps
+      # returning HTTP 504 on these (twice in a row killed v2.1.27
+      # builds). By downloading them ourselves with curl --retry into
+      # the same %LOCALAPPDATA%\electron-builder\Cache\... directory
+      # that electron-builder reads, we avoid the in-builder fetch
+      # entirely — and even if curl fails, we retry the actual
+      # electron-builder step up to 3 times below.
+      # ────────────────────────────────────────────────────────────
+      - name: Pre-cache NSIS binaries (work around GitHub 504s)
+        shell: pwsh
+        run: |
+          $cacheRoot = "$env:LOCALAPPDATA\electron-builder\Cache"
+          $nsisDir   = "$cacheRoot\nsis\nsis-3.0.4.1"
+          $resDir    = "$cacheRoot\nsis\nsis-resources-3.4.1"
+          New-Item -ItemType Directory -Force -Path $nsisDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $resDir  | Out-Null
+
+          function Fetch($url, $out) {
+            for ($i = 1; $i -le 5; $i++) {
+              try {
+                Write-Host "Attempt $i → $url"
+                Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+                Write-Host "  ✓ downloaded ($([math]::Round((Get-Item $out).Length/1MB,1)) MB)"
+                return $true
+              } catch {
+                Write-Host "  ✗ attempt $i failed: $($_.Exception.Message)"
+                Start-Sleep -Seconds (5 * $i)
+              }
+            }
+            return $false
+          }
+
+          $tmp1 = "$env:RUNNER_TEMP\nsis-3.0.4.1.7z"
+          $tmp2 = "$env:RUNNER_TEMP\nsis-resources-3.4.1.7z"
+          $ok1 = Fetch "https://github.com/electron-userland/electron-builder-binaries/releases/download/nsis-3.0.4.1/nsis-3.0.4.1.7z" $tmp1
+          $ok2 = Fetch "https://github.com/electron-userland/electron-builder-binaries/releases/download/nsis-resources-3.4.1/nsis-resources-3.4.1.7z" $tmp2
+
+          if ($ok1) {
+            7z x $tmp1 "-o$nsisDir" -y | Out-Null
+            Write-Host "Extracted NSIS → $nsisDir"
+          }
+          if ($ok2) {
+            7z x $tmp2 "-o$resDir" -y | Out-Null
+            Write-Host "Extracted NSIS-resources → $resDir"
+          }
+          # Don't fail the job if pre-cache fails — the retry step below
+          # is still our safety net.
+
+      - name: Build NSIS installer (with retry — GitHub CDN sometimes 504s)
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 25
+          max_attempts: 3
+          retry_wait_seconds: 90
+          shell: bash
+          command: |
+            cd electron-desktop
+            npx electron-builder --win --x64 --publish never
 
       - name: List dist artifacts (debug)
         working-directory: electron-desktop
