@@ -6991,8 +6991,14 @@ async def rut_preview_data_file(
     src = ""
     try:
         if upload_data_file_id:
-            doc = await db.uploads.find_one(
-                {"id": upload_data_file_id, "user_id": user["id"], "type": "data_file"},
+            # 2026-02 — uploaded resources live in the PER-USER database
+            # under `uploaded_resources` (NOT the global `db.uploads`).
+            # Querying the wrong DB caused the user-reported error:
+            #   "Could not analyze data file: Uploaded data file not found"
+            # even though the batch was clearly visible in /uploaded-items.
+            user_db_inst = get_db_for_user(user)
+            doc = await user_db_inst["uploaded_resources"].find_one(
+                {"id": upload_data_file_id, "type": "data_file"},
                 {"_id": 0}
             )
             if not doc:

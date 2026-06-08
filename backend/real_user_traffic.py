@@ -5036,30 +5036,47 @@ async def run_real_user_traffic_job(
         on_demand_proxy: Optional[Dict[str, Any]] = None
         on_demand_geo: Optional[Dict[str, Any]] = None
         if proxyjet_on_demand:
-            # Step 1: pick row first — try sequential, then state-rotate
-            # so we don't deadlock on a single state running out of leads.
-            on_demand_row_pick = pick_next_row()
-            if not on_demand_row_pick:
-                entry["status"] = "failed"
-                entry["error"] = "No remaining unconsumed rows in data file"
-                push_live_step(job_id, i + 1, "row", "failed", "No rows left")
-                await _record(job_id, entry, report, report_lock, db)
-                return
-            _row_idx, _row = on_demand_row_pick
-            row_state_code = _normalize_state(_row.get(state_col)) if state_col else ""
-            if not row_state_code:
-                # Should be impossible — pre-flight rejected such rows.
-                entry["status"] = "failed"
-                entry["error"] = f"Row {_row_idx + 1} has an invalid state value (post-preflight)."
-                push_live_step(job_id, i + 1, "row", "failed", entry["error"])
-                await _record(job_id, entry, report, report_lock, db)
-                return
-            entry["row_index"] = _row_idx + 1
-            entry["lead_state"] = row_state_code
-            push_live_step(
-                job_id, i + 1, "row", "ok",
-                f"Row {_row_idx + 1} picked first · state={row_state_code} · fetching unique IP…",
-            )
+            # 2026-02 — when neither form-fill nor state-match is on, we
+            # don't actually need a per-row pick: it's a click-only visit
+            # and ProxyJet just needs to fetch ONE random unique IP. The
+            # original code unconditionally called pick_next_row() here
+            # which would raise "No remaining unconsumed rows in data
+            # file" whenever the data file was empty/missing — even for
+            # pure click traffic that doesn't need data at all.
+            if not proxyjet_needs_data_file:
+                on_demand_row_pick = None
+                _row_idx = -1
+                _row = {}
+                row_state_code = (proxyjet_default_state or "").strip().upper()
+                push_live_step(
+                    job_id, i + 1, "row", "ok",
+                    f"Click-only visit — no data row needed (state={row_state_code or 'random'})",
+                )
+            else:
+                # Step 1: pick row first — try sequential, then state-rotate
+                # so we don't deadlock on a single state running out of leads.
+                on_demand_row_pick = pick_next_row()
+                if not on_demand_row_pick:
+                    entry["status"] = "failed"
+                    entry["error"] = "No remaining unconsumed rows in data file"
+                    push_live_step(job_id, i + 1, "row", "failed", "No rows left")
+                    await _record(job_id, entry, report, report_lock, db)
+                    return
+                _row_idx, _row = on_demand_row_pick
+                row_state_code = _normalize_state(_row.get(state_col)) if state_col else ""
+                if not row_state_code:
+                    # Should be impossible — pre-flight rejected such rows.
+                    entry["status"] = "failed"
+                    entry["error"] = f"Row {_row_idx + 1} has an invalid state value (post-preflight)."
+                    push_live_step(job_id, i + 1, "row", "failed", entry["error"])
+                    await _record(job_id, entry, report, report_lock, db)
+                    return
+                entry["row_index"] = _row_idx + 1
+                entry["lead_state"] = row_state_code
+                push_live_step(
+                    job_id, i + 1, "row", "ok",
+                    f"Row {_row_idx + 1} picked first · state={row_state_code} · fetching unique IP…",
+                )
 
             # Step 2-5: loop until we get a non-duplicate exit IP.
             try:
