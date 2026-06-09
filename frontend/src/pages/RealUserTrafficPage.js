@@ -370,6 +370,7 @@ export default function RealUserTrafficPage() {
   // ── 2026-02 v2.1.31 — Step 3: Multi-Hop Proxy Chain + Browser Variant ──
   const [proxyChainEnabled, setProxyChainEnabled] = useState(false);
   const [proxyChainUseTor, setProxyChainUseTor] = useState(true);
+  const [proxyChainExtraHops, setProxyChainExtraHops] = useState("");
   const [browserVariant, setBrowserVariant] = useState("auto");
   const [adCapabilities, setAdCapabilities] = useState(null);
 
@@ -1162,6 +1163,7 @@ export default function RealUserTrafficPage() {
       // 2026-02 v2.1.31 — Step 3
       fd.append("proxy_chain_enabled", String(!!proxyChainEnabled));
       fd.append("proxy_chain_use_tor", String(!!proxyChainUseTor));
+      fd.append("proxy_chain_extra_hops", proxyChainExtraHops || "");
       fd.append("browser_variant", browserVariant || "auto");
       // 2026-02 v2.1.31 — Step 4
       fd.append("behavioral_bio_enabled", String(!!behavioralBioEnabled));
@@ -2323,6 +2325,22 @@ export default function RealUserTrafficPage() {
                         {adCapabilities.tor_available ? "Tor LIVE" : "Tor down → single-hop"}
                       </span>
                     )}
+                  </div>
+                )}
+                {proxyChainEnabled && (
+                  <div className="mt-2 ml-6">
+                    <Label className="text-zinc-400 text-xs">Extra Hops (one per line, optional)</Label>
+                    <textarea
+                      data-testid="rut-proxy-chain-extra-hops"
+                      value={proxyChainExtraHops}
+                      onChange={(e) => setProxyChainExtraHops(e.target.value.slice(0, 800))}
+                      rows={3}
+                      placeholder="socks5://hop1.example:1080&#10;http://user:pass@hop2.example:8080"
+                      className="mt-1 w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md px-2 py-1.5 text-xs font-mono"
+                    />
+                    <p className="text-[10px] text-zinc-500 mt-1">
+                      Inserted BETWEEN Tor and exit proxy. Build 3+ hop chains. Max 6 hops.
+                    </p>
                   </div>
                 )}
                 <p className="text-xs text-gray-500 mt-2">

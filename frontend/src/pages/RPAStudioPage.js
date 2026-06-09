@@ -590,6 +590,58 @@ export default function RPAStudioPage() {
                     Bypasses Cloudflare BM / DataDome / Akamai on cold visits.
                   </p>
                 </div>
+
+                {/* ── 2026-02 Step 5 — Phase 3+4 parity (Big-1) ── */}
+                <div className="mt-4 pt-3 border-t border-slate-800">
+                  <h4 className="text-xs font-semibold text-sky-400 mb-2">Phase 3+4</h4>
+
+                  <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer mb-2">
+                    <input
+                      type="checkbox"
+                      checked={!!workflow?.settings?.proxy_chain_enabled}
+                      onChange={(e) => setWorkflow({ ...workflow, settings: { ...(workflow.settings || {}), proxy_chain_enabled: e.target.checked } })}
+                      className="rounded"
+                      data-testid="rpa-settings-proxy-chain"
+                    />
+                    <span>Multi-Hop Proxy Chain (Tor → exit)</span>
+                  </label>
+
+                  <label className="block text-xs text-slate-400 mb-1">Browser Binary</label>
+                  <select
+                    value={workflow?.settings?.browser_variant ?? "auto"}
+                    onChange={(e) => setWorkflow({ ...workflow, settings: { ...(workflow.settings || {}), browser_variant: e.target.value } })}
+                    className="w-full bg-slate-800 px-2 py-1.5 rounded text-xs mb-2"
+                    data-testid="rpa-settings-browser-variant"
+                  >
+                    <option value="auto">Auto</option>
+                    <option value="chromium">Full Chromium</option>
+                    <option value="brave">Brave</option>
+                    <option value="headless-shell">Headless-Shell</option>
+                    <option value="rotate">Rotate</option>
+                  </select>
+
+                  <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer mb-2">
+                    <input
+                      type="checkbox"
+                      checked={!!workflow?.settings?.behavioral_bio_enabled}
+                      onChange={(e) => setWorkflow({ ...workflow, settings: { ...(workflow.settings || {}), behavioral_bio_enabled: e.target.checked } })}
+                      className="rounded"
+                      data-testid="rpa-settings-behavioral-bio"
+                    />
+                    <span>Behavioral Biometrics (paranoia mode)</span>
+                  </label>
+
+                  <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={!!workflow?.settings?.ip_warmup_enabled}
+                      onChange={(e) => setWorkflow({ ...workflow, settings: { ...(workflow.settings || {}), ip_warmup_enabled: e.target.checked } })}
+                      className="rounded"
+                      data-testid="rpa-settings-ip-warmup"
+                    />
+                    <span>IP Warm-up (Google/Wikipedia)</span>
+                  </label>
+                </div>
               </div>
             )}
           </div>

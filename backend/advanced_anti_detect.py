@@ -177,6 +177,74 @@ class IdentityStore:
             return None
         return doc.get("storage_state")
 
+    # ── 2026-02 Step 5 (Big-5) — per-identity rate limiter ────────
+    async def reserve_visit_slot(
+        self,
+        identity_id: str,
+        *,
+        target_per_hour: int = 0,
+        max_wait_seconds: float = 90.0,
+    ) -> float:
+        """Atomically reserve a visit slot for `identity_id`. Returns the
+        seconds the caller must sleep BEFORE starting the visit.
+
+        Coordinates RUT / Form Filler / RPA Studio runs that share the
+        same `identity_label` so they don't burst against the same
+        identity. Implementation: read `last_visit_at`, compute
+        next-slot from `target_per_hour` (60 min / N visits with ±25%
+        jitter), bump `last_visit_at` atomically.
+
+        target_per_hour=0 → no rate limit, returns 0 immediately."""
+        if not identity_id or target_per_hour <= 0:
+            return 0.0
+        from datetime import datetime, timezone
+        col = self.db.anti_detect_identities
+        now_ts = datetime.now(timezone.utc).timestamp()
+        # Average inter-visit gap with ±25% jitter for naturalness
+        avg_gap = max(2.0, 3600.0 / float(target_per_hour))
+        jitter = (random.random() - 0.5) * 0.5 * avg_gap
+        target_gap = max(2.0, avg_gap + jitter)
+        # Atomic compare-and-set: only succeed if last_visit_at older
+        # than our threshold OR field missing. If conflict, return wait.
+        threshold = now_ts - target_gap
+        res = await col.find_one_and_update(
+            {"id": identity_id, "$or": [
+                {"last_visit_at": {"$exists": False}},
+                {"last_visit_at": {"$lt": threshold}},
+            ]},
+            {"$set": {"last_visit_at": now_ts}},
+            return_document=False,
+        )
+        if res is not None:
+            return 0.0
+        # Couldn't reserve — compute wait
+        doc = await col.find_one({"id": identity_id}, {"_id": 0, "last_visit_at": 1})
+        if not doc or not doc.get("last_visit_at"):
+            return 0.0
+        wait = max(0.0, doc["last_visit_at"] + target_gap - now_ts)
+        wait = min(wait, max_wait_seconds)
+        # Reserve the slot we'll occupy after the wait
+        new_slot = now_ts + wait
+        await col.update_one({"id": identity_id}, {"$set": {"last_visit_at": new_slot}})
+        return wait
+
+    # ── 2026-02 Step 5 (Big-6) — per-identity fpHash persistence ──
+    async def get_or_set_fp_hash(self, identity_id: str) -> int:
+        """Returns a stable fpHash for this identity. First call computes
+        + persists a fresh deterministic-random hash; subsequent calls
+        return the same value so ClientRects noise + MediaDevices +
+        Storage Quota all stay identity-stable across runs (returning
+        user pattern)."""
+        if not identity_id:
+            return 0
+        col = self.db.anti_detect_identities
+        doc = await col.find_one({"id": identity_id}, {"_id": 0, "fp_hash": 1})
+        if doc and isinstance(doc.get("fp_hash"), int) and doc["fp_hash"] != 0:
+            return int(doc["fp_hash"]) & 0xFFFFFFFF
+        new_hash = random.randint(0x10000000, 0xFFFFFFFF)
+        await col.update_one({"id": identity_id}, {"$set": {"fp_hash": new_hash}})
+        return new_hash
+
     async def mark_burnt(self, identity_id: str, reason: str = "") -> None:
         await self.db.anti_detect_identities.update_one(
             {"id": identity_id},

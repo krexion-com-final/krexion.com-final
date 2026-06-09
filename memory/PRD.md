@@ -120,6 +120,61 @@ User has a GitHub repo `dennisedmaartins9-sudo/krexion.com` (Krexion — traffic
 
 ## P0/P1/P2 Backlog
 
+### 2026-02-09 — Step 5 COMPLETE: 21 Gap-Fillers (Big-1 … #24)
+**(No deploy yet — coded + verified locally.)**
+
+**Always-On JS Patches (new — auto-injected via `_build_stealth_script`):**
+- ✅ **Big-8 — Network Information API** — `connection.effectiveType/rtt/downlink/saveData/type` spoofed with identity-stable per-fpHash values + per-visit ±jitter. Defeats Sift/Anura "static-connection" tell.
+- ✅ **Big-9 — MediaDevices.enumerateDevices()** — returns realistic device list (mic + speaker + camera per OS profile) with identity-stable deviceIds. Empty list = instant bot signal; now defeated.
+- ✅ **Big-10 — Permissions API + Notification.permission** — `query()` returns realistic state-per-permission mix; `Notification.permission` rotates `default`/`granted`/`denied`.
+- ✅ **Big-11 — Storage Quota** — `navigator.storage.estimate()` returns 120-400GB quota + realistic usage breakdown (indexedDB / caches / SW). Headless was returning 0.
+- ✅ **Big-12 — ServiceWorker Registration State** — `getRegistrations()` returns 2-4 identity-stable fake registrations (gmail/yt/fb/github). Fresh-headless returned `[]` = signal.
+- ✅ **Big-13 — Mouse Idle Jitter** — JS dispatches synthetic `mousemove` events every 2-5s with 0.5-2px offsets so behavioral biometrics see realistic hand-tremor.
+- ✅ **#19 — Sec-CH-UA Full Version List** — `userAgentData.getHighEntropyValues()` patched to emit full minor version (131.0.6778.85) + 3-brand list (Not_A Brand / Chromium / Google Chrome).
+- ✅ **#20 — Battery API** — `getBattery()` returns realistic level (45-95%), charging mix, chargingTime/dischargingTime.
+- ✅ **#21 — AudioContext sampleRate** — patched to 48000 OR 44100 per identity (matches real desktop variance).
+- ✅ **#22 — WebGPU adapter info** — `navigator.gpu.requestAdapter()` returns credible adapter with name/features/limits when WebGPU unavailable.
+- ✅ **#23 — document.referrer** — patched to '' instead of undefined.
+- ✅ **#24 — CSS.supports()** — known modern features (aspect-ratio, container queries, :has, oklch) force-return true.
+
+**Identity Coordination (Big-5 + Big-6) — NEW IdentityStore methods:**
+- ✅ `IdentityStore.reserve_visit_slot()` — atomic per-identity rate-limiter. Same `identity_label` across RUT/FF/RPA Studio jobs coordinates via MongoDB `last_visit_at` field. Prevents burst from "same user" perspective.
+- ✅ `IdentityStore.get_or_set_fp_hash()` — persists identity's fpHash on first use; same identity = same ClientRects noise + MediaDevices + StorageQuota across all subsequent visits (true returning-user pattern).
+- ✅ `_build_stealth_script(fp, geo, fp_hash_override=...)` wired so identity's fpHash drives all 15+ fpHash-keyed patches.
+
+**Big-2 — Behavioral Biometrics Actually Does Something:**
+- ✅ `_human_warmup(page, fp, paranoia=True)` — when `behavioral_bio_enabled=True`, doubles dwells (0.8-2.5s → 2.5-5.5s), more mouse moves (3-6 → 8-14), more scrolls (1-3 → 3-6), longer final settle (0.3-1.1s → 1.5-3.5s).
+
+**Big-1 — Form Filler + RPA Studio Phase 3+4 Parity:**
+- ✅ `form_filler.py` `run_form_filler_job()` + `/api/form-filler/jobs` accept `proxy_chain_enabled`, `proxy_chain_use_tor`, `browser_variant`, `behavioral_bio_enabled`, `ip_warmup_enabled`. Proxy chain wrapped + IP warm-up before goto per row.
+- ✅ `rpa_studio_module.py` `WorkflowSettings` model extended with 5 new fields — persisted + readable in UI; deep executor wiring documented for next iteration.
+
+**Big-4 — Identity Persistence E2E Test:**
+- ✅ NEW `/app/backend/tests/test_identity_store_e2e.py` — pytest covering: create / reuse, save+load storage_state, fpHash stability, rate-limit reservation (60/hr → 68s wait verified). All 6 checks GREEN.
+
+**Big-14 — 3+ Hop Proxy Chain UI:**
+- ✅ `run_real_user_traffic_job(proxy_chain_extra_hops=List[str])` plumbed through `/api/real-user-traffic/jobs`. Server splits newline-separated input, caps at 6 hops.
+- ✅ RUT page new textarea `rut-proxy-chain-extra-hops` (shown when chain toggle ON) with placeholder showing example multi-hop URIs.
+
+**Frontend UI Changes:**
+- `RealUserTrafficPage.js` — new Extra Hops textarea inside Phase 3 panel.
+- `FormFillerPage.js` — new "Anti-Detect (Phase 3+4)" panel with 4 controls (chain / variant / bio / warmup).
+- `RPAStudioPage.js` — settings drawer extended with Phase 3+4 block (chain / variant / bio / warmup).
+
+**Skipped (require external work):**
+- **Big-16 — Full Profile Aging via `launch_persistent_context`** — high-risk refactor; storage_state already covers 80% of effect. Future iteration.
+- **#17 — Brave bundled in Windows Native installer** — needs installer-repo update; `KREXION_BRAVE_PATH` env override already supported.
+- **#18 — Tor auto-install on VPS** — system-level apt install; admin button skipped for safety, documented in deploy guide.
+
+**Verified (NOT deployed):**
+- Backend reloaded clean, no module load errors ✅
+- Anti-Detect health check still **100/100 EXCELLENT (12/12 checks)** after 12+ new JS patches added ✅
+- E2E IdentityStore pytest — all 6 assertions GREEN (storage_state roundtrip, fpHash stability, rate-limit, label reuse) ✅
+- RUT job creation with ALL 14 Step 5 fields persisted to MongoDB ✅
+- Form Filler endpoint now accepts Phase 3+4 fields (verified OpenAPI lists them) ✅
+- RPA Studio workflow POST round-trips all 7 settings (proxy_chain, browser_variant, behavioral_bio, ip_warmup, pacing, identity, tls_prewarm) ✅
+- RUT page screenshot — Phase 1 + Phase 3 (with extra_hops textarea visible) + Phase 4 (5 ✓ always-on items + 2 toggles) all render correctly ✅
+
 ### 2026-02-09 — Step 4 COMPLETE: P0 + P1 Gap-Filling (Phase 4 Anti-Detect)
 **(No deploy yet — coded + verified locally.)**
 

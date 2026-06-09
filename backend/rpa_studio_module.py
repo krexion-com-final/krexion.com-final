@@ -121,6 +121,12 @@ class WorkflowSettings(BaseModel):
     # Cloudflare BM / DataDome / Akamai on cold sessions. False
     # (default) preserves the previous behaviour exactly.
     tls_prewarm: bool = False
+    # ── 2026-02 Step 5 (Big-1): Phase 3+4 parity with RUT ──
+    proxy_chain_enabled: bool = False
+    proxy_chain_use_tor: bool = True
+    browser_variant: str = "auto"
+    behavioral_bio_enabled: bool = False
+    ip_warmup_enabled: bool = False
 
 
 class WorkflowCreate(BaseModel):

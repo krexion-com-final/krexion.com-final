@@ -5785,6 +5785,12 @@ async def form_filler_create_job(
     pacing_per_hour: int = Form(0),
     identity_label: str = Form(""),
     tls_prewarm: bool = Form(False),
+    # 2026-02 Step 5 — Phase 3+4 parity with RUT (Big-1)
+    proxy_chain_enabled: bool = Form(False),
+    proxy_chain_use_tor: bool = Form(True),
+    browser_variant: str = Form("auto"),
+    behavioral_bio_enabled: bool = Form(False),
+    ip_warmup_enabled: bool = Form(False),
     user: dict = Depends(get_current_user),
     _cloud_gate: bool = Depends(require_local_mode),
 ):
@@ -5914,6 +5920,12 @@ async def form_filler_create_job(
         pacing_per_hour=max(0, int(pacing_per_hour or 0)),
         identity_label=(identity_label or "").strip()[:120],
         tls_prewarm=bool(tls_prewarm),
+        # 2026-02 Step 5 — Phase 3+4 parity
+        proxy_chain_enabled=bool(proxy_chain_enabled),
+        proxy_chain_use_tor=bool(proxy_chain_use_tor),
+        browser_variant=(browser_variant or "auto").strip().lower()[:32],
+        behavioral_bio_enabled=bool(behavioral_bio_enabled),
+        ip_warmup_enabled=bool(ip_warmup_enabled),
     )
     return {
         "job_id": job_id,
@@ -6982,6 +6994,7 @@ async def _rut_prepare_and_run(
             # 2026-02 v2.1.31 — Step 3 wiring
             proxy_chain_enabled=bool(params.get("proxy_chain_enabled")),
             proxy_chain_use_tor=bool(params.get("proxy_chain_use_tor", True)),
+            proxy_chain_extra_hops=list(params.get("proxy_chain_extra_hops") or []),
             browser_variant=str(params.get("browser_variant") or "auto").strip().lower(),
             # 2026-02 v2.1.31 — Step 4 wiring
             behavioral_bio_enabled=bool(params.get("behavioral_bio_enabled")),
@@ -7223,6 +7236,9 @@ async def rut_create_job(
     # ── 2026-02 v2.1.31 — Step 3: Multi-Hop Proxy Chain ───────────────
     proxy_chain_enabled: bool = Form(False),
     proxy_chain_use_tor: bool = Form(True),
+    # 2026-02 Step 5 (Big-14): newline-separated hop URIs inserted into
+    # the chain BETWEEN Tor and the exit proxy. Optional.
+    proxy_chain_extra_hops: str = Form(""),
     # ── 2026-02 v2.1.31 — Step 3: Browser Binary Rotation ─────────────
     # "auto" | "chromium" | "headless-shell" | "brave" | "rotate"
     browser_variant: str = Form("auto"),
@@ -7448,6 +7464,10 @@ async def rut_create_job(
         # 2026-02 v2.1.31 — Step 3 wiring
         "proxy_chain_enabled": bool(proxy_chain_enabled),
         "proxy_chain_use_tor": bool(proxy_chain_use_tor),
+        "proxy_chain_extra_hops": [
+            ln.strip() for ln in (proxy_chain_extra_hops or "").splitlines()
+            if ln.strip()
+        ][:6],  # cap at 6 extra hops
         "browser_variant": (browser_variant or "auto").strip().lower()[:32],
         # 2026-02 v2.1.31 — Step 4 wiring
         "behavioral_bio_enabled": bool(behavioral_bio_enabled),
@@ -7548,6 +7568,10 @@ async def rut_create_job(
             # 2026-02 v2.1.31 — Step 3 wiring (persisted)
             "proxy_chain_enabled": bool(proxy_chain_enabled),
             "proxy_chain_use_tor": bool(proxy_chain_use_tor),
+            "proxy_chain_extra_hops": [
+                ln.strip() for ln in (proxy_chain_extra_hops or "").splitlines()
+                if ln.strip()
+            ][:6],
             "browser_variant": (browser_variant or "auto").strip().lower()[:32],
             # 2026-02 v2.1.31 — Step 4 wiring (persisted)
             "behavioral_bio_enabled": bool(behavioral_bio_enabled),

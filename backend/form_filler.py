@@ -1120,6 +1120,12 @@ async def run_form_filler_job(
     pacing_per_hour: int = 0,
     identity_label: str = "",
     tls_prewarm: bool = False,
+    # 2026-02 Step 5 — Phase 3+4 parity with RUT (Big-1)
+    proxy_chain_enabled: bool = False,
+    proxy_chain_use_tor: bool = True,
+    browser_variant: str = "auto",
+    behavioral_bio_enabled: bool = False,
+    ip_warmup_enabled: bool = False,
 ):
     """
     Runs the batch sequentially. Progress is written to JOBS[job_id]
@@ -1191,6 +1197,28 @@ async def run_form_filler_job(
                 skip_reason = ""
                 lead_proof = {}
                 browser = None
+                # ── 2026-02 Step 5 (Big-1): Proxy chain wrapping ──
+                # Mirror RUT's per-row chain start/stop. Single-row visit
+                # → single chain lifecycle.
+                _ff_chain_handle = None
+                _effective_proxy_cfg = proxy_cfg
+                if proxy_chain_enabled and proxy_cfg:
+                    try:
+                        import proxy_chain as _ff_pc
+                        _ff_chain = await _ff_pc.start_chain(
+                            exit_proxy=proxy_cfg,
+                            use_tor=bool(proxy_chain_use_tor),
+                        )
+                        if _ff_chain and _ff_chain.get("proxy"):
+                            _effective_proxy_cfg = _ff_chain["proxy"]
+                            _ff_chain_handle = _ff_chain.get("handle")
+                            logger.info(
+                                f"form_filler proxy chain ON row {i}: "
+                                f"{len(_ff_chain.get('hops') or [])} hops"
+                            )
+                    except Exception as _ff_pc_err:  # noqa: BLE001
+                        logger.debug(f"ff proxy_chain failed: {_ff_pc_err}")
+
                 try:
                     # ── Stealth-armed launch (centralized engine) ────────
                     # Provides identical 35+ anti-detect patches as RUT:
@@ -1199,7 +1227,7 @@ async def run_form_filler_job(
                     if _stealth_launch:
                         try:
                             browser, context, page = await _stealth_launch(
-                                p, ua=ua, proxy=proxy_cfg, headless=True,
+                                p, ua=ua, proxy=_effective_proxy_cfg, headless=True,
                             )
                         except Exception as _ste_err:
                             import logging
@@ -1208,7 +1236,7 @@ async def run_form_filler_job(
                             )
                             browser = await p.chromium.launch(
                                 headless=True,
-                                proxy=proxy_cfg,
+                                proxy=_effective_proxy_cfg,
                                 args=["--no-sandbox", "--disable-dev-shm-usage"],
                             )
                             context = await browser.new_context(user_agent=ua) if ua else await browser.new_context()
@@ -1216,11 +1244,24 @@ async def run_form_filler_job(
                     else:
                         browser = await p.chromium.launch(
                             headless=True,
-                            proxy=proxy_cfg,
+                            proxy=_effective_proxy_cfg,
                             args=["--no-sandbox", "--disable-dev-shm-usage"],
                         )
                         context = await browser.new_context(user_agent=ua) if ua else await browser.new_context()
                         page = await context.new_page()
+
+                    # ── 2026-02 Step 5 (Big-1): IP warm-up for FF ─
+                    if ip_warmup_enabled:
+                        try:
+                            from advanced_anti_detect import warm_up_ip as _ff_warm
+                            _wpg = await context.new_page()
+                            try:
+                                await _ff_warm(_wpg, visits=2, dwell_sec=3.0)
+                            finally:
+                                try: await _wpg.close()
+                                except Exception: pass
+                        except Exception as _wu_err:  # noqa: BLE001
+                            logger.debug(f"ff ip_warmup failed: {_wu_err}")
                     # ── 2026-02 v2.1.31 — TLS / JA3 prewarm ──────────
                     # Pre-fetch target with real Chrome JA3 via curl_cffi
                     # and seed the resulting cookies onto the Playwright
@@ -1473,6 +1514,10 @@ async def run_form_filler_job(
                 finally:
                     if browser is not None:
                         try: await browser.close()
+                        except Exception: pass
+                    # 2026-02 Step 5 (Big-1): stop the per-row proxy chain
+                    if _ff_chain_handle is not None:
+                        try: await _ff_chain_handle.stop()
                         except Exception: pass
 
                 # Update counters

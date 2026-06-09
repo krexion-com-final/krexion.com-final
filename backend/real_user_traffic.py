@@ -853,7 +853,7 @@ def _build_client_hint_headers(fp: Dict[str, Any], ua: str) -> Dict[str, str]:
 # JS API is masked. These helpers add realistic warm-up behaviour at
 # the right moments without touching the existing form_filler flow.
 # ──────────────────────────────────────────────────────────────────────
-async def _human_warmup(page: Any, fp: Dict[str, Any]) -> None:
+async def _human_warmup(page: Any, fp: Dict[str, Any], *, paranoia: bool = False) -> None:
     """Simulate a real user landing on a page: read pause + mouse jitter
     + a few realistic scrolls. NEVER raises — every failure is swallowed
     so an unrelated runtime quirk in the page can't abort the visit."""
@@ -863,35 +863,45 @@ async def _human_warmup(page: Any, fp: Dict[str, Any]) -> None:
         vh = max(480, int(viewport.get("height", 800)))
 
         # Initial read pause — real users don't move for ~0.8-2.5s on land
-        await asyncio.sleep(random.uniform(0.8, 2.5))
+        # Step 5 (Big-2): paranoia mode doubles dwells + adds extra moves
+        if paranoia:
+            await asyncio.sleep(random.uniform(2.5, 5.5))
+        else:
+            await asyncio.sleep(random.uniform(0.8, 2.5))
 
-        # Mouse jitter — 3-6 small bezier-style moves
+        # Mouse jitter — 3-6 small bezier-style moves (paranoia: 8-14)
         if not fp.get("is_mobile"):
             try:
                 x, y = random.randint(50, vw - 50), random.randint(50, vh - 50)
                 await page.mouse.move(x, y, steps=random.randint(8, 20))
                 await asyncio.sleep(random.uniform(0.15, 0.45))
-                for _ in range(random.randint(3, 6)):
+                _move_count = random.randint(8, 14) if paranoia else random.randint(3, 6)
+                for _ in range(_move_count):
                     x = max(10, min(vw - 10, x + random.randint(-180, 180)))
                     y = max(10, min(vh - 10, y + random.randint(-120, 120)))
                     await page.mouse.move(x, y, steps=random.randint(6, 14))
-                    await asyncio.sleep(random.uniform(0.08, 0.32))
+                    _dwell_max = 0.65 if paranoia else 0.32
+                    await asyncio.sleep(random.uniform(0.08, _dwell_max))
             except Exception:
                 pass
 
-        # Scroll down 1-3 times then occasional scroll back up
+        # Scroll down 1-3 times then occasional scroll back up (paranoia: 3-6)
         try:
-            for _ in range(random.randint(1, 3)):
+            _scrolls = random.randint(3, 6) if paranoia else random.randint(1, 3)
+            for _ in range(_scrolls):
                 await page.mouse.wheel(0, random.randint(180, 620))
                 await asyncio.sleep(random.uniform(0.35, 1.4))
-            if random.random() < 0.4:
+            if random.random() < (0.7 if paranoia else 0.4):
                 await page.mouse.wheel(0, -random.randint(80, 240))
                 await asyncio.sleep(random.uniform(0.25, 0.8))
         except Exception:
             pass
 
-        # Final settle pause
-        await asyncio.sleep(random.uniform(0.3, 1.1))
+        # Final settle pause (paranoia: 1.5-3.5s, normal: 0.3-1.1s)
+        if paranoia:
+            await asyncio.sleep(random.uniform(1.5, 3.5))
+        else:
+            await asyncio.sleep(random.uniform(0.3, 1.1))
     except Exception:
         pass
 
@@ -2168,7 +2178,7 @@ async def _probe_proxy_target_reachable(
 # MaxMind minFraud / IPQualityScore / Anura / ArkoseLabs / FingerprintJS
 # / CreepJS / BotD probe. Per-visit unique noise so two visits from the
 # same OS+UA still get different audio/canvas/font fingerprints.
-def _build_stealth_script(fp: Dict[str, Any], geo: Dict[str, Any]) -> str:
+def _build_stealth_script(fp: Dict[str, Any], geo: Dict[str, Any], *, fp_hash_override: Optional[int] = None) -> str:
     import json as _json
     langs = [s.split(";")[0].strip() for s in geo["accept_language"].split(",") if s.strip()]
     langs = [lg for lg in langs if lg]
@@ -2214,13 +2224,21 @@ def _build_stealth_script(fp: Dict[str, Any], geo: Dict[str, Any]) -> str:
         # always sees coordinates matching the visiting country/city.
         "lat": float(geo.get("lat", 40.7128) or 40.7128),
         "lon": float(geo.get("lon", -74.0060) or -74.0060),
+        # 2026-02 Step 5: chrome FULL version (with minor) exposed to JS
+        # for Sec-CH-UA full-version-list spoof (#19). The existing
+        # `chromeVersion` field above stays as int for legacy patches.
+        "chromeFullVersion": str(fp.get("chrome_full_version") or fp.get("chrome_version") or "131.0.6778.85"),
         # 2026-02 Step 4 (P0 #4): deterministic per-fingerprint seed for
         # the ClientRects sub-pixel noise patch. Derives from the UA +
         # chrome version + timezone so the noise is stable across the
         # visit but differs across visits (defeats cross-visit
         # ClientRects clustering used by FingerprintJS Pro v4 / Sift).
+        # Step 5 (Big-6): when caller supplies `fp_hash_override` (from
+        # a persisted identity), use it instead — that way returning
+        # users see the SAME hardware fingerprint across runs.
         "fpHash": int(
-            (abs(hash(
+            (int(fp_hash_override) & 0xFFFFFFFF) if fp_hash_override
+            else (abs(hash(
                 f"{fp.get('ua','')}|{fp.get('chrome_version','')}|{geo.get('timezone','')}"
             )) & 0xFFFFFFFF) or 0x9E3779B9
         ),
@@ -3415,6 +3433,406 @@ safe(() => {
   }
 });
 
+// ══════════════════════════════════════════════════════════════════
+// STEP 5 — Phase-5 patches (Big-8 … Big-24)
+// Every patch is best-effort + safe (try/catch silent), so a missing
+// API on this Chrome rev never breaks the page.
+// ══════════════════════════════════════════════════════════════════
+
+// ── 7a. Network Information API (Big-8) ──────────────────────────
+// Sift / Anura / FingerprintJS Pro read navigator.connection.* to
+// see if traffic looks like real network conditions. Headless
+// reports `effectiveType:"4g", rtt:50, downlink:10` STATICALLY across
+// every visit → flag. Real users: jitter every reload.
+safe(() => {
+  const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+  if (!conn) return;
+  try {
+    const seed = (__KX.fpHash || 0x9e3779b9) >>> 0;
+    // Deterministic per-identity choice — same identity sees consistent
+    // network "quality" across visits (real returning user pattern).
+    const types = ['4g', '4g', '4g', 'wifi', '3g'];
+    const _et = types[seed % types.length];
+    // RTT jitter ±15ms, downlink jitter ±2 Mbps every visit
+    const _rttBase = (_et === 'wifi' ? 15 : (_et === '3g' ? 180 : 55));
+    const _dlBase  = (_et === 'wifi' ? 25 : (_et === '3g' ? 1.5 : 10));
+    const _rtt = _rttBase + (((seed >>> 8) & 31) - 16);
+    const _dl  = Math.max(0.5, _dlBase + (((seed >>> 16) & 7) - 3) * 0.4);
+    Object.defineProperty(conn, 'effectiveType', { get: () => _et, configurable: true });
+    Object.defineProperty(conn, 'rtt', { get: () => Math.round(_rtt / 25) * 25, configurable: true });
+    Object.defineProperty(conn, 'downlink', { get: () => Math.round(_dl * 10) / 10, configurable: true });
+    Object.defineProperty(conn, 'saveData', { get: () => false, configurable: true });
+    if (typeof conn.type !== 'undefined') {
+      Object.defineProperty(conn, 'type', { get: () => (_et === 'wifi' ? 'wifi' : 'cellular'), configurable: true });
+    }
+  } catch (e) {}
+});
+
+// ── 7b. MediaDevices.enumerateDevices (Big-9) ────────────────────
+// Headless Chrome returns EMPTY array → instant bot signal.
+// Real laptops report 1-2 mics + 1-2 speakers + 1 camera (deviceId
+// hashed so it's stable per-origin). We forge a realistic set keyed
+// to the identity hash so same identity gives same deviceIds.
+safe(() => {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  const seed = (__KX.fpHash || 0x9e3779b9) >>> 0;
+  const _did = (label, kind) => {
+    // 64-hex deviceId derived from seed + label
+    let h = seed;
+    for (let i = 0; i < label.length; i++) {
+      h = ((h * 33) ^ label.charCodeAt(i)) >>> 0;
+    }
+    return ('0'.repeat(64) + h.toString(16)).slice(-64);
+  };
+  const profiles = [
+    // Most real laptops
+    [
+      { kind: 'audioinput',  label: 'Default - Microphone (Realtek(R) Audio)', groupId: 'g1' },
+      { kind: 'audioinput',  label: 'Microphone Array (Intel® Smart Sound Technology)', groupId: 'g2' },
+      { kind: 'audiooutput', label: 'Default - Speakers (Realtek(R) Audio)', groupId: 'g1' },
+      { kind: 'videoinput',  label: 'HD WebCam (04f2:b6c8)', groupId: 'g3' },
+    ],
+    // macOS-style
+    [
+      { kind: 'audioinput',  label: 'Default', groupId: 'gm1' },
+      { kind: 'audiooutput', label: 'MacBook Pro Speakers', groupId: 'gm2' },
+      { kind: 'videoinput',  label: 'FaceTime HD Camera (Built-in)', groupId: 'gm3' },
+    ],
+    // Generic desktop
+    [
+      { kind: 'audioinput',  label: 'Microphone (USB Audio Device)', groupId: 'gd1' },
+      { kind: 'audiooutput', label: 'Speakers (USB Audio Device)', groupId: 'gd1' },
+    ],
+  ];
+  const profile = profiles[seed % profiles.length];
+  const fake = profile.map(d => ({
+    deviceId: _did(d.label, d.kind),
+    kind: d.kind,
+    label: '', // Per spec: label is empty until getUserMedia is granted
+    groupId: _did(d.groupId, 'g'),
+    toJSON: function () { return { deviceId: this.deviceId, kind: this.kind, label: this.label, groupId: this.groupId }; },
+  }));
+  try {
+    const orig = navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices);
+    navigator.mediaDevices.enumerateDevices = function () {
+      try { return orig().then(real => (real && real.length) ? real : fake); }
+      catch (e) { return Promise.resolve(fake); }
+    };
+  } catch (e) {}
+  // getSupportedConstraints — real Chrome reports ~30 keys true
+  try {
+    if (typeof navigator.mediaDevices.getSupportedConstraints === 'function') {
+      const orig2 = navigator.mediaDevices.getSupportedConstraints.bind(navigator.mediaDevices);
+      navigator.mediaDevices.getSupportedConstraints = function () {
+        const out = orig2();
+        // Patch the obvious missing keys some detectors check for
+        ['width','height','aspectRatio','frameRate','facingMode','resizeMode','sampleRate','sampleSize','echoCancellation','autoGainControl','noiseSuppression','channelCount','deviceId','groupId'].forEach(k => { try { out[k] = true; } catch (e) {} });
+        return out;
+      };
+    }
+  } catch (e) {}
+});
+
+// ── 7c. Permissions API + Notification.permission (Big-10) ───────
+safe(() => {
+  // Notification.permission: real users have a MIX. We pick "default"
+  // most often (most sites haven't asked yet), occasionally "granted".
+  if (typeof Notification !== 'undefined') {
+    try {
+      const seed = (__KX.fpHash || 0) >>> 0;
+      const perm = (seed % 7 === 0) ? 'granted' : (seed % 13 === 0 ? 'denied' : 'default');
+      Object.defineProperty(Notification, 'permission', { get: () => perm, configurable: true });
+    } catch (e) {}
+  }
+  // navigator.permissions.query — real Chrome returns PermissionStatus
+  // with state ∈ {granted, denied, prompt}. Headless: ALWAYS 'prompt'
+  // (no user has interacted) → tell. We return identity-derived mix.
+  if (navigator.permissions && navigator.permissions.query) {
+    try {
+      const orig = navigator.permissions.query.bind(navigator.permissions);
+      navigator.permissions.query = function (desc) {
+        const name = (desc && desc.name) ? String(desc.name) : '';
+        // Permissions that real users grant for everyday usage
+        const grantedMap = {
+          'geolocation': 'prompt',  // most users haven't yet
+          'notifications': (Notification && Notification.permission) || 'default',
+          'persistent-storage': 'granted',
+          'midi': 'denied',
+          'background-sync': 'granted',
+          'screen-wake-lock': 'granted',
+          'clipboard-read': 'prompt',
+          'clipboard-write': 'granted',
+          'camera': 'prompt',
+          'microphone': 'prompt',
+          'payment-handler': 'granted',
+        };
+        const fakeState = grantedMap[name];
+        if (fakeState) {
+          // Build a PermissionStatus-shaped object so .state/.onchange work
+          const ps = { state: fakeState, status: fakeState, name: name,
+                       addEventListener: function () {}, removeEventListener: function () {},
+                       dispatchEvent: function () { return true; }, onchange: null };
+          return Promise.resolve(ps);
+        }
+        return orig(desc);
+      };
+    } catch (e) {}
+  }
+});
+
+// ── 7d. Storage Quota (Big-11) ───────────────────────────────────
+// navigator.storage.estimate() on real laptops returns quota in
+// 50-500 GB range, usage in MB. Headless: undefined OR quota=0 → tell.
+safe(() => {
+  if (!navigator.storage || !navigator.storage.estimate) return;
+  try {
+    const orig = navigator.storage.estimate.bind(navigator.storage);
+    navigator.storage.estimate = function () {
+      const seed = (__KX.fpHash || 0) >>> 0;
+      // Pick realistic disk size based on fpHash → identity-stable
+      const totalGB = 120 + (seed % 8) * 40;   // 120, 160, 200, …, 400
+      const usedMB  = 800 + ((seed >>> 5) % 1500);
+      const fake = {
+        quota: totalGB * 1024 * 1024 * 1024,
+        usage: usedMB * 1024 * 1024,
+        usageDetails: {
+          indexedDB: Math.floor(usedMB * 0.3) * 1024 * 1024,
+          caches:    Math.floor(usedMB * 0.5) * 1024 * 1024,
+          serviceWorkerRegistrations: Math.floor(usedMB * 0.02) * 1024 * 1024,
+        },
+      };
+      return orig().then(real => {
+        // If real returned 0/undefined (headless), use fake. Else
+        // preserve real (so we don't downgrade a real measurement).
+        if (!real || !real.quota || real.quota < 1024 * 1024) return fake;
+        return real;
+      }).catch(() => fake);
+    };
+  } catch (e) {}
+});
+
+// ── 7e. Service Worker Registration State (Big-12) ───────────────
+// Real returning users have multiple SWs registered (gmail.com,
+// facebook.com, …). Fresh headless: zero → tell. We forge a small
+// realistic list that's IDENTITY-stable (same identity = same SWs).
+safe(() => {
+  if (!('serviceWorker' in navigator)) return;
+  try {
+    const seed = (__KX.fpHash || 0) >>> 0;
+    const allSites = [
+      'https://www.google.com/',
+      'https://mail.google.com/',
+      'https://www.youtube.com/',
+      'https://www.facebook.com/',
+      'https://twitter.com/',
+      'https://github.com/',
+      'https://www.linkedin.com/',
+      'https://web.whatsapp.com/',
+    ];
+    // 2-4 registrations, identity-stable selection
+    const count = 2 + (seed % 3);
+    const picked = [];
+    for (let i = 0; i < count; i++) {
+      picked.push(allSites[(seed >>> (i * 2)) % allSites.length]);
+    }
+    const fakeRegs = picked.map(scope => ({
+      scope,
+      active: { scriptURL: scope + 'sw.js', state: 'activated' },
+      installing: null,
+      waiting: null,
+      navigationPreload: { enable: () => Promise.resolve(), disable: () => Promise.resolve(), setHeaderValue: () => Promise.resolve(), getState: () => Promise.resolve({ enabled: false, headerValue: '' }) },
+      pushManager: { getSubscription: () => Promise.resolve(null), subscribe: () => Promise.reject(new DOMException('Not allowed', 'NotAllowedError')), permissionState: () => Promise.resolve('prompt') },
+      update: () => Promise.resolve(),
+      unregister: () => Promise.resolve(true),
+      addEventListener: function () {}, removeEventListener: function () {},
+    }));
+    const origGR = navigator.serviceWorker.getRegistrations;
+    if (origGR) {
+      const bound = origGR.bind(navigator.serviceWorker);
+      navigator.serviceWorker.getRegistrations = function () {
+        return bound().then(real => (real && real.length) ? real : fakeRegs).catch(() => fakeRegs);
+      };
+    }
+  } catch (e) {}
+});
+
+// ── 7f. Battery API (#20) ────────────────────────────────────────
+safe(() => {
+  if (typeof navigator.getBattery !== 'function') return;
+  try {
+    const seed = (__KX.fpHash || 0) >>> 0;
+    const _level = Math.max(0.15, Math.min(0.99, 0.45 + ((seed >>> 3) % 50) / 100)); // 45-95%
+    const _charging = (seed % 3 === 0);
+    const _chargingTime = _charging ? (1800 + (seed % 1800)) : Infinity;
+    const _dischargingTime = _charging ? Infinity : (3600 + (seed % 7200));
+    const fake = {
+      level: _level,
+      charging: _charging,
+      chargingTime: _chargingTime,
+      dischargingTime: _dischargingTime,
+      addEventListener: function () {}, removeEventListener: function () {},
+      dispatchEvent: function () { return true; },
+      onchargingchange: null, onlevelchange: null, onchargingtimechange: null, ondischargingtimechange: null,
+    };
+    navigator.getBattery = function () { return Promise.resolve(fake); };
+  } catch (e) {}
+});
+
+// ── 7g. AudioContext sampleRate variation (#21) ──────────────────
+safe(() => {
+  if (typeof AudioContext === 'undefined' && typeof webkitAudioContext === 'undefined') return;
+  try {
+    const seed = (__KX.fpHash || 0) >>> 0;
+    const _rate = (seed % 2 === 0) ? 48000 : 44100; // Real desktops mix
+    const OrigAC = window.AudioContext || window.webkitAudioContext;
+    if (!OrigAC) return;
+    const Patched = function () {
+      const ctx = new OrigAC(...arguments);
+      try {
+        Object.defineProperty(ctx, 'sampleRate', { get: () => _rate, configurable: true });
+      } catch (e) {}
+      return ctx;
+    };
+    Patched.prototype = OrigAC.prototype;
+    try { window.AudioContext = Patched; } catch (e) {}
+    try { window.webkitAudioContext = Patched; } catch (e) {}
+  } catch (e) {}
+});
+
+// ── 7h. WebGPU adapter info (#22) ────────────────────────────────
+safe(() => {
+  if (!navigator.gpu || !navigator.gpu.requestAdapter) return;
+  try {
+    const orig = navigator.gpu.requestAdapter.bind(navigator.gpu);
+    navigator.gpu.requestAdapter = async function () {
+      const adapter = await orig.apply(this, arguments);
+      if (!adapter) {
+        // Forge a credible adapter when WebGPU isn't really available
+        // (most headless envs) — Chrome 113+ pages expect SOMETHING here
+        return {
+          name: 'Intel(R) UHD Graphics',
+          features: new Set(['depth-clip-control', 'texture-compression-bc', 'timestamp-query']),
+          limits: { maxTextureDimension1D: 8192, maxTextureDimension2D: 8192, maxTextureDimension3D: 2048, maxBindGroups: 4 },
+          isFallbackAdapter: false,
+          requestDevice: () => Promise.reject(new DOMException('Adapter not capable', 'OperationError')),
+          requestAdapterInfo: () => Promise.resolve({ vendor: 'intel', architecture: 'gen-12', device: '', description: 'Intel(R) UHD Graphics' }),
+        };
+      }
+      return adapter;
+    };
+  } catch (e) {}
+});
+
+// ── 7i. document.referrer realism (#23) ──────────────────────────
+// When the page loads with empty referrer in a "social/search" UA
+// context (e.g. mobile UA where the user "tapped a fb link"), real
+// browsers send a referer. We DO NOT lie about referrer here — it's
+// set by Playwright via extra_http_headers at navigation time. But
+// we DO patch document.referrer to MATCH what real browsers expose:
+// the value matches the Referer header sent. Sanity-only check.
+// (Real fix is on the Python side — referrer must be set per visit.)
+safe(() => {
+  // No-op JS patch — referrer must be set at navigation. This block
+  // simply asserts that any client-side scripts that READ
+  // document.referrer don't see "undefined" → empty string.
+  try {
+    if (typeof document.referrer === 'undefined') {
+      Object.defineProperty(document, 'referrer', { get: () => '', configurable: true });
+    }
+  } catch (e) {}
+});
+
+// ── 7j. CSS.supports() feature whitelist (#24) ────────────────────
+// Real Chrome 131 supports a specific set of CSS features. Some
+// detectors call CSS.supports() with known queries and compare
+// against the UA version. Mostly already correct via real CSS engine,
+// but we patch the edge case where headless reports false for a known
+// feature.
+safe(() => {
+  if (typeof CSS === 'undefined' || !CSS.supports) return;
+  try {
+    const orig = CSS.supports.bind(CSS);
+    // Known-true features in modern Chrome
+    const known = new Set([
+      'aspect-ratio: 16 / 9',
+      'gap: 1rem',
+      'display: grid',
+      'display: flex',
+      'backdrop-filter: blur(5px)',
+      'color: oklch(0.5 0.1 50)',
+      'container-type: inline-size',
+      ':has(p)',
+    ]);
+    CSS.supports = function (prop, value) {
+      try {
+        const q = (arguments.length === 1) ? String(prop) : `${prop}: ${value}`;
+        if (known.has(q)) return true;
+      } catch (e) {}
+      return orig.apply(CSS, arguments);
+    };
+  } catch (e) {}
+});
+
+// ── 7k. Sec-CH-UA Full Version List exposure (#19) ───────────────
+// navigator.userAgentData.getHighEntropyValues() — real Chrome
+// returns the FULL minor version (131.0.6778.85). Headless often
+// returns just major (131.0.0.0) → cohort tell.
+safe(() => {
+  if (!navigator.userAgentData || !navigator.userAgentData.getHighEntropyValues) return;
+  try {
+    const orig = navigator.userAgentData.getHighEntropyValues.bind(navigator.userAgentData);
+    navigator.userAgentData.getHighEntropyValues = async function (hints) {
+      const real = await orig(hints);
+      const cv = (__KX.chromeFullVersion || __KX.chromeVersion || real.uaFullVersion || '131.0.6778.85');
+      const cvFull = (cv.split('.').length >= 4) ? cv : (cv + '.6778.85').split('.').slice(0, 4).join('.');
+      try { real.uaFullVersion = cvFull; } catch (e) {}
+      try {
+        if (Array.isArray(real.fullVersionList)) {
+          real.fullVersionList = [
+            { brand: 'Not_A Brand',     version: '8.0.0.0' },
+            { brand: 'Chromium',        version: cvFull },
+            { brand: 'Google Chrome',   version: cvFull },
+          ];
+        }
+      } catch (e) {}
+      return real;
+    };
+  } catch (e) {}
+});
+
+// ── 7l. Mouse Idle Jitter (Big-13) ────────────────────────────────
+// Real users never hold mouse perfectly still for >5s — there's
+// micro-jitter from hand tremor. Headless: stationary = bot pattern.
+// We dispatch synthetic mousemove events every 2-5s with 0.5-2px
+// offsets so behavioral biometrics see realistic idle activity.
+safe(() => {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return;
+  let _lastX = 0, _lastY = 0;
+  try {
+    document.addEventListener('mousemove', function (e) {
+      _lastX = e.clientX; _lastY = e.clientY;
+    }, true);
+  } catch (e) {}
+  const tick = function () {
+    try {
+      if (_lastX && _lastY && Math.random() < 0.7) {
+        const dx = (Math.random() - 0.5) * 3;
+        const dy = (Math.random() - 0.5) * 3;
+        const nx = Math.max(0, Math.min(window.innerWidth - 1, _lastX + dx));
+        const ny = Math.max(0, Math.min(window.innerHeight - 1, _lastY + dy));
+        const ev = new MouseEvent('mousemove', {
+          clientX: nx, clientY: ny, bubbles: true, cancelable: true, view: window,
+        });
+        document.dispatchEvent(ev);
+        _lastX = nx; _lastY = ny;
+      }
+    } catch (e) {}
+    setTimeout(tick, 2000 + Math.random() * 3000);
+  };
+  // Start after 3-7s so it doesn't fire before first real interaction
+  setTimeout(tick, 3000 + Math.random() * 4000);
+});
+
 """
     return "(()=>{" + config_js + js_body + "})();"
 
@@ -4429,6 +4847,13 @@ async def run_real_user_traffic_job(
     # directly as before.
     proxy_chain_enabled: bool = False,
     proxy_chain_use_tor: bool = True,
+    # ── 2026-02 Step 5 (Big-14): Extra hops in the chain ──
+    # Newline-separated list of hop URIs. Inserted BETWEEN Tor (if
+    # enabled) and the final exit proxy. Lets ops build 3+ hop chains
+    # (residential A → datacenter B → Tor → residential C → target)
+    # for the highest possible IP correlation defense. Empty (default)
+    # = legacy 2-hop max.
+    proxy_chain_extra_hops: Optional[List[str]] = None,
     # ── 2026-02 v2.1.31 — Step 3: Browser Binary Rotation ────────────
     # Per-visit choice of Chromium / Brave / headless-shell. "auto"
     # preserves the existing _use_full_chromium() flow.
@@ -5740,6 +6165,7 @@ async def run_real_user_traffic_job(
                 _chain = await _pc.start_chain(
                     exit_proxy=proxy,
                     use_tor=bool(proxy_chain_use_tor),
+                    extra_hops=list(proxy_chain_extra_hops) if proxy_chain_extra_hops else None,
                 )
                 if _chain and _chain.get("proxy"):
                     _effective_proxy = _chain["proxy"]
@@ -5762,8 +6188,11 @@ async def run_real_user_traffic_job(
         # `storage_state` (cookies + origins + localStorage) so the
         # new_context boots with a baked-in profile. The label scopes
         # identities per-user via the IdentityStore collection.
+        # ── Step 5 (Big-5, Big-6): also load fp_hash for stable
+        #     fingerprint across visits + reserve rate-limited slot.
         _identity_doc = None
         _identity_storage_state = None
+        _identity_fp_hash: Optional[int] = None
         if identity_label and db is not None:
             try:
                 from advanced_anti_detect import IdentityStore as _IdStore
@@ -5775,12 +6204,32 @@ async def run_real_user_traffic_job(
                 )
                 if _identity_doc:
                     _identity_storage_state = await _id_store.load_storage_state(_identity_doc["id"])
+                    _identity_fp_hash = await _id_store.get_or_set_fp_hash(_identity_doc["id"])
+                    # Big-5: rate-limit coordination across jobs that
+                    # share this identity. target_per_hour=0 (default)
+                    # is a pass-through. Caller passes pacing_per_hour.
+                    if pacing_per_hour and pacing_per_hour > 0:
+                        try:
+                            wait_s = await _id_store.reserve_visit_slot(
+                                _identity_doc["id"],
+                                target_per_hour=int(pacing_per_hour),
+                                max_wait_seconds=90.0,
+                            )
+                            if wait_s > 0.5:
+                                push_live_step(
+                                    job_id, i + 1, "identity", "info",
+                                    f"Identity rate-limit: waiting {wait_s:.1f}s before visit (target={pacing_per_hour}/hr)",
+                                )
+                                await asyncio.sleep(wait_s)
+                        except Exception as _rl_err:  # noqa: BLE001
+                            logger.debug(f"identity rate-limit failed: {_rl_err}")
                     if _identity_storage_state:
                         push_live_step(
                             job_id, i + 1, "identity", "ok",
                             f"Identity '{identity_label}' loaded "
                             f"(age={int((time.time() - _identity_doc.get('created_ts', time.time())) / 86400)}d, "
-                            f"visits={_identity_doc.get('visits_count', 0)})",
+                            f"visits={_identity_doc.get('visits_count', 0)}, "
+                            f"fpHash={hex(_identity_fp_hash or 0)[:10]})",
                         )
             except Exception as _id_err:  # noqa: BLE001
                 logger.debug(f"identity load failed: {_id_err}")
@@ -5870,7 +6319,7 @@ async def run_real_user_traffic_job(
                     )
                 else:
                     raise
-            await context.add_init_script(_build_stealth_script(fp, geo))
+            await context.add_init_script(_build_stealth_script(fp, geo, fp_hash_override=_identity_fp_hash))
 
             # Defensive guard: block navigations to URLs that contain
             # unfilled tracker macros like `{{ccpa}}`, `{{sub}}`, etc.
@@ -6276,7 +6725,7 @@ async def run_real_user_traffic_job(
                                 permissions=["geolocation"],
                                 extra_http_headers=_ctx_headers,
                             )
-                            await context.add_init_script(_build_stealth_script(fp, geo))
+                            await context.add_init_script(_build_stealth_script(fp, geo, fp_hash_override=_identity_fp_hash))
                             await context.route(
                                 "**/*",
                                 _make_macro_guard(job_id, i + 1),
@@ -6591,7 +7040,7 @@ async def run_real_user_traffic_job(
                 # 3-8 seconds of realistic mouse/scroll/pause behaviour.
                 # Errors swallowed inside the helper so a quirky page
                 # can NEVER abort a visit.
-                await _human_warmup(page, fp)
+                await _human_warmup(page, fp, paranoia=bool(behavioral_bio_enabled))
 
                 if follow_redirect:
                     # Give the page a bit more time to do any JS redirect

@@ -61,6 +61,12 @@ export default function FormFillerPage() {
   const [pacingPerHour, setPacingPerHour] = useState(0);
   const [identityLabel, setIdentityLabel] = useState("");
   const [tlsPrewarm, setTlsPrewarm] = useState(false);
+  // ── 2026-02 Step 5 — Phase 3+4 parity (Big-1) ──
+  const [proxyChainEnabled, setProxyChainEnabled] = useState(false);
+  const [proxyChainUseTor, setProxyChainUseTor] = useState(true);
+  const [browserVariant, setBrowserVariant] = useState("auto");
+  const [behavioralBioEnabled, setBehavioralBioEnabled] = useState(false);
+  const [ipWarmupEnabled, setIpWarmupEnabled] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const pollRef = useRef(null);
 
@@ -149,6 +155,12 @@ export default function FormFillerPage() {
       fd.append("pacing_per_hour", String(pacingPerHour || 0));
       fd.append("identity_label", identityLabel || "");
       fd.append("tls_prewarm", tlsPrewarm ? "true" : "false");
+      // 2026-02 Step 5 — Phase 3+4 (Big-1)
+      fd.append("proxy_chain_enabled", proxyChainEnabled ? "true" : "false");
+      fd.append("proxy_chain_use_tor", proxyChainUseTor ? "true" : "false");
+      fd.append("browser_variant", browserVariant || "auto");
+      fd.append("behavioral_bio_enabled", behavioralBioEnabled ? "true" : "false");
+      fd.append("ip_warmup_enabled", ipWarmupEnabled ? "true" : "false");
 
       const r = await fetch(`${API_URL}/api/form-filler/jobs`, {
         method: "POST",
@@ -369,6 +381,61 @@ export default function FormFillerPage() {
                   </label>
                   <p className="text-[10px] text-zinc-500 mt-1">Bypasses Cloudflare/DataDome/Akamai on cold visits.</p>
                 </div>
+              </div>
+            </div>
+
+            {/* ── 2026-02 Step 5 — Form Filler Phase 3+4 panel (Big-1) ── */}
+            <div className="mt-4 p-4 rounded-lg border border-sky-500/30 bg-sky-950/10">
+              <div className="flex items-center gap-2 mb-3">
+                <span className="text-sky-300 text-sm font-semibold">🌐 Anti-Detect (Phase 3+4)</span>
+                <span className="text-[10px] text-zinc-500 px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-800">Multi-Hop · Browser Rotation · Behavioral Bio · IP Warm-up</span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={proxyChainEnabled}
+                    onChange={(e) => setProxyChainEnabled(e.target.checked)}
+                    className="mt-0.5 w-4 h-4 accent-sky-500"
+                    data-testid="ff-proxy-chain-enabled"
+                  />
+                  <span className="text-xs text-zinc-300">Multi-Hop Chain (Tor → exit)</span>
+                </label>
+                <div>
+                  <label className="block text-[11px] text-zinc-400 mb-1">Browser Binary</label>
+                  <select
+                    value={browserVariant}
+                    onChange={(e) => setBrowserVariant(e.target.value)}
+                    className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100"
+                    data-testid="ff-browser-variant"
+                  >
+                    <option value="auto">Auto</option>
+                    <option value="chromium">Full Chromium</option>
+                    <option value="brave">Brave</option>
+                    <option value="headless-shell">Headless-Shell</option>
+                    <option value="rotate">Rotate</option>
+                  </select>
+                </div>
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={behavioralBioEnabled}
+                    onChange={(e) => setBehavioralBioEnabled(e.target.checked)}
+                    className="mt-0.5 w-4 h-4 accent-emerald-500"
+                    data-testid="ff-behavioral-bio-enabled"
+                  />
+                  <span className="text-xs text-zinc-300">Behavioral Biometrics (paranoia)</span>
+                </label>
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={ipWarmupEnabled}
+                    onChange={(e) => setIpWarmupEnabled(e.target.checked)}
+                    className="mt-0.5 w-4 h-4 accent-emerald-500"
+                    data-testid="ff-ip-warmup-enabled"
+                  />
+                  <span className="text-xs text-zinc-300">IP Warm-up (Google/Wiki)</span>
+                </label>
               </div>
             </div>
 
