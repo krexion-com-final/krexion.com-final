@@ -29,10 +29,11 @@ import {
   Fingerprint, Package, Camera, UserPlus, Activity, ChevronDown, Bell,
   CloudUpload, HelpCircle, Plus, Crown, Minus, Square, X as XIcon,
   ListChecks, Tag, Layers, FileText, Wrench, KeyRound, PanelLeftClose,
-  PanelLeftOpen, RefreshCw
+  PanelLeftOpen, RefreshCw, Zap
 } from "lucide-react";
 import axios from "axios";
 import { useBranding } from "../context/BrandingContext";
+import BannerBar from "./BannerBar";
 import "./NativeShell.css";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -77,6 +78,7 @@ const NAV_GROUPS = [
     items: [
       { name: "Real-User Traffic", path: "/real-user-traffic", icon: Fingerprint, feature: "real_user_traffic" },
       { name: "Visual Recorder",   path: "/visual-recorder",   icon: Camera,      feature: "real_user_traffic" },
+      { name: "RPA Studio",        path: "/rpa-studio",        icon: Zap,         feature: null },
       { name: "Form Filler",       path: "/form-filler",       icon: FileText,    feature: "form_filler" },
       { name: "Uploaded Items",    path: "/uploaded-things",   icon: Package,     feature: "real_user_traffic" },
     ],
@@ -401,6 +403,7 @@ export default function NativeShell({ children }) {
           </div>
 
           <div className="knative-body" data-testid="native-body">
+            <BannerBar />
             {children}
           </div>
         </div>
