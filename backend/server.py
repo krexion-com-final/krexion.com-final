@@ -18910,6 +18910,24 @@ except Exception as _rpa_err:  # noqa: BLE001
     logger.error(f"RPA Studio module failed to load: {_rpa_err}")
 
 
+# ─── Anti-Detect Health Check endpoint (2026-06) ──────────────────────
+# Powers the System Health page tile + customer diagnostic. Runs a
+# live self-test of the entire stealth stack and returns a 0-100 score.
+# NOTE: mounted as @app.get NOT @api_router.get because api_router was
+# already included into app at line ~18235 — any later decorations on
+# api_router would NOT be picked up.
+@app.get("/api/anti-detect/health-check")
+async def anti_detect_health_check(current_user=Depends(get_current_user)):
+    try:
+        from advanced_anti_detect import run_health_check
+        result = await run_health_check()
+        return result
+    except Exception as _ad_err:  # noqa: BLE001
+        logger.error(f"anti-detect health check failed: {_ad_err}")
+        return {"score": 0, "verdict": "broken", "error": str(_ad_err),
+                "checks": [], "passed": 0, "total": 0}
+
+
 # (Local-UI static mount moved to end of file so it doesn't shadow
 #  routes registered by later modules - see "Local UI static mount"
 #  block near the bottom of server.py.)

@@ -234,7 +234,7 @@ NODE_CATALOG = {
             "color": "#ec4899",
             "nodes": [
                 {"type": "openai", "label": "OpenAI / Claude / Gemini", "params": ["provider", "model", "prompt", "save_to"]},
-                {"type": "captcha_2captcha", "label": "2Captcha Solver", "params": ["api_key", "captcha_type", "save_to"]},
+                {"type": "captcha_2captcha", "label": "Captcha Solver (2C/AntiC/CapM)", "params": ["provider", "api_key", "captcha_type", "save_to"]},
                 {"type": "google_sheets", "label": "Google Sheets", "params": ["sheet_id", "operation", "range", "values"]},
                 {"type": "http_request", "label": "HTTP Request", "params": ["method", "url", "headers", "body", "save_to"]},
             ],
@@ -1059,7 +1059,9 @@ async def _execute_workflow(run_id: str, wf: dict, override_vars: dict, headless
                     if params.get("save_to"):
                         variables[params["save_to"]] = res
                 elif ntype == "captcha_2captcha":
-                    res = await _exec_2captcha_node(params, page)
+                    # Now supports 3 providers via the unified solver:
+                    # `provider`: "2captcha" | "anticaptcha" | "capmonster"
+                    res = await _exec_universal_captcha_node(params, page)
                     if params.get("save_to"):
                         variables[params["save_to"]] = res
                 elif ntype == "apply_workflow":
@@ -1263,6 +1265,78 @@ async def _exec_gsheets_node(params: dict) -> Any:
         return {"ok": True, "operation": op, "note": "Read implementation pending"}
     except ImportError:
         return {"error": "gsheet_writer not available"}
+
+
+async def _exec_universal_captcha_node(params: dict, page) -> Any:
+    """Multi-provider captcha solver. Auto-discovers sitekey from page,
+    routes to 2Captcha / AntiCaptcha / CapMonster per `provider` param,
+    and injects solved token into the page so the form can submit.
+    Supported provider values: 2captcha | anticaptcha | capmonster
+    Supported captcha_type: recaptcha_v2 | recaptcha_v3 | hcaptcha |
+                            cloudflare_turnstile | image
+    """
+    provider = (params.get("provider") or "2captcha").lower()
+    api_key = params.get("api_key") or ""
+    captcha_type = (params.get("captcha_type") or "recaptcha_v2").lower()
+    if not api_key:
+        return {"error": "api_key required"}
+    if not page:
+        return {"error": "no active page"}
+    try:
+        page_url = page.url
+        if captcha_type in ("recaptcha_v2", "recaptcha_v3"):
+            sitekey = await page.evaluate("""
+                () => { const e=document.querySelector('[data-sitekey]');
+                  if(e) return e.getAttribute('data-sitekey');
+                  const i=document.querySelector('iframe[src*="recaptcha"]');
+                  if(i){const u=new URL(i.src);return u.searchParams.get('k');}
+                  return null; }""")
+        elif captcha_type == "hcaptcha":
+            sitekey = await page.evaluate("""
+                () => { const e=document.querySelector('[data-sitekey]');
+                  if(e) return e.getAttribute('data-sitekey');
+                  const i=document.querySelector('iframe[src*="hcaptcha"]');
+                  if(i){const u=new URL(i.src);return u.searchParams.get('sitekey');}
+                  return null; }""")
+        elif captcha_type == "cloudflare_turnstile":
+            sitekey = await page.evaluate("""
+                () => { const e=document.querySelector('.cf-turnstile,[data-sitekey]');
+                  return e ? (e.getAttribute('data-sitekey')||e.getAttribute('data-key')) : null; }""")
+        else:
+            sitekey = params.get("sitekey")
+    except Exception as e:
+        return {"error": f"sitekey discovery: {e}"}
+    if not sitekey and captcha_type != "image":
+        return {"error": "sitekey not found"}
+
+    try:
+        from advanced_anti_detect import solve_captcha_universal
+    except Exception as e:
+        return {"error": f"engine: {e}"}
+    res = await solve_captcha_universal(
+        provider=provider, api_key=api_key, captcha_type=captcha_type,
+        sitekey=sitekey or "", page_url=page_url,
+        action=params.get("action"), min_score=float(params.get("min_score") or 0.5),
+        image_base64=params.get("image_base64"),
+    )
+    if not res.get("ok"):
+        return res
+    token = res["token"]
+    try:
+        if captcha_type.startswith("recaptcha"):
+            await page.evaluate(f"""
+                const ta=document.getElementById('g-recaptcha-response')||document.querySelector('textarea[name="g-recaptcha-response"]');
+                if(ta){{ta.value='{token}';ta.innerHTML='{token}';}}
+                if(window.___grecaptcha_cfg){{try{{window.___grecaptcha_cfg.clients[0].callback('{token}');}}catch(e){{}}}}""")
+        elif captcha_type == "hcaptcha":
+            await page.evaluate(f"""
+                document.querySelectorAll('textarea[name="h-captcha-response"],textarea[name="g-recaptcha-response"]').forEach(t=>{{t.value='{token}';t.innerHTML='{token}';}});""")
+        elif captcha_type == "cloudflare_turnstile":
+            await page.evaluate(f"""
+                document.querySelectorAll('input[name="cf-turnstile-response"]').forEach(t=>{{t.value='{token}';}});""")
+    except Exception as e:
+        logger.warning(f"token inject: {e}")
+    return {"ok": True, "token": token, "provider": provider}
 
 
 async def _exec_2captcha_node(params: dict, page) -> Any:
