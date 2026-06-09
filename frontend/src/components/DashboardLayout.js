@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { LayoutDashboard, Link2, MousePointerClick, DollarSign, Server, Menu, LogOut, User, Settings, TrendingUp, Upload, Mail, Phone, Filter, Smartphone, Search, ClipboardCheck, Fingerprint, Package, Apple, Cpu, Briefcase, ChevronDown, ChevronRight, Link as LinkIcon, Activity, Camera, UserPlus, KeyRound } from "lucide-react";
+import { LayoutDashboard, Link2, MousePointerClick, DollarSign, Server, Menu, LogOut, User, Settings, TrendingUp, Upload, Mail, Phone, Filter, Smartphone, Search, ClipboardCheck, Fingerprint, Package, Apple, Cpu, Briefcase, ChevronDown, ChevronRight, Link as LinkIcon, Activity, Camera, UserPlus, KeyRound, Zap } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "./ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "./ui/dropdown-menu";
@@ -11,6 +11,7 @@ import CloudModeBanner from "./CloudModeBanner";
 import LocalPCStatusBadge from "./LocalPCStatusBadge";
 import UpdateBanner from "./UpdateBanner";
 import InstalledVersionBadge from "./InstalledVersionBadge";
+import BannerBar from "./BannerBar";
 import axios from "axios";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -88,6 +89,7 @@ export default function DashboardLayout({ children }) {
     { name: "UA Checker", path: "/ua-checker", icon: Search, feature: "ua_generator" },
     { name: "Real User Traffic", path: "/real-user-traffic", icon: Fingerprint, feature: "real_user_traffic" },
     { name: "Visual Recorder", path: "/visual-recorder", icon: Camera, feature: "real_user_traffic" },
+    { name: "RPA Studio", path: "/rpa-studio", icon: Zap, feature: null },
     { name: "Uploaded Things", path: "/uploaded-things", icon: Package, feature: "real_user_traffic" },
     { name: "Proxies", path: "/proxies", icon: Server, feature: "proxies" },
     { name: "Profile Builder", path: "/profile-builder", icon: UserPlus, feature: "profile_builder" },
@@ -377,6 +379,7 @@ export default function DashboardLayout({ children }) {
         <main className="flex-1 overflow-auto data-testid-main" data-testid="main-content" style={{ backgroundColor: 'transparent' }}>
           <CloudModeBanner />
           <UpdateBanner />
+          <BannerBar />
           <div className="p-4 md:p-6">
           <AnimatePresence mode="wait">
             <motion.div

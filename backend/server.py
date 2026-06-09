@@ -18886,6 +18886,30 @@ except Exception as _desk_err:  # noqa: BLE001
     logger.error(f"Desktop module failed to load: {_desk_err}")
 
 
+# ─── Banner / Announcement module (2026-06) ───────────────────────────
+# Admin can post promotional banners (discounts, offers) that customers
+# see on their dashboard. See banner_module.py for endpoints.
+try:
+    from banner_module import _bind as _banner_bind
+    _banner_router = _banner_bind(main_db=main_db, get_current_admin=get_current_admin)
+    app.include_router(_banner_router)
+    logger.info("Banner module loaded - /api/admin/banners + /api/banners/active")
+except Exception as _bnr_err:  # noqa: BLE001
+    logger.error(f"Banner module failed to load: {_bnr_err}")
+
+
+# ─── RPA Studio module (2026-06) ──────────────────────────────────────
+# AdsPower-grade visual RPA editor with 50+ nodes. See
+# rpa_studio_module.py for full endpoint list.
+try:
+    from rpa_studio_module import _bind as _rpa_bind
+    _rpa_router = _rpa_bind(main_db=main_db, get_current_user=get_current_user)
+    app.include_router(_rpa_router)
+    logger.info("RPA Studio module loaded - /api/rpa/* (visual workflow editor + executor)")
+except Exception as _rpa_err:  # noqa: BLE001
+    logger.error(f"RPA Studio module failed to load: {_rpa_err}")
+
+
 # (Local-UI static mount moved to end of file so it doesn't shadow
 #  routes registered by later modules - see "Local UI static mount"
 #  block near the bottom of server.py.)

@@ -53,6 +53,10 @@ import PlansAdminPage from "./pages/PlansAdminPage";
 import SystemMaintenancePage from "./pages/SystemMaintenancePage";
 import SiteContentAdminPage from "./pages/SiteContentAdminPage";
 import LicensePage from "./pages/LicensePage";
+import RPAStudioPage from "./pages/RPAStudioPage";
+import RPAWorkflowsPage from "./pages/RPAWorkflowsPage";
+import RPARunsPage from "./pages/RPARunsPage";
+import AdminBannersPage from "./pages/AdminBannersPage";
 import { Toaster } from "./components/ui/sonner";
 import { BrandingProvider } from "./context/BrandingContext";
 import { ThemeProvider } from "./context/ThemeContext";
@@ -199,6 +203,11 @@ function App() {
                 <LicenseAdminPage />
               </AdminRoute>
             } />
+            <Route path="/admin/banners" element={
+              <AdminRoute>
+                <AdminBannersPage />
+              </AdminRoute>
+            } />
             <Route
               path="/*"
               element={
@@ -280,6 +289,15 @@ function App() {
                         <FeatureRoute feature="real_user_traffic">
                           <VisualRecorderPage />
                         </FeatureRoute>
+                      } />
+                      <Route path="/rpa-studio" element={
+                        <RPAWorkflowsPage />
+                      } />
+                      <Route path="/rpa-studio/:id" element={
+                        <RPAStudioPage />
+                      } />
+                      <Route path="/rpa-runs" element={
+                        <RPARunsPage />
                       } />
                       <Route path="/uploaded-things" element={
                         <FeatureRoute feature="real_user_traffic">

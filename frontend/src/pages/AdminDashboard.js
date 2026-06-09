@@ -772,12 +772,22 @@ export default function AdminDashboard() {
             <Button
               variant="outline"
               size="sm"
+              onClick={() => window.location.href = "/admin/banners"}
+              data-testid="goto-banners-btn"
+              className="border-fuchsia-500/40 text-fuchsia-400 hover:bg-fuchsia-500/10"
+            >
+              <Palette size={16} className="mr-2" />
+              Banners
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
               onClick={() => window.location.href = "/admin/licenses"}
               data-testid="goto-licenses-btn"
               className="border-[var(--brand-border)]"
             >
               <Settings size={16} className="mr-2" />
-              Licenses & Pricing
+              Licenses &amp; Pricing
             </Button>
             <Button variant="outline" size="sm" onClick={fetchData} className="border-[var(--brand-border)]">
               <RefreshCw size={16} className="mr-2" />
