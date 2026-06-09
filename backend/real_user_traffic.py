@@ -463,6 +463,19 @@ _BROWSER_LAUNCH_ARGS_BASE = [
     "--no-first-run",
     "--no-default-browser-check",
     "--metrics-recording-only",
+    # 2026-02 Step 4 (P0 #6) — HTTP/3 / QUIC support.
+    # Chrome headless mode disables QUIC by default. Real Chrome on
+    # real users uses QUIC on ~25% of major sites (Google, YouTube,
+    # Cloudflare CDN). Disabled-QUIC traffic is a SUBTLE cohort tell
+    # picked up by Cloudflare BM v2 + Akamai BM. Re-enable.
+    "--enable-quic",
+    "--quic-version=h3",
+    "--origin-to-force-quic-on=*",
+    # 2026-02 Step 4 (P1 #8) — IPv6 enabled (Chromium defaults vary).
+    # Real users hit 50%+ IPv6 dual-stack — IPv4-only traffic is a tell
+    # for some EU anti-fraud detectors. Harmless when proxy/network is
+    # IPv4-only (Chromium silently falls back).
+    "--enable-features=AddressSpaceTraversal,EnableDualStackForChrome",
     # 2026-01 Anti-detect: removed `--mute-audio` — real Chrome doesn't
     # launch with audio muted by default, and detectors comparing
     # AudioContext.state can flag the discrepancy. Audio output stays
@@ -2201,6 +2214,16 @@ def _build_stealth_script(fp: Dict[str, Any], geo: Dict[str, Any]) -> str:
         # always sees coordinates matching the visiting country/city.
         "lat": float(geo.get("lat", 40.7128) or 40.7128),
         "lon": float(geo.get("lon", -74.0060) or -74.0060),
+        # 2026-02 Step 4 (P0 #4): deterministic per-fingerprint seed for
+        # the ClientRects sub-pixel noise patch. Derives from the UA +
+        # chrome version + timezone so the noise is stable across the
+        # visit but differs across visits (defeats cross-visit
+        # ClientRects clustering used by FingerprintJS Pro v4 / Sift).
+        "fpHash": int(
+            (abs(hash(
+                f"{fp.get('ua','')}|{fp.get('chrome_version','')}|{geo.get('timezone','')}"
+            )) & 0xFFFFFFFF) or 0x9E3779B9
+        ),
     }
     config_js = "const __KX = " + _json.dumps(kx) + ";"
 
@@ -3265,6 +3288,133 @@ safe(() => {
   } catch (e) {}
 });
 
+// ── 6a. WebAuthn / PublicKeyCredential (2026-02 Step 4 — P0 #1) ──
+// Anura Premium + Sift call PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()
+// to verify the device has TPM / Secure Enclave (real laptops + phones do,
+// servers + headless browsers don't). Returning `false` or throwing both
+// flag as bot. We expose a credible PublicKeyCredential surface and
+// truthfully report a platform authenticator is available.
+safe(() => {
+  if (typeof window.PublicKeyCredential !== 'undefined') {
+    // Already present (modern Chrome/Brave) — patch the verifier to always
+    // resolve true. Real laptops/phones return true ~95% of the time.
+    try {
+      window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = function () {
+        return Promise.resolve(true);
+      };
+    } catch (e) {}
+    try {
+      // Conditional UI capability — newer Chrome only
+      window.PublicKeyCredential.isConditionalMediationAvailable = function () {
+        return Promise.resolve(true);
+      };
+    } catch (e) {}
+    return;
+  }
+  // No PublicKeyCredential at all → forge a minimal class. We can't
+  // forge a real credential ceremony (the page would catch a fake AAGUID)
+  // but the AVAILABILITY check (which is what fingerprinters call) is
+  // 100% defensible.
+  try {
+    const PKC = function () { throw new Error('Illegal constructor'); };
+    PKC.isUserVerifyingPlatformAuthenticatorAvailable = function () {
+      return Promise.resolve(true);
+    };
+    PKC.isConditionalMediationAvailable = function () {
+      return Promise.resolve(true);
+    };
+    Object.defineProperty(window, 'PublicKeyCredential', { get: () => PKC, configurable: true });
+    // credentials.get / credentials.create — return a never-resolving
+    // promise so the page silently times out instead of throwing
+    if (navigator.credentials) {
+      const _origCG = navigator.credentials.get;
+      navigator.credentials.get = function (opts) {
+        if (opts && opts.publicKey) return new Promise(() => {});
+        return _origCG ? _origCG.apply(navigator.credentials, arguments) : Promise.reject(new DOMException('Not allowed', 'NotAllowedError'));
+      };
+    }
+  } catch (e) {}
+});
+
+// ── 6b. getClientRects / getBoundingClientRect sub-pixel noise
+// (2026-02 Step 4 — P0 #4) ───────────────────────────────────────
+// Sift + Anura + FingerprintJS Pro v4 ship "ClientRectsFingerprint":
+// render the SAME text into a hidden <div>, call getClientRects(), and
+// hash the sub-pixel coords. Hash differs per GPU/font/AA settings —
+// stable per-device for ML cohorting. We inject ~0.0001px noise into
+// the returned DOMRect width/height/x/y so the hash CHANGES between
+// our visits (defeats cross-visit clustering) but stays internally
+// consistent within ONE visit (so layout-dependent app code doesn't
+// break — e.g. tooltip positioning).
+safe(() => {
+  // Per-session deterministic seed → noise is stable WITHIN a visit
+  const seed = (__KX.fpHash || 0x9e3779b9) | 0;
+  let _r = seed >>> 0;
+  const nextNoise = function () {
+    // xorshift32 → -0.0002 .. +0.0002 px range
+    _r ^= _r << 13; _r ^= _r >>> 17; _r ^= _r << 5;
+    return ((_r >>> 0) / 4294967296 - 0.5) * 0.0004;
+  };
+  const _patchRect = function (rect) {
+    if (!rect || typeof rect !== 'object') return rect;
+    try {
+      const nx = nextNoise(), ny = nextNoise(), nw = nextNoise(), nh = nextNoise();
+      return new DOMRect(
+        rect.x + nx, rect.y + ny,
+        Math.max(0, rect.width + nw),
+        Math.max(0, rect.height + nh)
+      );
+    } catch (e) { return rect; }
+  };
+  const _patchRectList = function (list) {
+    try {
+      if (!list || !list.length) return list;
+      const out = [];
+      for (let i = 0; i < list.length; i++) out.push(_patchRect(list[i]));
+      out.item = (i) => out[i] || null;
+      Object.defineProperty(out, 'length', { value: out.length });
+      return out;
+    } catch (e) { return list; }
+  };
+  if (typeof Element !== 'undefined') {
+    const oGBCR = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = function () {
+      return _patchRect(oGBCR.apply(this, arguments));
+    };
+    const oGCR = Element.prototype.getClientRects;
+    Element.prototype.getClientRects = function () {
+      return _patchRectList(oGCR.apply(this, arguments));
+    };
+  }
+  if (typeof Range !== 'undefined') {
+    const rGBCR = Range.prototype.getBoundingClientRect;
+    Range.prototype.getBoundingClientRect = function () {
+      return _patchRect(rGBCR.apply(this, arguments));
+    };
+    const rGCR = Range.prototype.getClientRects;
+    Range.prototype.getClientRects = function () {
+      return _patchRectList(rGCR.apply(this, arguments));
+    };
+  }
+});
+
+// ── 6c. ScreenOrientation + visualViewport realism
+// (2026-02 Step 4 — defensive baseline) ──────────────────────────
+safe(() => {
+  if (window.screen && window.screen.orientation) {
+    try {
+      Object.defineProperty(window.screen.orientation, 'angle', {
+        get: () => (__KX.isMobile ? (Math.random() < 0.5 ? 0 : 90) : 0),
+        configurable: true,
+      });
+      Object.defineProperty(window.screen.orientation, 'type', {
+        get: () => (__KX.isMobile ? 'portrait-primary' : 'landscape-primary'),
+        configurable: true,
+      });
+    } catch (e) {}
+  }
+});
+
 """
     return "(()=>{" + config_js + js_body + "})();"
 
@@ -4283,6 +4433,19 @@ async def run_real_user_traffic_job(
     # Per-visit choice of Chromium / Brave / headless-shell. "auto"
     # preserves the existing _use_full_chromium() flow.
     browser_variant: str = "auto",
+    # ── 2026-02 v2.1.31 — Step 4: Phase-4 Anti-Detect ───────────────
+    # `behavioral_bio_enabled` — when True, wrap every click with a
+    # bezier-curve mouse approach (overshoot + correction + micro-shake)
+    # and 1-2s hover dwell, defeating BioCatch / NuData / Forter
+    # behavioral biometrics that flag straight-line cursor moves.
+    behavioral_bio_enabled: bool = False,
+    # `ip_warmup_enabled` — when True, the worker visits 2 benign
+    # public sites (google/wikipedia/etc) via the same proxy BEFORE
+    # the target offer, seeding cf_clearance + Akamai BM cookies and
+    # making the IP look "warmed" instead of cold. Adds ~10-15s per
+    # visit. Combined with TLS prewarm gives the strongest cold-IP
+    # bypass possible without a real human session.
+    ip_warmup_enabled: bool = False,
 ):
     """
     Main orchestrator. Emits progress into RUT_JOBS[job_id].
@@ -5594,6 +5757,34 @@ async def run_real_user_traffic_job(
             except Exception as _pc_err:  # noqa: BLE001
                 logger.debug(f"proxy_chain failed: {_pc_err}")
 
+        # ── 2026-02 v2.1.31 — Step 4: Identity persistence (P1 #7/#10)
+        # When identity_label is set, load the persisted Playwright
+        # `storage_state` (cookies + origins + localStorage) so the
+        # new_context boots with a baked-in profile. The label scopes
+        # identities per-user via the IdentityStore collection.
+        _identity_doc = None
+        _identity_storage_state = None
+        if identity_label and db is not None:
+            try:
+                from advanced_anti_detect import IdentityStore as _IdStore
+                _id_store = _IdStore(db)
+                _identity_doc = await _id_store.get_or_create(
+                    owner_user_id=engine_user_id or "anon",
+                    label=identity_label,
+                    max_age_days=30,
+                )
+                if _identity_doc:
+                    _identity_storage_state = await _id_store.load_storage_state(_identity_doc["id"])
+                    if _identity_storage_state:
+                        push_live_step(
+                            job_id, i + 1, "identity", "ok",
+                            f"Identity '{identity_label}' loaded "
+                            f"(age={int((time.time() - _identity_doc.get('created_ts', time.time())) / 86400)}d, "
+                            f"visits={_identity_doc.get('visits_count', 0)})",
+                        )
+            except Exception as _id_err:  # noqa: BLE001
+                logger.debug(f"identity load failed: {_id_err}")
+
         try:
             # Use the SHARED browser launched once at job start. Per-visit
             # isolation comes from a fresh BrowserContext with its own proxy,
@@ -5639,6 +5830,9 @@ async def run_real_user_traffic_job(
                     geolocation={"latitude": geo["lat"], "longitude": geo["lon"]},
                     permissions=["geolocation"],
                     extra_http_headers=_ctx_headers,
+                    # 2026-02 Step 4 (P1 #7/#10): seed with persisted
+                    # identity storage_state when caller supplied a label
+                    **({"storage_state": _identity_storage_state} if _identity_storage_state else {}),
                 )
             except Exception as _nce:
                 # new_context can still race with a crash that happened
@@ -5868,6 +6062,36 @@ async def run_real_user_traffic_job(
                     # safety net.
 
                 push_live_step(job_id, i + 1, "browser", "info", f"Opening {target_url}")
+
+                # ── 2026-02 Step 4 (P1 #11) — IP warm-up ─────────────
+                # Visit 1-2 benign public sites BEFORE the target so the
+                # exit IP looks "active" (has CDN sessions, has cookies
+                # from real sites) instead of a cold-start request to
+                # the offer. Adds ~10-15s per visit; opt-in only via
+                # `ip_warmup_enabled=True`.
+                if ip_warmup_enabled:
+                    try:
+                        from advanced_anti_detect import warm_up_ip as _warm
+                        _warm_page = await context.new_page()
+                        try:
+                            sites_done = await _warm(
+                                _warm_page,
+                                visits=2,
+                                dwell_sec=4.0,
+                            )
+                            if sites_done:
+                                push_live_step(
+                                    job_id, i + 1, "warmup", "ok",
+                                    f"IP warmed via {len(sites_done)} site(s): "
+                                    + ", ".join(s.replace("https://www.", "").replace("https://", "")[:24] for s in sites_done),
+                                )
+                        finally:
+                            try:
+                                await _warm_page.close()
+                            except Exception:
+                                pass
+                    except Exception as _warm_err:  # noqa: BLE001
+                        logger.debug(f"ip_warmup failed: {_warm_err}")
 
                 # ── 2026-02 v2.1.31 — TLS / JA3 Pre-warm ─────────────
                 # When the caller opted in via `tls_prewarm=True`, fetch
@@ -7390,6 +7614,24 @@ async def run_real_user_traffic_job(
             # Browser is shared across visits — we only close the per-visit
             # context here. The shared browser is closed by the parent job
             # once ALL workers have finished.
+            # ── 2026-02 Step 4 (P1 #7/#10) — Persist identity storage ──
+            # Before closing the context, snapshot storage_state and
+            # save it under the identity_label so the NEXT visit using
+            # the same label boots with this profile baked in. Skipped
+            # silently if identity_label was blank.
+            if (
+                context is not None
+                and _identity_doc is not None
+                and db is not None
+            ):
+                try:
+                    _state = await context.storage_state()
+                    if _state:
+                        from advanced_anti_detect import IdentityStore as _IdStore
+                        _id_store = _IdStore(db)
+                        await _id_store.save_storage_state(_identity_doc["id"], _state)
+                except Exception as _save_err:  # noqa: BLE001
+                    logger.debug(f"identity save_storage_state failed: {_save_err}")
             # Aggressive cleanup to prevent memory leaks
             if context is not None:
                 try:

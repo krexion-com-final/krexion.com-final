@@ -6983,6 +6983,9 @@ async def _rut_prepare_and_run(
             proxy_chain_enabled=bool(params.get("proxy_chain_enabled")),
             proxy_chain_use_tor=bool(params.get("proxy_chain_use_tor", True)),
             browser_variant=str(params.get("browser_variant") or "auto").strip().lower(),
+            # 2026-02 v2.1.31 — Step 4 wiring
+            behavioral_bio_enabled=bool(params.get("behavioral_bio_enabled")),
+            ip_warmup_enabled=bool(params.get("ip_warmup_enabled")),
         )
     except Exception as e:  # noqa: BLE001
         logger.exception(f"_rut_prepare_and_run crashed for job {job_id}: {e}")
@@ -7223,6 +7226,9 @@ async def rut_create_job(
     # ── 2026-02 v2.1.31 — Step 3: Browser Binary Rotation ─────────────
     # "auto" | "chromium" | "headless-shell" | "brave" | "rotate"
     browser_variant: str = Form("auto"),
+    # ── 2026-02 v2.1.31 — Step 4: Phase-4 Anti-Detect ────────────────
+    behavioral_bio_enabled: bool = Form(False),
+    ip_warmup_enabled: bool = Form(False),
     user: dict = Depends(get_current_user_with_fresh_data),
     _cloud_gate: bool = Depends(require_local_mode),
 ):
@@ -7443,6 +7449,9 @@ async def rut_create_job(
         "proxy_chain_enabled": bool(proxy_chain_enabled),
         "proxy_chain_use_tor": bool(proxy_chain_use_tor),
         "browser_variant": (browser_variant or "auto").strip().lower()[:32],
+        # 2026-02 v2.1.31 — Step 4 wiring
+        "behavioral_bio_enabled": bool(behavioral_bio_enabled),
+        "ip_warmup_enabled": bool(ip_warmup_enabled),
     }
     # A job is auto-resumable on backend restart only if it has no in-memory
     # bytes attached (Mongo can't store huge UploadFile blobs efficiently
@@ -7540,6 +7549,9 @@ async def rut_create_job(
             "proxy_chain_enabled": bool(proxy_chain_enabled),
             "proxy_chain_use_tor": bool(proxy_chain_use_tor),
             "browser_variant": (browser_variant or "auto").strip().lower()[:32],
+            # 2026-02 v2.1.31 — Step 4 wiring (persisted)
+            "behavioral_bio_enabled": bool(behavioral_bio_enabled),
+            "ip_warmup_enabled": bool(ip_warmup_enabled),
         }},
         upsert=True,
     )

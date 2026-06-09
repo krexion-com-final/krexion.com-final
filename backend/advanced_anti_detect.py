@@ -26,7 +26,13 @@ import logging
 import math
 import random
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+
+def _iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
 
 logger = logging.getLogger("advanced_anti_detect")
 
@@ -143,6 +149,33 @@ class IdentityStore:
         await self.db.anti_detect_identities.update_one(
             {"id": identity_id}, {"$set": {"cookies": cookies}}
         )
+
+    async def save_storage_state(self, identity_id: str, storage_state: dict) -> None:
+        """Persist the FULL Playwright storage_state (cookies + origins +
+        localStorage + sessionStorage). When the same identity_label is
+        re-used, `load_storage_state()` returns this so the new context
+        boots with the identity's full browsing history baked in — the
+        "browser profile aging" effect.
+
+        (2026-02 Step 4 — P1 #7 / P1 #10)
+        """
+        if not storage_state:
+            return
+        await self.db.anti_detect_identities.update_one(
+            {"id": identity_id},
+            {"$set": {
+                "storage_state": storage_state,
+                "storage_state_updated": _iso_now(),
+            }},
+        )
+
+    async def load_storage_state(self, identity_id: str) -> Optional[dict]:
+        doc = await self.db.anti_detect_identities.find_one(
+            {"id": identity_id}, {"_id": 0, "storage_state": 1}
+        )
+        if not doc:
+            return None
+        return doc.get("storage_state")
 
     async def mark_burnt(self, identity_id: str, reason: str = "") -> None:
         await self.db.anti_detect_identities.update_one(

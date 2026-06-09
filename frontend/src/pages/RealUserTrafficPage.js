@@ -373,6 +373,10 @@ export default function RealUserTrafficPage() {
   const [browserVariant, setBrowserVariant] = useState("auto");
   const [adCapabilities, setAdCapabilities] = useState(null);
 
+  // ── 2026-02 v2.1.31 — Step 4: Phase-4 Anti-Detect ──
+  const [behavioralBioEnabled, setBehavioralBioEnabled] = useState(false);
+  const [ipWarmupEnabled, setIpWarmupEnabled] = useState(false);
+
   // Fetch host capabilities ONCE so we render only what works here
   useEffect(() => {
     const token = localStorage.getItem("token");
@@ -1159,6 +1163,9 @@ export default function RealUserTrafficPage() {
       fd.append("proxy_chain_enabled", String(!!proxyChainEnabled));
       fd.append("proxy_chain_use_tor", String(!!proxyChainUseTor));
       fd.append("browser_variant", browserVariant || "auto");
+      // 2026-02 v2.1.31 — Step 4
+      fd.append("behavioral_bio_enabled", String(!!behavioralBioEnabled));
+      fd.append("ip_warmup_enabled", String(!!ipWarmupEnabled));
 
       fd.append("form_fill_enabled", String(formFillEnabled));
       if (formFillEnabled) {
@@ -2355,6 +2362,71 @@ export default function RealUserTrafficPage() {
                 <p className="text-xs text-gray-500 mt-1">
                   Defeats "100% Chromium" cohort tell. Brave path: set <code>KREXION_BRAVE_PATH</code> env or install at standard paths. Variants not present here will fall back to auto.
                 </p>
+              </div>
+            </div>
+          </div>
+
+          {/* ── 2026-02 v2.1.31 — Anti-Detect (Phase 4) ── */}
+          <div className="mt-6 p-4 rounded-lg border border-emerald-500/30 bg-emerald-950/10">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="text-emerald-300 text-sm font-semibold">🧬 Anti-Detect (Phase 4)</span>
+              <span className="text-[10px] text-zinc-500 px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-800">WebAuthn · ClientRects · HTTP/3 · IPv6 · Behavioral · IP Warm-up · Identity Persistence</span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Always-on patches summary */}
+              <div className="p-3 rounded-md bg-emerald-950/20 border border-emerald-500/20">
+                <div className="text-xs font-semibold text-emerald-200 mb-2">Always-On (injected automatically)</div>
+                <ul className="text-[11px] text-zinc-400 space-y-0.5 font-mono">
+                  <li><span className="text-emerald-400">✓</span> WebAuthn <code>isUserVerifyingPlatformAuthenticatorAvailable</code> → true</li>
+                  <li><span className="text-emerald-400">✓</span> ClientRects / getBoundingClientRect sub-pixel noise</li>
+                  <li><span className="text-emerald-400">✓</span> ScreenOrientation realism</li>
+                  <li><span className="text-emerald-400">✓</span> HTTP/3 (QUIC h3) enabled at launch</li>
+                  <li><span className="text-emerald-400">✓</span> IPv6 dual-stack enabled at launch</li>
+                </ul>
+              </div>
+
+              {/* Opt-in toggles */}
+              <div className="space-y-3">
+                <div>
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input
+                      data-testid="rut-behavioral-bio-enabled"
+                      type="checkbox"
+                      checked={behavioralBioEnabled}
+                      onChange={(e) => setBehavioralBioEnabled(e.target.checked)}
+                      className="mt-0.5 w-4 h-4 rounded accent-emerald-500"
+                    />
+                    <div>
+                      <div className="text-sm text-zinc-200">Behavioral Biometrics (paranoia mode)</div>
+                      <p className="text-[11px] text-zinc-500">
+                        Longer pre-click dwells, micro-movements, scroll-before-click. Defeats BioCatch / NuData / Forter on Tier-2 networks. +5–8% bypass; +2–4s/visit.
+                      </p>
+                    </div>
+                  </label>
+                </div>
+
+                <div>
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input
+                      data-testid="rut-ip-warmup-enabled"
+                      type="checkbox"
+                      checked={ipWarmupEnabled}
+                      onChange={(e) => setIpWarmupEnabled(e.target.checked)}
+                      className="mt-0.5 w-4 h-4 rounded accent-emerald-500"
+                    />
+                    <div>
+                      <div className="text-sm text-zinc-200">IP Warm-up (visit Google / Wikipedia first)</div>
+                      <p className="text-[11px] text-zinc-500">
+                        Visits 2 benign sites via the same proxy before target. Seeds CF / Akamai cookies, IP looks "active" not cold. +~10s/visit.
+                      </p>
+                    </div>
+                  </label>
+                </div>
+
+                <div className="text-[11px] text-zinc-500 pl-6">
+                  <span className="text-emerald-300">Identity Label set above</span> → cookies + localStorage + history persist across runs (browser profile aging).
+                </div>
               </div>
             </div>
           </div>
