@@ -72,7 +72,29 @@ User has a GitHub repo `dennisedmaartins9-sudo/krexion.com` (Krexion — traffic
 
 **Admin Dashboard:** Added "Banners" button.
 
-## Tested End-to-End
+### 2026-06-09 — Live Recording → RPA Studio Converter (`from-recorder` + `from-upload`)
+- New backend endpoints:
+  - `POST /api/rpa/workflows/from-recorder` — converts inline steps array (`{steps: [...]}`) to a fresh flowchart workflow with auto-layout
+  - `POST /api/rpa/workflows/from-upload/{upload_id}` — converts a saved Visual Recorder upload (Uploaded Things) to a flowchart
+- Converter handles 18 Visual Recorder action types → mapped to RPA Studio node types
+  (goto, click, fill, type, select, check/uncheck, press, wait, wait_for_*, scroll, evaluate, extract, screenshot, dismiss_popups, close, branch)
+- Unknown actions fall through to Execute JS comment nodes to preserve ordering
+- Auto-layout: vertical chain (x=240, y+=110), edges connect consecutive nodes
+- Frontend `RPAWorkflowsPage.js`: new "Import from Recording" button opens modal listing user's saved recordings
+- Modal shows recording name, description, step count, date; one-click converts and navigates to editor
+
+### 2026-06-09 — ResizeObserver Error Suppression
+- Added global handlers in `index.js` to suppress the harmless "ResizeObserver loop" warning from react-flow in CRA dev mode
+- Production builds are unaffected (this warning never appears in production)
+
+### Deployment Readiness Verified
+- VPS deploy via `.github/workflows/deploy.yml` — rsync excludes `.env`, `node_modules`, `__pycache__`, `.git` (matches user's existing pipeline)
+- Electron desktop build via `build-electron-desktop.yml` — independent build, bundles backend + frontend, runs on 127.0.0.1:8088 — new `/api/rpa/*` and `/api/banners/*` endpoints will work without changes
+- Windows installer build via `build-windows-release.yml` — independent of new modules
+- All new files compile cleanly (Python + JS)
+- No hardcoded URLs or secrets in new files (only example.com placeholder hint inside param-helper UI)
+- Both modules register cleanly in server.py with try/except — won't break startup if anything fails
+- `.gitignore` correctly keeps `.env` excluded — VPS has its own env file already deployed
 - ✓ Banner created via admin UI, appears on customer dashboard with theme + CTA + dismiss
 - ✓ RPA workflow created (`Test WF` with goto + click nodes), saved
 - ✓ RPA workflow run successfully: goto → wait → screenshot all completed
