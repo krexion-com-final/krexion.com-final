@@ -1095,6 +1095,27 @@ async def _execute_workflow(run_id: str, wf: dict, override_vars: dict, headless
 
                 await push_event({"node_id": node_id, "type": ntype, "status": "ok", "step": step_no + 1})
 
+                # ── Live variables snapshot (for Variables Inspector) ──
+                # Update only the small `variables` field on each step so
+                # the UI can stream values as they're set.
+                if ntype in ("set_var", "get_url", "get_element", "regex_extract",
+                              "to_json", "extract_field", "random_extract", "math",
+                              "random_click", "random_select", "evaluate", "openai",
+                              "http_request", "google_sheets", "captcha_2captcha",
+                              "for_loop_times", "for_loop_data", "while_loop"):
+                    try:
+                        # Only store JSON-serializable subset
+                        snap = {}
+                        for k, v in variables.items():
+                            try:
+                                json.dumps(v)
+                                snap[k] = v
+                            except Exception:
+                                snap[k] = str(v)[:200]
+                        await db.rpa_runs.update_one({"id": run_id}, {"$set": {"variables": snap}})
+                    except Exception:
+                        pass
+
             except _ExitLoop:
                 raise
             except asyncio.CancelledError:

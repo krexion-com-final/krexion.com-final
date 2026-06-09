@@ -28,6 +28,8 @@ import {
   ArrowLeft,
   AlertCircle,
   Code,
+  Variable,
+  ClipboardCopy,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -73,6 +75,8 @@ export default function RPAStudioPage() {
   const [running, setRunning] = useState(false);
   const [runId, setRunId] = useState(null);
   const [runEvents, setRunEvents] = useState([]);
+  const [runVariables, setRunVariables] = useState({});
+  const [runPanelTab, setRunPanelTab] = useState("events"); // "events" | "variables"
   const [runStatus, setRunStatus] = useState(null);
   const [showJsonEditor, setShowJsonEditor] = useState(false);
   const [jsonText, setJsonText] = useState("");
@@ -265,6 +269,7 @@ export default function RPAStudioPage() {
         if (!r.ok) return;
         const d = await r.json();
         setRunEvents(d.events || []);
+        setRunVariables(d.variables || {});
         setRunStatus(d.status);
         if (d.has_screenshot) {
           setLivePreview(`${BACKEND_URL}/api/rpa/runs/${runId}/screenshot?t=${encodeURIComponent(localStorage.getItem("token"))}&ts=${Date.now()}`);
@@ -579,30 +584,131 @@ export default function RPAStudioPage() {
                   </div>
                 )}
               </div>
-              {/* Event log */}
-              <div className="w-1/2 overflow-y-auto p-2 text-xs font-mono">
-                {runEvents.length === 0 && <div className="text-slate-500">No events yet</div>}
-                {runEvents.map((ev, i) => (
-                  <div
-                    key={i}
-                    className={`px-2 py-1 mb-0.5 rounded text-xs ${
-                      ev.status === "ok" ? "bg-emerald-900/20 text-emerald-300" :
-                      ev.status === "error" ? "bg-red-900/20 text-red-300" :
-                      ev.status === "running" ? "bg-blue-900/20 text-blue-300" :
-                      "bg-slate-800/50 text-slate-400"
+              {/* Event log / Variables Inspector — tabbed */}
+              <div className="w-1/2 flex flex-col">
+                <div className="flex items-center gap-1 px-2 pt-2 border-b border-slate-800">
+                  <button
+                    onClick={() => setRunPanelTab("events")}
+                    className={`px-3 py-1.5 text-xs rounded-t transition-colors ${
+                      runPanelTab === "events"
+                        ? "bg-slate-800 text-white border-b-2 border-blue-500"
+                        : "text-slate-400 hover:text-white hover:bg-slate-800/60"
                     }`}
-                    data-testid={`rpa-run-event-${i}`}
+                    data-testid="rpa-run-tab-events"
                   >
-                    <span className="opacity-60">[{ev.step || i + 1}]</span> {ev.type}
-                    {ev.status === "error" && <span className="block text-red-400 mt-0.5">⚠ {ev.error}</span>}
-                  </div>
-                ))}
+                    <Activity className="w-3 h-3 inline mr-1.5" />
+                    Events ({runEvents.length})
+                  </button>
+                  <button
+                    onClick={() => setRunPanelTab("variables")}
+                    className={`px-3 py-1.5 text-xs rounded-t transition-colors ${
+                      runPanelTab === "variables"
+                        ? "bg-slate-800 text-white border-b-2 border-emerald-500"
+                        : "text-slate-400 hover:text-white hover:bg-slate-800/60"
+                    }`}
+                    data-testid="rpa-run-tab-variables"
+                  >
+                    <Variable className="w-3 h-3 inline mr-1.5" />
+                    Variables ({Object.keys(runVariables).length})
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-2 text-xs font-mono">
+                  {runPanelTab === "events" && (
+                    <>
+                      {runEvents.length === 0 && <div className="text-slate-500">No events yet</div>}
+                      {runEvents.map((ev, i) => (
+                        <div
+                          key={i}
+                          className={`px-2 py-1 mb-0.5 rounded text-xs ${
+                            ev.status === "ok" ? "bg-emerald-900/20 text-emerald-300" :
+                            ev.status === "error" ? "bg-red-900/20 text-red-300" :
+                            ev.status === "running" ? "bg-blue-900/20 text-blue-300" :
+                            "bg-slate-800/50 text-slate-400"
+                          }`}
+                          data-testid={`rpa-run-event-${i}`}
+                        >
+                          <span className="opacity-60">[{ev.step || i + 1}]</span> {ev.type}
+                          {ev.status === "error" && <span className="block text-red-400 mt-0.5">⚠ {ev.error}</span>}
+                        </div>
+                      ))}
+                    </>
+                  )}
+                  {runPanelTab === "variables" && (
+                    <VariablesInspector variables={runVariables} />
+                  )}
+                </div>
               </div>
             </div>
           </div>
         )}
       </div>
     </ReactFlowProvider>
+  );
+}
+
+// ── Variables Inspector ──────────────────────────────────────────────
+// Renders a live key→value table of workflow variables with copy-to-clipboard
+// per cell and type-aware formatting (string/number/bool/object/array).
+function VariablesInspector({ variables }) {
+  const entries = Object.entries(variables || {});
+  if (entries.length === 0) {
+    return (
+      <div className="text-slate-500 px-2 py-4 text-center">
+        <Variable className="w-6 h-6 mx-auto mb-2 opacity-30" />
+        No variables yet — they'll appear here as the run sets them.
+      </div>
+    );
+  }
+  const copy = (val) => {
+    try {
+      navigator.clipboard.writeText(typeof val === "string" ? val : JSON.stringify(val, null, 2));
+      toast.success("Copied to clipboard");
+    } catch {
+      toast.error("Copy failed");
+    }
+  };
+  const renderValue = (v) => {
+    if (v === null || v === undefined) return <span className="text-slate-500">null</span>;
+    if (typeof v === "boolean") return <span className="text-amber-400">{String(v)}</span>;
+    if (typeof v === "number") return <span className="text-blue-400">{v}</span>;
+    if (typeof v === "string") {
+      if (v.startsWith("data:image/")) {
+        return <span className="text-purple-400">[image · {v.length} chars]</span>;
+      }
+      return <span className="text-emerald-300 break-all">{v.length > 200 ? v.slice(0, 200) + "…" : v}</span>;
+    }
+    return <span className="text-cyan-300 break-all">{JSON.stringify(v).slice(0, 300)}</span>;
+  };
+  const typeOf = (v) => {
+    if (v === null || v === undefined) return "null";
+    if (Array.isArray(v)) return `array(${v.length})`;
+    return typeof v;
+  };
+  return (
+    <div className="space-y-1">
+      {entries.map(([key, val]) => (
+        <div
+          key={key}
+          className="bg-slate-800/40 hover:bg-slate-800/70 rounded px-2 py-1.5 group"
+          data-testid={`rpa-var-${key}`}
+        >
+          <div className="flex items-center gap-2 text-xs">
+            <code className="text-emerald-400 font-semibold flex-shrink-0">{key}</code>
+            <span className="text-slate-600 text-[10px]">{typeOf(val)}</span>
+            <div className="flex-1" />
+            <button
+              onClick={() => copy(val)}
+              className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-slate-700"
+              title="Copy value"
+              data-testid={`rpa-var-copy-${key}`}
+            >
+              <ClipboardCopy className="w-3 h-3" />
+            </button>
+          </div>
+          <div className="text-xs mt-0.5 pl-2 border-l-2 border-slate-700">{renderValue(val)}</div>
+        </div>
+      ))}
+    </div>
   );
 }
 
