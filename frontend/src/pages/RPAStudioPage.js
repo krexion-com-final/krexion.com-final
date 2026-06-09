@@ -542,6 +542,54 @@ export default function RPAStudioPage() {
                   onChange={(e) => setWorkflow({ ...workflow, settings: { ...(workflow.settings || {}), max_runtime_seconds: Number(e.target.value) } })}
                   className="w-full bg-slate-800 px-2 py-1.5 rounded text-xs"
                 />
+
+                {/* ── 2026-02 Anti-Detect Phase 1 ── */}
+                <div className="mt-4 pt-3 border-t border-slate-800">
+                  <h4 className="text-xs font-semibold text-fuchsia-400 mb-2">Anti-Detect (Phase 1)</h4>
+
+                  <label className="block text-xs text-slate-400 mb-1">Pacing (visits / hour)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={3600}
+                    value={workflow?.settings?.pacing_per_hour ?? 0}
+                    onChange={(e) => setWorkflow({ ...workflow, settings: { ...(workflow.settings || {}), pacing_per_hour: Math.max(0, Math.min(3600, Number(e.target.value) || 0)) } })}
+                    className="w-full bg-slate-800 px-2 py-1.5 rounded text-xs mb-1"
+                    placeholder="0 = no pacing jitter"
+                    data-testid="rpa-settings-pacing-per-hour"
+                  />
+                  <p className="text-[10px] text-slate-500 mb-2">
+                    Log-normal jitter on run start. 0 = run immediately. 10–60 typical for batches.
+                  </p>
+
+                  <label className="block text-xs text-slate-400 mb-1">Identity Label</label>
+                  <input
+                    type="text"
+                    value={workflow?.settings?.identity_label ?? ""}
+                    onChange={(e) => setWorkflow({ ...workflow, settings: { ...(workflow.settings || {}), identity_label: e.target.value.slice(0, 120) } })}
+                    className="w-full bg-slate-800 px-2 py-1.5 rounded text-xs mb-1"
+                    placeholder="(blank = fresh identity per run)"
+                    data-testid="rpa-settings-identity-label"
+                  />
+                  <p className="text-[10px] text-slate-500 mb-2">
+                    Persistent identity (cookies + fingerprint) across runs with this label.
+                  </p>
+
+                  <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={!!workflow?.settings?.tls_prewarm}
+                      onChange={(e) => setWorkflow({ ...workflow, settings: { ...(workflow.settings || {}), tls_prewarm: e.target.checked } })}
+                      className="rounded"
+                      data-testid="rpa-settings-tls-prewarm"
+                    />
+                    <span>TLS / JA3 Pre-warm (Chrome impersonation)</span>
+                  </label>
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    First Goto fetches via curl_cffi (real Chrome TLS) and seeds cookies onto context.
+                    Bypasses Cloudflare BM / DataDome / Akamai on cold visits.
+                  </p>
+                </div>
               </div>
             )}
           </div>

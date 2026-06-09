@@ -57,6 +57,10 @@ export default function FormFillerPage() {
   const [skipCaptcha, setSkipCaptcha] = useState(true);
   const [useUAs, setUseUAs] = useState(true);
   const [useProxies, setUseProxies] = useState(false);
+  // ── 2026-02 v2.1.31 — Anti-Detect Phase 1 wiring ──
+  const [pacingPerHour, setPacingPerHour] = useState(0);
+  const [identityLabel, setIdentityLabel] = useState("");
+  const [tlsPrewarm, setTlsPrewarm] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const pollRef = useRef(null);
 
@@ -141,6 +145,10 @@ export default function FormFillerPage() {
       fd.append("skip_captcha", skipCaptcha ? "true" : "false");
       fd.append("use_user_agents", useUAs ? "true" : "false");
       fd.append("use_proxies", useProxies ? "true" : "false");
+      // 2026-02 v2.1.31 — Anti-Detect Phase 1
+      fd.append("pacing_per_hour", String(pacingPerHour || 0));
+      fd.append("identity_label", identityLabel || "");
+      fd.append("tls_prewarm", tlsPrewarm ? "true" : "false");
 
       const r = await fetch(`${API_URL}/api/form-filler/jobs`, {
         method: "POST",
@@ -312,6 +320,56 @@ export default function FormFillerPage() {
                   data-testid="use-proxies" />
                 Use my stored proxies (if any)
               </label>
+            </div>
+
+            {/* ── 2026-02 v2.1.31 — Anti-Detect (Phase 1) ── */}
+            <div className="mt-4 p-4 rounded-lg border border-fuchsia-500/30 bg-fuchsia-950/10">
+              <div className="flex items-center gap-2 mb-3">
+                <ShieldAlert className="w-4 h-4 text-fuchsia-400" />
+                <span className="text-fuchsia-300 text-sm font-semibold">Anti-Detect (Phase 1)</span>
+                <span className="text-[10px] text-zinc-500 px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-800">PacingEngine · IdentityStore · TLS/JA3</span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-xs text-zinc-400 mb-1">Pacing (submissions / hour)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={3600}
+                    value={pacingPerHour}
+                    onChange={(e) => setPacingPerHour(Math.max(0, Math.min(3600, Number(e.target.value) || 0)))}
+                    className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm text-zinc-100"
+                    data-testid="ff-pacing-per-hour"
+                  />
+                  <p className="text-[10px] text-zinc-500 mt-1">0 = flat duration spacing. {">"}0 = log-normal jitter.</p>
+                </div>
+                <div>
+                  <label className="block text-xs text-zinc-400 mb-1">Identity Label</label>
+                  <input
+                    type="text"
+                    value={identityLabel}
+                    onChange={(e) => setIdentityLabel(e.target.value.slice(0, 120))}
+                    placeholder="(blank = fresh per row)"
+                    className="w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5 text-sm text-zinc-100"
+                    data-testid="ff-identity-label"
+                  />
+                  <p className="text-[10px] text-zinc-500 mt-1">Same label across runs = persistent identity.</p>
+                </div>
+                <div>
+                  <label className="block text-xs text-zinc-400 mb-1">TLS / JA3 Pre-warm</label>
+                  <label className="flex items-center gap-2 mt-1 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={tlsPrewarm}
+                      onChange={(e) => setTlsPrewarm(e.target.checked)}
+                      className="w-4 h-4 accent-fuchsia-500"
+                      data-testid="ff-tls-prewarm"
+                    />
+                    <span className="text-sm text-zinc-300">Real-Chrome TLS handshake</span>
+                  </label>
+                  <p className="text-[10px] text-zinc-500 mt-1">Bypasses Cloudflare/DataDome/Akamai on cold visits.</p>
+                </div>
+              </div>
             </div>
 
             <div className="pt-2">

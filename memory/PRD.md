@@ -119,6 +119,28 @@ User has a GitHub repo `dennisedmaartins9-sudo/krexion.com` (Krexion — traffic
 - NEW frontend/src/pages/RPARunsPage.js
 
 ## P0/P1/P2 Backlog
+
+### 2026-02-09 — Step 1 COMPLETE: Anti-Detect Phase 1 Wiring
+**TLS/JA3 Browser Impersonation + Pacing/Identity UI** wired across all three modules (no deploy yet).
+
+**Backend:**
+- `tls_anti_detect.py` — added `prewarm_target(url, proxy, ua)` helper using curl_cffi (real Chrome JA3/JA4) returning Playwright-compatible cookies (cf_clearance / datadome ready). Safe-by-default: any failure returns None.
+- `real_user_traffic.py` — `run_real_user_traffic_job()` signature extended with `pacing_per_hour: int = 0`, `identity_label: str = ""`, `tls_prewarm: bool = False`. PacingEngine drives per-visit log-normal cumulative offsets when `pacing_per_hour > 0`. TLS prewarm + `context.add_cookies()` runs right before every `page.goto(target_url)`.
+- `form_filler.py` — same 3 params added to `run_form_filler_job()`. Pacing replaces flat delay between rows. TLS prewarm before per-row goto.
+- `rpa_studio_module.py` — `WorkflowSettings` model extended with the 3 fields. PacingEngine runs ONCE at run start (capped at 5 min). TLS prewarm fires on FIRST `goto` node only (once per run).
+- `server.py` — `/api/real-user-traffic/jobs` (Form fields) + `/api/form-filler/jobs` (Form fields) accept + persist all 3 settings.
+
+**Frontend:**
+- `RealUserTrafficPage.js` — new "Anti-Detect (Phase 1)" panel: 3 inputs (`rut-pacing-per-hour`, `rut-identity-label`, `rut-tls-prewarm`) with helper copy. Posts via FormData.
+- `FormFillerPage.js` — same panel under existing toggles (`ff-pacing-per-hour`, `ff-identity-label`, `ff-tls-prewarm`).
+- `RPAStudioPage.js` — Settings drawer extended (`rpa-settings-pacing-per-hour`, `rpa-settings-identity-label`, `rpa-settings-tls-prewarm`).
+
+**Verification:**
+- `tls_anti_detect.prewarm_target()` end-to-end test: google.com → 200, 3 cookies seeded, impersonate=chrome131.
+- RUT job created via curl with `pacing_per_hour=20, identity_label=qa-rut, tls_prewarm=true` — all 3 persisted to Mongo + backend log `RUT pacing engine ON: 1 visits over ~3.0 min (target=20/hr, log-normal jitter)`.
+- RPA Studio workflow created with all 3 settings — round-tripped from API.
+- Frontend smoke screenshot of RUT page confirms new UI block renders correctly.
+
 **P1 (nice to have, not blocking):**
 - Live recording mode for RPA Studio (like Visual Recorder integration — record clicks as nodes)
 - Live inspector overlay (hover element → show selector/XPath, click to copy)

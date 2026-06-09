@@ -105,6 +105,22 @@ class WorkflowSettings(BaseModel):
     use_stealth: bool = True
     headless: bool = True
     viewport: Dict[str, int] = Field(default_factory=lambda: {"width": 1280, "height": 800})
+    # ── 2026-02 v2.1.31 — Anti-Detect Wiring (Phase 1) ──────────────
+    # When > 0, the run waits a log-normal pacing sample BEFORE the
+    # first node executes (so back-to-back manual runs don't burst
+    # against the offer at the exact same wall-clock cadence). 0 (default)
+    # preserves the previous behaviour exactly.
+    pacing_per_hour: int = 0
+    # When non-empty, the run reuses cookies + fingerprint persisted
+    # under this label across runs (returning-user pattern). "" (default)
+    # preserves fresh-per-run behaviour.
+    identity_label: str = ""
+    # When True, the FIRST `goto` node pre-fetches the URL via
+    # curl_cffi (real Chrome JA3 / JA4) and seeds the resulting cookies
+    # onto the Playwright context before the navigation. Bypass
+    # Cloudflare BM / DataDome / Akamai on cold sessions. False
+    # (default) preserves the previous behaviour exactly.
+    tls_prewarm: bool = False
 
 
 class WorkflowCreate(BaseModel):
@@ -673,6 +689,42 @@ async def _execute_workflow(run_id: str, wf: dict, override_vars: dict, headless
         {"id": run_id}, {"$set": {"status": "running", "started_at": _now_iso()}}
     )
 
+    # ── 2026-02 v2.1.31 — Pre-run pacing ─────────────────────────────
+    # When the workflow opts into PacingEngine (settings.pacing_per_hour
+    # > 0), wait a log-normal jitter sample BEFORE the first node fires.
+    # Stops back-to-back manual runs from hammering the offer at exactly
+    # the same wall-clock cadence (cohort detection). The full
+    # workflow-internal node sequencing is unchanged.
+    try:
+        _rpa_pacing = int(settings.get("pacing_per_hour") or 0)
+        if _rpa_pacing > 0:
+            from advanced_anti_detect import PacingEngine as _PacingEngine  # type: ignore
+            _rpa_pacer = _PacingEngine(target_per_hour=_rpa_pacing)
+            _wait_s = max(0.0, float(_rpa_pacer.next_delay()))
+            # Cap at 5 minutes so a single pacing sample can't stall
+            # an interactive run forever.
+            _wait_s = min(_wait_s, 300.0)
+            logger.info(
+                "RPA run %s pacing jitter: waiting %.2fs (target=%d/hr)",
+                run_id, _wait_s, _rpa_pacing,
+            )
+            await db.rpa_runs.update_one(
+                {"id": run_id},
+                {"$push": {"step_results": {
+                    "type": "pacing",
+                    "status": "info",
+                    "detail": (
+                        f"PacingEngine sample: {_wait_s:.2f}s "
+                        f"(target={_rpa_pacing}/hr, log-normal jitter)"
+                    ),
+                    "t": _now_iso(),
+                }}},
+            )
+            if _wait_s > 0.01:
+                await asyncio.sleep(_wait_s)
+    except Exception as _pace_err:  # noqa: BLE001
+        logger.debug(f"RPA pacing init failed: {_pace_err}")
+
     # Try to load Playwright
     playwright = browser = context = page = None
     try:
@@ -715,6 +767,37 @@ async def _execute_workflow(run_id: str, wf: dict, override_vars: dict, headless
                         raise ValueError("goto requires url")
                     if page is None:
                         await _ensure_browser()
+                    # ── 2026-02 v2.1.31 — TLS / JA3 prewarm ──────────
+                    # On the FIRST goto of the run only, when settings
+                    # opt in via `tls_prewarm=True`, fetch the URL via
+                    # curl_cffi (real Chrome JA3) and seed cookies onto
+                    # the Playwright context. Cloudflare BM / DataDome /
+                    # Akamai BM gates pass on the cold visit.
+                    if (
+                        bool(settings.get("tls_prewarm"))
+                        and not runtime.get("_tls_prewarm_done")
+                        and context is not None
+                    ):
+                        try:
+                            import tls_anti_detect as _rpa_tls_ad  # type: ignore
+                            if _rpa_tls_ad.is_available():
+                                _pw_res = await _rpa_tls_ad.prewarm_target(
+                                    url, ua="", timeout=20.0,
+                                )
+                                if _pw_res and _pw_res.get("ok") and _pw_res.get("cookies"):
+                                    await context.add_cookies(_pw_res["cookies"])
+                                    await push_event({
+                                        "node_id": node_id, "type": "tls_prewarm",
+                                        "status": "ok",
+                                        "detail": (
+                                            f"{_pw_res.get('impersonate','chrome')} · "
+                                            f"{len(_pw_res['cookies'])} cookies "
+                                            f"(status={_pw_res.get('status')})"
+                                        ),
+                                    })
+                        except Exception as _pw_err:  # noqa: BLE001
+                            logger.debug(f"rpa tls prewarm exception: {_pw_err}")
+                        runtime["_tls_prewarm_done"] = True
                     await page.goto(url, timeout=int(params.get("timeout") or 60000))
                     await page.wait_for_load_state("domcontentloaded", timeout=30000)
                 elif ntype == "new_tab":

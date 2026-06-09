@@ -358,6 +358,15 @@ export default function RealUserTrafficPage() {
   // failed and the user clicks Retry manually. Predictable lifecycle.
   const [autoResumeEnabled, setAutoResumeEnabled] = useState(false);
 
+  // ── 2026-02 v2.1.31 — Anti-Detect Phase 1 wiring ──
+  // pacing_per_hour: 0 = legacy flat duration spacing.
+  //                  >0 = log-normal jitter from PacingEngine.
+  // identity_label: persistent cookies + fingerprint across runs.
+  // tls_prewarm: real-Chrome JA3 curl_cffi handshake before goto.
+  const [pacingPerHour, setPacingPerHour] = useState(0);
+  const [identityLabel, setIdentityLabel] = useState("");
+  const [tlsPrewarm, setTlsPrewarm] = useState(false);
+
   // ── 2026-06: Health Check / Preflight Trace ──
   // Lightweight dry-run that validates the recording + URL on ONE
   // browser BEFORE committing budget to a full RUT job. Surfaces a
@@ -1125,6 +1134,10 @@ export default function RealUserTrafficPage() {
       // 60 — raised from old hardcoded 25 to handle slow form-submit
       // sequences.
       fd.append("stuck_watchdog_seconds", String(stuckWatchdogSeconds || 240));
+      // 2026-02 v2.1.31 — Anti-Detect Phase 1
+      fd.append("pacing_per_hour", String(pacingPerHour || 0));
+      fd.append("identity_label", identityLabel || "");
+      fd.append("tls_prewarm", String(!!tlsPrewarm));
 
       fd.append("form_fill_enabled", String(formFillEnabled));
       if (formFillEnabled) {
@@ -2183,6 +2196,61 @@ export default function RealUserTrafficPage() {
               <p className="text-xs text-gray-500 mt-1">
                 If page URL & DOM both stay frozen for this many seconds the visit is aborted. Default 240 (4 min) — raise for very slow offers, lower for fast fail-on-stuck. Dead proxies / chrome-errors are aborted instantly regardless.
               </p>
+            </div>
+          </div>
+
+          {/* ── 2026-02 v2.1.31 — Anti-Detect (Phase 1) ── */}
+          <div className="mt-6 p-4 rounded-lg border border-fuchsia-500/30 bg-fuchsia-950/10">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="text-fuchsia-300 text-sm font-semibold">🛡️ Anti-Detect (Phase 1)</span>
+              <span className="text-[10px] text-zinc-500 px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-800">PacingEngine · IdentityStore · TLS/JA3</span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <Label className="text-zinc-300 text-sm">Pacing (visits / hour)</Label>
+                <Input
+                  data-testid="rut-pacing-per-hour"
+                  type="number"
+                  min={0}
+                  max={3600}
+                  value={pacingPerHour}
+                  onChange={(e) => setPacingPerHour(Math.max(0, Math.min(3600, Number(e.target.value) || 0)))}
+                  className="mt-1 bg-zinc-800 border-zinc-700 text-zinc-100"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  0 = use Duration/total spacing. {">"}0 = log-normal jitter (bursts + lulls instead of even intervals — defeats cohort detection).
+                </p>
+              </div>
+              <div>
+                <Label className="text-zinc-300 text-sm">Identity Label</Label>
+                <Input
+                  data-testid="rut-identity-label"
+                  type="text"
+                  value={identityLabel}
+                  onChange={(e) => setIdentityLabel(e.target.value.slice(0, 120))}
+                  placeholder="(blank = fresh per visit)"
+                  className="mt-1 bg-zinc-800 border-zinc-700 text-zinc-100"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Same label across runs = simulated returning user (cookies + fingerprint persist in MongoDB).
+                </p>
+              </div>
+              <div>
+                <Label className="text-zinc-300 text-sm">TLS / JA3 Pre-warm</Label>
+                <div className="mt-2 flex items-center gap-2">
+                  <input
+                    data-testid="rut-tls-prewarm"
+                    type="checkbox"
+                    checked={tlsPrewarm}
+                    onChange={(e) => setTlsPrewarm(e.target.checked)}
+                    className="w-4 h-4 rounded accent-fuchsia-500"
+                  />
+                  <span className="text-sm text-zinc-300">Enable real-Chrome TLS handshake</span>
+                </div>
+                <p className="text-xs text-gray-500 mt-1">
+                  Pre-fetches the target via curl_cffi (real JA3/JA4 Chrome fingerprint), then seeds cookies onto Playwright. Bypasses Cloudflare BM / DataDome / Akamai BM on cold visits (~50% → ~75–80%).
+                </p>
+              </div>
             </div>
           </div>
 

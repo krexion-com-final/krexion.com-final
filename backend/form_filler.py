@@ -1114,6 +1114,12 @@ async def run_form_filler_job(
     gemini_api_key: Optional[str] = None,
     ai_provider: str = "gemini",
     target_screenshot_description: str = "Stage F deals/offers grid (multiple offer cards visible) — final reward conversion page.",
+    # 2026-02 v2.1.31 — Anti-Detect Phase 1 wiring (additive — defaults
+    # preserve previous behaviour exactly). See real_user_traffic.py for
+    # the full design contract.
+    pacing_per_hour: int = 0,
+    identity_label: str = "",
+    tls_prewarm: bool = False,
 ):
     """
     Runs the batch sequentially. Progress is written to JOBS[job_id]
@@ -1125,6 +1131,34 @@ async def run_form_filler_job(
         return
 
     delay = max(1.0, (duration_minutes * 60.0) / total) if duration_minutes > 0 else 2.0
+
+    # ── 2026-02 v2.1.31 — PacingEngine (log-normal jitter) ───────────
+    # When `pacing_per_hour` > 0, replace the flat `delay` with a per-
+    # iteration log-normal sample so visits don't look perfectly
+    # evenly-spaced. Defeats cohort detection. delay=0 (default) keeps
+    # the legacy behaviour exactly.
+    _ff_pacer = None
+    try:
+        if pacing_per_hour and int(pacing_per_hour) > 0:
+            from advanced_anti_detect import PacingEngine as _PacingEngine  # type: ignore
+            _ff_pacer = _PacingEngine(target_per_hour=int(pacing_per_hour))
+            logger.info(
+                "FormFiller pacing engine ON: target=%d/hr (log-normal jitter)",
+                int(pacing_per_hour),
+            )
+    except Exception as _pace_err:  # noqa: BLE001
+        logger.warning(f"FormFiller PacingEngine init failed ({_pace_err}); flat delay")
+        _ff_pacer = None
+
+    # ── 2026-02 v2.1.31 — TLS / JA3 prewarm helper (lazy import) ─────
+    _ff_tls_ad = None
+    if tls_prewarm:
+        try:
+            import tls_anti_detect as _ff_tls_ad  # type: ignore
+            if not _ff_tls_ad.is_available():
+                _ff_tls_ad = None
+        except Exception:
+            _ff_tls_ad = None
 
     job_dir = RESULTS_ROOT / job_id
     shots_dir = job_dir / "screenshots"
@@ -1187,6 +1221,33 @@ async def run_form_filler_job(
                         )
                         context = await browser.new_context(user_agent=ua) if ua else await browser.new_context()
                         page = await context.new_page()
+                    # ── 2026-02 v2.1.31 — TLS / JA3 prewarm ──────────
+                    # Pre-fetch target with real Chrome JA3 via curl_cffi
+                    # and seed the resulting cookies onto the Playwright
+                    # context BEFORE the first navigation. Bypass
+                    # Cloudflare BM / DataDome / Akamai on cold visits.
+                    if _ff_tls_ad is not None and tls_prewarm:
+                        try:
+                            _pw_res = await _ff_tls_ad.prewarm_target(
+                                target_url,
+                                proxy=proxy_cfg,
+                                ua=ua or "",
+                                timeout=20.0,
+                            )
+                            if _pw_res and _pw_res.get("ok") and _pw_res.get("cookies"):
+                                try:
+                                    await context.add_cookies(_pw_res["cookies"])
+                                    logger.info(
+                                        "form_filler TLS prewarm OK row %d: "
+                                        "%d cookies seeded (status=%s)",
+                                        i, len(_pw_res["cookies"]),
+                                        _pw_res.get("status"),
+                                    )
+                                except Exception as _ck_err:  # noqa: BLE001
+                                    logger.debug(f"prewarm add_cookies failed: {_ck_err}")
+                        except Exception as _pw_err:  # noqa: BLE001
+                            logger.debug(f"form_filler tls prewarm exception: {_pw_err}")
+
                     await page.goto(target_url, timeout=30000, wait_until="domcontentloaded")
                     await page.wait_for_timeout(800)
 
@@ -1440,9 +1501,17 @@ async def run_form_filler_job(
                 if db is not None and (i + 1) % 3 == 0:
                     await _persist(db, job_id)
 
-                # Pacing
+                # Pacing — log-normal jitter if PacingEngine is active,
+                # otherwise the flat `delay` derived from duration_minutes.
                 if i < total - 1:
-                    await asyncio.sleep(delay)
+                    if _ff_pacer is not None:
+                        try:
+                            _d = _ff_pacer.next_delay()
+                            await asyncio.sleep(float(_d))
+                        except Exception:
+                            await asyncio.sleep(delay)
+                    else:
+                        await asyncio.sleep(delay)
 
         # Write report.csv
         with open(job_dir / "report.csv", "w", newline="", encoding="utf-8") as f:

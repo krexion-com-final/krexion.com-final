@@ -5781,6 +5781,10 @@ async def form_filler_create_job(
     use_user_agents: bool = Form(True),
     use_proxies: bool = Form(False),
     file: Optional[UploadFile] = File(None),
+    # ── 2026-02 v2.1.31 — Anti-Detect Wiring (Phase 1) ──────────────
+    pacing_per_hour: int = Form(0),
+    identity_label: str = Form(""),
+    tls_prewarm: bool = Form(False),
     user: dict = Depends(get_current_user),
     _cloud_gate: bool = Depends(require_local_mode),
 ):
@@ -5906,6 +5910,10 @@ async def form_filler_create_job(
         db=db,
         gemini_api_key=ai_api_key,
         ai_provider=ai_provider,
+        # 2026-02 v2.1.31 — Anti-Detect Phase 1 wiring
+        pacing_per_hour=max(0, int(pacing_per_hour or 0)),
+        identity_label=(identity_label or "").strip()[:120],
+        tls_prewarm=bool(tls_prewarm),
     )
     return {
         "job_id": job_id,
@@ -6967,6 +6975,10 @@ async def _rut_prepare_and_run(
             # Default raised 60 → 240 (2026-05). UI exposes a number
             # input so operators can tune per offer.
             stuck_watchdog_seconds=float(params.get("stuck_watchdog_seconds") or 240.0),
+            # 2026-02 v2.1.31 — Anti-Detect wiring (Phase 1)
+            pacing_per_hour=int(params.get("pacing_per_hour") or 0),
+            identity_label=str(params.get("identity_label") or "").strip(),
+            tls_prewarm=bool(params.get("tls_prewarm")),
         )
     except Exception as e:  # noqa: BLE001
         logger.exception(f"_rut_prepare_and_run crashed for job {job_id}: {e}")
@@ -7188,6 +7200,19 @@ async def rut_create_job(
     # can render the result panel with "All steps OK → Start Full Job"
     # vs "Step #N failed → fix recording".
     smoke_test: bool = Form(False),
+    # ── 2026-02 v2.1.31 — Anti-Detect Wiring (Phase 1) ──────────────
+    # When > 0, the runner uses PacingEngine (log-normal jitter) for
+    # visit spacing instead of the flat duration/total math. Defeats
+    # cohort detection that flags evenly-spaced visit patterns.
+    pacing_per_hour: int = Form(0),
+    # When non-empty, the runner reuses cookies + fingerprint persisted
+    # under this label across runs (returning-user pattern).
+    identity_label: str = Form(""),
+    # When True, every visit pre-fetches the target via curl_cffi (real
+    # Chrome JA3) BEFORE Playwright's first navigation, then injects the
+    # warmed cookies into the Playwright context. Bypass Cloudflare BM /
+    # DataDome / Akamai BM on cold visits.
+    tls_prewarm: bool = Form(False),
     user: dict = Depends(get_current_user_with_fresh_data),
     _cloud_gate: bool = Depends(require_local_mode),
 ):
@@ -7400,6 +7425,10 @@ async def rut_create_job(
         "paste_proxy_lines": paste_proxy_lines,
         "paste_ua_lines": paste_ua_lines,
         "smoke_test": bool(smoke_test),
+        # 2026-02 v2.1.31 — Anti-Detect Phase 1 wiring
+        "pacing_per_hour": max(0, int(pacing_per_hour or 0)),
+        "identity_label": (identity_label or "").strip()[:120],
+        "tls_prewarm": bool(tls_prewarm),
     }
     # A job is auto-resumable on backend restart only if it has no in-memory
     # bytes attached (Mongo can't store huge UploadFile blobs efficiently
@@ -7488,6 +7517,11 @@ async def rut_create_job(
             # the validation result panel instead of the regular full-job
             # report).
             "smoke_test": bool(smoke_test),
+            # 2026-02 v2.1.31 — Anti-Detect Phase 1 wiring (persisted so
+            # Past Jobs + retry see the settings used for the run)
+            "pacing_per_hour": max(0, int(pacing_per_hour or 0)),
+            "identity_label": (identity_label or "").strip()[:120],
+            "tls_prewarm": bool(tls_prewarm),
         }},
         upsert=True,
     )

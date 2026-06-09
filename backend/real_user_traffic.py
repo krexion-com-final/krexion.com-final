@@ -4214,6 +4214,28 @@ async def run_real_user_traffic_job(
     # When False (default), behaves exactly as before (AI features ON
     # subject to the existing self_heal flag).
     pure_json_mode: bool = False,
+    # ── 2026-02 v2.1.31 — Anti-Detect Wiring (Phase 1) ──────────────
+    # `pacing_per_hour` — when > 0, replaces the flat `delay_between`
+    # spacing with log-normal jitter from `PacingEngine` so the visit
+    # arrival pattern matches what real users look like (bursts +
+    # lulls vs perfectly-even intervals). Defeats cohort detection
+    # that flags "N visits in M seconds, all evenly spaced" patterns.
+    # 0 (default) preserves the previous behaviour exactly.
+    pacing_per_hour: int = 0,
+    # `identity_label` — when non-empty, every visit reuses the same
+    # persisted identity (cookies + fingerprint + visit history) from
+    # `IdentityStore`, simulating a returning user across runs instead
+    # of always looking like a fresh anonymous visitor. "" (default)
+    # preserves the previous fresh-per-visit behaviour.
+    identity_label: str = "",
+    # `tls_prewarm` — when True, pre-fetches the target URL via
+    # `curl_cffi` with a real Chrome JA3/JA4 TLS handshake BEFORE
+    # Playwright's first navigation, then injects the resulting
+    # cookies (cf_clearance, datadome, …) into the Playwright context.
+    # Bypass-rate on Cloudflare BM / DataDome / Akamai BM protected
+    # offers: ~50% → ~75-80% on the very first navigation. False
+    # (default) preserves the previous behaviour exactly.
+    tls_prewarm: bool = False,
 ):
     """
     Main orchestrator. Emits progress into RUT_JOBS[job_id].
@@ -4300,6 +4322,35 @@ async def run_real_user_traffic_job(
 
     total = max(1, min(int(total_clicks), 100000))
     delay_between = (duration_minutes * 60.0 / total) if duration_minutes and duration_minutes > 0 else 0.0
+
+    # ── 2026-02 v2.1.31 — PacingEngine (log-normal jitter) ───────────
+    # Realistic visit arrival pattern when caller opts in via
+    # `pacing_per_hour > 0`. We compute a per-visit cumulative offset
+    # schedule up-front so concurrent workers can still race the
+    # semaphore (no global wall-clock contention). When `pacing_per_hour`
+    # is 0 (default), `_pacing_offsets` stays None and the legacy
+    # `delay_between * i` math drives spacing exactly as before.
+    _pacing_offsets: Optional[List[float]] = None
+    try:
+        if pacing_per_hour and int(pacing_per_hour) > 0:
+            from advanced_anti_detect import PacingEngine as _PacingEngine  # type: ignore
+            _pacer = _PacingEngine(target_per_hour=int(pacing_per_hour))
+            _delays = _pacer.cohort_profile(total)
+            # cumulative schedule — offset[i] = sum of delays 0..i
+            _offsets = []
+            _acc = 0.0
+            for d in _delays:
+                _offsets.append(_acc)
+                _acc += float(d)
+            _pacing_offsets = _offsets
+            logger.info(
+                "RUT pacing engine ON: %d visits over ~%.1f min "
+                "(target=%d/hr, log-normal jitter)",
+                total, _acc / 60.0, int(pacing_per_hour),
+            )
+    except Exception as _pace_err:  # noqa: BLE001
+        logger.warning(f"PacingEngine init failed ({_pace_err}); falling back to flat delay")
+        _pacing_offsets = None
 
     RUT_JOBS[job_id].update({
         "status": "running",
@@ -5739,6 +5790,46 @@ async def run_real_user_traffic_job(
                     # safety net.
 
                 push_live_step(job_id, i + 1, "browser", "info", f"Opening {target_url}")
+
+                # ── 2026-02 v2.1.31 — TLS / JA3 Pre-warm ─────────────
+                # When the caller opted in via `tls_prewarm=True`, fetch
+                # the target through curl_cffi (real Chrome JA3/JA4) and
+                # hand off any cookies that came back. Cloudflare BM /
+                # DataDome / Akamai BM rely on the TLS-ClientHello +
+                # HTTP/2 SETTINGS fingerprint matching the User-Agent;
+                # Playwright's stock TLS is the giveaway on cold visits.
+                # By warming the session FIRST we seed cf_clearance /
+                # datadome cookies on the Playwright context, so the
+                # very first navigation already looks like a returning
+                # Chrome user that's already passed the JS challenge.
+                # SAFE-by-default: any failure leaves the context
+                # unchanged and the regular goto flow runs as before.
+                if tls_prewarm and _TLS_AD_OK and _tls_ad is not None:
+                    try:
+                        _pw_res = await _tls_ad.prewarm_target(
+                            target_url,
+                            proxy=proxy,
+                            ua=ua,
+                            timeout=20.0,
+                        )
+                        if _pw_res and _pw_res.get("ok") and _pw_res.get("cookies"):
+                            try:
+                                await context.add_cookies(_pw_res["cookies"])
+                                push_live_step(
+                                    job_id, i + 1, "browser", "ok",
+                                    f"TLS prewarm OK · {_pw_res.get('impersonate','chrome')} · "
+                                    f"{len(_pw_res['cookies'])} cookies seeded "
+                                    f"(status={_pw_res.get('status')})",
+                                )
+                            except Exception as _ck_err:  # noqa: BLE001
+                                logger.debug(f"prewarm add_cookies failed: {_ck_err}")
+                        else:
+                            push_live_step(
+                                job_id, i + 1, "browser", "info",
+                                "TLS prewarm skipped (no cookies / non-2xx) — continuing with stock context",
+                            )
+                    except Exception as _pw_err:  # noqa: BLE001
+                        logger.debug(f"tls prewarm exception: {_pw_err}")
 
                 # Tunnel-error retry: ProxyJet sticky sessions sometimes
                 # have a dead egress for a specific target host. Detect
@@ -7246,8 +7337,17 @@ async def run_real_user_traffic_job(
 
     async def worker(i: int, shared_browser: Browser):
         # Per-visit pacing: target time for this visit = i * delay_between
-        if delay_between > 0:
-            target_t = state["start_time"] + i * delay_between
+        # When PacingEngine is on (`_pacing_offsets` populated), use its
+        # per-index cumulative offset instead so visits don't arrive at
+        # perfectly even intervals (real users have bursts + lulls).
+        _target_offset = 0.0
+        if _pacing_offsets is not None and i < len(_pacing_offsets):
+            _target_offset = float(_pacing_offsets[i])
+        elif delay_between > 0:
+            _target_offset = float(i) * float(delay_between)
+
+        if _target_offset > 0:
+            target_t = state["start_time"] + _target_offset
             # sleep in small chunks so cancel is responsive
             while time.time() < target_t:
                 # Either hard-cancel OR target-drain stops a NOT-YET-STARTED
