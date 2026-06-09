@@ -6979,6 +6979,10 @@ async def _rut_prepare_and_run(
             pacing_per_hour=int(params.get("pacing_per_hour") or 0),
             identity_label=str(params.get("identity_label") or "").strip(),
             tls_prewarm=bool(params.get("tls_prewarm")),
+            # 2026-02 v2.1.31 — Step 3 wiring
+            proxy_chain_enabled=bool(params.get("proxy_chain_enabled")),
+            proxy_chain_use_tor=bool(params.get("proxy_chain_use_tor", True)),
+            browser_variant=str(params.get("browser_variant") or "auto").strip().lower(),
         )
     except Exception as e:  # noqa: BLE001
         logger.exception(f"_rut_prepare_and_run crashed for job {job_id}: {e}")
@@ -7213,6 +7217,12 @@ async def rut_create_job(
     # warmed cookies into the Playwright context. Bypass Cloudflare BM /
     # DataDome / Akamai BM on cold visits.
     tls_prewarm: bool = Form(False),
+    # ── 2026-02 v2.1.31 — Step 3: Multi-Hop Proxy Chain ───────────────
+    proxy_chain_enabled: bool = Form(False),
+    proxy_chain_use_tor: bool = Form(True),
+    # ── 2026-02 v2.1.31 — Step 3: Browser Binary Rotation ─────────────
+    # "auto" | "chromium" | "headless-shell" | "brave" | "rotate"
+    browser_variant: str = Form("auto"),
     user: dict = Depends(get_current_user_with_fresh_data),
     _cloud_gate: bool = Depends(require_local_mode),
 ):
@@ -7429,6 +7439,10 @@ async def rut_create_job(
         "pacing_per_hour": max(0, int(pacing_per_hour or 0)),
         "identity_label": (identity_label or "").strip()[:120],
         "tls_prewarm": bool(tls_prewarm),
+        # 2026-02 v2.1.31 — Step 3 wiring
+        "proxy_chain_enabled": bool(proxy_chain_enabled),
+        "proxy_chain_use_tor": bool(proxy_chain_use_tor),
+        "browser_variant": (browser_variant or "auto").strip().lower()[:32],
     }
     # A job is auto-resumable on backend restart only if it has no in-memory
     # bytes attached (Mongo can't store huge UploadFile blobs efficiently
@@ -7522,6 +7536,10 @@ async def rut_create_job(
             "pacing_per_hour": max(0, int(pacing_per_hour or 0)),
             "identity_label": (identity_label or "").strip()[:120],
             "tls_prewarm": bool(tls_prewarm),
+            # 2026-02 v2.1.31 — Step 3 wiring (persisted)
+            "proxy_chain_enabled": bool(proxy_chain_enabled),
+            "proxy_chain_use_tor": bool(proxy_chain_use_tor),
+            "browser_variant": (browser_variant or "auto").strip().lower()[:32],
         }},
         upsert=True,
     )
@@ -18960,6 +18978,33 @@ async def anti_detect_health_check(current_user=Depends(get_current_user)):
         logger.error(f"anti-detect health check failed: {_ad_err}")
         return {"score": 0, "verdict": "broken", "error": str(_ad_err),
                 "checks": [], "passed": 0, "total": 0}
+
+
+# ── 2026-02 v2.1.31 (Step 3) — Stealth Capabilities Introspection ──
+# Lets the UI render only the rotation variants + chain hops that this
+# host can actually run. Returns NO secrets — paths only.
+@app.get("/api/anti-detect/capabilities")
+async def anti_detect_capabilities(current_user=Depends(get_current_user)):
+    out = {"browser_variants": [], "brave_path": None, "chromium_path": None, "headless_shell_path": None,
+           "tor_available": False, "proxy_chain_ready": False}
+    try:
+        from browser_variants import (
+            list_available_variants, find_brave_executable,
+            find_full_chromium_executable, find_headless_shell_executable,
+        )
+        out["browser_variants"] = list_available_variants()
+        out["brave_path"] = find_brave_executable()
+        out["chromium_path"] = find_full_chromium_executable()
+        out["headless_shell_path"] = find_headless_shell_executable()
+    except Exception as e:  # noqa: BLE001
+        out["browser_variants_error"] = str(e)
+    try:
+        import proxy_chain as _pc
+        out["tor_available"] = await _pc.is_tor_available()
+        out["proxy_chain_ready"] = True
+    except Exception as e:  # noqa: BLE001
+        out["proxy_chain_error"] = str(e)
+    return out
 
 
 # (Local-UI static mount moved to end of file so it doesn't shadow

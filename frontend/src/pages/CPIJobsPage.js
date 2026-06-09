@@ -49,7 +49,15 @@ export default function CPIJobsPage() {
     upload_proxy_id: "",
     upload_ua_id: "",
     auto_consume: true,
+    // ── 2026-02 v2.1.31 — Behavior Simulator ──
+    behavior_sim_enabled: false,
+    behavior_sim_intensity: "medium",
+    behavior_sim_window_hours: 24,
   });
+
+  // Behavior plan preview state
+  const [bpPreview, setBpPreview] = useState(null);
+  const [bpLoading, setBpLoading] = useState(false);
 
   const token = localStorage.getItem("token");
   const auth = { headers: { Authorization: `Bearer ${token}` } };
@@ -113,6 +121,10 @@ export default function CPIJobsPage() {
         upload_proxy_id: proxyMode === "uploaded" ? form.upload_proxy_id : null,
         upload_ua_id: uaMode === "uploaded" ? form.upload_ua_id : null,
         auto_consume: form.auto_consume,
+        // 2026-02 v2.1.31 — Behavior Simulator
+        behavior_sim_enabled: !!form.behavior_sim_enabled,
+        behavior_sim_intensity: form.behavior_sim_intensity || "medium",
+        behavior_sim_window_hours: parseInt(form.behavior_sim_window_hours) || 24,
       }, auth);
       toast.success("Job created (queued). Click ▶ to start.");
       setOpen(false);
@@ -258,6 +270,105 @@ export default function CPIJobsPage() {
                 <Label>Settle Wait After Install (s)</Label>
                 <Input type="number" value={form.settle_seconds} onChange={(e) => setForm({ ...form, settle_seconds: e.target.value })} />
               </div>
+            </div>
+
+            {/* ── 2026-02 v2.1.31 — Mobile Behavior Simulator ── */}
+            <div className="space-y-2 p-3 rounded-lg border border-fuchsia-500/30 bg-fuchsia-950/10">
+              <div className="flex items-center justify-between">
+                <Label className="text-fuchsia-300 text-sm font-semibold flex items-center gap-2">
+                  🛡️ Mobile Behavior Simulator
+                  <span className="text-[10px] text-zinc-500 px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-800">AppsFlyer Protect360 v2024 bypass</span>
+                </Label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={!!form.behavior_sim_enabled}
+                    onChange={(e) => setForm({ ...form, behavior_sim_enabled: e.target.checked })}
+                    className="w-4 h-4 accent-fuchsia-500"
+                    data-testid="cpi-behavior-sim-toggle"
+                  />
+                  <span className="text-xs text-zinc-300">Enable</span>
+                </label>
+              </div>
+              {form.behavior_sim_enabled && (
+                <>
+                  <p className="text-[11px] text-zinc-500">
+                    Worker simulates app opens / swipes / scrolls / screen-views distributed over the window. Defeats zero-engagement attribution fraud detection.
+                  </p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <Label className="text-xs">Intensity</Label>
+                      <select
+                        value={form.behavior_sim_intensity}
+                        onChange={(e) => setForm({ ...form, behavior_sim_intensity: e.target.value })}
+                        className="w-full bg-background border border-input rounded-md px-2 py-1.5 text-sm mt-1"
+                        data-testid="cpi-behavior-sim-intensity"
+                      >
+                        <option value="low">Low (~4 actions/day)</option>
+                        <option value="medium">Medium (~10 actions/day)</option>
+                        <option value="high">High (~20 actions/day)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <Label className="text-xs">Window (hours)</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={168}
+                        value={form.behavior_sim_window_hours}
+                        onChange={(e) => setForm({ ...form, behavior_sim_window_hours: e.target.value })}
+                        className="mt-1"
+                        data-testid="cpi-behavior-sim-window"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        setBpLoading(true);
+                        try {
+                          const { data } = await axios.get(
+                            `${API}/cpi/behavior-plan/preview?intensity=${form.behavior_sim_intensity}&window_hours=${parseInt(form.behavior_sim_window_hours) || 24}`,
+                            auth,
+                          );
+                          setBpPreview(data);
+                        } catch (e) {
+                          toast.error(e.response?.data?.detail || "Preview failed");
+                        } finally {
+                          setBpLoading(false);
+                        }
+                      }}
+                      disabled={bpLoading}
+                      className="text-xs px-3 py-1 rounded-md bg-fuchsia-600/20 border border-fuchsia-500/40 text-fuchsia-200 hover:bg-fuchsia-600/30 disabled:opacity-50"
+                      data-testid="cpi-behavior-plan-preview-btn"
+                    >
+                      {bpLoading ? "Loading…" : "Preview Plan"}
+                    </button>
+                    {bpPreview && (
+                      <span className="text-[11px] text-zinc-400" data-testid="cpi-behavior-plan-summary">
+                        {bpPreview.actions_count} actions · first at {(bpPreview.first_action_offset_seconds / 60).toFixed(1)}m · last at {(bpPreview.last_action_offset_seconds / 3600).toFixed(1)}h
+                      </span>
+                    )}
+                  </div>
+                  {bpPreview && (
+                    <div className="mt-2 max-h-32 overflow-y-auto rounded-md border border-fuchsia-500/20 bg-slate-950/60 p-2 text-[10px] font-mono text-zinc-400" data-testid="cpi-behavior-plan-list">
+                      {(bpPreview.plan || []).slice(0, 12).map((a, i) => (
+                        <div key={i}>
+                          <span className="text-fuchsia-300">+{(a.at_offset_seconds / 60).toFixed(1)}m</span>{" "}
+                          <span className="text-emerald-300">{a.action}</span>{" "}
+                          {Object.keys(a.params || {}).length > 0 && (
+                            <span className="text-zinc-500">{JSON.stringify(a.params)}</span>
+                          )}
+                        </div>
+                      ))}
+                      {(bpPreview.plan || []).length > 12 && (
+                        <div className="text-zinc-600">… {bpPreview.plan.length - 12} more</div>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
             </div>
 
             <div className="space-y-2">

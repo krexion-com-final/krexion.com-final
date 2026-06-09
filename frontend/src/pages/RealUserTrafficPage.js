@@ -367,6 +367,23 @@ export default function RealUserTrafficPage() {
   const [identityLabel, setIdentityLabel] = useState("");
   const [tlsPrewarm, setTlsPrewarm] = useState(false);
 
+  // ── 2026-02 v2.1.31 — Step 3: Multi-Hop Proxy Chain + Browser Variant ──
+  const [proxyChainEnabled, setProxyChainEnabled] = useState(false);
+  const [proxyChainUseTor, setProxyChainUseTor] = useState(true);
+  const [browserVariant, setBrowserVariant] = useState("auto");
+  const [adCapabilities, setAdCapabilities] = useState(null);
+
+  // Fetch host capabilities ONCE so we render only what works here
+  useEffect(() => {
+    const token = localStorage.getItem("token");
+    fetch(`${process.env.REACT_APP_BACKEND_URL}/api/anti-detect/capabilities`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => setAdCapabilities(d))
+      .catch(() => {});
+  }, []);
+
   // ── 2026-06: Health Check / Preflight Trace ──
   // Lightweight dry-run that validates the recording + URL on ONE
   // browser BEFORE committing budget to a full RUT job. Surfaces a
@@ -1138,6 +1155,10 @@ export default function RealUserTrafficPage() {
       fd.append("pacing_per_hour", String(pacingPerHour || 0));
       fd.append("identity_label", identityLabel || "");
       fd.append("tls_prewarm", String(!!tlsPrewarm));
+      // 2026-02 v2.1.31 — Step 3
+      fd.append("proxy_chain_enabled", String(!!proxyChainEnabled));
+      fd.append("proxy_chain_use_tor", String(!!proxyChainUseTor));
+      fd.append("browser_variant", browserVariant || "auto");
 
       fd.append("form_fill_enabled", String(formFillEnabled));
       if (formFillEnabled) {
@@ -2249,6 +2270,90 @@ export default function RealUserTrafficPage() {
                 </div>
                 <p className="text-xs text-gray-500 mt-1">
                   Pre-fetches the target via curl_cffi (real JA3/JA4 Chrome fingerprint), then seeds cookies onto Playwright. Bypasses Cloudflare BM / DataDome / Akamai BM on cold visits (~50% → ~75–80%).
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* ── 2026-02 v2.1.31 — Anti-Detect (Phase 3) ── */}
+          <div className="mt-6 p-4 rounded-lg border border-sky-500/30 bg-sky-950/10">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="text-sky-300 text-sm font-semibold">🌐 Anti-Detect (Phase 3)</span>
+              <span className="text-[10px] text-zinc-500 px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-800">Multi-Hop Proxy · Browser Rotation</span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <Label className="text-zinc-300 text-sm">Multi-Hop Proxy Chain</Label>
+                <div className="mt-2 flex items-center gap-2">
+                  <input
+                    data-testid="rut-proxy-chain-enabled"
+                    type="checkbox"
+                    checked={proxyChainEnabled}
+                    onChange={(e) => setProxyChainEnabled(e.target.checked)}
+                    className="w-4 h-4 rounded accent-sky-500"
+                  />
+                  <span className="text-sm text-zinc-300">Enable chain (Tor → exit proxy)</span>
+                </div>
+                {proxyChainEnabled && (
+                  <div className="mt-2 ml-6 flex items-center gap-2">
+                    <input
+                      data-testid="rut-proxy-chain-use-tor"
+                      type="checkbox"
+                      checked={proxyChainUseTor}
+                      onChange={(e) => setProxyChainUseTor(e.target.checked)}
+                      className="w-3.5 h-3.5 rounded accent-sky-500"
+                    />
+                    <span className="text-xs text-zinc-400">First hop: local Tor SOCKS5 (127.0.0.1:9050)</span>
+                    {adCapabilities && (
+                      <span
+                        className={`text-[10px] px-1.5 py-0.5 rounded-full border ${
+                          adCapabilities.tor_available
+                            ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                            : "bg-amber-500/15 text-amber-300 border-amber-500/30"
+                        }`}
+                        data-testid="rut-tor-status-badge"
+                      >
+                        {adCapabilities.tor_available ? "Tor LIVE" : "Tor down → single-hop"}
+                      </span>
+                    )}
+                  </div>
+                )}
+                <p className="text-xs text-gray-500 mt-2">
+                  Breaks single-IP correlation (IPQS / AppsFlyer / Anura cross-IP graph). Tor unreachable → graceful single-hop fallback. Off = legacy single-proxy.
+                </p>
+              </div>
+              <div>
+                <Label className="text-zinc-300 text-sm">Browser Binary</Label>
+                <select
+                  data-testid="rut-browser-variant"
+                  value={browserVariant}
+                  onChange={(e) => setBrowserVariant(e.target.value)}
+                  className="mt-1 w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md px-2 py-1.5 text-sm"
+                >
+                  <option value="auto">Auto (default — full chromium when available)</option>
+                  {adCapabilities?.browser_variants?.includes("chromium") && (
+                    <option value="chromium">Full Chromium (--headless=new)</option>
+                  )}
+                  {adCapabilities?.browser_variants?.includes("brave") && (
+                    <option value="brave">Brave Browser</option>
+                  )}
+                  {adCapabilities?.browser_variants?.includes("headless-shell") && (
+                    <option value="headless-shell">Chromium Headless-Shell (lightweight)</option>
+                  )}
+                  <option value="rotate">Rotate (random per job from installed binaries)</option>
+                </select>
+                {adCapabilities && (
+                  <div className="mt-1 text-[10px] text-zinc-500 font-mono flex flex-wrap gap-2" data-testid="rut-browser-variants-available">
+                    {adCapabilities.chromium_path && <span className="text-emerald-300">✓ chromium</span>}
+                    {adCapabilities.brave_path && <span className="text-emerald-300">✓ brave</span>}
+                    {adCapabilities.headless_shell_path && <span className="text-emerald-300">✓ headless-shell</span>}
+                    {!adCapabilities.chromium_path && <span>· chromium ✗</span>}
+                    {!adCapabilities.brave_path && <span>· brave ✗</span>}
+                    {!adCapabilities.headless_shell_path && <span>· headless-shell ✗</span>}
+                  </div>
+                )}
+                <p className="text-xs text-gray-500 mt-1">
+                  Defeats "100% Chromium" cohort tell. Brave path: set <code>KREXION_BRAVE_PATH</code> env or install at standard paths. Variants not present here will fall back to auto.
                 </p>
               </div>
             </div>

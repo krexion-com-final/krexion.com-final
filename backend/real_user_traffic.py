@@ -470,7 +470,7 @@ _BROWSER_LAUNCH_ARGS_BASE = [
 ]
 
 
-async def _launch_anti_detect_browser(pw) -> Browser:
+async def _launch_anti_detect_browser(pw, *, variant: str = "auto") -> Browser:
     """Launch Chromium for RUT jobs with the strongest anti-detect setup
     available on this host:
 
@@ -484,8 +484,42 @@ async def _launch_anti_detect_browser(pw) -> Browser:
          legacy way. Fully backwards-compatible — customer VPS instances
          that haven't run the upgrade keep working exactly as before.
 
+    ── 2026-02 v2.1.31 (Step 3) — Browser Binary Rotation ─────────────
+    When `variant` is set to "brave" / "chromium" / "headless-shell" /
+    "rotate", the choice is delegated to `browser_variants.pick_browser_executable`
+    which returns an executable_path + extra args. "auto" (default)
+    keeps the legacy `_use_full_chromium()` flow above so all existing
+    jobs behave identically.
+
     Returns the launched Browser. Caller is responsible for closing it.
     """
+    # ── 2026-02 v2.1.31 — variant override path ──
+    if variant and variant.lower() != "auto":
+        try:
+            from browser_variants import pick_browser_executable as _pbe  # type: ignore
+            pick = _pbe(variant)
+            exe = pick.get("executable_path")
+            args_extra = list(pick.get("args_extra") or [])
+            engine = pick.get("engine_label") or variant
+            if exe:
+                logger.info(
+                    "RUT browser variant: %s — exe=%s", engine, exe,
+                )
+                try:
+                    return await pw.chromium.launch(
+                        headless=False,  # Brave/Chromium with --headless=new mode
+                        executable_path=exe,
+                        args=[*args_extra, *_BROWSER_LAUNCH_ARGS_BASE],
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        f"variant '{variant}' (exe={exe}) launch failed ({e}) — "
+                        f"falling back to auto"
+                    )
+            # variant unavailable on this host → fall through to auto
+        except Exception as _v_err:  # noqa: BLE001
+            logger.debug(f"browser_variants import/use failed: {_v_err}")
+
     if _use_full_chromium():
         # Full chromium: pass --headless=new explicitly via args. We
         # ALSO set headless=False so Playwright doesn't pass --headless
@@ -4236,6 +4270,19 @@ async def run_real_user_traffic_job(
     # offers: ~50% → ~75-80% on the very first navigation. False
     # (default) preserves the previous behaviour exactly.
     tls_prewarm: bool = False,
+    # ── 2026-02 v2.1.31 — Step 3: Multi-Hop Proxy Chains ─────────────
+    # When True, every visit's proxy is wrapped through a local HTTP
+    # CONNECT relay that internally chains Tor (first hop) → exit
+    # proxy (second hop) → target. Breaks single-IP correlation
+    # graphs used by IPQS / AppsFlyer / Anura. Tor unreachable →
+    # graceful single-hop fallback. Off (default) = exit proxy used
+    # directly as before.
+    proxy_chain_enabled: bool = False,
+    proxy_chain_use_tor: bool = True,
+    # ── 2026-02 v2.1.31 — Step 3: Browser Binary Rotation ────────────
+    # Per-visit choice of Chromium / Brave / headless-shell. "auto"
+    # preserves the existing _use_full_chromium() flow.
+    browser_variant: str = "auto",
 ):
     """
     Main orchestrator. Emits progress into RUT_JOBS[job_id].
@@ -5033,7 +5080,7 @@ async def run_real_user_traffic_job(
                                "Chromium crashed — relaunching…")
             except Exception:
                 pass
-            new_b = await _launch_anti_detect_browser(pw)
+            new_b = await _launch_anti_detect_browser(pw, variant=browser_variant)
             _browser_holder["b"] = new_b
             try:
                 push_live_step(job_id, 0, "engine", "ok",
@@ -5516,6 +5563,37 @@ async def run_real_user_traffic_job(
 
         browser: Optional[Browser] = None
         context: Optional[BrowserContext] = None
+        # ── 2026-02 v2.1.31 — Step 3: Multi-Hop Proxy Chain ──────────
+        # When enabled, replace the upstream `proxy` dict with one
+        # pointing at a local HTTP CONNECT relay that chains through
+        # Tor → exit_proxy → target. The local relay is closed in
+        # the finally-block of this visit. Off (default) keeps the
+        # legacy single-hop proxy semantics exactly.
+        _chain_handle = None
+        _effective_proxy = dict(proxy)
+        if proxy_chain_enabled:
+            try:
+                import proxy_chain as _pc  # type: ignore
+                _chain = await _pc.start_chain(
+                    exit_proxy=proxy,
+                    use_tor=bool(proxy_chain_use_tor),
+                )
+                if _chain and _chain.get("proxy"):
+                    _effective_proxy = _chain["proxy"]
+                    _chain_handle = _chain.get("handle")
+                    push_live_step(
+                        job_id, i + 1, "proxy", "ok",
+                        f"Proxy chain ON · {len(_chain.get('hops') or [])} hops"
+                        + (" (multi-hop)" if _chain.get("is_multihop") else " (single-hop fallback)"),
+                    )
+                else:
+                    push_live_step(
+                        job_id, i + 1, "proxy", "info",
+                        "Proxy chain requested but no usable hops — using direct proxy",
+                    )
+            except Exception as _pc_err:  # noqa: BLE001
+                logger.debug(f"proxy_chain failed: {_pc_err}")
+
         try:
             # Use the SHARED browser launched once at job start. Per-visit
             # isolation comes from a fresh BrowserContext with its own proxy,
@@ -5547,9 +5625,9 @@ async def run_real_user_traffic_job(
                     pass
                 context = await browser.new_context(
                     proxy={
-                        "server": proxy["server"],
-                        **({"username": proxy["username"]} if proxy.get("username") else {}),
-                        **({"password": proxy["password"]} if proxy.get("password") else {}),
+                        "server": _effective_proxy["server"],
+                        **({"username": _effective_proxy["username"]} if _effective_proxy.get("username") else {}),
+                        **({"password": _effective_proxy["password"]} if _effective_proxy.get("password") else {}),
                     },
                     user_agent=ua,
                     viewport=fp["viewport"],
@@ -7318,6 +7396,12 @@ async def run_real_user_traffic_job(
                     await context.close()
                 except Exception:
                     pass
+            # ── 2026-02 v2.1.31 — Stop the per-visit proxy chain relay
+            if _chain_handle is not None:
+                try:
+                    await _chain_handle.stop()
+                except Exception:
+                    pass
             # Small delay to let cleanup complete
             await asyncio.sleep(0.1)
 
@@ -7452,7 +7536,7 @@ async def run_real_user_traffic_job(
     _browser_holder["pw_cm"] = pw_cm
     shared_browser: Optional[Browser] = None
     try:
-        shared_browser = await _launch_anti_detect_browser(pw)
+        shared_browser = await _launch_anti_detect_browser(pw, variant=browser_variant)
         _browser_holder["b"] = shared_browser
     except Exception as e:
         try:

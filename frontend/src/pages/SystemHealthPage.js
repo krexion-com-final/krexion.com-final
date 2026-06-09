@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import axios from "axios";
-import { Activity, Wrench, RefreshCw, CheckCircle2, AlertTriangle, XCircle, Loader2, Database, Cpu, HardDrive, MemoryStick, Cog, Sheet } from "lucide-react";
+import { Activity, Wrench, RefreshCw, CheckCircle2, AlertTriangle, XCircle, Loader2, Database, Cpu, HardDrive, MemoryStick, Cog, Sheet, ShieldCheck } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
 import { useToast } from "../hooks/use-toast";
@@ -36,7 +36,33 @@ export default function SystemHealthPage() {
   const [error, setError] = useState("");
   const [repairing, setRepairing] = useState(false);
   const [lastRepair, setLastRepair] = useState(null);
+  // ── 2026-02 Anti-Detect Health Check tile ──
+  const [adHealth, setAdHealth] = useState(null);
+  const [adLoading, setAdLoading] = useState(false);
+  const [adError, setAdError] = useState("");
+  const [adRanAt, setAdRanAt] = useState(null);
   const { toast } = useToast();
+
+  const runAntiDetectCheck = useCallback(async () => {
+    setAdLoading(true);
+    setAdError("");
+    try {
+      const token = localStorage.getItem("token");
+      const { data } = await axios.get(`${API}/anti-detect/health-check`, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 90000, // launches real Playwright — can take 20-40s on cold start
+      });
+      setAdHealth(data);
+      setAdRanAt(new Date());
+    } catch (e) {
+      setAdError(e.response?.data?.detail || e.message || "Anti-Detect check failed");
+    } finally {
+      setAdLoading(false);
+    }
+  }, []);
+
+  // Run anti-detect check ONCE on mount (don't auto-refresh — it's expensive)
+  useEffect(() => { runAntiDetectCheck(); }, [runAntiDetectCheck]);
 
   const fetchHealth = useCallback(async () => {
     try {
@@ -217,6 +243,138 @@ export default function SystemHealthPage() {
           );
         })}
       </div>
+
+      {/* ── 2026-02 Anti-Detect Stealth Health Card ── */}
+      <Card
+        className="p-5 mt-2 border-fuchsia-500/30 bg-gradient-to-br from-fuchsia-950/20 to-slate-950/40"
+        data-testid="anti-detect-health-card"
+      >
+        <div className="flex items-start justify-between gap-4 flex-wrap mb-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 rounded-lg bg-fuchsia-500/15 text-fuchsia-300">
+              <ShieldCheck className="h-5 w-5" />
+            </div>
+            <div>
+              <h3 className="font-bold text-base leading-tight flex items-center gap-2">
+                Anti-Detect Stealth Health
+                {adHealth && (
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider border ${
+                      adHealth.verdict === "excellent"
+                        ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                        : adHealth.verdict === "good"
+                        ? "bg-sky-500/15 text-sky-300 border-sky-500/30"
+                        : adHealth.verdict === "partial"
+                        ? "bg-amber-500/15 text-amber-300 border-amber-500/30"
+                        : "bg-rose-500/15 text-rose-300 border-rose-500/30"
+                    }`}
+                    data-testid="anti-detect-verdict-badge"
+                  >
+                    {adHealth.verdict}
+                  </span>
+                )}
+              </h3>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Live self-test — stealth engine, WebGL/canvas/WebRTC patches, fingerprint, sec-ch-ua.
+              </p>
+            </div>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={runAntiDetectCheck}
+            disabled={adLoading}
+            data-testid="anti-detect-rerun-btn"
+            className="gap-2"
+          >
+            {adLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+            {adLoading ? "Running…" : "Re-run Check"}
+          </Button>
+        </div>
+
+        {/* Score bar */}
+        {adHealth && !adError && (
+          <div className="mb-4" data-testid="anti-detect-score-block">
+            <div className="flex items-baseline justify-between mb-1.5">
+              <span className="text-xs uppercase tracking-wider text-muted-foreground">Stealth Score</span>
+              <span className="font-mono text-sm">
+                <span
+                  data-testid="anti-detect-score-value"
+                  className={`text-xl font-bold ${
+                    adHealth.score >= 90 ? "text-emerald-400"
+                    : adHealth.score >= 75 ? "text-sky-400"
+                    : adHealth.score >= 50 ? "text-amber-400"
+                    : "text-rose-400"
+                  }`}
+                >
+                  {adHealth.score}
+                </span>
+                <span className="text-muted-foreground"> / 100</span>
+                <span className="text-muted-foreground ml-3">{adHealth.passed}/{adHealth.total} checks passed</span>
+              </span>
+            </div>
+            <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
+              <div
+                className={`h-full transition-all duration-500 ${
+                  adHealth.score >= 90 ? "bg-emerald-500"
+                  : adHealth.score >= 75 ? "bg-sky-500"
+                  : adHealth.score >= 50 ? "bg-amber-500"
+                  : "bg-rose-500"
+                }`}
+                style={{ width: `${adHealth.score}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        {adError && (
+          <div className="flex items-start gap-2 text-sm text-rose-300 bg-rose-500/10 rounded-md p-3 mb-3" data-testid="anti-detect-error">
+            <XCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold">Anti-Detect check failed</div>
+              <div className="text-xs text-rose-200/70 mt-0.5">{adError}</div>
+            </div>
+          </div>
+        )}
+
+        {adLoading && !adHealth && (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground py-6 justify-center">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Launching headless Chromium for live self-test (15–40s)…
+          </div>
+        )}
+
+        {/* Individual checks */}
+        {adHealth?.checks?.length > 0 && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-2" data-testid="anti-detect-checks-grid">
+            {adHealth.checks.map((c, i) => {
+              const Icon = c.ok ? CheckCircle2 : XCircle;
+              const color = c.ok ? "text-emerald-400" : "text-rose-400";
+              return (
+                <div
+                  key={i}
+                  className="flex items-start gap-2 text-xs px-2.5 py-1.5 rounded-md bg-slate-900/40 border border-slate-800/60"
+                  data-testid={`anti-detect-check-${i}`}
+                >
+                  <Icon className={`h-3.5 w-3.5 flex-shrink-0 mt-0.5 ${color}`} />
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium text-foreground/90 truncate">{c.name}</div>
+                    {c.detail && (
+                      <div className="font-mono text-[10px] text-muted-foreground truncate">{c.detail}</div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {adRanAt && (
+          <div className="text-[10px] text-muted-foreground text-right mt-3">
+            Last run: {adRanAt.toLocaleTimeString()}
+          </div>
+        )}
+      </Card>
 
       {/* Last repair report */}
       {lastRepair && (

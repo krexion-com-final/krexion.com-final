@@ -76,6 +76,114 @@ _consume_uploads = None
 # Models
 # ────────────────────────────────────────────────────────────────────────
 
+# ── 2026-02 v2.1.31 — Behavior Simulator plan builder ────────────────────
+# AppsFlyer Protect360 v2024 + Adjust + Kochava all run ML that flags
+# attribution events with "zero engagement after install". A real user
+# opens the app multiple times in the first 24-72h, swipes around,
+# triggers events (level_up, screen_view, …). We emit a per-attempt
+# schedule the worker can follow. This file is the source of truth so
+# the schedule is deterministic-per-attempt (worker can re-poll without
+# producing wildly different plans).
+import random as _bp_random
+
+_INTENSITY_ACTIONS_PER_DAY = {
+    "low":    4,
+    "medium": 10,
+    "high":   20,
+}
+# Realistic action mix observed in real user sessions
+_ACTION_BUCKETS = [
+    ("app_open",        0.32),  # cold-start the app
+    ("app_resume",      0.22),  # foreground from background
+    ("scroll",          0.15),
+    ("tap",             0.15),
+    ("swipe",           0.07),
+    ("screen_view",     0.05),  # navigate to a screen → fires AF screen event
+    ("session_idle",    0.04),  # leave app open 30-120s without interaction
+]
+
+def _pick_action() -> str:
+    r = _bp_random.random()
+    acc = 0.0
+    for name, w in _ACTION_BUCKETS:
+        acc += w
+        if r <= acc:
+            return name
+    return _ACTION_BUCKETS[0][0]
+
+
+def build_behavior_plan(
+    intensity: str = "medium",
+    window_hours: int = 24,
+    *,
+    seed: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Return a sequence of post-install actions the worker executes
+    over `window_hours` to defeat zero-engagement detection.
+
+    Each entry: ``{at_offset_seconds, action, params}``.
+
+    ``at_offset_seconds`` is measured from the install moment. The first
+    action is delayed at least 60s (real users rarely open immediately)
+    and the rest cluster non-uniformly with longer night-time gaps to
+    mimic human circadian patterns.
+    """
+    rng = _bp_random.Random(seed) if seed is not None else _bp_random.Random()
+    intensity = (intensity or "medium").lower()
+    per_day = _INTENSITY_ACTIONS_PER_DAY.get(intensity, 10)
+    window_hours = max(1, min(168, int(window_hours or 24)))
+    total_actions = max(2, int(per_day * (window_hours / 24.0)))
+    total_seconds = window_hours * 3600
+
+    # Generate offsets using a beta-skewed distribution so MOST actions
+    # happen in first 4-8h (matching real install→engagement curves).
+    offsets: List[int] = []
+    for _ in range(total_actions):
+        # alpha=1.5, beta=4 → bell skewed toward t=0 with a long tail
+        t = rng.betavariate(1.5, 4.0) * total_seconds
+        offsets.append(int(t))
+    offsets.sort()
+    # Ensure first action ≥ 60s after install (real users don't insta-open)
+    if offsets and offsets[0] < 60:
+        offsets[0] = 60 + rng.randint(0, 120)
+    # Enforce ≥ 90s gap between consecutive actions
+    for i in range(1, len(offsets)):
+        if offsets[i] - offsets[i - 1] < 90:
+            offsets[i] = offsets[i - 1] + 90 + rng.randint(0, 180)
+
+    plan: List[Dict[str, Any]] = []
+    for off in offsets:
+        action = _pick_action()
+        params: Dict[str, Any] = {}
+        if action == "swipe":
+            params = {
+                "direction": rng.choice(["up", "down", "left", "right"]),
+                "distance_px": rng.randint(180, 720),
+                "duration_ms": rng.randint(180, 420),
+            }
+        elif action == "tap":
+            params = {"jitter_px": rng.randint(0, 8)}
+        elif action == "scroll":
+            params = {
+                "direction": rng.choice(["up", "down"]),
+                "steps": rng.randint(2, 6),
+            }
+        elif action == "session_idle":
+            params = {"hold_seconds": rng.randint(30, 120)}
+        elif action == "app_open" or action == "app_resume":
+            params = {"min_dwell_seconds": rng.randint(8, 45)}
+        elif action == "screen_view":
+            params = {"screen": rng.choice([
+                "home", "profile", "offers", "settings", "rewards", "history",
+            ])}
+        plan.append({
+            "at_offset_seconds": int(off),
+            "action": action,
+            "params": params,
+        })
+    return plan
+
+
 class CPIOfferIn(BaseModel):
     name: str
     network: Optional[str] = ""
@@ -119,6 +227,19 @@ class CPIJobIn(BaseModel):
     upload_ua_id: Optional[str] = None
     # Auto-consume used resources after job completes (mirrors RUT behavior)
     auto_consume: bool = True
+    # ── 2026-02 v2.1.31 — Mobile CPI Behavior Simulator ──────────────
+    # When True, the orchestrator emits a `behavior_plan` along with each
+    # claimed attempt in the /worker/poll response. The worker uses the
+    # plan to simulate post-install activity (random app opens, swipes,
+    # in-app session beats) over `behavior_sim_window_hours`. Bypasses
+    # AppsFlyer Protect360 v2024 + Adjust's "no engagement after install"
+    # ML detector. Workers that don't recognise the field ignore it
+    # gracefully (forward-compatible).
+    behavior_sim_enabled: bool = False
+    # "low" = ~4 actions/day, "medium" = ~10/day, "high" = ~20/day
+    behavior_sim_intensity: str = "medium"
+    # Distribute actions across this many hours (typical: 24, 48, 72)
+    behavior_sim_window_hours: int = 24
 
 
 class CPIJob(BaseModel):
@@ -142,6 +263,10 @@ class CPIJob(BaseModel):
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     created_at: str
+    # ── 2026-02 v2.1.31 — Behavior Simulator (read-back) ──
+    behavior_sim_enabled: bool = False
+    behavior_sim_intensity: str = "medium"
+    behavior_sim_window_hours: int = 24
 
 
 class CPIInstallAttempt(BaseModel):
@@ -579,6 +704,10 @@ async def create_job(payload: CPIJobIn, request: Request):
         "_uas_used": [],
         "_consume_upload_ids": consume_upload_ids,
         "_auto_consume": bool(payload.auto_consume),
+        # 2026-02 v2.1.31 — Behavior Simulator settings
+        "behavior_sim_enabled": bool(payload.behavior_sim_enabled),
+        "behavior_sim_intensity": (payload.behavior_sim_intensity or "medium").lower(),
+        "behavior_sim_window_hours": max(1, min(168, int(payload.behavior_sim_window_hours or 24))),
     }
     await db.cpi_jobs.insert_one(job)
 
@@ -719,6 +848,34 @@ async def list_job_attempts(job_id: str, request: Request, limit: int = 200):
 # WORKER PROTOCOL
 # ────────────────────────────────────────────────────────────────────────
 
+@cpi_router.get("/behavior-plan/preview")
+async def behavior_plan_preview(
+    request: Request,
+    intensity: str = "medium",
+    window_hours: int = 24,
+):
+    """Preview a behavior simulation plan in the UI before launching a job.
+    Lets customers see exactly which post-install actions the worker will
+    execute (proves anti-detect value at sale time). Seed is fresh so
+    repeated previews look slightly different each time — like real users."""
+    await _require_cpi_user(request)
+    try:
+        plan = build_behavior_plan(
+            intensity=intensity,
+            window_hours=max(1, min(168, int(window_hours))),
+        )
+        return {
+            "intensity": intensity,
+            "window_hours": window_hours,
+            "actions_count": len(plan),
+            "first_action_offset_seconds": plan[0]["at_offset_seconds"] if plan else 0,
+            "last_action_offset_seconds": plan[-1]["at_offset_seconds"] if plan else 0,
+            "plan": plan,
+        }
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @cpi_router.post("/worker/poll")
 async def worker_poll(request: Request, payload: Dict[str, Any] = Body(default={})):
     """Worker calls this every few seconds. We claim ONE queued attempt
@@ -774,11 +931,35 @@ async def worker_poll(request: Request, payload: Dict[str, Any] = Body(default={
 
         # Pull offer for full instructions
         offer = await db.cpi_offers.find_one({"id": job["offer_id"]}, {"_id": 0}) or {}
+
+        # ── 2026-02 v2.1.31 — Behavior Simulator plan ──
+        # When the job opted in, emit a per-attempt plan the worker
+        # executes after install. Seeded by the attempt id so re-polls
+        # of the same attempt produce the same plan (idempotent for the
+        # worker's retry logic).
+        behavior_plan: List[Dict[str, Any]] = []
+        if full_job.get("behavior_sim_enabled"):
+            try:
+                # Stable per-attempt seed → reproducible plan
+                _seed = abs(hash(attempt["id"])) & 0xFFFFFFFF
+                behavior_plan = build_behavior_plan(
+                    intensity=full_job.get("behavior_sim_intensity") or "medium",
+                    window_hours=int(full_job.get("behavior_sim_window_hours") or 24),
+                    seed=_seed,
+                )
+            except Exception as _bp_err:  # noqa: BLE001
+                logger.warning(f"[cpi] behavior_plan generation failed: {_bp_err}")
+                behavior_plan = []
+
         return {
             "has_work": True,
             "attempt": {**attempt, "proxy_used": proxy, "ua_used": ua, "lead_used": lead},
             "job": {k: v for k, v in full_job.items() if not k.startswith("_")},
             "offer": offer,
+            # Behavior plan is emitted alongside the attempt so workers
+            # don't need a second API roundtrip. Workers that don't
+            # recognise this key simply ignore it.
+            "behavior_plan": behavior_plan,
         }
 
     return {"has_work": False}
