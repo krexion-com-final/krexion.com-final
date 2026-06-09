@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
-import { Plus, Play, Trash2, Copy, Download, Upload, Zap, Activity, Workflow as WfIcon, ArrowRight, Search } from "lucide-react";
+import { Plus, Play, Trash2, Copy, Download, Upload, Zap, Activity, Workflow as WfIcon, ArrowRight, Search, Camera, X } from "lucide-react";
 import { toast } from "sonner";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -14,6 +14,10 @@ export default function RPAWorkflowsPage() {
   const [workflows, setWorkflows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [showRecordingsModal, setShowRecordingsModal] = useState(false);
+  const [recordings, setRecordings] = useState([]);
+  const [loadingRecordings, setLoadingRecordings] = useState(false);
+  const [importingId, setImportingId] = useState(null);
 
   const load = async () => {
     setLoading(true);
@@ -88,6 +92,44 @@ export default function RPAWorkflowsPage() {
     input.click();
   };
 
+  // ── Live Recording → RPA Studio conversion ────────────────────────
+  // Opens a modal listing the user's saved Visual Recorder uploads.
+  // Picking one converts it to a flowchart workflow in one click.
+  const openRecordingsModal = async () => {
+    setShowRecordingsModal(true);
+    setLoadingRecordings(true);
+    try {
+      const r = await fetch(`${BACKEND_URL}/api/uploads?type=automation_json`, { headers: authH() });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const list = await r.json();
+      setRecordings(Array.isArray(list) ? list : []);
+    } catch (e) {
+      toast.error(`Could not load recordings: ${e.message}`);
+      setRecordings([]);
+    } finally {
+      setLoadingRecordings(false);
+    }
+  };
+
+  const importFromRecording = async (upload) => {
+    setImportingId(upload.id);
+    try {
+      const r = await fetch(`${BACKEND_URL}/api/rpa/workflows/from-upload/${upload.id}`, {
+        method: "POST",
+        headers: authH(),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      toast.success(`Imported "${upload.name}" → ${(d.nodes || []).length} nodes`);
+      setShowRecordingsModal(false);
+      navigate(`/rpa-studio/${d.id}`);
+    } catch (e) {
+      toast.error(`Import failed: ${e.message}`);
+    } finally {
+      setImportingId(null);
+    }
+  };
+
   const filtered = workflows.filter((w) =>
     !search.trim() || (w.name || "").toLowerCase().includes(search.toLowerCase())
   );
@@ -112,6 +154,14 @@ export default function RPAWorkflowsPage() {
           >
             <Activity className="w-4 h-4" /> Runs
           </Link>
+          <button
+            onClick={openRecordingsModal}
+            className="px-3 py-2 rounded bg-purple-600/20 hover:bg-purple-600 border border-purple-500/40 text-purple-200 hover:text-white text-sm flex items-center gap-2 transition-colors"
+            data-testid="rpa-import-recording-btn"
+            title="Convert a Visual Recorder session into an RPA flowchart"
+          >
+            <Camera className="w-4 h-4" /> Import from Recording
+          </button>
           <button
             onClick={importJson}
             className="px-3 py-2 rounded bg-slate-800 hover:bg-slate-700 text-sm flex items-center gap-2"
@@ -191,6 +241,83 @@ export default function RPAWorkflowsPage() {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* ── Recordings modal — Live Visual Recorder → RPA Studio ── */}
+      {showRecordingsModal && (
+        <div
+          className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          onClick={() => setShowRecordingsModal(false)}
+          data-testid="rpa-recordings-modal"
+        >
+          <div
+            className="bg-slate-900 border border-purple-500/40 rounded-lg w-full max-w-3xl max-h-[80vh] flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800">
+              <h3 className="font-semibold flex items-center gap-2">
+                <Camera className="w-5 h-5 text-purple-400" />
+                Import from Visual Recorder
+              </h3>
+              <button
+                onClick={() => setShowRecordingsModal(false)}
+                className="p-1 rounded hover:bg-slate-800"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="px-4 py-3 text-xs text-slate-400 border-b border-slate-800">
+              Pick a saved recording — it will be auto-converted into a Krexion RPA flowchart that you can extend with If/Else, Loops, sub-workflows, and 3rd-party nodes.
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-2">
+              {loadingRecordings && <div className="text-sm text-slate-500 text-center py-8">Loading recordings…</div>}
+              {!loadingRecordings && recordings.length === 0 && (
+                <div className="text-center py-10">
+                  <Camera className="w-10 h-10 mx-auto mb-2 text-slate-600" />
+                  <div className="text-sm text-slate-500 mb-1">No saved recordings yet</div>
+                  <div className="text-xs text-slate-600 mb-4">Open the Visual Recorder, record a flow, click Save → it'll appear here.</div>
+                  <Link
+                    to="/visual-recorder"
+                    className="inline-flex items-center gap-2 px-3 py-2 bg-purple-600 hover:bg-purple-500 rounded text-sm"
+                    onClick={() => setShowRecordingsModal(false)}
+                  >
+                    <Camera className="w-4 h-4" /> Open Visual Recorder
+                  </Link>
+                </div>
+              )}
+              {recordings.map((u) => {
+                let stepCount = 0;
+                try { stepCount = JSON.parse(u.automation_json || "[]").length; } catch {}
+                return (
+                  <button
+                    key={u.id}
+                    onClick={() => importFromRecording(u)}
+                    disabled={importingId === u.id}
+                    className="w-full text-left p-3 rounded border border-slate-700 bg-slate-800/50 hover:bg-slate-800 hover:border-purple-500 transition-colors disabled:opacity-50 flex items-center gap-3"
+                    data-testid={`rpa-import-recording-${u.id}`}
+                  >
+                    <div className="w-10 h-10 rounded bg-purple-500/20 flex items-center justify-center flex-shrink-0">
+                      <Camera className="w-5 h-5 text-purple-400" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-semibold text-sm truncate">{u.name || "Untitled recording"}</div>
+                      {u.description && <div className="text-xs text-slate-400 truncate">{u.description}</div>}
+                      <div className="text-xs text-slate-500 mt-0.5">
+                        {stepCount} step{stepCount === 1 ? "" : "s"}
+                        {u.created_at && ` · ${new Date(u.created_at).toLocaleDateString()}`}
+                      </div>
+                    </div>
+                    {importingId === u.id ? (
+                      <span className="text-xs text-purple-300">Converting…</span>
+                    ) : (
+                      <ArrowRight className="w-4 h-4 text-slate-500" />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         </div>
       )}
     </div>

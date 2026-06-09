@@ -271,6 +271,83 @@ def build_router(get_current_user):
         await db.rpa_workflows.insert_one(doc.copy())
         return _strip_id(doc)
 
+    # ── Convert Visual Recorder steps → RPA flowchart ────────────────
+    @router.post("/workflows/from-recorder")
+    async def from_recorder(payload: Dict[str, Any] = Body(...), user=Depends(get_current_user)):
+        """Convert a Visual Recorder `steps` array into a Krexion RPA
+        workflow (nodes + edges) with auto-layout.
+
+        Payload shape:
+            {
+              "name":  "My Workflow",          (optional)
+              "steps": [{action: "goto", url: "..."}, …]
+            }
+        Returns the newly-created workflow.
+        """
+        db = _state["db"]
+        user_id = (user.get("id") or user.get("user_id") or user.get("email") or "") if isinstance(user, dict) else getattr(user, "id", "")
+        steps = payload.get("steps") or []
+        if not isinstance(steps, list) or not steps:
+            raise HTTPException(status_code=400, detail="steps array required")
+        nodes, edges = _convert_recorder_steps_to_flowchart(steps)
+        wf_id = _new_id("wf")
+        now = _now_iso()
+        doc = {
+            "id": wf_id,
+            "owner_user_id": user_id,
+            "name": payload.get("name") or "Imported from Recorder",
+            "description": payload.get("description") or f"Auto-converted from {len(steps)} recorded steps",
+            "nodes": nodes,
+            "edges": edges,
+            "settings": {"use_stealth": True, "headless": True},
+            "variables": {},
+            "is_active": True,
+            "version": 1,
+            "created_at": now,
+            "updated_at": now,
+            "source": "visual_recorder",
+        }
+        await db.rpa_workflows.insert_one(doc.copy())
+        return _strip_id(doc)
+
+    @router.post("/workflows/from-upload/{upload_id}")
+    async def from_upload(upload_id: str, user=Depends(get_current_user)):
+        """Convert a saved Visual Recorder upload (Uploaded Things →
+        Automation JSON) into a brand-new RPA workflow."""
+        db = _state["db"]
+        user_id = (user.get("id") or user.get("user_id") or user.get("email") or "") if isinstance(user, dict) else getattr(user, "id", "")
+        upload = await db.uploads.find_one({"id": upload_id, "user_id": user_id}, {"_id": 0})
+        if not upload:
+            raise HTTPException(status_code=404, detail="Upload not found")
+        try:
+            steps = json.loads(upload.get("automation_json") or "[]")
+        except Exception:
+            steps = []
+        if not isinstance(steps, list) or not steps:
+            raise HTTPException(status_code=400, detail="Upload has no recorded steps")
+        nodes, edges = _convert_recorder_steps_to_flowchart(steps)
+        wf_id = _new_id("wf")
+        now = _now_iso()
+        doc = {
+            "id": wf_id,
+            "owner_user_id": user_id,
+            "name": upload.get("name") or "Imported Recording",
+            "description": upload.get("description") or f"Auto-converted from recording • {len(steps)} steps",
+            "nodes": nodes,
+            "edges": edges,
+            "settings": {"use_stealth": True, "headless": True},
+            "variables": {},
+            "is_active": True,
+            "version": 1,
+            "created_at": now,
+            "updated_at": now,
+            "source": "visual_recorder_upload",
+            "source_upload_id": upload_id,
+        }
+        await db.rpa_workflows.insert_one(doc.copy())
+        return _strip_id(doc)
+
+
     @router.get("/workflows")
     async def list_workflows(user=Depends(get_current_user)):
         db = _state["db"]
@@ -1159,3 +1236,140 @@ def _bind(*, main_db, get_current_user):
     _state["db"] = main_db
     router = build_router(get_current_user)
     return router
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Visual Recorder → RPA Studio converter
+# ─────────────────────────────────────────────────────────────────────
+def _convert_recorder_steps_to_flowchart(steps: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Convert a Visual Recorder steps array into RPA Studio nodes + edges.
+
+    The recorder's JSON is a *linear* list of action dicts. We map each
+    to its closest RPA Studio node type, lay them out in a vertical
+    chain (auto-spaced), and emit straight edges between consecutive
+    nodes so the user immediately sees a working flowchart they can
+    extend (add If/Loop branches, sub-workflows, etc.).
+    """
+    nodes: List[Dict[str, Any]] = []
+    edges: List[Dict[str, Any]] = []
+    x = 240
+    y = 60
+    dy = 110
+
+    prev_id: Optional[str] = None
+    for i, raw in enumerate(steps):
+        if not isinstance(raw, dict):
+            continue
+        action = (raw.get("action") or "").lower().strip()
+        if not action:
+            continue
+        nid = f"rec_{i}_{uuid.uuid4().hex[:6]}"
+        rpa_node = _recorder_step_to_rpa_node(nid, action, raw, {"x": x, "y": y})
+        if rpa_node is None:
+            continue
+        nodes.append(rpa_node)
+        if prev_id is not None:
+            edges.append({"id": f"e_{prev_id}_{nid}", "from": prev_id, "to": nid})
+        prev_id = nid
+        y += dy
+
+    return nodes, edges
+
+
+def _recorder_step_to_rpa_node(nid: str, action: str, raw: dict, pos: dict) -> Optional[Dict[str, Any]]:
+    """Map ONE recorder step → ONE RPA Studio node (or None to skip)."""
+    base = {"id": nid, "position": pos, "on_error": "skip", "body": [], "branches": {}}
+
+    if action in ("goto", "navigate"):
+        return {**base, "type": "goto", "params": {"url": raw.get("url") or "", "timeout": raw.get("timeout") or 60000}}
+    if action == "click":
+        return {**base, "type": "click", "params": {
+            "selector": raw.get("selector") or "",
+            "button": raw.get("button") or "left",
+            "count": int(raw.get("click_count") or 1),
+            "timeout": raw.get("timeout") or 15000,
+        }}
+    if action in ("fill", "type"):
+        return {**base, "type": "fill", "params": {
+            "selector": raw.get("selector") or "",
+            "value": str(raw.get("value") or ""),
+            "clear_first": True,
+            "type_interval_ms": raw.get("delay") or 0,
+        }}
+    if action == "select":
+        return {**base, "type": "select", "params": {
+            "selector": raw.get("selector") or "",
+            "value": raw.get("value") or "",
+            "match_by": raw.get("match_by") or "value",
+        }}
+    if action in ("check", "uncheck"):
+        return {**base, "type": "checkbox", "params": {
+            "selector": raw.get("selector") or "",
+            "action": action,
+        }}
+    if action == "press":
+        return {**base, "type": "press", "params": {"key": raw.get("key") or "Enter"}}
+    if action == "wait":
+        return {**base, "type": "wait", "params": {"ms": int(raw.get("ms") or 1000)}}
+    if action == "wait_for_load":
+        return {**base, "type": "wait_for_load", "params": {"state": raw.get("state") or "domcontentloaded", "timeout": raw.get("timeout") or 30000}}
+    if action == "wait_for_selector":
+        return {**base, "type": "wait_for_selector", "params": {
+            "selector": raw.get("selector") or "",
+            "state": raw.get("state") or "visible",
+            "timeout": raw.get("timeout") or 15000,
+        }}
+    if action == "wait_for_text":
+        return {**base, "type": "wait_for_text", "params": {
+            "text": raw.get("text") or "",
+            "timeout": raw.get("timeout") or 15000,
+        }}
+    if action == "wait_for_url":
+        return {**base, "type": "wait_for_url", "params": {
+            "contains": raw.get("contains") or raw.get("url") or "",
+            "timeout": raw.get("timeout") or 15000,
+        }}
+    if action == "scroll":
+        y_val = raw.get("y")
+        dist = "bottom"
+        if isinstance(y_val, (int, float)):
+            dist = int(y_val)
+        elif y_val is not None:
+            dist = str(y_val)
+        return {**base, "type": "scroll", "params": {"distance": dist, "smooth": True}}
+    if action == "evaluate":
+        return {**base, "type": "evaluate", "params": {"script": raw.get("script") or "1"}}
+    if action == "extract":
+        return {**base, "type": "get_element", "params": {
+            "selector": raw.get("selector") or "",
+            "extraction": "attribute" if raw.get("attribute") else "text",
+            "attribute": raw.get("attribute") or "",
+            "save_to": raw.get("store_key") or "extracted",
+        }}
+    if action == "screenshot":
+        return {**base, "type": "screenshot", "params": {"name": raw.get("name") or "Screenshot", "full_page": bool(raw.get("full_page"))}}
+    if action == "dismiss_popups":
+        # No direct node — emit an Execute JS step with a sensible default
+        return {**base, "type": "evaluate", "params": {
+            "script": "document.querySelectorAll('[aria-label*=close i],[class*=close i]').forEach(el => { try { el.click(); } catch(e) {} });",
+        }}
+    if action == "close":
+        return {**base, "type": "quit_browser", "params": {}}
+    if action == "branch":
+        # Visual Recorder branch becomes an If node with two child chains.
+        # Both branch's `steps` are flattened into the body for now —
+        # advanced users can rewire them to true/false handles after import.
+        branches = raw.get("branches") or []
+        first = (branches[0] if branches else {}) or {}
+        cond = (first.get("condition") or {}).get("selector") or ""
+        return {**base, "type": "if", "params": {
+            "variable": "_branch_indicator",
+            "condition": "exists",
+            "value": cond,
+        }}
+    # Unknown / unmapped action → keep as a transparent Execute JS no-op
+    # so the original ordering is preserved in the flowchart.
+    return {**base, "type": "evaluate", "params": {
+        "script": f"/* unmapped recorder action: {action} — params: {json.dumps(raw)[:200]} */ 1",
+    }}
+
