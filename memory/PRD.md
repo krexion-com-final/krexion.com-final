@@ -1,5 +1,8 @@
 # Krexion — PRD & Working Log
 
+## ⚠️ READ FIRST: `/app/memory/CRITICAL_RULES.md`
+**Every change must apply to ALL 5 targets: Cloud Web, Native Desktop (.exe), Electron App, Admin Dashboard, Mobile. NEVER skip rules in CRITICAL_RULES.md.**
+
 ## Original Problem Statement
 User has a GitHub repo `dennisedmaartins9-sudo/krexion.com` (Krexion — traffic tracking + RPA + anti-detect platform). They want to:
 1. Add an RPA Studio feature similar to AdsPower RPA (50+ visual nodes, drag-drop editor)

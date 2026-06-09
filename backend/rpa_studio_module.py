@@ -1135,7 +1135,30 @@ async def _execute_workflow(run_id: str, wf: dict, override_vars: dict, headless
             nonlocal playwright, browser, context, page
             if browser is None:
                 playwright = await async_playwright().start()
-                browser = await playwright.chromium.launch(headless=headless, args=["--no-sandbox", "--disable-dev-shm-usage"])
+                # ── Try stealth launch first (central anti_detect_engine)
+                # so RPA Studio workflows get the SAME 35+ anti-detect
+                # patches as Real User Traffic (canvas/audio/WebGL/WebRTC/
+                # webdriver/Jornaya/TrustedForm/mobile sensors/CDP …).
+                # Falls back to vanilla launch only if stealth path fails.
+                use_stealth = bool(settings.get("use_stealth", True))
+                if use_stealth:
+                    try:
+                        from anti_detect_engine import launch_stealth_session as _ade_launch  # type: ignore
+                        browser, context, page = await _ade_launch(
+                            playwright, headless=headless,
+                        )
+                        logger.info("RPA run %s: stealth session launched", run_id)
+                        return
+                    except Exception as _ade_err:
+                        logger.warning(
+                            "RPA run %s: stealth launch failed (%s) — using vanilla",
+                            run_id, _ade_err,
+                        )
+                # Vanilla fallback
+                browser = await playwright.chromium.launch(
+                    headless=headless,
+                    args=["--no-sandbox", "--disable-dev-shm-usage"],
+                )
                 context = await browser.new_context(viewport=viewport)
                 page = await context.new_page()
 
@@ -1243,13 +1266,129 @@ async def _exec_gsheets_node(params: dict) -> Any:
 
 
 async def _exec_2captcha_node(params: dict, page) -> Any:
-    """Stub — solves via 2Captcha if user provides api_key."""
+    """Real 2Captcha integration. Supports:
+      • recaptcha_v2  (uses g-recaptcha-response token injection)
+      • recaptcha_v3  (returns token; caller injects)
+      • hcaptcha
+      • cloudflare_turnstile
+      • image          (base64 captcha image -> text)
+
+    Requires the user to provide their 2Captcha API key in params.
+    The solved token is automatically injected into the page's
+    `g-recaptcha-response` / `h-captcha-response` / `cf-turnstile-response`
+    textarea so the form is ready to submit.
+    """
+    import httpx as _httpx
     api_key = params.get("api_key") or ""
     captcha_type = (params.get("captcha_type") or "recaptcha_v2").lower()
     if not api_key:
-        return {"error": "api_key required"}
-    # Real implementation would call 2captcha REST API + inject solved token
-    return {"ok": False, "error": "2Captcha integration is a stub — wire api_key on the worker"}
+        return {"error": "2captcha api_key required"}
+    if not page:
+        return {"error": "no active page"}
+
+    # Step 1: Discover the sitekey + page URL from the current page
+    try:
+        page_url = page.url
+        if captcha_type in ("recaptcha_v2", "recaptcha_v3"):
+            sitekey = await page.evaluate("""
+                () => {
+                  const el = document.querySelector('[data-sitekey]');
+                  if (el) return el.getAttribute('data-sitekey');
+                  const iframe = document.querySelector('iframe[src*="recaptcha"]');
+                  if (iframe) { const u = new URL(iframe.src); return u.searchParams.get('k'); }
+                  return null;
+                }
+            """)
+        elif captcha_type == "hcaptcha":
+            sitekey = await page.evaluate("""
+                () => {
+                  const el = document.querySelector('[data-sitekey]');
+                  if (el) return el.getAttribute('data-sitekey');
+                  const iframe = document.querySelector('iframe[src*="hcaptcha"]');
+                  if (iframe) { const u = new URL(iframe.src); return u.searchParams.get('sitekey'); }
+                  return null;
+                }
+            """)
+        elif captcha_type == "cloudflare_turnstile":
+            sitekey = await page.evaluate("""
+                () => {
+                  const el = document.querySelector('.cf-turnstile,[data-sitekey]');
+                  return el ? (el.getAttribute('data-sitekey') || el.getAttribute('data-key')) : null;
+                }
+            """)
+        else:
+            sitekey = params.get("sitekey")
+    except Exception as e:
+        return {"error": f"sitekey discovery failed: {e}"}
+
+    if not sitekey and captcha_type != "image":
+        return {"error": "sitekey not found on page"}
+
+    # Step 2: Submit to 2Captcha
+    submit_params: Dict[str, Any] = {"key": api_key, "json": 1, "pageurl": page_url, "sitekey": sitekey}
+    if captcha_type == "recaptcha_v2":
+        submit_params["method"] = "userrecaptcha"
+    elif captcha_type == "recaptcha_v3":
+        submit_params["method"] = "userrecaptcha"
+        submit_params["version"] = "v3"
+        submit_params["action"] = params.get("action") or "verify"
+        submit_params["min_score"] = params.get("min_score") or 0.5
+    elif captcha_type == "hcaptcha":
+        submit_params["method"] = "hcaptcha"
+    elif captcha_type == "cloudflare_turnstile":
+        submit_params["method"] = "turnstile"
+    elif captcha_type == "image":
+        submit_params["method"] = "base64"
+        submit_params["body"] = params.get("image_base64") or ""
+
+    try:
+        async with _httpx.AsyncClient(timeout=120) as client:
+            r = await client.get("https://2captcha.com/in.php", params=submit_params)
+            data = r.json()
+            if data.get("status") != 1:
+                return {"error": f"2captcha submit failed: {data.get('request')}"}
+            captcha_id = data["request"]
+
+            # Step 3: Poll for result (max 120s)
+            for _ in range(40):
+                await asyncio.sleep(3.0)
+                rr = await client.get("https://2captcha.com/res.php", params={
+                    "key": api_key, "action": "get", "id": captcha_id, "json": 1
+                })
+                rd = rr.json()
+                if rd.get("status") == 1:
+                    token = rd["request"]
+                    # Step 4: Inject token into page
+                    try:
+                        if captcha_type.startswith("recaptcha"):
+                            await page.evaluate(f"""
+                                const ta = document.getElementById('g-recaptcha-response') ||
+                                           document.querySelector('textarea[name="g-recaptcha-response"]');
+                                if (ta) {{ ta.value = '{token}'; ta.innerHTML = '{token}'; }}
+                                if (window.___grecaptcha_cfg) {{
+                                  try {{ window.___grecaptcha_cfg.clients[0].callback('{token}'); }} catch(e) {{}}
+                                }}
+                            """)
+                        elif captcha_type == "hcaptcha":
+                            await page.evaluate(f"""
+                                document.querySelectorAll('textarea[name="h-captcha-response"],textarea[name="g-recaptcha-response"]').forEach(t => {{
+                                  t.value = '{token}'; t.innerHTML = '{token}';
+                                }});
+                            """)
+                        elif captcha_type == "cloudflare_turnstile":
+                            await page.evaluate(f"""
+                                document.querySelectorAll('input[name="cf-turnstile-response"]').forEach(t => {{
+                                  t.value = '{token}';
+                                }});
+                            """)
+                    except Exception as e:
+                        logger.warning(f"token injection failed: {e}")
+                    return {"ok": True, "token": token}
+                if rd.get("request") != "CAPCHA_NOT_READY":
+                    return {"error": f"2captcha err: {rd.get('request')}"}
+            return {"error": "2captcha timeout"}
+    except Exception as e:
+        return {"error": f"2captcha exception: {e}"}
 
 
 # ── Bind ──────────────────────────────────────────────────────────────

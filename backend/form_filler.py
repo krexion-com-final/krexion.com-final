@@ -39,6 +39,22 @@ import httpx
 import pandas as pd
 from playwright.async_api import async_playwright, Page, BrowserContext
 
+# 🛡️ Central anti-detect engine — IMPORTED LAZILY (inside the runner)
+# to avoid circular imports. anti_detect_engine itself imports from
+# real_user_traffic, which imports from form_filler — a top-level
+# import here would deadlock. Lazy resolution sidesteps that.
+def _get_stealth_launcher():
+    try:
+        from anti_detect_engine import launch_stealth_session  # type: ignore
+        return launch_stealth_session
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning(
+            f"form_filler: anti_detect_engine unavailable ({e}); "
+            f"falling back to vanilla launch"
+        )
+        return None
+
 # Cross-module helpers — survey click + AI vision fallback
 try:
     from rut_flash_helpers import survey_click_v2 as _rut_survey_click_v2
@@ -1142,13 +1158,35 @@ async def run_form_filler_job(
                 lead_proof = {}
                 browser = None
                 try:
-                    browser = await p.chromium.launch(
-                        headless=True,
-                        proxy=proxy_cfg,
-                        args=["--no-sandbox", "--disable-dev-shm-usage"],
-                    )
-                    context = await browser.new_context(user_agent=ua) if ua else await browser.new_context()
-                    page = await context.new_page()
+                    # ── Stealth-armed launch (centralized engine) ────────
+                    # Provides identical 35+ anti-detect patches as RUT:
+                    # canvas/audio/WebGL/webdriver/WebRTC/Jornaya/etc.
+                    _stealth_launch = _get_stealth_launcher()
+                    if _stealth_launch:
+                        try:
+                            browser, context, page = await _stealth_launch(
+                                p, ua=ua, proxy=proxy_cfg, headless=True,
+                            )
+                        except Exception as _ste_err:
+                            import logging
+                            logging.getLogger(__name__).warning(
+                                f"stealth launch failed: {_ste_err} — using legacy"
+                            )
+                            browser = await p.chromium.launch(
+                                headless=True,
+                                proxy=proxy_cfg,
+                                args=["--no-sandbox", "--disable-dev-shm-usage"],
+                            )
+                            context = await browser.new_context(user_agent=ua) if ua else await browser.new_context()
+                            page = await context.new_page()
+                    else:
+                        browser = await p.chromium.launch(
+                            headless=True,
+                            proxy=proxy_cfg,
+                            args=["--no-sandbox", "--disable-dev-shm-usage"],
+                        )
+                        context = await browser.new_context(user_agent=ua) if ua else await browser.new_context()
+                        page = await context.new_page()
                     await page.goto(target_url, timeout=30000, wait_until="domcontentloaded")
                     await page.wait_for_timeout(800)
 

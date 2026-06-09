@@ -889,3 +889,4 @@ credentials.json
 build/requirements-native.txt
 build/krexion-manifest.json
 build/python-*-embed.zip
+memory/CRITICAL_RULES.md
