@@ -9057,6 +9057,82 @@ async def _smart_select_with_fallback(page, selector: str, value: Any,
 #   4. JS set + dispatch `change`+`input`+jQuery('.trigger') as last
 #      resort.
 # Returns silently on success; raises last exception on total failure.
+async def _robust_click(page, selector: str, timeout: int = 25000) -> None:
+    """Click that survives "intercepted by another element" and "not in
+    view" failures the user has been reporting with the Visual-Recorder
+    click step on real customer pages (cookie banners, sticky CTAs,
+    in-page chat widgets, animated modals).
+
+    2026-06 — Customer feedback: "click hota par work ni krta" — the
+    bare ``await page.click(selector, timeout=timeout)`` registered a
+    click but landed on a transparent overlay (cookie banner / chat
+    widget) so the target's handler never fired. Symptom = silently
+    no-op step that then breaks the rest of the funnel.
+
+    Strategy ladder (each step has a small slice of the timeout
+    budget — no single failure mode burns the entire 25 s budget):
+
+      1. Locator-based click — scrolls + waits for stable bounding-box
+         first; this resolves the vast majority of overlay misses
+         because Playwright auto-retries while elements shift around.
+      2. ``page.click(selector)`` plain (legacy code path, preserved
+         for backward-compat with pages that the locator API treats
+         too strictly).
+      3. Locator click with ``force=True`` — bypasses the actionability
+         check (still uses a real mouse-event so site JS sees a
+         genuine MouseEvent, not just a synthetic ``.click()`` ).
+      4. ``element_handle.dispatch_event('click')`` via JS — last
+         resort. Works even for fully-hidden elements (rare custom
+         widgets) but lacks the trusted-event semantics, so we keep
+         it as the final fallback only.
+
+    Raises the most recent exception if every strategy fails.
+    """
+    last_err: Optional[Exception] = None
+    # Strategy 1: locator click (auto-waits + scroll-into-view)
+    s1_to = max(3000, int(timeout * 0.45))
+    try:
+        loc = page.locator(selector).first
+        await loc.click(timeout=s1_to)
+        return
+    except Exception as e:
+        last_err = e
+    # Strategy 2: legacy page.click (preserves backward-compat for
+    # pages where locator API is too strict)
+    s2_to = max(2000, int(timeout * 0.25))
+    try:
+        await page.click(selector, timeout=s2_to)
+        return
+    except Exception as e:
+        last_err = e
+    # Strategy 3: force-click (bypasses actionability gates — handles
+    # the overlay-intercept case which is the #1 cause of "click hota
+    # par work ni krta" on real lead-gen pages)
+    s3_to = max(2000, int(timeout * 0.20))
+    try:
+        loc = page.locator(selector).first
+        await loc.scroll_into_view_if_needed(timeout=s3_to)
+        await loc.click(force=True, timeout=s3_to)
+        return
+    except Exception as e:
+        last_err = e
+    # Strategy 4: JS dispatch_event('click') — for elements the mouse
+    # genuinely cannot reach (pointer-events: none, etc.). Trusted-event
+    # semantics are lost so site code that checks event.isTrusted may
+    # ignore the click — that's why this is last.
+    s4_to = max(1000, int(timeout * 0.10))
+    try:
+        el = await page.wait_for_selector(selector, timeout=s4_to, state="attached")
+        if el is not None:
+            await el.dispatch_event("click")
+            return
+    except Exception as e:
+        last_err = e
+    if last_err is not None:
+        raise last_err
+    raise RuntimeError(f"_robust_click: all strategies failed for selector {selector!r}")
+
+
 async def _smart_check_with_fallback(page, selector: str, want_checked: bool = True,
                                      timeout: int = 25000) -> None:
     """Robust check/uncheck handling CSS-styled (hidden) checkboxes."""
@@ -9458,7 +9534,7 @@ async def _execute_automation_steps(
                         navigated = False
                         try:
                             async with page.expect_navigation(timeout=nav_timeout, wait_until="load"):
-                                await page.click(selector, timeout=timeout)
+                                await _robust_click(page, selector, timeout=timeout)
                             navigated = True
                         except Exception:
                             navigated = False
@@ -9494,7 +9570,7 @@ async def _execute_automation_steps(
                         except Exception:
                             pass
                     else:
-                        await page.click(selector, timeout=timeout)
+                        await _robust_click(page, selector, timeout=timeout)
                 elif action == "fill":
                     # 2026-01 Anti-detect: humanise the fill (see notes
                     # at the second fill handler ~4675 for the rationale).
@@ -10807,7 +10883,7 @@ async def _dispatch_single_action(page: Page, action: str, selector: str,
     if action == "goto":
         await page.goto(value or selector, timeout=timeout, wait_until="domcontentloaded")
     elif action == "click":
-        await page.click(selector, timeout=timeout)
+        await _robust_click(page, selector, timeout=timeout)
         if wait_nav:
             try:
                 await page.wait_for_load_state("networkidle", timeout=20000)

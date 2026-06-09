@@ -410,12 +410,20 @@ begin
   // Custom wizard page — collect the customer's license key BEFORE
   // installation begins. The value is later piped into license-key.txt
   // by the [Run] section.
+  //
+  // 2026-06 — License is now MANDATORY. The customer cannot click
+  // Next on this page until a non-empty key in the canonical
+  // KRX-XXXX-XXXX-XXXX-XXXX shape is entered (enforced in
+  // NextButtonClick below). Removes the prior "leave blank and add
+  // later" escape hatch that let paid-only software be installed by
+  // unverified visitors.
   LicensePage := CreateInputQueryPage(
     wpWelcome,
-    'License Activation',
+    'License Activation (required)',
     'Enter your Krexion license key',
     'Paste the KRX-XXXX-XXXX-XXXX-XXXX key from your purchase email.' + #13#10 +
-    'You can leave this blank and add it later from the Krexion dashboard.'
+    'This step is required — you cannot continue without a valid-shaped key.' + #13#10 +
+    'If you do not have one yet, please complete checkout at https://krexion.com/pricing.'
   );
   LicensePage.Add('License key:', False);
   LicensePage.Values[0] := '';
@@ -435,6 +443,87 @@ end;
 function HasLicenseKey: Boolean;
 begin
   Result := Length(GetLicenseKey('')) > 0;
+end;
+
+// 2026-06 — Validate the shape KRX-XXXX-XXXX-XXXX-XXXX. We do *not*
+// hit the network from inside the installer (cust may have spotty
+// connectivity / corp proxy) — the local backend re-validates the
+// key against the cloud on first start, and the dashboard will show
+// a clear "License invalid" banner if the key turns out to be fake.
+// Inno Setup has no native regex, so we walk the string by hand.
+function IsValidLicenseShape(K: string): Boolean;
+var
+  i, Seg, SegLen: Integer;
+  Ch: Char;
+begin
+  Result := False;
+  // Canonical: KRX-XXXX-XXXX-XXXX-XXXX  (3 + 4*(1+4) = 23 chars,
+  // 4 dashes, only A-Z 0-9 inside segments)
+  if Length(K) <> 23 then Exit;
+  if Copy(K, 1, 4) <> 'KRX-' then Exit;
+  Seg := 0;
+  SegLen := 0;
+  for i := 5 to Length(K) do
+  begin
+    Ch := K[i];
+    if Ch = '-' then
+    begin
+      if SegLen <> 4 then Exit;
+      SegLen := 0;
+      Seg := Seg + 1;
+    end
+    else if ((Ch >= 'A') and (Ch <= 'Z')) or ((Ch >= '0') and (Ch <= '9')) then
+    begin
+      SegLen := SegLen + 1;
+      if SegLen > 4 then Exit;
+    end
+    else
+      Exit;
+  end;
+  // Last segment must also be exactly 4 chars
+  if SegLen <> 4 then Exit;
+  // We must have seen exactly 3 dash-separated segments after KRX-
+  if Seg <> 3 then Exit;
+  Result := True;
+end;
+
+// Inno Setup callback: invoked when the user clicks Next on any
+// wizard page. Returning False keeps them on the page (use this to
+// block forward navigation when their license key is missing or
+// malformed). We only gate the LicensePage; every other page passes
+// through unchanged.
+function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  K: string;
+begin
+  Result := True;
+  if Assigned(LicensePage) and (CurPageID = LicensePage.ID) then
+  begin
+    K := GetLicenseKey('');
+    if Length(K) = 0 then
+    begin
+      MsgBox(
+        'A license key is required to install Krexion.' + #13#10 + #13#10 +
+        'Paste the KRX-XXXX-XXXX-XXXX-XXXX key from your purchase email.' + #13#10 +
+        'If you have not purchased yet, visit https://krexion.com/pricing.',
+        mbError, MB_OK
+      );
+      Result := False;
+      Exit;
+    end;
+    if not IsValidLicenseShape(K) then
+    begin
+      MsgBox(
+        'That key does not look right.' + #13#10 + #13#10 +
+        'Expected format:  KRX-XXXX-XXXX-XXXX-XXXX' + #13#10 +
+        '(letters A-Z and digits 0-9, four blocks of four, separated by dashes).' + #13#10 + #13#10 +
+        'Please copy the key exactly as it appears in your purchase email.',
+        mbError, MB_OK
+      );
+      Result := False;
+      Exit;
+    end;
+  end;
 end;
 
 function InitializeSetup(): Boolean;
