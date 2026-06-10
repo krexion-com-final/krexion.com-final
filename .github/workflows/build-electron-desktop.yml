@@ -16,6 +16,15 @@ on:
         description: 'Optional release tag (e.g. desktop-v2.1.8). Empty = artifact only, no GH Release.'
         required: false
         default: ''
+  # 2026-02 v2.1.32: mirror the Windows-native auto-trigger. Whenever
+  # backend/VERSION bumps, the Electron desktop build also fires
+  # automatically — so the customer's auto-update channel
+  # (latest.yml on https://krexion.com/downloads/desktop/) gets the
+  # new version on the same push, not 24h later via a manual dispatch.
+  push:
+    branches: [main]
+    paths:
+      - 'backend/VERSION'
 
 permissions:
   contents: write
@@ -173,11 +182,15 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Create GitHub Release (only when release_tag provided)
-        if: ${{ inputs.release_tag != '' }}
+      - name: Create GitHub Release (when release_tag provided OR on VERSION push)
+        # 2026-02 v2.1.32: also publish a release on push-triggered builds
+        # (auto-tag = v<VERSION>). Without this the latest.yml auto-update
+        # channel never gets the new build because Electron Desktop only
+        # picks up updates from a real GH Release attaching latest.yml.
+        if: ${{ inputs.release_tag != '' || github.event_name == 'push' }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.release_tag }}
+          tag_name: ${{ inputs.release_tag != '' && inputs.release_tag || format('desktop-v{0}', steps.version.outputs.version) }}
           name: Krexion Desktop ${{ steps.version.outputs.version }}
           body: |
             Krexion Desktop — fully-local edition (auto-update enabled).
