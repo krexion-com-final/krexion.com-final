@@ -307,3 +307,37 @@ User has a GitHub repo `dennisedmaartins9-sudo/krexion.com` (Krexion — traffic
 - Google Sheets read/write full integration (gsheet_writer adapter)
 - WebSocket-based live frame streaming (currently polling-based screenshot)
 - Sub-workflow node passing (variables in/out)
+
+
+### 2026-02-12 — Step 6 COMPLETE: Zero-Touch Browser Bootstrap
+**Brave + Chromium ko backend startup pe automatically download/install karne ka system live hai.**
+
+**Backend:**
+- `browser_bootstrap.py` (new, 336 lines) — `bootstrap_browsers_async()` fire-and-forget task. Brave portable releases (v1.73.105) from official GitHub, atomic .part-rename install, idempotent. Supported: Linux x86_64, Windows amd64, macOS arm64/x86_64. Linux arm64 (preview pod) → safe skip.
+- `browser_variants.py` — Krexion-managed install paths (`~/.krexion/browsers/brave/...`) ko FIRST priority pe scan kiya — manual Brave installs override karta hai for known-good version.
+- `server.py` — `_krexion_customer_startup_tasks()` mein `asyncio.create_task(_bb.bootstrap_browsers_async())` schedule. `/api/anti-detect/capabilities` endpoint ab `browser_bootstrap` status return karta hai (platform, install_dir, done).
+
+**Customer Experience:**
+Customer downloads .exe / .dmg / spins up VPS container → backend warms up → background mein Brave + Chromium ~2-3 min mein install ho jate hain → Browser Binary Rotation feature day-1 active bina kisi manual step ke.
+
+**Verification:**
+- Backend startup logs: `Krexion: browser auto-bootstrap scheduled (Brave + Chromium)` → `browser bootstrap done: {...}` ✅
+- Idempotent — already-installed paths skip cleanly ✅
+- Linux arm64 unsupported platform → silent skip, no crash ✅
+- `/api/anti-detect/capabilities` returns `browser_bootstrap` block ✅
+
+**Deploy Status:** Committed to `main` (commit `f1214f5`). GitHub Actions auto-deploy on push will roll out to VPS + Windows Native + Electron simultaneously.
+
+## Prioritized Backlog (P0 → P2)
+
+**P0 — User-Blocked:**
+- Lead Quality Gate (IPQS / Twilio / BriteVerify integration) — needs customer's API key
+
+**P1 — Next Up:**
+- Stealth Posture Score Widget (0-100 score on dashboard based on active toggles)
+- External `krexion-cpi-worker` repo update (parse + execute `behavior_plan` arrays)
+
+**P2 — Future:**
+- AntiCaptcha / CapMonster config UI (backend logic exists)
+- Full Browser Profile Aging (persistent `user_data_dir` for ServiceWorker / IndexedDB / Cache Storage)
+- Refactor: extract massive JS stealth payload string into `.js` template file
