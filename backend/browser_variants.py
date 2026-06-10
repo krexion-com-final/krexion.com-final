@@ -46,6 +46,13 @@ logger = logging.getLogger("browser_variants")
 # Brave installs at well-known paths across platforms. We probe in
 # priority order: native VPS Linux first (servers), then desktop OSes.
 _BRAVE_PATHS = [
+    # ── 2026-02 Step 6: Auto-bootstrap install paths (zero-touch) ──
+    # `browser_bootstrap.py` downloads Brave portable to these locations
+    # on first backend boot. Checked FIRST so even if a system-wide
+    # Brave exists, the Krexion-managed copy (known-good version) wins.
+    str(Path(os.environ.get("LOCALAPPDATA", os.environ.get("APPDATA", str(Path.home())))) / "Krexion" / "browsers" / "brave" / "brave.exe"),
+    str(Path.home() / "Library" / "Application Support" / "Krexion" / "browsers" / "brave" / "Brave Browser.app" / "Contents" / "MacOS" / "Brave Browser"),
+    str(Path(os.environ.get("HOME", "/root")) / ".krexion" / "browsers" / "brave" / "brave-browser"),
     # Linux (apt/snap/flatpak/portable)
     "/usr/bin/brave-browser",
     "/usr/bin/brave",

@@ -19040,6 +19040,16 @@ async def anti_detect_capabilities(current_user=Depends(get_current_user)):
         out["proxy_chain_ready"] = True
     except Exception as e:  # noqa: BLE001
         out["proxy_chain_error"] = str(e)
+    # 2026-02 Step 6 — browser auto-bootstrap status
+    try:
+        import browser_bootstrap as _bb
+        out["browser_bootstrap"] = {
+            "platform": "/".join(_bb._platform_key()),
+            "install_dir": str(_bb._krexion_browsers_dir()),
+            "done": _bb._BOOTSTRAPPED,
+        }
+    except Exception as e:  # noqa: BLE001
+        out["browser_bootstrap_error"] = str(e)
     return out
 
 
@@ -20294,7 +20304,18 @@ async def _krexion_customer_startup_tasks():
                 except Exception as _ch_e:
                     logger.debug(f"Auto chromium install skipped: {_ch_e}")
     except Exception as _imp_e:
-        logger.debug(f"Auto chromium hook skipped (module unavailable): {_imp_e}")
+        logger.debug(f"Chromium import error: {_imp_e}")
+
+    # 2. ── 2026-02 Step 6 — Zero-touch browser bootstrap ──────────────
+    # Auto-download Brave portable + ensure Chromium so Browser Binary
+    # Rotation (Step 3) works on day-1 across Electron / Native / VPS
+    # without ANY manual customer install. Fire-and-forget; safe-fails.
+    try:
+        import browser_bootstrap as _bb
+        asyncio.create_task(_bb.bootstrap_browsers_async())
+        logger.info("Krexion: browser auto-bootstrap scheduled (Brave + Chromium)")
+    except Exception as _bb_err:  # noqa: BLE001
+        logger.warning(f"Krexion: browser bootstrap scheduling failed: {_bb_err}")
 
     # 2. License hardening — best-effort
     try:
