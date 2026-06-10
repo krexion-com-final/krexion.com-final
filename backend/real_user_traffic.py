@@ -734,55 +734,163 @@ _PLATFORM_REFERER_POOL: Dict[str, str] = {
 }
 
 
-def _resolve_visit_referer(ua: str, cfg: Optional[Dict[str, Any]]) -> str:
-    """Pick the Referer header value for ONE visit.
+def _resolve_visit_referer(ua: str, cfg: Optional[Dict[str, Any]]) -> Tuple[str, str]:
+    """Pick the (Referer URL, platform signal) for ONE visit.
+
+    Returns a tuple:
+        (referer_url, platform_signal)
+
+    `referer_url` is what gets injected into Playwright's
+    extra_http_headers["Referer"]. Empty string → no Referer is sent.
+
+    `platform_signal` is the short-name of the chosen source platform
+    (facebook / tiktok / instagram / google / …). When non-empty the
+    RUT engine appends a SIGNED `_kx_src=<platform>&_kx_sig=<hmac>`
+    pair to the tracker URL so the tracker can apply matching URL
+    params (fbclid / gclid / ttclid / igshid / …) for THIS visit —
+    eliminating the Referer ↔ URL-params MISMATCH leak.
 
     `cfg` is the job-level override dict:
         {"enabled": bool, "mode": str, "value": str, "platform_pool": str}
 
-    Returns "" when no Referer should be sent. Never raises — any
-    unexpected input silently falls back to `_get_referer_from_ua(ua)`
-    so a misconfigured override can never break a live campaign.
+    Never raises — any unexpected input silently falls back to the
+    legacy `_get_referer_from_ua(ua)` behaviour.
     """
     try:
         if not cfg or not cfg.get("enabled"):
-            return _get_referer_from_ua(ua)
+            ref = _get_referer_from_ua(ua)
+            return ref, _platform_from_referer_url(ref)
 
         mode  = (cfg.get("mode") or "auto").strip().lower()
         value = (cfg.get("value") or "")
 
         if mode == "auto":
-            return _get_referer_from_ua(ua)
+            ref = _get_referer_from_ua(ua)
+            return ref, _platform_from_referer_url(ref)
 
         if mode in ("direct", "none", ""):
-            return ""
+            return "", ""
 
         if mode == "custom":
-            return value.strip()
+            ref = value.strip()
+            return ref, _platform_from_referer_url(ref)
 
         if mode == "random_list":
             lines = [ln.strip() for ln in value.splitlines() if ln.strip()]
-            return random.choice(lines) if lines else _get_referer_from_ua(ua)
+            if not lines:
+                ref = _get_referer_from_ua(ua)
+                return ref, _platform_from_referer_url(ref)
+            ref = random.choice(lines)
+            return ref, _platform_from_referer_url(ref)
 
         if mode == "google_search":
             kws = [ln.strip() for ln in value.splitlines() if ln.strip()]
             if not kws:
-                return "https://www.google.com/"
+                return "https://www.google.com/", "google"
             from urllib.parse import quote_plus
-            return f"https://www.google.com/search?q={quote_plus(random.choice(kws))}"
+            return (
+                f"https://www.google.com/search?q={quote_plus(random.choice(kws))}",
+                "google",
+            )
 
         if mode == "platform_pool":
             pool_str = (cfg.get("platform_pool") or "").lower()
             keys = [p.strip() for p in pool_str.split(",") if p.strip()]
             keys = [k for k in keys if k in _PLATFORM_REFERER_POOL]
             if not keys:
-                return _get_referer_from_ua(ua)
-            return _PLATFORM_REFERER_POOL[random.choice(keys)]
+                ref = _get_referer_from_ua(ua)
+                return ref, _platform_from_referer_url(ref)
+            chosen = random.choice(keys)
+            # Normalise "x" → "twitter" for the signal so the tracker's
+            # generate_platform_params() finds the right branch.
+            signal = "twitter" if chosen == "x" else chosen
+            return _PLATFORM_REFERER_POOL[chosen], signal
 
         # Unknown mode → legacy fallback.
-        return _get_referer_from_ua(ua)
+        ref = _get_referer_from_ua(ua)
+        return ref, _platform_from_referer_url(ref)
     except Exception:
-        return _get_referer_from_ua(ua)
+        ref = _get_referer_from_ua(ua)
+        return ref, _platform_from_referer_url(ref)
+
+
+# Mapping from a referer URL host substring → platform short-name used
+# by the tracker's generate_platform_params(). Kept tight so non-platform
+# domains (the user's own blog, a CDN, …) return "" and we don't inject
+# spurious fbclid/gclid.
+_REFERER_HOST_TO_PLATFORM: Tuple[Tuple[str, str], ...] = (
+    ("facebook.com",  "facebook"),
+    ("fb.com",        "facebook"),
+    ("fb.watch",      "facebook"),
+    ("instagram.com", "instagram"),
+    ("tiktok.com",    "tiktok"),
+    ("youtube.com",   "youtube"),
+    ("youtu.be",      "youtube"),
+    ("twitter.com",   "twitter"),
+    ("x.com",         "twitter"),
+    ("t.co",          "twitter"),
+    ("snapchat.com",  "snapchat"),
+    ("pinterest.com", "pinterest"),
+    ("pin.it",        "pinterest"),
+    ("reddit.com",    "reddit"),
+    ("linkedin.com",  "linkedin"),
+    ("lnkd.in",       "linkedin"),
+    ("whatsapp.com",  "whatsapp"),
+    ("wa.me",         "whatsapp"),
+    ("t.me",          "telegram"),
+    ("telegram.me",   "telegram"),
+    ("discord.com",   "discord"),
+    ("discord.gg",    "discord"),
+    ("google.",       "google"),    # google.com, google.co.uk, google.de …
+    ("bing.com",      "bing"),
+    ("duckduckgo.com","duckduckgo"),
+    ("yahoo.com",     "yahoo"),
+    ("yandex.",       "yandex"),
+)
+
+
+def _platform_from_referer_url(ref_url: str) -> str:
+    """Infer the platform short-name from a Referer URL. Returns "" for
+    unknown hosts (e.g. the user's own blog) so the engine knows NOT to
+    inject platform-specific URL params on that visit."""
+    if not ref_url:
+        return ""
+    ref_l = ref_url.lower()
+    for needle, platform in _REFERER_HOST_TO_PLATFORM:
+        if needle in ref_l:
+            return platform
+    return ""
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 2026-06: HMAC handshake for the tracker — must mirror the helpers in
+# server.py (_kx_src_sign / build_kx_src_qs). We re-implement here so
+# real_user_traffic.py stays free of circular imports back into server.
+# ──────────────────────────────────────────────────────────────────────
+def _rut_build_kx_src_qs(platform: str) -> str:
+    """Build the `_kx_src=<p>&_kx_sig=<hmac>` query fragment that the
+    engine appends to the tracker URL for each visit. Returns "" when
+    `platform` is empty (no signal → tracker keeps link's static
+    simulate_platform). Uses JWT_SECRET_KEY from env — same secret the
+    server.py side uses to verify."""
+    import hmac as _hmac
+    import hashlib as _hashlib
+    p = (platform or "").strip().lower()
+    if not p:
+        return ""
+    secret = os.environ.get("JWT_SECRET_KEY", "your-secret-key-change-in-production")
+    key = secret.encode("utf-8") if isinstance(secret, str) else bytes(secret)
+    sig = _hmac.new(key, p.encode("utf-8"), _hashlib.sha256).hexdigest()[:12]
+    return f"_kx_src={p}&_kx_sig={sig}"
+
+
+def _rut_append_kx_qs(url: str, qs_fragment: str) -> str:
+    """Safely append the kx handshake to a URL (handles ? vs & correctly).
+    Returns the URL unchanged when `qs_fragment` is empty."""
+    if not qs_fragment or not url:
+        return url
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}{qs_fragment}"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -6389,10 +6497,25 @@ async def run_real_user_traffic_job(
                 # override, this resolver applies their chosen strategy
                 # (custom URL / random_list / google_search / platform_pool
                 # / direct) instead of the UA-derived default.
-                _ua_referer = _resolve_visit_referer(ua, _referer_cfg)
+                # Also returns the chosen platform short-name so we can
+                # append the HMAC-signed `_kx_src` handshake to the
+                # tracker URL → eliminates the Referer ↔ URL-params
+                # MISMATCH leak (e.g. tiktok.com Referer + fbclid URL).
+                _ua_referer, _kx_platform = _resolve_visit_referer(ua, _referer_cfg)
                 _ctx_headers = {"Accept-Language": geo["accept_language"]}
                 if _ua_referer:
                     _ctx_headers["Referer"] = _ua_referer
+
+                # 2026-06: Augmented tracker URL for THIS visit. When a
+                # platform was chosen (FB / TikTok / Google / …), append
+                # the HMAC-signed handshake so the tracker swaps in the
+                # MATCHING URL params (fbclid / ttclid / gclid / …) for
+                # this single visit, overriding the link's static
+                # simulate_platform. Empty signal → URL unchanged →
+                # tracker falls back to the link's setting (or nothing).
+                _visit_target_url = _rut_append_kx_qs(
+                    target_url, _rut_build_kx_src_qs(_kx_platform)
+                )
                 # 2026-01: Sec-CH-UA client hint headers matching UA's
                 # Chrome version + OS. MaxMind / IPQS / Anura cross-check
                 # these against the UA — a mismatch is a HARD bot signal.
@@ -6429,7 +6552,11 @@ async def run_real_user_traffic_job(
                     browser = await _get_live_browser()
                     # Reuse same Referer strategy for the retry context
                     # (2026-06: honours the per-job override too).
-                    _ua_referer_retry = _resolve_visit_referer(ua, _referer_cfg)
+                    # We discard the platform signal here because the
+                    # outer `_kx_platform` already drove the tracker URL
+                    # rewrite for this visit — retry navigates to the
+                    # SAME URL (no second handshake to compute).
+                    _ua_referer_retry, _ = _resolve_visit_referer(ua, _referer_cfg)
                     _ctx_headers_retry = {"Accept-Language": geo["accept_language"]}
                     if _ua_referer_retry:
                         _ctx_headers_retry["Referer"] = _ua_referer_retry
@@ -6798,7 +6925,7 @@ async def run_real_user_traffic_job(
                         # response received) instead of full DOM — many
                         # transient tunnel hiccups resolve mid-flight.
                         _wait_until = "commit" if same_proxy_retry > 0 else "domcontentloaded"
-                        resp = await page.goto(target_url, timeout=35000, wait_until=_wait_until)
+                        resp = await page.goto(_visit_target_url, timeout=35000, wait_until=_wait_until)
                         goto_exc = None
                         break
                     except Exception as _ge:
@@ -7815,7 +7942,7 @@ async def run_real_user_traffic_job(
 
                             # Reload form page so invalid state is cleared
                             try:
-                                await page.goto(target_url, timeout=90000,
+                                await page.goto(_visit_target_url, timeout=90000,
                                                 wait_until="domcontentloaded")
                                 await page.wait_for_timeout(700 + random.randint(0, 500))
                                 try:

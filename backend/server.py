@@ -2513,104 +2513,239 @@ def categorize_referrer(referrer: str, url_params: dict = None) -> dict:
     return {"source": "other", "source_name": "Other", "domain": domain, "detected_from": "referrer"}
 
 def generate_platform_params(platform: str, custom_params: dict = None) -> dict:
-    """Generate platform-specific URL parameters to simulate traffic source"""
+    """Generate platform-specific URL parameters to simulate traffic source.
+
+    2026-06 — ID FORMATS modernised to match what the real platforms
+    actually emit in 2025–2026. Earlier versions used short "IwAR + 30
+    alphanumeric" style fbclids (2018-2021 era) that anti-fraud trackers
+    (Voluum / RedTrack / Binom / AppsFlyer) flag as outdated. The new
+    formats below match what `fetch('https://www.facebook.com/...')` /
+    `https://ads.google.com/...` actually drop in 2026 traffic.
+
+    Per-visit randomness is preserved — every call yields a fresh ID,
+    so 1000 clicks on the same link yield 1000 distinct fbclids/gclids.
+    """
     import random
     import string
-    
+
     def random_id(length=20):
         return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
-    
+
     def random_numeric(length=15):
         return ''.join(random.choices(string.digits, k=length))
-    
+
+    # Base64-urlsafe alphabet — what real fbclid/gclid/ttclid use.
+    _B64URL = string.ascii_letters + string.digits + "-_"
+    def b64url_id(length: int) -> str:
+        return ''.join(random.choices(_B64URL, k=length))
+
     params = {}
-    
+
     if platform == "facebook":
-        # Facebook Click ID - looks like: IwAR3xyzabc123...
-        params["fbclid"] = f"IwAR{random_id(30)}"
+        # Modern fbclid (2022+): "IwY2xjawF" prefix + ~80 chars base64url.
+        # Reference samples seen in real FB ad traffic:
+        #   IwY2xjawFkcGVsZWQ2NTdjOWE0...   (~95 total chars)
+        # We randomise the length within the observed range so a bulk run
+        # doesn't produce 100 fbclids of identical length (which itself
+        # is a fingerprint).
+        fbclid_len = random.randint(78, 96)
+        params["fbclid"] = f"IwY2xjawF{b64url_id(fbclid_len)}"
+        # fbc = the cookie format Facebook drops when a user clicks an ad.
+        # Format: fb.1.<timestamp_ms>.<fbclid>
+        import time as _t
+        params["fbc"] = f"fb.1.{int(_t.time()*1000)}.{params['fbclid']}"
         params["utm_source"] = "facebook"
-        params["utm_medium"] = "social"
+        params["utm_medium"] = "paid_social"
         params["utm_campaign"] = "fb_ads"
-    
+
     elif platform == "instagram":
-        params["igshid"] = random_id(22)
+        # Real igshid format: ~22 chars base64url, sometimes starts with
+        # "MzRl" or "Mz" prefix.
+        params["igshid"] = f"Mz{b64url_id(20)}"
         params["utm_source"] = "instagram"
         params["utm_medium"] = "social"
-    
+
     elif platform == "tiktok":
-        # TikTok Click ID
-        params["ttclid"] = random_id(32)
+        # Real ttclid format: ~64-char base64url string (longer than the
+        # old 32-char random impl). TikTok also drops `_t` micro-stamp
+        # and `_r=1` referral-bit on outbound clicks from the in-app
+        # browser — adding those for max realism.
+        params["ttclid"] = b64url_id(random.randint(60, 80))
+        params["ttp"] = b64url_id(28)   # TikTok Pixel cookie
+        params["_t"] = str(random.randint(8, 9)) + str(random.randint(10**11, 10**12 - 1))
+        params["_r"] = "1"
         params["utm_source"] = "tiktok"
-        params["utm_medium"] = "social"
-    
+        params["utm_medium"] = "paid_social"
+
     elif platform == "twitter":
-        params["twclid"] = random_id(24)
+        # twclid = 22-26 chars base64url.
+        params["twclid"] = b64url_id(random.randint(22, 28))
         params["utm_source"] = "twitter"
         params["utm_medium"] = "social"
-    
+
     elif platform == "google":
-        # Google Click ID (gclid)
-        params["gclid"] = f"Cj0KCQj{random_id(40)}"
+        # Real gclid format (2026): mostly 3 observed prefixes —
+        #   Cj0KCQ...   (most common — full search ad click)
+        #   EAIaIQobChMI...   (display network)
+        #   Cj4KCQ...   (legacy search shortened)
+        # The body is base64url with mixed case + digits + - _
+        prefix = random.choice(["Cj0KCQ", "EAIaIQ", "Cj4KCQ", "Cj0KEQ"])
+        params["gclid"] = f"{prefix}{b64url_id(random.randint(58, 70))}"
+        # Google Ads 2024+ also drops gad_source and (Enhanced
+        # Conversions for Web) gbraid / wbraid on iOS/cross-app traffic.
+        params["gad_source"] = str(random.randint(1, 5))
+        if random.random() < 0.30:
+            # 30% of Google ad clicks carry gbraid (iOS/cross-app).
+            params["gbraid"] = f"0AAAAA{b64url_id(20)}"
         params["utm_source"] = "google"
         params["utm_medium"] = "cpc"
-    
+        params["utm_campaign"] = "search_ads"
+
     elif platform == "youtube":
+        # YouTube redirector → ad clicks. Carries `feature` + sometimes
+        # a video id (`v=`) in the referrer chain. Modern YT ads also
+        # use gclid (since YouTube ads run via Google Ads).
+        prefix = random.choice(["Cj0KCQ", "EAIaIQ"])
+        params["gclid"] = f"{prefix}{b64url_id(random.randint(58, 70))}"
         params["utm_source"] = "youtube"
         params["utm_medium"] = "video"
-        params["utm_campaign"] = "youtube_traffic"
-    
+        params["utm_campaign"] = "youtube_ads"
+
     elif platform == "pinterest":
-        params["epik"] = random_id(30)
+        # Real Pinterest epik format: "dj0y" prefix + base64url ~60 chars.
+        params["epik"] = f"dj0y{b64url_id(random.randint(54, 70))}"
         params["utm_source"] = "pinterest"
         params["utm_medium"] = "social"
-    
+
     elif platform == "linkedin":
-        params["li_fat_id"] = random_id(36)
+        # li_fat_id is a 36-char UUID-style identifier.
+        import uuid as _u
+        params["li_fat_id"] = str(_u.uuid4())
         params["utm_source"] = "linkedin"
         params["utm_medium"] = "social"
-    
+
     elif platform == "whatsapp":
         params["utm_source"] = "whatsapp"
         params["utm_medium"] = "social"
         params["utm_campaign"] = "whatsapp_share"
-    
+
     elif platform == "telegram":
         params["utm_source"] = "telegram"
         params["utm_medium"] = "social"
-    
+
     elif platform == "snapchat":
-        params["sccid"] = random_id(28)
+        # Snap Click ID — base64url ~52 chars.
+        params["sccid"] = b64url_id(random.randint(48, 60))
+        params["ScCid"] = params["sccid"]   # Snap sometimes uppercases
         params["utm_source"] = "snapchat"
-        params["utm_medium"] = "social"
-    
+        params["utm_medium"] = "paid_social"
+
     elif platform == "reddit":
         params["utm_source"] = "reddit"
         params["utm_medium"] = "social"
         params["utm_campaign"] = "reddit_post"
-    
+
+    elif platform == "bing":
+        # Bing Ads (Microsoft Ads) — msclkid base64url ~32 chars.
+        params["msclkid"] = b64url_id(random.randint(28, 36)).lower()
+        params["utm_source"] = "bing"
+        params["utm_medium"] = "cpc"
+
+    elif platform == "duckduckgo":
+        params["utm_source"] = "duckduckgo"
+        params["utm_medium"] = "organic"
+
+    elif platform == "yahoo":
+        params["utm_source"] = "yahoo"
+        params["utm_medium"] = "organic"
+
+    elif platform == "yandex":
+        # Yandex Direct: yclid is numeric, 16-20 digits.
+        params["yclid"] = random_numeric(random.randint(16, 20))
+        params["utm_source"] = "yandex"
+        params["utm_medium"] = "cpc"
+
     elif platform == "email":
         params["utm_source"] = "email"
         params["utm_medium"] = "email"
         params["utm_campaign"] = "newsletter"
-    
+
     elif platform == "sms":
         params["utm_source"] = "sms"
         params["utm_medium"] = "sms"
-    
+
     elif platform == "direct":
         # No params for direct traffic
         pass
-    
+
     else:
         # Custom platform
         params["utm_source"] = platform
         params["utm_medium"] = "referral"
-    
+
     # Add custom params if provided
     if custom_params:
         params.update(custom_params)
-    
+
     return params
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 2026-06: Per-visit platform override (RUT engine → tracker handshake)
+# ──────────────────────────────────────────────────────────────────────
+# When the RUT engine uses its referrer-override feature (especially
+# `referer_mode=platform_pool`), each visit's Referer header is set to a
+# different platform. To avoid the Referrer ↔ URL-params MISMATCH leak
+# (e.g. visit comes "from tiktok.com" but offer URL gets fbclid because
+# the link's static simulate_platform=facebook), the engine appends a
+# tiny HMAC-signed pair of query params to the tracker URL:
+#
+#     ?_kx_src=<platform>&_kx_sig=<HMAC-SHA256(platform)[..12]>
+#
+# The tracker reads + verifies + strips them before redirecting. The
+# verified platform overrides the link's static simulate_platform for
+# THIS visit only. Pure signal-side fix — no link config changes needed.
+#
+# Security: the secret is `SECRET_KEY` (same as JWT). Since both signer
+# and verifier are the SAME backend process, this is trivially safe
+# against external forgery — an attacker can't sign a token, so an
+# external visitor adding `?_kx_src=facebook` to a tracker URL has the
+# token silently ignored (we never apply the override unless `_kx_sig`
+# verifies).
+# ──────────────────────────────────────────────────────────────────────
+def _kx_src_sign(platform: str) -> str:
+    """Return the short HMAC tag for a platform short-name. Trimmed to
+    12 hex chars — that's 48 bits of entropy, way more than enough to
+    block forgery (attackers would need 2^47 guesses on average) while
+    keeping the tracker URL short."""
+    import hmac as _hmac
+    import hashlib as _hashlib
+    msg = (platform or "").strip().lower().encode("utf-8")
+    key = SECRET_KEY.encode("utf-8") if isinstance(SECRET_KEY, str) else bytes(SECRET_KEY)
+    return _hmac.new(key, msg, _hashlib.sha256).hexdigest()[:12]
+
+
+def _kx_src_verify(platform: str, sig: str) -> bool:
+    """Constant-time HMAC verification. Returns False on any mismatch
+    (bad sig, empty sig, mismatched platform). Never raises."""
+    import hmac as _hmac
+    try:
+        if not platform or not sig:
+            return False
+        expected = _kx_src_sign(platform)
+        return _hmac.compare_digest(expected, str(sig)[:12])
+    except Exception:
+        return False
+
+
+def build_kx_src_qs(platform: str) -> str:
+    """Build the `&_kx_src=...&_kx_sig=...` query-string fragment that
+    the RUT engine appends to the tracker URL. Returns "" for unknown
+    or empty platforms."""
+    p = (platform or "").strip().lower()
+    if not p:
+        return ""
+    return f"_kx_src={p}&_kx_sig={_kx_src_sign(p)}"
 
 def build_redirect_url(base_url: str, params: dict) -> str:
     """Build redirect URL with added parameters"""
@@ -15776,7 +15911,27 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     simulate_platform = link.get("simulate_platform")
     custom_params = link.get("url_params") or {}
     referrer_mode = link.get("referrer_mode", "normal")
-    
+
+    # ── 2026-06: Per-visit RUT platform override (HMAC-signed) ────────
+    # The RUT engine may append ?_kx_src=<platform>&_kx_sig=<hmac> to
+    # tell us "for THIS visit only, simulate <platform>" — overriding
+    # the link's static simulate_platform. Verified with HMAC so only
+    # the engine (sharing SECRET_KEY) can request the override.
+    # We strip both params from `url_params` so the offer never sees
+    # the handshake tokens.
+    try:
+        _kx_src = (url_params or {}).pop("_kx_src", None) if isinstance(url_params, dict) else None
+        _kx_sig = (url_params or {}).pop("_kx_sig", None) if isinstance(url_params, dict) else None
+        if _kx_src and _kx_sig and _kx_src_verify(_kx_src, _kx_sig):
+            simulate_platform = _kx_src
+            # Also drop them from custom_params if echoed there.
+            if isinstance(custom_params, dict):
+                custom_params.pop("_kx_src", None)
+                custom_params.pop("_kx_sig", None)
+    except Exception:
+        # Defensive: never let signal handshake bugs break the redirect.
+        pass
+
     if simulate_platform:
         platform_params = generate_platform_params(simulate_platform, custom_params)
         destination_url = build_redirect_url(destination_url, platform_params)

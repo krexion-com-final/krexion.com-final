@@ -2332,6 +2332,17 @@ export default function RealUserTrafficPage() {
             </p>
 
             {refererOverrideEnabled && (
+              <div className="mb-3 p-3 rounded-md bg-emerald-950/30 border border-emerald-700/40">
+                <div className="flex items-start gap-2 text-xs text-emerald-200">
+                  <span className="text-emerald-400 text-base leading-none">⚡</span>
+                  <span>
+                    <span className="font-semibold text-emerald-300">Auto-sync URL params (signed handshake)</span> — when this is ON, every visit's Referer AND URL params come from the SAME platform automatically. A TikTok-Referer visit gets fresh <span className="font-mono text-emerald-200">ttclid</span>, a Facebook one gets <span className="font-mono text-emerald-200">fbclid + fbc</span>, a Google one gets <span className="font-mono text-emerald-200">gclid + gad_source</span>, Bing → <span className="font-mono text-emerald-200">msclkid</span>, Pinterest → <span className="font-mono text-emerald-200">epik</span>, etc. Modern 2026 ID formats. No link-level config needed. Eliminates the Referer ↔ URL-params mismatch tell that anti-fraud trackers (Voluum / RedTrack / Binom / AppsFlyer) flag.
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {refererOverrideEnabled && (
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
                   <Label className="text-zinc-300 text-sm">Referrer Mode</Label>
