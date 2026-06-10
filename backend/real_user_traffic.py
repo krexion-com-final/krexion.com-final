@@ -679,6 +679,113 @@ def _get_referer_from_ua(ua: str) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# 2026-06: USER-CONFIGURABLE REFERRER OVERRIDE (per-job)
+# ──────────────────────────────────────────────────────────────────────
+# Default behaviour (when override is OFF) is preserved exactly:
+# `_get_referer_from_ua` maps in-app browser UAs (TikTok / FB / IG / …)
+# to the matching platform Referer and returns "" for plain browser UAs
+# (so no Referer header is sent). Existing customers see zero change.
+#
+# When the operator turns the override ON in the RUT job form, the
+# resolver below picks the Referer per visit according to the chosen
+# strategy. Modes:
+#
+#   "auto"          → fall back to _get_referer_from_ua (legacy).
+#   "direct"        → return "" → no Referer header at all (true
+#                     direct/bookmark hit — like email-list traffic).
+#   "custom"        → one fixed URL applied to EVERY visit. Use when
+#                     you want every visit to look like it came from
+#                     one specific ad placement / FB post / blog page.
+#   "random_list"   → newline-separated pool of URLs. One picked at
+#                     random per visit — useful when you have 10
+#                     different FB ad creatives, IG bio links etc.
+#   "google_search" → realistic organic look: a random keyword from
+#                     the value pool becomes the q= param of a Google
+#                     SERP URL (https://www.google.com/search?q=…).
+#                     Empty pool → bare https://www.google.com/.
+#   "platform_pool" → rotates through a comma-separated list of
+#                     platform short-names (facebook, tiktok, instagram,
+#                     youtube, twitter, snapchat, pinterest, reddit,
+#                     linkedin, google, bing, …). One per visit.
+#
+# All modes are PURE-PYTHON and never raise — any malformed cfg
+# silently falls back to legacy auto-from-UA behaviour so an operator
+# typo can never break a live campaign.
+# ──────────────────────────────────────────────────────────────────────
+_PLATFORM_REFERER_POOL: Dict[str, str] = {
+    "facebook":   "https://www.facebook.com/",
+    "instagram":  "https://www.instagram.com/",
+    "tiktok":     "https://www.tiktok.com/",
+    "youtube":    "https://www.youtube.com/",
+    "twitter":    "https://twitter.com/",
+    "x":          "https://twitter.com/",
+    "snapchat":   "https://www.snapchat.com/",
+    "pinterest":  "https://www.pinterest.com/",
+    "reddit":     "https://www.reddit.com/",
+    "linkedin":   "https://www.linkedin.com/",
+    "whatsapp":   "https://www.whatsapp.com/",
+    "telegram":   "https://t.me/",
+    "discord":    "https://discord.com/",
+    "google":     "https://www.google.com/",
+    "bing":       "https://www.bing.com/",
+    "duckduckgo": "https://duckduckgo.com/",
+    "yahoo":      "https://search.yahoo.com/",
+    "yandex":     "https://yandex.com/",
+}
+
+
+def _resolve_visit_referer(ua: str, cfg: Optional[Dict[str, Any]]) -> str:
+    """Pick the Referer header value for ONE visit.
+
+    `cfg` is the job-level override dict:
+        {"enabled": bool, "mode": str, "value": str, "platform_pool": str}
+
+    Returns "" when no Referer should be sent. Never raises — any
+    unexpected input silently falls back to `_get_referer_from_ua(ua)`
+    so a misconfigured override can never break a live campaign.
+    """
+    try:
+        if not cfg or not cfg.get("enabled"):
+            return _get_referer_from_ua(ua)
+
+        mode  = (cfg.get("mode") or "auto").strip().lower()
+        value = (cfg.get("value") or "")
+
+        if mode == "auto":
+            return _get_referer_from_ua(ua)
+
+        if mode in ("direct", "none", ""):
+            return ""
+
+        if mode == "custom":
+            return value.strip()
+
+        if mode == "random_list":
+            lines = [ln.strip() for ln in value.splitlines() if ln.strip()]
+            return random.choice(lines) if lines else _get_referer_from_ua(ua)
+
+        if mode == "google_search":
+            kws = [ln.strip() for ln in value.splitlines() if ln.strip()]
+            if not kws:
+                return "https://www.google.com/"
+            from urllib.parse import quote_plus
+            return f"https://www.google.com/search?q={quote_plus(random.choice(kws))}"
+
+        if mode == "platform_pool":
+            pool_str = (cfg.get("platform_pool") or "").lower()
+            keys = [p.strip() for p in pool_str.split(",") if p.strip()]
+            keys = [k for k in keys if k in _PLATFORM_REFERER_POOL]
+            if not keys:
+                return _get_referer_from_ua(ua)
+            return _PLATFORM_REFERER_POOL[random.choice(keys)]
+
+        # Unknown mode → legacy fallback.
+        return _get_referer_from_ua(ua)
+    except Exception:
+        return _get_referer_from_ua(ua)
+
+
+# ──────────────────────────────────────────────────────────────────────
 # 2026-01: ENHANCED ANTI-DETECT HELPERS
 # ──────────────────────────────────────────────────────────────────────
 # These helpers feed the per-visit fingerprint with extra fields that
@@ -4871,10 +4978,36 @@ async def run_real_user_traffic_job(
     # visit. Combined with TLS prewarm gives the strongest cold-IP
     # bypass possible without a real human session.
     ip_warmup_enabled: bool = False,
+    # ── 2026-06: User-configurable referrer override ────────────────
+    # When `referer_override_enabled` is False (default), the engine
+    # uses the existing UA-derived referer behaviour (TikTok UA →
+    # tiktok.com Referer, plain Chrome UA → no Referer, etc.). When
+    # True, the engine applies the per-visit referer chosen by the
+    # `referer_mode` strategy. Lets the operator make traffic look
+    # organic from any platform (Facebook ads, Google search, TikTok
+    # in-app, Instagram bio, …) without touching the UA rotation.
+    # See `_resolve_visit_referer` for the full mode reference.
+    referer_override_enabled: bool = False,
+    referer_mode: str = "auto",
+    referer_value: str = "",
+    referer_platform_pool: str = "",
 ):
     """
     Main orchestrator. Emits progress into RUT_JOBS[job_id].
     """
+    # ── 2026-06: Build referrer-override cfg ONCE per job ─────────────
+    # Closed-over by the inner `process_one` worker → `_resolve_visit_referer`
+    # is called per visit with this exact dict. When `enabled=False` the
+    # resolver short-circuits to the legacy `_get_referer_from_ua(ua)`
+    # behaviour, so jobs from older clients (no UI / no params sent)
+    # see ZERO behavioural change.
+    _referer_cfg: Dict[str, Any] = {
+        "enabled": bool(referer_override_enabled),
+        "mode": (referer_mode or "auto").strip().lower(),
+        "value": referer_value or "",
+        "platform_pool": referer_platform_pool or "",
+    }
+
     # Guarantee chromium is installed BEFORE launching any visits.
     # This is the single robust guard that recovers from pod restarts that
     # wipe ad-hoc browser installs. First job on a fresh pod will pause
@@ -6252,7 +6385,11 @@ async def run_real_user_traffic_job(
                 # Auto-detect Referer from the user-agent — TikTok UAs get a
                 # tiktok.com referer, FB in-app UAs get facebook.com, etc.
                 # Plain browser UAs return "" and Referer header is omitted.
-                _ua_referer = _get_referer_from_ua(ua)
+                # 2026-06: when the operator turned on the per-job referer
+                # override, this resolver applies their chosen strategy
+                # (custom URL / random_list / google_search / platform_pool
+                # / direct) instead of the UA-derived default.
+                _ua_referer = _resolve_visit_referer(ua, _referer_cfg)
                 _ctx_headers = {"Accept-Language": geo["accept_language"]}
                 if _ua_referer:
                     _ctx_headers["Referer"] = _ua_referer
@@ -6290,8 +6427,9 @@ async def run_real_user_traffic_job(
                 msg = str(_nce)
                 if ("closed" in msg.lower()) or ("TargetClosed" in type(_nce).__name__):
                     browser = await _get_live_browser()
-                    # Reuse same UA-derived Referer for the retry context.
-                    _ua_referer_retry = _get_referer_from_ua(ua)
+                    # Reuse same Referer strategy for the retry context
+                    # (2026-06: honours the per-job override too).
+                    _ua_referer_retry = _resolve_visit_referer(ua, _referer_cfg)
                     _ctx_headers_retry = {"Accept-Language": geo["accept_language"]}
                     if _ua_referer_retry:
                         _ctx_headers_retry["Referer"] = _ua_referer_retry

@@ -6999,6 +6999,11 @@ async def _rut_prepare_and_run(
             # 2026-02 v2.1.31 — Step 4 wiring
             behavioral_bio_enabled=bool(params.get("behavioral_bio_enabled")),
             ip_warmup_enabled=bool(params.get("ip_warmup_enabled")),
+            # 2026-06 — Referrer override wiring
+            referer_override_enabled=bool(params.get("referer_override_enabled")),
+            referer_mode=str(params.get("referer_mode") or "auto"),
+            referer_value=str(params.get("referer_value") or ""),
+            referer_platform_pool=str(params.get("referer_platform_pool") or ""),
         )
     except Exception as e:  # noqa: BLE001
         logger.exception(f"_rut_prepare_and_run crashed for job {job_id}: {e}")
@@ -7245,6 +7250,15 @@ async def rut_create_job(
     # ── 2026-02 v2.1.31 — Step 4: Phase-4 Anti-Detect ────────────────
     behavioral_bio_enabled: bool = Form(False),
     ip_warmup_enabled: bool = Form(False),
+    # ── 2026-06: User-configurable Referrer Override ─────────────────
+    # OFF by default → legacy UA-derived referer behaviour is preserved
+    # exactly. When ON, the operator's chosen strategy (auto / custom /
+    # random_list / google_search / platform_pool / direct) is applied
+    # per visit. See `_resolve_visit_referer` in real_user_traffic.py.
+    referer_override_enabled: bool = Form(False),
+    referer_mode: str = Form("auto"),
+    referer_value: str = Form(""),
+    referer_platform_pool: str = Form(""),
     user: dict = Depends(get_current_user_with_fresh_data),
     _cloud_gate: bool = Depends(require_local_mode),
 ):
@@ -7472,6 +7486,11 @@ async def rut_create_job(
         # 2026-02 v2.1.31 — Step 4 wiring
         "behavioral_bio_enabled": bool(behavioral_bio_enabled),
         "ip_warmup_enabled": bool(ip_warmup_enabled),
+        # 2026-06 — User-configurable Referrer override
+        "referer_override_enabled": bool(referer_override_enabled),
+        "referer_mode": (referer_mode or "auto").strip().lower()[:32],
+        "referer_value": (referer_value or "")[:8000],          # newline-separated lists
+        "referer_platform_pool": (referer_platform_pool or "")[:512],
     }
     # A job is auto-resumable on backend restart only if it has no in-memory
     # bytes attached (Mongo can't store huge UploadFile blobs efficiently
@@ -7576,6 +7595,12 @@ async def rut_create_job(
             # 2026-02 v2.1.31 — Step 4 wiring (persisted)
             "behavioral_bio_enabled": bool(behavioral_bio_enabled),
             "ip_warmup_enabled": bool(ip_warmup_enabled),
+            # 2026-06 — Referrer override (persisted so Past-Jobs + retry
+            # see the exact settings used for the run)
+            "referer_override_enabled": bool(referer_override_enabled),
+            "referer_mode": (referer_mode or "auto").strip().lower()[:32],
+            "referer_value": (referer_value or "")[:8000],
+            "referer_platform_pool": (referer_platform_pool or "")[:512],
         }},
         upsert=True,
     )

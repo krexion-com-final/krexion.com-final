@@ -378,6 +378,21 @@ export default function RealUserTrafficPage() {
   const [behavioralBioEnabled, setBehavioralBioEnabled] = useState(false);
   const [ipWarmupEnabled, setIpWarmupEnabled] = useState(false);
 
+  // ── 2026-06: Referrer Override (OFF by default — customer opt-in) ──
+  // When OFF the engine uses the legacy UA-derived referer logic
+  // (TikTok UA → tiktok.com, plain Chrome UA → no Referer).
+  // When ON, the chosen mode below is applied per visit so the operator
+  // can make traffic look like it originated from any platform.
+  const [refererOverrideEnabled, setRefererOverrideEnabled] = useState(false);
+  const [refererMode, setRefererMode] = useState("platform_pool");
+  // ↑ Default mode is platform_pool (visually obvious "real social
+  // traffic" look). The toggle is OFF by default so existing customer
+  // jobs keep behaving exactly as before.
+  const [refererValue, setRefererValue] = useState("");
+  const [refererPlatformPool, setRefererPlatformPool] = useState(
+    "facebook,tiktok,instagram,google"
+  );
+
   // Fetch host capabilities ONCE so we render only what works here
   useEffect(() => {
     const token = localStorage.getItem("token");
@@ -1168,6 +1183,12 @@ export default function RealUserTrafficPage() {
       // 2026-02 v2.1.31 — Step 4
       fd.append("behavioral_bio_enabled", String(!!behavioralBioEnabled));
       fd.append("ip_warmup_enabled", String(!!ipWarmupEnabled));
+
+      // 2026-06 — Referrer Override (off-by-default, customer opt-in)
+      fd.append("referer_override_enabled", String(!!refererOverrideEnabled));
+      fd.append("referer_mode", refererMode || "auto");
+      fd.append("referer_value", refererValue || "");
+      fd.append("referer_platform_pool", refererPlatformPool || "");
 
       fd.append("form_fill_enabled", String(formFillEnabled));
       if (formFillEnabled) {
@@ -2282,6 +2303,136 @@ export default function RealUserTrafficPage() {
                 </p>
               </div>
             </div>
+          </div>
+
+          {/* ── 2026-06: Referrer Source (off-by-default, customer opt-in) ── */}
+          <div className="mt-6 p-4 rounded-lg border border-emerald-500/30 bg-emerald-950/10">
+            <div className="flex items-center justify-between gap-2 mb-3">
+              <div className="flex items-center gap-2">
+                <span className="text-emerald-300 text-sm font-semibold">🌍 Referrer Source</span>
+                <span className="text-[10px] text-zinc-500 px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-800">
+                  Per-visit Referer header · 100% organic look
+                </span>
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <input
+                  data-testid="rut-referer-override-enabled"
+                  type="checkbox"
+                  checked={refererOverrideEnabled}
+                  onChange={(e) => setRefererOverrideEnabled(e.target.checked)}
+                  className="w-4 h-4 rounded accent-emerald-500"
+                />
+                <span className={`text-xs font-medium ${refererOverrideEnabled ? "text-emerald-300" : "text-zinc-500"}`}>
+                  {refererOverrideEnabled ? "ON" : "OFF (legacy UA-only)"}
+                </span>
+              </label>
+            </div>
+            <p className="text-xs text-zinc-400 mb-3">
+              When <span className="text-zinc-300">OFF</span> the engine sets Referer only for in-app browser UAs (TikTok / FB / IG / …) — plain Chrome / Safari UAs hit your tracker with <span className="text-zinc-300">no Referer</span>, which gets logged as <span className="text-amber-400">Direct / Other</span>. Turn this <span className="text-emerald-300">ON</span> to force every visit through a chosen organic source so analytics show the real platform.
+            </p>
+
+            {refererOverrideEnabled && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                  <Label className="text-zinc-300 text-sm">Referrer Mode</Label>
+                  <select
+                    data-testid="rut-referer-mode"
+                    value={refererMode}
+                    onChange={(e) => setRefererMode(e.target.value)}
+                    className="mt-1 w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md px-3 py-2 text-sm"
+                  >
+                    <option value="auto">Auto from UA (smart in-app detection)</option>
+                    <option value="platform_pool">Random Platform Pool</option>
+                    <option value="custom">Custom URL (same for every visit)</option>
+                    <option value="random_list">Random from URL List</option>
+                    <option value="google_search">Google Search (organic SEO look)</option>
+                    <option value="direct">Direct / None (no Referer)</option>
+                  </select>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Mode controls how each visit's Referer header is picked.
+                  </p>
+                </div>
+
+                {refererMode === "platform_pool" && (
+                  <div className="md:col-span-2">
+                    <Label className="text-zinc-300 text-sm">Platform Pool (comma-separated)</Label>
+                    <Input
+                      data-testid="rut-referer-platform-pool"
+                      type="text"
+                      value={refererPlatformPool}
+                      onChange={(e) => setRefererPlatformPool(e.target.value.slice(0, 512))}
+                      placeholder="facebook,tiktok,instagram,google,youtube,twitter,snapchat,pinterest,reddit,linkedin,bing"
+                      className="mt-1 bg-zinc-800 border-zinc-700 text-zinc-100"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      One platform is picked per visit at random. Available: facebook, instagram, tiktok, youtube, twitter, snapchat, pinterest, reddit, linkedin, whatsapp, telegram, discord, google, bing, duckduckgo, yahoo, yandex.
+                    </p>
+                  </div>
+                )}
+
+                {refererMode === "custom" && (
+                  <div className="md:col-span-2">
+                    <Label className="text-zinc-300 text-sm">Custom Referrer URL</Label>
+                    <Input
+                      data-testid="rut-referer-custom-value"
+                      type="text"
+                      value={refererValue}
+                      onChange={(e) => setRefererValue(e.target.value.slice(0, 1024))}
+                      placeholder="https://www.facebook.com/groups/your-group-id/"
+                      className="mt-1 bg-zinc-800 border-zinc-700 text-zinc-100"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Exact URL used as the Referer header for EVERY visit. Use the full URL of the FB post / IG bio link / blog page that "sent" the visitor.
+                    </p>
+                  </div>
+                )}
+
+                {refererMode === "random_list" && (
+                  <div className="md:col-span-2">
+                    <Label className="text-zinc-300 text-sm">Referrer URL Pool (one per line)</Label>
+                    <textarea
+                      data-testid="rut-referer-url-list"
+                      value={refererValue}
+                      onChange={(e) => setRefererValue(e.target.value.slice(0, 8000))}
+                      rows={5}
+                      placeholder={"https://www.facebook.com/groups/123/\nhttps://www.instagram.com/p/abc/\nhttps://www.tiktok.com/@user/video/9999\nhttps://twitter.com/user/status/1234"}
+                      className="mt-1 w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md px-3 py-2 text-sm font-mono"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      One URL per line — engine picks a different one per visit at random. Best for campaigns with 5–50 different ad creatives / post URLs.
+                    </p>
+                  </div>
+                )}
+
+                {refererMode === "google_search" && (
+                  <div className="md:col-span-2">
+                    <Label className="text-zinc-300 text-sm">Search Keywords (one per line)</Label>
+                    <textarea
+                      data-testid="rut-referer-google-keywords"
+                      value={refererValue}
+                      onChange={(e) => setRefererValue(e.target.value.slice(0, 8000))}
+                      rows={5}
+                      placeholder={"best vpn 2026\nfree trial software\ncar insurance quotes\ncrypto trading signals"}
+                      className="mt-1 w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md px-3 py-2 text-sm font-mono"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Each visit gets a Referer like <span className="text-emerald-300">https://www.google.com/search?q=&lt;your-keyword&gt;</span> — looks like organic Google search traffic. Empty list = plain <span className="text-zinc-300">google.com</span>.
+                    </p>
+                  </div>
+                )}
+
+                {(refererMode === "auto" || refererMode === "direct") && (
+                  <div className="md:col-span-2 flex items-start gap-2 text-xs text-zinc-400 mt-2">
+                    <span className="text-emerald-300 text-base leading-none">ℹ</span>
+                    <span>
+                      {refererMode === "auto"
+                        ? "Smart mode — Referer is auto-derived from each visit's User-Agent. TikTok/FB/IG in-app UAs get their platform URL, plain browsers get no Referer."
+                        : "No Referer header will be sent on any visit. Useful when simulating bookmark / direct-typed-URL / email-link traffic."}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* ── 2026-02 v2.1.31 — Anti-Detect (Phase 3) ── */}
