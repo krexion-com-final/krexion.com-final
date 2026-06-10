@@ -2669,34 +2669,42 @@ def generate_platform_params(platform: str, custom_params: dict = None) -> dict:
         # ────────────────────────────────────────────────────────────
         # 2026-06 — Realistic email-marketing traffic.
         # Real emails ALMOST NEVER carry a Referer header (mail clients
-        # strip it for privacy) — the engine handles that side. Here we
-        # focus on the URL params that the tracker actually inspects to
-        # classify "this click came from an email campaign".
+        # strip it for privacy) OR they carry the ESP click-tracking
+        # host as Referer (Mailchimp → us21.list-manage.com, etc.).
+        # The engine handles the Referer side; here we focus on the
+        # URL params that the tracker actually inspects to classify
+        # "this click came from an email campaign".
         #
         # Trackers identify email by:
         #   • utm_medium=email          (the primary signal)
         #   • ESP-specific click/subscriber IDs (mc_cid / _kx / _hsenc …)
-        #   • utm_source matching a campaign/list name
+        #   • utm_source matching a campaign/list name (brand-tagged
+        #     when the operator set a brand identifier)
         #
-        # Per-visit randomness: ESP is chosen per click (real marketers
-        # send from a single ESP, but a Krexion job often simulates a
-        # mixed inbox audience, so rotation is *more* realistic for a
-        # multi-IP / multi-UA campaign than picking one ESP for ALL
-        # 1000 visits).
+        # When the RUT engine pre-picked an ESP for this visit, it
+        # passes that via `__force_esp` (HMAC-verified earlier in the
+        # tracker). This guarantees the URL params (mc_cid vs _kx vs
+        # _hsenc) line up with the Referer host the engine chose for
+        # the same visit — eliminating the ESP↔Referer leak.
         # ────────────────────────────────────────────────────────────
-        esp = random.choice([
-            # Weighted by 2025-2026 market share (Litmus + EmailToolTester
-            # reports). Mailchimp ~28% retail, Klaviyo ~16% ecom-heavy,
-            # SendGrid ~12% transactional, HubSpot ~8% B2B, others tail.
-            "mailchimp", "mailchimp", "mailchimp",
-            "klaviyo",   "klaviyo",
-            "sendgrid",  "sendgrid",
-            "hubspot",
-            "activecampaign",
-            "convertkit",
-            "constantcontact",
-            "generic",
-        ])
+        force_esp = (custom_params or {}).pop("__force_esp", None) if isinstance(custom_params, dict) else None
+        brand     = (custom_params or {}).pop("__brand",     None) if isinstance(custom_params, dict) else None
+        if force_esp and isinstance(force_esp, str):
+            esp = force_esp.strip().lower()
+        else:
+            esp = random.choice([
+                # Weighted by 2025-2026 market share (Litmus + EmailToolTester
+                # reports). Mailchimp ~28% retail, Klaviyo ~16% ecom-heavy,
+                # SendGrid ~12% transactional, HubSpot ~8% B2B, others tail.
+                "mailchimp", "mailchimp", "mailchimp",
+                "klaviyo",   "klaviyo",
+                "sendgrid",  "sendgrid",
+                "hubspot",
+                "activecampaign",
+                "convertkit",
+                "constantcontact",
+                "generic",
+            ])
         if esp == "mailchimp":
             # Real Mailchimp click URLs: ?mc_cid=abc123 + &mc_eid=xyz456
             params["mc_cid"] = b64url_id(10).lower()
@@ -2717,18 +2725,36 @@ def generate_platform_params(platform: str, custom_params: dict = None) -> dict:
             params["ssp"] = b64url_id(random.randint(28, 40))
         # else "generic" → UTMs only (still classifies as email)
 
+        # Brand-aware UTMs. When the operator entered a brand identifier
+        # (e.g. "acme"), we use it as utm_source and prefix utm_campaign
+        # so destination trackers see consistent brand-tagged labels
+        # matching what an advertiser would expect from "Brand X's email
+        # marketing".
+        brand_safe = ""
+        if brand:
+            brand_safe = "".join(
+                c if (c.isalnum() or c in "_-") else "_"
+                for c in str(brand).lower().strip()
+            )[:32]
+
         # Standard UTMs every email link carries
-        params["utm_source"] = random.choice([
-            "newsletter", "email", "mailing_list", "weekly_digest",
-            "subscribers", esp,
-        ])
+        if brand_safe:
+            params["utm_source"] = f"{brand_safe}_newsletter"
+        else:
+            params["utm_source"] = random.choice([
+                "newsletter", "email", "mailing_list", "weekly_digest",
+                "subscribers", esp,
+            ])
         params["utm_medium"] = "email"
-        params["utm_campaign"] = random.choice([
+        _campaign_base = random.choice([
             "jan_2026_promo", "weekly_digest", "exclusive_offer",
             "welcome_series", "abandoned_cart", "winback_q1",
             "new_product_launch", "vip_only", "limited_time",
             "flash_sale", "subscriber_perks", "monthly_recap",
         ])
+        params["utm_campaign"] = (
+            f"{brand_safe}_{_campaign_base}" if brand_safe else _campaign_base
+        )
         params["utm_content"] = random.choice([
             "cta_top", "cta_bottom", "header_link",
             "footer_link", "main_image", "secondary_button",
@@ -2805,6 +2831,30 @@ def _kx_src_verify(platform: str, sig: str) -> bool:
         if not platform or not sig:
             return False
         expected = _kx_src_sign(platform)
+        return _hmac.compare_digest(expected, str(sig)[:12])
+    except Exception:
+        return False
+
+
+def _kx_esp_sign(platform: str, esp: str) -> str:
+    """HMAC tag for the (platform, esp) pair — used so the RUT engine
+    can tell the tracker WHICH ESP to use for THIS visit's URL params
+    when the platform is "email". Same secret + same 12-hex trim as
+    _kx_src_sign."""
+    import hmac as _hmac
+    import hashlib as _hashlib
+    msg = f"{(platform or '').strip().lower()}:{(esp or '').strip().lower()}".encode("utf-8")
+    key = SECRET_KEY.encode("utf-8") if isinstance(SECRET_KEY, str) else bytes(SECRET_KEY)
+    return _hmac.new(key, msg, _hashlib.sha256).hexdigest()[:12]
+
+
+def _kx_esp_verify(platform: str, esp: str, sig: str) -> bool:
+    """Constant-time HMAC verification of the (platform, esp) pair."""
+    import hmac as _hmac
+    try:
+        if not platform or not esp or not sig:
+            return False
+        expected = _kx_esp_sign(platform, esp)
         return _hmac.compare_digest(expected, str(sig)[:12])
     except Exception:
         return False
@@ -7211,6 +7261,7 @@ async def _rut_prepare_and_run(
             referer_mode=str(params.get("referer_mode") or "auto"),
             referer_value=str(params.get("referer_value") or ""),
             referer_platform_pool=str(params.get("referer_platform_pool") or ""),
+            referer_brand=str(params.get("referer_brand") or ""),
         )
     except Exception as e:  # noqa: BLE001
         logger.exception(f"_rut_prepare_and_run crashed for job {job_id}: {e}")
@@ -7466,6 +7517,12 @@ async def rut_create_job(
     referer_mode: str = Form("auto"),
     referer_value: str = Form(""),
     referer_platform_pool: str = Form(""),
+    # Brand identifier (optional). When set + email is in the platform
+    # pool, the tracker tags email visits with brand-aware UTMs
+    # (utm_source=<brand>_newsletter, utm_campaign=<brand>_<base>) so a
+    # customer claiming "I am Brand X's marketing" produces consistent
+    # brand-labelled signals — without leaking any actual email address.
+    referer_brand: str = Form(""),
     user: dict = Depends(get_current_user_with_fresh_data),
     _cloud_gate: bool = Depends(require_local_mode),
 ):
@@ -7698,6 +7755,7 @@ async def rut_create_job(
         "referer_mode": (referer_mode or "auto").strip().lower()[:32],
         "referer_value": (referer_value or "")[:8000],          # newline-separated lists
         "referer_platform_pool": (referer_platform_pool or "")[:512],
+        "referer_brand": (referer_brand or "")[:64],
     }
     # A job is auto-resumable on backend restart only if it has no in-memory
     # bytes attached (Mongo can't store huge UploadFile blobs efficiently
@@ -7808,6 +7866,7 @@ async def rut_create_job(
             "referer_mode": (referer_mode or "auto").strip().lower()[:32],
             "referer_value": (referer_value or "")[:8000],
             "referer_platform_pool": (referer_platform_pool or "")[:512],
+            "referer_brand": (referer_brand or "")[:64],
         }},
         upsert=True,
     )
@@ -15985,21 +16044,44 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     referrer_mode = link.get("referrer_mode", "normal")
 
     # ── 2026-06: Per-visit RUT platform override (HMAC-signed) ────────
-    # The RUT engine may append ?_kx_src=<platform>&_kx_sig=<hmac> to
-    # tell us "for THIS visit only, simulate <platform>" — overriding
-    # the link's static simulate_platform. Verified with HMAC so only
-    # the engine (sharing SECRET_KEY) can request the override.
-    # We strip both params from `url_params` so the offer never sees
-    # the handshake tokens.
+    # The RUT engine may append:
+    #    ?_kx_src=<platform>&_kx_sig=<hmac>
+    #    [&_kx_esp=<esp>&_kx_esp_sig=<hmac>]
+    #    [&_kx_brand=<urlencoded_brand>]
+    # to tell us:
+    #   - "for THIS visit only, simulate <platform>" (overrides link's
+    #     static simulate_platform). Verified with HMAC.
+    #   - For email visits, force a specific ESP so the URL params
+    #     (mc_cid vs _kx vs _hsenc) line up with the engine's chosen
+    #     Referer host. Also verified with HMAC.
+    #   - Optional brand identifier (e.g. "acme") that the params
+    #     generator uses to produce brand-tagged UTMs. Not signed —
+    #     worst-case impact is cosmetic.
+    # We strip all five params from `url_params` so the offer never
+    # sees the handshake tokens.
     try:
-        _kx_src = (url_params or {}).pop("_kx_src", None) if isinstance(url_params, dict) else None
-        _kx_sig = (url_params or {}).pop("_kx_sig", None) if isinstance(url_params, dict) else None
+        _kx_src     = (url_params or {}).pop("_kx_src",     None) if isinstance(url_params, dict) else None
+        _kx_sig     = (url_params or {}).pop("_kx_sig",     None) if isinstance(url_params, dict) else None
+        _kx_esp     = (url_params or {}).pop("_kx_esp",     None) if isinstance(url_params, dict) else None
+        _kx_esp_sig = (url_params or {}).pop("_kx_esp_sig", None) if isinstance(url_params, dict) else None
+        _kx_brand   = (url_params or {}).pop("_kx_brand",   None) if isinstance(url_params, dict) else None
         if _kx_src and _kx_sig and _kx_src_verify(_kx_src, _kx_sig):
             simulate_platform = _kx_src
             # Also drop them from custom_params if echoed there.
             if isinstance(custom_params, dict):
-                custom_params.pop("_kx_src", None)
-                custom_params.pop("_kx_sig", None)
+                for _k in ("_kx_src", "_kx_sig", "_kx_esp", "_kx_esp_sig", "_kx_brand"):
+                    custom_params.pop(_k, None)
+            # Force the chosen ESP for email visits if signature checks.
+            if (_kx_src == "email" and _kx_esp and _kx_esp_sig
+                    and _kx_esp_verify(_kx_src, _kx_esp, _kx_esp_sig)):
+                if not isinstance(custom_params, dict):
+                    custom_params = {}
+                custom_params["__force_esp"] = _kx_esp
+            # Brand label is unsigned — only used for UTM cosmetics.
+            if _kx_brand:
+                if not isinstance(custom_params, dict):
+                    custom_params = {}
+                custom_params["__brand"] = str(_kx_brand)[:64]
     except Exception:
         # Defensive: never let signal handshake bugs break the redirect.
         pass

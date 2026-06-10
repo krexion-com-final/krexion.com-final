@@ -392,6 +392,11 @@ export default function RealUserTrafficPage() {
   const [refererPlatformPool, setRefererPlatformPool] = useState(
     "facebook,tiktok,instagram,google"
   );
+  // 2026-06: Optional brand identifier — when email is in the pool,
+  // tracker tags visits with brand-aware UTMs (utm_source=<brand>_newsletter,
+  // utm_campaign=<brand>_<base>). Helps customers claiming they market
+  // for a specific brand produce consistent brand-labelled email signals.
+  const [refererBrand, setRefererBrand] = useState("");
 
   // Fetch host capabilities ONCE so we render only what works here
   useEffect(() => {
@@ -1189,6 +1194,7 @@ export default function RealUserTrafficPage() {
       fd.append("referer_mode", refererMode || "auto");
       fd.append("referer_value", refererValue || "");
       fd.append("referer_platform_pool", refererPlatformPool || "");
+      fd.append("referer_brand", refererBrand || "");
 
       fd.append("form_fill_enabled", String(formFillEnabled));
       if (formFillEnabled) {
@@ -2379,8 +2385,28 @@ export default function RealUserTrafficPage() {
                       One platform is picked per visit at random. Available: facebook, instagram, tiktok, youtube, twitter, snapchat, pinterest, reddit, linkedin, whatsapp, telegram, discord, google, bing, duckduckgo, yahoo, yandex, <span className="text-emerald-300 font-medium">email</span>.
                     </p>
                     <p className="text-xs text-gray-500 mt-1">
-                      <span className="text-emerald-300">email</span> = email-marketing traffic. Per visit the engine rotates between Mailchimp / SendGrid / Klaviyo / HubSpot / ActiveCampaign / ConvertKit / Constant Contact / generic — each with its own ESP-specific tracking params (<span className="font-mono">mc_cid</span>, <span className="font-mono">_kx</span>, <span className="font-mono">_hsenc</span>…) + standard <span className="font-mono">utm_medium=email</span>. Referer = empty 60% / Gmail-web 25% / Outlook-web 15% (matches real inbox-click distribution).
+                      <span className="text-emerald-300">email</span> = full email-marketing pipeline. Per visit the engine pre-picks an ESP (Mailchimp / SendGrid / Klaviyo / HubSpot / ActiveCampaign / ConvertKit / Constant Contact / generic) and matches the Referer host to that ESP: <span className="font-mono text-zinc-300">35% empty</span> (native mail clients) · <span className="font-mono text-zinc-300">30% ESP click-tracker</span> (e.g. <span className="font-mono">us21.list-manage.com</span> for Mailchimp visits) · <span className="font-mono text-zinc-300">20% Gmail-web</span> · <span className="font-mono text-zinc-300">15% Outlook-web</span>. The URL gets the MATCHING ESP params (<span className="font-mono">mc_cid</span>+<span className="font-mono">mc_eid</span> for Mailchimp, <span className="font-mono">_kx</span> for Klaviyo, <span className="font-mono">_hsenc</span>+<span className="font-mono">_hsmi</span> for HubSpot, …) — so the destination tracker sees a fully consistent Referer↔URL handshake (no leak).
                     </p>
+
+                    {/* Brand identifier — shown only when email is in the pool */}
+                    {refererPlatformPool.toLowerCase().includes("email") && (
+                      <div className="mt-3 p-3 rounded-md bg-zinc-900/60 border border-zinc-700/60">
+                        <Label className="text-zinc-300 text-sm flex items-center gap-2">
+                          <span>Brand Identifier <span className="text-zinc-500 text-xs font-normal">(optional, email visits only)</span></span>
+                        </Label>
+                        <Input
+                          data-testid="rut-referer-brand"
+                          type="text"
+                          value={refererBrand}
+                          onChange={(e) => setRefererBrand(e.target.value.slice(0, 64))}
+                          placeholder="acme   ·   brandname   ·   your-shop"
+                          className="mt-1 bg-zinc-800 border-zinc-700 text-zinc-100"
+                        />
+                        <p className="text-xs text-gray-500 mt-1">
+                          When set, email visits get brand-tagged UTMs: <span className="font-mono text-emerald-300">utm_source=&lt;brand&gt;_newsletter</span> + <span className="font-mono text-emerald-300">utm_campaign=&lt;brand&gt;_jan_2026_promo</span>. Lets a customer who claims "I'm doing email marketing for Brand X" produce consistent brand-labelled signals an advertiser would expect. <span className="text-amber-300">Note:</span> the actual email address of the sender/recipient is <span className="text-amber-300">NEVER exposed</span> in URLs or headers (real ESPs strip it for privacy + GDPR) — this field only affects the public UTM labels.
+                        </p>
+                      </div>
+                    )}
                   </div>
                 )}
 
