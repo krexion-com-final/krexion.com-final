@@ -2336,7 +2336,7 @@ export default function RealUserTrafficPage() {
                 <div className="flex items-start gap-2 text-xs text-emerald-200">
                   <span className="text-emerald-400 text-base leading-none">⚡</span>
                   <span>
-                    <span className="font-semibold text-emerald-300">Auto-sync URL params (signed handshake)</span> — when this is ON, every visit's Referer AND URL params come from the SAME platform automatically. A TikTok-Referer visit gets fresh <span className="font-mono text-emerald-200">ttclid</span>, a Facebook one gets <span className="font-mono text-emerald-200">fbclid + fbc</span>, a Google one gets <span className="font-mono text-emerald-200">gclid + gad_source</span>, Bing → <span className="font-mono text-emerald-200">msclkid</span>, Pinterest → <span className="font-mono text-emerald-200">epik</span>, etc. Modern 2026 ID formats. No link-level config needed. Eliminates the Referer ↔ URL-params mismatch tell that anti-fraud trackers (Voluum / RedTrack / Binom / AppsFlyer) flag.
+                    <span className="font-semibold text-emerald-300">Auto-sync URL params (signed handshake)</span> — when this is ON, every visit's Referer AND URL params come from the SAME platform automatically. A TikTok-Referer visit gets fresh <span className="font-mono text-emerald-200">ttclid</span>, a Facebook one gets <span className="font-mono text-emerald-200">fbclid + fbc</span>, a Google one gets <span className="font-mono text-emerald-200">gclid + gad_source</span>, Bing → <span className="font-mono text-emerald-200">msclkid</span>, Pinterest → <span className="font-mono text-emerald-200">epik</span>, <span className="font-mono text-emerald-200">email</span> → rotating ESP params (<span className="font-mono">mc_cid</span> / <span className="font-mono">_kx</span> / <span className="font-mono">_hsenc</span>) + <span className="font-mono">utm_medium=email</span>, etc. Modern 2026 ID formats. No link-level config needed. Eliminates the Referer ↔ URL-params mismatch tell that anti-fraud trackers (Voluum / RedTrack / Binom / AppsFlyer) flag.
                   </span>
                 </div>
               </div>
@@ -2372,11 +2372,14 @@ export default function RealUserTrafficPage() {
                       type="text"
                       value={refererPlatformPool}
                       onChange={(e) => setRefererPlatformPool(e.target.value.slice(0, 512))}
-                      placeholder="facebook,tiktok,instagram,google,youtube,twitter,snapchat,pinterest,reddit,linkedin,bing"
+                      placeholder="facebook,tiktok,instagram,google,email,youtube,twitter,snapchat,pinterest,reddit,linkedin,bing"
                       className="mt-1 bg-zinc-800 border-zinc-700 text-zinc-100"
                     />
                     <p className="text-xs text-gray-500 mt-1">
-                      One platform is picked per visit at random. Available: facebook, instagram, tiktok, youtube, twitter, snapchat, pinterest, reddit, linkedin, whatsapp, telegram, discord, google, bing, duckduckgo, yahoo, yandex.
+                      One platform is picked per visit at random. Available: facebook, instagram, tiktok, youtube, twitter, snapchat, pinterest, reddit, linkedin, whatsapp, telegram, discord, google, bing, duckduckgo, yahoo, yandex, <span className="text-emerald-300 font-medium">email</span>.
+                    </p>
+                    <p className="text-xs text-gray-500 mt-1">
+                      <span className="text-emerald-300">email</span> = email-marketing traffic. Per visit the engine rotates between Mailchimp / SendGrid / Klaviyo / HubSpot / ActiveCampaign / ConvertKit / Constant Contact / generic — each with its own ESP-specific tracking params (<span className="font-mono">mc_cid</span>, <span className="font-mono">_kx</span>, <span className="font-mono">_hsenc</span>…) + standard <span className="font-mono">utm_medium=email</span>. Referer = empty 60% / Gmail-web 25% / Outlook-web 15% (matches real inbox-click distribution).
                     </p>
                   </div>
                 )}

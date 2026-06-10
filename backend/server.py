@@ -2666,9 +2666,81 @@ def generate_platform_params(platform: str, custom_params: dict = None) -> dict:
         params["utm_medium"] = "cpc"
 
     elif platform == "email":
-        params["utm_source"] = "email"
+        # ────────────────────────────────────────────────────────────
+        # 2026-06 — Realistic email-marketing traffic.
+        # Real emails ALMOST NEVER carry a Referer header (mail clients
+        # strip it for privacy) — the engine handles that side. Here we
+        # focus on the URL params that the tracker actually inspects to
+        # classify "this click came from an email campaign".
+        #
+        # Trackers identify email by:
+        #   • utm_medium=email          (the primary signal)
+        #   • ESP-specific click/subscriber IDs (mc_cid / _kx / _hsenc …)
+        #   • utm_source matching a campaign/list name
+        #
+        # Per-visit randomness: ESP is chosen per click (real marketers
+        # send from a single ESP, but a Krexion job often simulates a
+        # mixed inbox audience, so rotation is *more* realistic for a
+        # multi-IP / multi-UA campaign than picking one ESP for ALL
+        # 1000 visits).
+        # ────────────────────────────────────────────────────────────
+        esp = random.choice([
+            # Weighted by 2025-2026 market share (Litmus + EmailToolTester
+            # reports). Mailchimp ~28% retail, Klaviyo ~16% ecom-heavy,
+            # SendGrid ~12% transactional, HubSpot ~8% B2B, others tail.
+            "mailchimp", "mailchimp", "mailchimp",
+            "klaviyo",   "klaviyo",
+            "sendgrid",  "sendgrid",
+            "hubspot",
+            "activecampaign",
+            "convertkit",
+            "constantcontact",
+            "generic",
+        ])
+        if esp == "mailchimp":
+            # Real Mailchimp click URLs: ?mc_cid=abc123 + &mc_eid=xyz456
+            params["mc_cid"] = b64url_id(10).lower()
+            params["mc_eid"] = b64url_id(10).lower()
+        elif esp == "sendgrid":
+            params["utm_id"] = f"sg_{b64url_id(22)}"
+        elif esp == "klaviyo":
+            # Klaviyo `_kx` is base64url 40-60 chars (encrypted subscriber id)
+            params["_kx"] = b64url_id(random.randint(40, 60))
+        elif esp == "hubspot":
+            params["_hsenc"] = b64url_id(random.randint(40, 60))
+            params["_hsmi"]  = str(random.randint(10**7, 10**9))
+        elif esp == "activecampaign":
+            params["vgo_ee"] = b64url_id(random.randint(24, 40))
+        elif esp == "convertkit":
+            params["ck_subscriber_id"] = str(random.randint(10**6, 10**8))
+        elif esp == "constantcontact":
+            params["ssp"] = b64url_id(random.randint(28, 40))
+        # else "generic" → UTMs only (still classifies as email)
+
+        # Standard UTMs every email link carries
+        params["utm_source"] = random.choice([
+            "newsletter", "email", "mailing_list", "weekly_digest",
+            "subscribers", esp,
+        ])
         params["utm_medium"] = "email"
-        params["utm_campaign"] = "newsletter"
+        params["utm_campaign"] = random.choice([
+            "jan_2026_promo", "weekly_digest", "exclusive_offer",
+            "welcome_series", "abandoned_cart", "winback_q1",
+            "new_product_launch", "vip_only", "limited_time",
+            "flash_sale", "subscriber_perks", "monthly_recap",
+        ])
+        params["utm_content"] = random.choice([
+            "cta_top", "cta_bottom", "header_link",
+            "footer_link", "main_image", "secondary_button",
+            "text_link_1", "hero_button", "product_card_3",
+        ])
+        if random.random() < 0.40:
+            # 40% of marketers also set utm_term (audience segment)
+            params["utm_term"] = random.choice([
+                "subscribers_a", "vip_segment", "us_users",
+                "high_engagement", "new_signups", "win_back",
+                "premium_tier", "active_30d",
+            ])
 
     elif platform == "sms":
         params["utm_source"] = "sms"

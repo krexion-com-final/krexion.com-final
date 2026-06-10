@@ -731,6 +731,12 @@ _PLATFORM_REFERER_POOL: Dict[str, str] = {
     "duckduckgo": "https://duckduckgo.com/",
     "yahoo":      "https://search.yahoo.com/",
     "yandex":     "https://yandex.com/",
+    # ── 2026-06: Email marketing source ──────────────────────────
+    # Pool value here is just a placeholder — real email visits
+    # almost never carry a Referer (mail clients strip it). The
+    # resolver below special-cases "email" to either send no Referer
+    # (most common) or a webmail referer (Gmail / Outlook web).
+    "email":      "",
 }
 
 
@@ -801,6 +807,21 @@ def _resolve_visit_referer(ua: str, cfg: Optional[Dict[str, Any]]) -> Tuple[str,
                 ref = _get_referer_from_ua(ua)
                 return ref, _platform_from_referer_url(ref)
             chosen = random.choice(keys)
+            # ── 2026-06: Email source special case ──────────────────
+            # Real email-marketing clicks almost never carry a Referer
+            # (mail clients strip it for privacy). ~25% come from Gmail
+            # web, ~15% from Outlook web, the rest from native mail
+            # clients with empty Referer. We mirror that distribution
+            # per visit so a 1000-visit campaign produces the same
+            # Referer-spread as a real email blast.
+            if chosen == "email":
+                roll = random.random()
+                if roll < 0.60:
+                    return "", "email"
+                elif roll < 0.85:
+                    return "https://mail.google.com/", "email"
+                else:
+                    return "https://outlook.live.com/", "email"
             # Normalise "x" → "twitter" for the signal so the tracker's
             # generate_platform_params() finds the right branch.
             signal = "twitter" if chosen == "x" else chosen
@@ -819,6 +840,26 @@ def _resolve_visit_referer(ua: str, cfg: Optional[Dict[str, Any]]) -> Tuple[str,
 # domains (the user's own blog, a CDN, …) return "" and we don't inject
 # spurious fbclid/gclid.
 _REFERER_HOST_TO_PLATFORM: Tuple[Tuple[str, str], ...] = (
+    # ── 2026-06: Email-marketing referers checked FIRST so webmail
+    # hostnames like `mail.google.com` don't get caught by the general
+    # `google.` rule below. Webmail + ESP click-tracking domains map
+    # to the "email" platform → tracker injects mc_cid / _kx /
+    # utm_medium=email instead of google's gclid.
+    ("mail.google.com",     "email"),
+    ("outlook.live.com",    "email"),
+    ("outlook.office.com",  "email"),
+    ("mail.yahoo.com",      "email"),
+    ("mail.proton.me",      "email"),
+    ("mailchi.mp",          "email"),     # Mailchimp short links
+    ("list-manage.com",     "email"),     # Mailchimp click-tracking host pattern
+    ("email.sendgrid.com",  "email"),
+    ("links.email.com",     "email"),
+    ("klaviyomail.com",     "email"),
+    ("activehosted.com",    "email"),     # ActiveCampaign tracking
+    ("hs-sites.com",        "email"),     # HubSpot
+    ("convertkit-mail",     "email"),     # ConvertKit subdomains
+
+    # ── Social / search engine referers ──────────────────────────
     ("facebook.com",  "facebook"),
     ("fb.com",        "facebook"),
     ("fb.watch",      "facebook"),
