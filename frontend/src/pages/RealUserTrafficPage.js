@@ -190,6 +190,143 @@ const DEVICE_MIX_LABELS = {
 };
 
 
+// ──────────────────────────────────────────────────────────────────────
+// 2026-06-11: Reusable multi-select with per-key % sliders.
+// Used by Pro Mode for the platform-mix AND the email-source-mix.
+// Customer ticks the keys they want, adjusts % via slider. Total auto-
+// normalises (engine handles unequal sums fine — weights are relative).
+// ──────────────────────────────────────────────────────────────────────
+function ReferrerProMultiSelect({ title, description, keys, weights, onChange, accent = "fuchsia", testIdPrefix }) {
+  // Total for the live indicator
+  const total = Object.values(weights || {}).reduce((s, w) => s + (parseFloat(w) || 0), 0);
+  const accentClasses = {
+    fuchsia: { ring: "border-fuchsia-700/40", bg: "bg-fuchsia-950/20", text: "text-fuchsia-300", slider: "accent-fuchsia-500" },
+    emerald: { ring: "border-emerald-700/40", bg: "bg-emerald-950/20", text: "text-emerald-300", slider: "accent-emerald-500" },
+    cyan:    { ring: "border-cyan-700/40",    bg: "bg-cyan-950/20",    text: "text-cyan-300",    slider: "accent-cyan-500" },
+  }[accent] || { ring: "border-fuchsia-700/40", bg: "bg-fuchsia-950/20", text: "text-fuchsia-300", slider: "accent-fuchsia-500" };
+
+  const toggle = (k) => {
+    const next = { ...(weights || {}) };
+    if (next[k] === undefined) {
+      // Default new entry to remaining-balance or 10
+      const remaining = Math.max(0, 100 - total);
+      next[k] = remaining > 0 ? Math.min(remaining, 20) : 10;
+    } else {
+      delete next[k];
+    }
+    onChange(next);
+  };
+  const setWeight = (k, w) => {
+    const next = { ...(weights || {}) };
+    next[k] = Math.max(0, Math.min(100, parseFloat(w) || 0));
+    if (next[k] === 0) delete next[k];
+    onChange(next);
+  };
+  const resetEqual = () => {
+    const active = Object.keys(weights || {});
+    if (active.length === 0) return;
+    const each = Math.round(100 / active.length);
+    const next = {};
+    active.forEach((k, i) => {
+      next[k] = i === active.length - 1 ? 100 - each * (active.length - 1) : each;
+    });
+    onChange(next);
+  };
+  const clearAll = () => onChange({});
+
+  return (
+    <div className={`p-3 rounded-md border ${accentClasses.ring} ${accentClasses.bg}`}>
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <div className={`text-sm font-semibold ${accentClasses.text}`}>{title}</div>
+          {description && (
+            <div className="text-[11px] text-zinc-400 mt-0.5">{description}</div>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-zinc-400">
+            Total: <span className={total >= 90 && total <= 110 ? "text-emerald-300 font-semibold" : "text-amber-400"}>{total.toFixed(0)}%</span>
+          </span>
+          <button
+            data-testid={`${testIdPrefix}-reset`}
+            type="button"
+            onClick={resetEqual}
+            className="text-[10px] px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 hover:bg-zinc-700"
+          >
+            Equal
+          </button>
+          <button
+            data-testid={`${testIdPrefix}-clear`}
+            type="button"
+            onClick={clearAll}
+            className="text-[10px] px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 hover:bg-zinc-700"
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+
+      {/* Chip selector */}
+      <div className="flex flex-wrap gap-1.5 mb-3">
+        {(keys || []).map((k) => {
+          const active = weights && weights[k] !== undefined;
+          return (
+            <button
+              key={k}
+              data-testid={`${testIdPrefix}-chip-${k}`}
+              type="button"
+              onClick={() => toggle(k)}
+              className={`text-[11px] px-2.5 py-1 rounded-full border transition ${
+                active
+                  ? `${accentClasses.text} border-current bg-zinc-900/80`
+                  : "text-zinc-500 border-zinc-700 bg-zinc-900/40 hover:text-zinc-300"
+              }`}
+            >
+              {k}{active ? ` (${(weights[k] || 0).toFixed(0)}%)` : ""}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Sliders for active keys */}
+      {Object.keys(weights || {}).length > 0 && (
+        <div className="space-y-1.5">
+          {Object.entries(weights).map(([k, w]) => (
+            <div key={k} className="flex items-center gap-2">
+              <span className="w-24 text-xs text-zinc-300 truncate" title={k}>{k}</span>
+              <input
+                data-testid={`${testIdPrefix}-slider-${k}`}
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={w}
+                onChange={(e) => setWeight(k, e.target.value)}
+                className={`flex-1 ${accentClasses.slider}`}
+              />
+              <input
+                data-testid={`${testIdPrefix}-input-${k}`}
+                type="number"
+                min={0}
+                max={100}
+                value={w}
+                onChange={(e) => setWeight(k, e.target.value)}
+                className="w-14 bg-zinc-800 border border-zinc-700 text-zinc-100 rounded px-1 py-0.5 text-xs text-right"
+              />
+              <span className="text-xs text-zinc-500">%</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {Object.keys(weights || {}).length === 0 && (
+        <div className="text-[11px] text-zinc-500 italic">No keys selected — click chips above to add. Engine will fall back to UA-derived behaviour for this visit.</div>
+      )}
+    </div>
+  );
+}
+
+
 export default function RealUserTrafficPage() {
   // Target
   const [links, setLinks] = useState([]);
@@ -397,6 +534,61 @@ export default function RealUserTrafficPage() {
   // utm_campaign=<brand>_<base>). Helps customers claiming they market
   // for a specific brand produce consistent brand-labelled email signals.
   const [refererBrand, setRefererBrand] = useState("");
+
+  // ── 2026-06-11: Referrer Pro-Mode (weighted multi-select pools) ──
+  // Pro mode replaces the comma-list with a multi-select + per-platform
+  // % slider UI. Customer fully controls traffic mix. Off by default →
+  // backend uses legacy comma-list behaviour exactly as before.
+  const [refererProMode, setRefererProMode] = useState(false);
+  // Platform weights as an object: { facebook: 35, tiktok: 25, … }
+  // Empty = no platform picked = legacy fallback.
+  const [refererPlatformWeights, setRefererPlatformWeights] = useState({
+    facebook: 35, tiktok: 25, instagram: 15, google: 15, email: 10,
+  });
+  // Email-bucket weights — empty / Gmail / Outlook / each ESP
+  const [refererEmailWeights, setRefererEmailWeights] = useState({});
+  // Realism toggles (default ON — modern bot-detection killer)
+  const [refererSocialWrapper, setRefererSocialWrapper] = useState(true);
+  const [refererInappDeep, setRefererInappDeep] = useState(true);
+  const [refererStripSearchPath, setRefererStripSearchPath] = useState(true);
+  const [refererNetworkClickChain, setRefererNetworkClickChain] = useState(false);
+  // Search-engine sub-options for the search-Referer rotation
+  const [refererSearchEngine, setRefererSearchEngine] = useState("google");
+  const [refererSearchKeywords, setRefererSearchKeywords] = useState("");
+  // Defaults loaded from /api/referrer-pro/defaults (platforms list, ESP list, etc.)
+  const [refererProDefaults, setRefererProDefaults] = useState({
+    platforms: [], email_buckets: [], email_default_weights: {},
+    search_engines: [], countries: [], intent_mixes: [],
+  });
+  // AI keyword generator state
+  const [aiKwOffer, setAiKwOffer] = useState("");
+  const [aiKwVertical, setAiKwVertical] = useState("");
+  const [aiKwCountry, setAiKwCountry] = useState("us");
+  const [aiKwIntent, setAiKwIntent] = useState("balanced");
+  const [aiKwCount, setAiKwCount] = useState(15);
+  const [aiKwLoading, setAiKwLoading] = useState(false);
+  const [aiKwError, setAiKwError] = useState("");
+
+  // Load referrer-pro defaults ONCE so the multi-select UI can render
+  // the list of available platforms / ESPs / countries / search engines.
+  useEffect(() => {
+    const token = localStorage.getItem("token");
+    fetch(`${process.env.REACT_APP_BACKEND_URL}/api/referrer-pro/defaults`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        if (d && Array.isArray(d.platforms)) {
+          setRefererProDefaults(d);
+          // Seed email weights to backend defaults the first time
+          if (Object.keys(refererEmailWeights).length === 0 && d.email_default_weights) {
+            setRefererEmailWeights({ ...d.email_default_weights });
+          }
+        }
+      })
+      .catch(() => { /* silent — UI keeps its hard-coded fallback */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Fetch host capabilities ONCE so we render only what works here
   useEffect(() => {
@@ -1195,6 +1387,27 @@ export default function RealUserTrafficPage() {
       fd.append("referer_value", refererValue || "");
       fd.append("referer_platform_pool", refererPlatformPool || "");
       fd.append("referer_brand", refererBrand || "");
+
+      // ── 2026-06-11: Referrer Pro-Mode (weighted, realism layers) ──
+      fd.append("referer_pro_mode", String(!!refererProMode));
+      // JSON-serialise weight dicts only when non-empty (saves bandwidth
+      // + keeps backend in legacy mode when user never touched the UI).
+      if (refererProMode && refererPlatformWeights && Object.keys(refererPlatformWeights).length > 0) {
+        fd.append("referer_platform_weights", JSON.stringify(refererPlatformWeights));
+      } else {
+        fd.append("referer_platform_weights", "");
+      }
+      if (refererProMode && refererEmailWeights && Object.keys(refererEmailWeights).length > 0) {
+        fd.append("referer_email_weights", JSON.stringify(refererEmailWeights));
+      } else {
+        fd.append("referer_email_weights", "");
+      }
+      fd.append("referer_social_wrapper", String(!!refererSocialWrapper));
+      fd.append("referer_inapp_deep", String(!!refererInappDeep));
+      fd.append("referer_search_engine", refererSearchEngine || "google");
+      fd.append("referer_search_keywords", refererSearchKeywords || "");
+      fd.append("referer_strip_search_path", String(!!refererStripSearchPath));
+      fd.append("referer_network_click_chain", String(!!refererNetworkClickChain));
 
       fd.append("form_fill_enabled", String(formFillEnabled));
       if (formFillEnabled) {
@@ -2368,9 +2581,31 @@ export default function RealUserTrafficPage() {
                   <p className="text-xs text-gray-500 mt-1">
                     Mode controls how each visit's Referer header is picked.
                   </p>
+
+                  {/* 2026-06-11: PRO-MODE master toggle */}
+                  <div className="mt-4 p-3 rounded-md bg-gradient-to-r from-fuchsia-900/30 to-amber-900/20 border border-fuchsia-700/40">
+                    <label className="flex items-center justify-between gap-2 cursor-pointer select-none">
+                      <span className="flex items-center gap-2">
+                        <span className="text-fuchsia-300 text-sm font-semibold">⚡ Pro Mode</span>
+                        <span className="text-[10px] text-zinc-400 px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-700">
+                          Weighted + 12 realism layers
+                        </span>
+                      </span>
+                      <input
+                        data-testid="rut-referer-pro-mode"
+                        type="checkbox"
+                        checked={refererProMode}
+                        onChange={(e) => setRefererProMode(e.target.checked)}
+                        className="w-4 h-4 rounded accent-fuchsia-500"
+                      />
+                    </label>
+                    <p className="text-[11px] text-zinc-400 mt-1">
+                      Multi-select platforms with <span className="text-fuchsia-300">% sliders</span>, weighted ESP/webmail mix, geo-localized Google/Bing/Yandex, social link wrappers (<span className="font-mono text-zinc-300">l.facebook.com</span>/<span className="font-mono text-zinc-300">t.co</span>/<span className="font-mono text-zinc-300">lnkd.in</span>), Sec-Fetch-* header sync, mobile in-app deep paths.
+                    </p>
+                  </div>
                 </div>
 
-                {refererMode === "platform_pool" && (
+                {refererMode === "platform_pool" && !refererProMode && (
                   <div className="md:col-span-2">
                     <Label className="text-zinc-300 text-sm">Platform Pool (comma-separated)</Label>
                     <Input
@@ -2385,7 +2620,7 @@ export default function RealUserTrafficPage() {
                       One platform is picked per visit at random. Available: facebook, instagram, tiktok, youtube, twitter, snapchat, pinterest, reddit, linkedin, whatsapp, telegram, discord, google, bing, duckduckgo, yahoo, yandex, <span className="text-emerald-300 font-medium">email</span>.
                     </p>
                     <p className="text-xs text-gray-500 mt-1">
-                      <span className="text-emerald-300">email</span> = full email-marketing pipeline. Per visit the engine pre-picks an ESP (Mailchimp / SendGrid / Klaviyo / HubSpot / ActiveCampaign / ConvertKit / Constant Contact / generic) and matches the Referer host to that ESP: <span className="font-mono text-zinc-300">35% empty</span> (native mail clients) · <span className="font-mono text-zinc-300">30% ESP click-tracker</span> (e.g. <span className="font-mono">us21.list-manage.com</span> for Mailchimp visits) · <span className="font-mono text-zinc-300">20% Gmail-web</span> · <span className="font-mono text-zinc-300">15% Outlook-web</span>. The URL gets the MATCHING ESP params (<span className="font-mono">mc_cid</span>+<span className="font-mono">mc_eid</span> for Mailchimp, <span className="font-mono">_kx</span> for Klaviyo, <span className="font-mono">_hsenc</span>+<span className="font-mono">_hsmi</span> for HubSpot, …) — so the destination tracker sees a fully consistent Referer↔URL handshake (no leak).
+                      Want full % control + ESP mix? Turn on <span className="text-fuchsia-300 font-medium">Pro Mode</span> for the multi-select UI.
                     </p>
 
                     {/* Brand identifier — shown only when email is in the pool */}
@@ -2403,7 +2638,235 @@ export default function RealUserTrafficPage() {
                           className="mt-1 bg-zinc-800 border-zinc-700 text-zinc-100"
                         />
                         <p className="text-xs text-gray-500 mt-1">
-                          When set, email visits get brand-tagged UTMs: <span className="font-mono text-emerald-300">utm_source=&lt;brand&gt;_newsletter</span> + <span className="font-mono text-emerald-300">utm_campaign=&lt;brand&gt;_jan_2026_promo</span>. Lets a customer who claims "I'm doing email marketing for Brand X" produce consistent brand-labelled signals an advertiser would expect. <span className="text-amber-300">Note:</span> the actual email address of the sender/recipient is <span className="text-amber-300">NEVER exposed</span> in URLs or headers (real ESPs strip it for privacy + GDPR) — this field only affects the public UTM labels.
+                          When set, email visits get brand-tagged UTMs: <span className="font-mono text-emerald-300">utm_source=&lt;brand&gt;_newsletter</span>.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* 2026-06-11: PRO-MODE multi-select + sliders */}
+                {refererProMode && (
+                  <div className="md:col-span-2 space-y-4">
+                    <ReferrerProMultiSelect
+                      title="Platform Mix"
+                      description="Tick platforms aap chahte ho, % slider se traffic share define karo. Total auto-normalize."
+                      keys={(refererProDefaults.platforms && refererProDefaults.platforms.length > 0)
+                        ? refererProDefaults.platforms
+                        : ["facebook","instagram","tiktok","youtube","twitter","snapchat","pinterest","reddit","linkedin","google","bing","duckduckgo","yahoo","yandex","email","whatsapp","telegram","discord"]}
+                      weights={refererPlatformWeights}
+                      onChange={setRefererPlatformWeights}
+                      accent="fuchsia"
+                      testIdPrefix="rut-pro-platform"
+                    />
+
+                    {/* Email bucket weights — only when "email" is in the platform mix */}
+                    {Object.keys(refererPlatformWeights).includes("email") && refererPlatformWeights.email > 0 && (
+                      <ReferrerProMultiSelect
+                        title="Email Source Mix (ESP + Webmail)"
+                        description="Jab platform pool email pick kare, ye sub-mix decide karta hai Referer empty rahe / Gmail / Outlook / kaunsa ESP click-tracker."
+                        keys={(refererProDefaults.email_buckets && refererProDefaults.email_buckets.length > 0)
+                          ? refererProDefaults.email_buckets
+                          : ["empty","gmail","outlook","yahoo","proton","mailchimp","klaviyo","sendgrid","hubspot","activecampaign","convertkit","constantcontact","mailerlite","brevo","aweber","drip","iterable","marketo","pardot"]}
+                        weights={refererEmailWeights}
+                        onChange={setRefererEmailWeights}
+                        accent="emerald"
+                        testIdPrefix="rut-pro-email"
+                      />
+                    )}
+
+                    {/* Search-engine sub-options */}
+                    {(Object.keys(refererPlatformWeights).some((k) =>
+                      ["google", "bing", "yahoo", "duckduckgo", "yandex"].includes(k)
+                    )) && (
+                      <div className="p-3 rounded-md bg-cyan-950/20 border border-cyan-700/40">
+                        <div className="flex items-center gap-2 mb-2">
+                          <span className="text-cyan-300 text-sm font-semibold">🔎 Search Engine Settings</span>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <div>
+                            <Label className="text-zinc-300 text-xs">Strip URL path (Real Chrome Referrer-Policy)</Label>
+                            <label className="flex items-center gap-2 mt-1 cursor-pointer">
+                              <input
+                                data-testid="rut-pro-strip-search-path"
+                                type="checkbox"
+                                checked={refererStripSearchPath}
+                                onChange={(e) => setRefererStripSearchPath(e.target.checked)}
+                                className="w-4 h-4 rounded accent-cyan-500"
+                              />
+                              <span className="text-xs text-zinc-400">Recommended ON — modern Chrome strips path on cross-site nav.</span>
+                            </label>
+                          </div>
+                          <div>
+                            <Label className="text-zinc-300 text-xs">Keyword Pool (per visit random)</Label>
+                            <textarea
+                              data-testid="rut-pro-search-keywords"
+                              value={refererSearchKeywords}
+                              onChange={(e) => setRefererSearchKeywords(e.target.value.slice(0, 8000))}
+                              rows={3}
+                              placeholder={"best dating app 2026\nflexfit review\nfree dating sites"}
+                              className="mt-1 w-full bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md px-3 py-2 text-xs font-mono"
+                            />
+                            <p className="text-[11px] text-gray-500 mt-1">
+                              Per visit, the engine picks one keyword and builds the SERP URL (geo-localized to proxy country: <span className="font-mono">google.de</span>, <span className="font-mono">.fr</span>, <span className="font-mono">.co.uk</span>, etc.).
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* AI keyword generator */}
+                        <div className="mt-3 p-3 rounded-md bg-zinc-950/60 border border-zinc-800">
+                          <div className="text-xs text-amber-300 font-semibold mb-2">✨ AI Keyword Generator (Claude Sonnet 4.6)</div>
+                          <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+                            <input
+                              data-testid="rut-pro-aikw-offer"
+                              type="text"
+                              value={aiKwOffer}
+                              onChange={(e) => setAiKwOffer(e.target.value.slice(0, 200))}
+                              placeholder="Offer name (e.g. FlexFit Dating)"
+                              className="bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md px-2 py-1 text-xs"
+                            />
+                            <input
+                              data-testid="rut-pro-aikw-vertical"
+                              type="text"
+                              value={aiKwVertical}
+                              onChange={(e) => setAiKwVertical(e.target.value.slice(0, 120))}
+                              placeholder="Vertical (dating, finance, …)"
+                              className="bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md px-2 py-1 text-xs"
+                            />
+                            <select
+                              data-testid="rut-pro-aikw-country"
+                              value={aiKwCountry}
+                              onChange={(e) => setAiKwCountry(e.target.value)}
+                              className="bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md px-2 py-1 text-xs"
+                            >
+                              {(refererProDefaults.countries || ["US"]).map((cc) => (
+                                <option key={cc} value={cc.toLowerCase()}>{cc}</option>
+                              ))}
+                            </select>
+                            <select
+                              data-testid="rut-pro-aikw-intent"
+                              value={aiKwIntent}
+                              onChange={(e) => setAiKwIntent(e.target.value)}
+                              className="bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md px-2 py-1 text-xs"
+                            >
+                              {(refererProDefaults.intent_mixes || ["balanced", "informational", "commercial", "branded"]).map((m) => (
+                                <option key={m} value={m}>{m}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="flex items-center gap-2 mt-2">
+                            <label className="text-[11px] text-zinc-400">Count:</label>
+                            <input
+                              data-testid="rut-pro-aikw-count"
+                              type="number"
+                              min={5}
+                              max={40}
+                              value={aiKwCount}
+                              onChange={(e) => setAiKwCount(Math.max(5, Math.min(40, parseInt(e.target.value) || 15)))}
+                              className="w-16 bg-zinc-800 border border-zinc-700 text-zinc-100 rounded-md px-2 py-1 text-xs"
+                            />
+                            <button
+                              data-testid="rut-pro-aikw-generate"
+                              type="button"
+                              disabled={aiKwLoading || !aiKwOffer.trim()}
+                              onClick={async () => {
+                                setAiKwError("");
+                                setAiKwLoading(true);
+                                try {
+                                  const token = localStorage.getItem("token");
+                                  const r = await fetch(`${process.env.REACT_APP_BACKEND_URL}/api/referrer-pro/generate-keywords`, {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+                                    body: JSON.stringify({
+                                      offer_name: aiKwOffer.trim(),
+                                      vertical: aiKwVertical.trim(),
+                                      country: aiKwCountry,
+                                      language: "en",
+                                      count: aiKwCount,
+                                      intent_mix: aiKwIntent,
+                                    }),
+                                  });
+                                  if (!r.ok) {
+                                    const t = await r.text();
+                                    throw new Error(t || `HTTP ${r.status}`);
+                                  }
+                                  const data = await r.json();
+                                  const newKws = (data.keywords || []).join("\n");
+                                  setRefererSearchKeywords((prev) => prev ? `${prev}\n${newKws}` : newKws);
+                                } catch (err) {
+                                  setAiKwError(String(err.message || err));
+                                } finally {
+                                  setAiKwLoading(false);
+                                }
+                              }}
+                              className="px-3 py-1 rounded-md text-xs font-medium bg-amber-600/80 hover:bg-amber-600 disabled:bg-zinc-700 disabled:cursor-not-allowed text-white"
+                            >
+                              {aiKwLoading ? "Generating…" : "Generate"}
+                            </button>
+                            {aiKwError && (
+                              <span className="text-xs text-red-400 truncate" title={aiKwError}>{aiKwError.slice(0, 80)}</span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Realism toggles */}
+                    <div className="p-3 rounded-md bg-zinc-900/60 border border-zinc-700/60">
+                      <div className="text-xs text-fuchsia-300 font-semibold mb-2">🎚️ Realism Layers</div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                        <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer">
+                          <input
+                            data-testid="rut-pro-social-wrapper"
+                            type="checkbox"
+                            checked={refererSocialWrapper}
+                            onChange={(e) => setRefererSocialWrapper(e.target.checked)}
+                            className="w-4 h-4 rounded accent-fuchsia-500"
+                          />
+                          <span>Social link wrappers <span className="text-zinc-500">(l.facebook.com / t.co / lnkd.in)</span></span>
+                        </label>
+                        <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer">
+                          <input
+                            data-testid="rut-pro-inapp-deep"
+                            type="checkbox"
+                            checked={refererInappDeep}
+                            onChange={(e) => setRefererInappDeep(e.target.checked)}
+                            className="w-4 h-4 rounded accent-fuchsia-500"
+                          />
+                          <span>Mobile in-app deep paths <span className="text-zinc-500">(tiktok video/post URLs)</span></span>
+                        </label>
+                        <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer">
+                          <input
+                            data-testid="rut-pro-network-chain"
+                            type="checkbox"
+                            checked={refererNetworkClickChain}
+                            onChange={(e) => setRefererNetworkClickChain(e.target.checked)}
+                            className="w-4 h-4 rounded accent-fuchsia-500"
+                          />
+                          <span>Network click-redirect chain <span className="text-zinc-500">(one extra 302 hop)</span></span>
+                        </label>
+                        <div className="text-xs text-zinc-400 leading-relaxed">
+                          <span className="text-fuchsia-300">Sec-Fetch-*</span> headers + UTM source/medium variation are <span className="text-emerald-300">always ON</span> in Pro Mode (no off-switch needed — they're 100% safe additive signals).
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Brand identifier */}
+                    {Object.keys(refererPlatformWeights).includes("email") && refererPlatformWeights.email > 0 && (
+                      <div className="p-3 rounded-md bg-zinc-900/60 border border-zinc-700/60">
+                        <Label className="text-zinc-300 text-sm flex items-center gap-2">
+                          <span>Brand Identifier <span className="text-zinc-500 text-xs font-normal">(optional, email visits only)</span></span>
+                        </Label>
+                        <Input
+                          data-testid="rut-referer-brand"
+                          type="text"
+                          value={refererBrand}
+                          onChange={(e) => setRefererBrand(e.target.value.slice(0, 64))}
+                          placeholder="acme   ·   brandname   ·   your-shop"
+                          className="mt-1 bg-zinc-800 border-zinc-700 text-zinc-100"
+                        />
+                        <p className="text-xs text-gray-500 mt-1">
+                          Sets <span className="font-mono text-emerald-300">utm_source=&lt;brand&gt;_newsletter</span> on email visits. Real address never exposed.
                         </p>
                       </div>
                     )}

@@ -7262,6 +7262,17 @@ async def _rut_prepare_and_run(
             referer_value=str(params.get("referer_value") or ""),
             referer_platform_pool=str(params.get("referer_platform_pool") or ""),
             referer_brand=str(params.get("referer_brand") or ""),
+            # 2026-06-11 — Referrer Pro-Mode wiring (weighted pools,
+            # geo search, social wrappers, in-app deep paths, etc.)
+            referer_pro_mode=bool(params.get("referer_pro_mode")),
+            referer_platform_weights=str(params.get("referer_platform_weights") or ""),
+            referer_email_weights=str(params.get("referer_email_weights") or ""),
+            referer_social_wrapper=bool(params.get("referer_social_wrapper", True)),
+            referer_inapp_deep=bool(params.get("referer_inapp_deep", True)),
+            referer_search_engine=str(params.get("referer_search_engine") or "google"),
+            referer_search_keywords=str(params.get("referer_search_keywords") or ""),
+            referer_strip_search_path=bool(params.get("referer_strip_search_path", True)),
+            referer_network_click_chain=bool(params.get("referer_network_click_chain", False)),
         )
     except Exception as e:  # noqa: BLE001
         logger.exception(f"_rut_prepare_and_run crashed for job {job_id}: {e}")
@@ -7523,6 +7534,16 @@ async def rut_create_job(
     # customer claiming "I am Brand X's marketing" produces consistent
     # brand-labelled signals — without leaking any actual email address.
     referer_brand: str = Form(""),
+    # ── 2026-06-11: Referrer Pro-Mode (weighted pools + realism layers)
+    referer_pro_mode: bool = Form(False),
+    referer_platform_weights: str = Form(""),     # JSON dict: {"facebook":40,"tiktok":30}
+    referer_email_weights: str = Form(""),        # JSON dict: {"empty":35,"gmail":20,...}
+    referer_social_wrapper: bool = Form(True),    # l.facebook.com / t.co / lnkd.in / …
+    referer_inapp_deep: bool = Form(True),        # Mobile in-app deep paths
+    referer_search_engine: str = Form("google"),  # google/bing/yahoo/duckduckgo/yandex/youtube
+    referer_search_keywords: str = Form(""),      # Newline-separated keyword pool
+    referer_strip_search_path: bool = Form(True), # Real Chrome Referrer-Policy
+    referer_network_click_chain: bool = Form(False),  # One optional 302 hop
     user: dict = Depends(get_current_user_with_fresh_data),
     _cloud_gate: bool = Depends(require_local_mode),
 ):
@@ -7756,6 +7777,16 @@ async def rut_create_job(
         "referer_value": (referer_value or "")[:8000],          # newline-separated lists
         "referer_platform_pool": (referer_platform_pool or "")[:512],
         "referer_brand": (referer_brand or "")[:64],
+        # 2026-06-11 — Referrer Pro-Mode (weighted, realism layers)
+        "referer_pro_mode": bool(referer_pro_mode),
+        "referer_platform_weights": (referer_platform_weights or "")[:4096],
+        "referer_email_weights": (referer_email_weights or "")[:4096],
+        "referer_social_wrapper": bool(referer_social_wrapper),
+        "referer_inapp_deep": bool(referer_inapp_deep),
+        "referer_search_engine": (referer_search_engine or "google").strip().lower()[:24],
+        "referer_search_keywords": (referer_search_keywords or "")[:8000],
+        "referer_strip_search_path": bool(referer_strip_search_path),
+        "referer_network_click_chain": bool(referer_network_click_chain),
     }
     # A job is auto-resumable on backend restart only if it has no in-memory
     # bytes attached (Mongo can't store huge UploadFile blobs efficiently
@@ -7867,6 +7898,16 @@ async def rut_create_job(
             "referer_value": (referer_value or "")[:8000],
             "referer_platform_pool": (referer_platform_pool or "")[:512],
             "referer_brand": (referer_brand or "")[:64],
+            # 2026-06-11 — Referrer Pro-Mode (persisted)
+            "referer_pro_mode": bool(referer_pro_mode),
+            "referer_platform_weights": (referer_platform_weights or "")[:4096],
+            "referer_email_weights": (referer_email_weights or "")[:4096],
+            "referer_social_wrapper": bool(referer_social_wrapper),
+            "referer_inapp_deep": bool(referer_inapp_deep),
+            "referer_search_engine": (referer_search_engine or "google").strip().lower()[:24],
+            "referer_search_keywords": (referer_search_keywords or "")[:8000],
+            "referer_strip_search_path": bool(referer_strip_search_path),
+            "referer_network_click_chain": bool(referer_network_click_chain),
         }},
         upsert=True,
     )
@@ -18655,6 +18696,17 @@ async def vr_lint_steps(req: VRLintStepsReq, user: dict = Depends(get_current_us
 
 
 app.include_router(api_router)
+
+# ─────────────────────────────────────────────────────────────────────
+# 2026-06-11: Referrer Pro module (weighted pools + AI keyword gen)
+# ─────────────────────────────────────────────────────────────────────
+try:
+    from referrer_pro_api import router as _refpro_router, bind_deps as _refpro_bind
+    _refpro_bind(get_current_user=get_current_user)
+    app.include_router(_refpro_router)
+    logger.info("Referrer Pro module loaded — /api/referrer-pro/*")
+except Exception as _refpro_err:  # noqa: BLE001
+    logger.error(f"Referrer Pro module failed to load: {_refpro_err}")
 
 # ─────────────────────────────────────────────────────────────────────
 # CPI Module (Cost-Per-Install orchestrator)

@@ -830,29 +830,28 @@ def _resolve_email_visit(brand: str) -> Tuple[str, str, str]:
     return ref, "email", esp
 
 
-def _resolve_visit_referer(ua: str, cfg: Optional[Dict[str, Any]]) -> Tuple[str, str, str]:
-    """Pick the (Referer URL, platform signal, esp signal) for ONE visit.
+def _resolve_visit_referer(ua: str, cfg: Optional[Dict[str, Any]]) -> Tuple[str, str, str, Dict[str, Any]]:
+    """Pick the (Referer URL, platform signal, esp signal, pro_extras) for ONE visit.
 
-    Returns a 3-tuple:
-        (referer_url, platform_signal, esp_signal)
+    Returns a 4-tuple:
+        (referer_url, platform_signal, esp_signal, pro_extras_dict)
 
-    `referer_url` is what gets injected into Playwright's
-    extra_http_headers["Referer"]. Empty string → no Referer is sent.
+    `pro_extras_dict` is non-empty only when `cfg.pro_mode=True` and the
+    resolver successfully went through the pro pipeline. Keys:
+        sec_fetch, utm_source, utm_medium, network_click_referer.
+    Empty dict for legacy / disabled cfg → callers can ignore it.
 
-    `platform_signal` is the short-name of the chosen source platform
-    (facebook / tiktok / instagram / google / email / …). When
-    non-empty the RUT engine appends a SIGNED handshake to the tracker
-    URL so the tracker applies matching URL params for THIS visit.
-
-    `esp_signal` is non-empty ONLY for email visits — names which ESP
-    (mailchimp / sendgrid / klaviyo / …) was chosen, so the tracker
-    can inject ESP-MATCHING URL params (mc_cid vs _kx vs _hsenc) that
-    line up with the Referer host. Eliminates the
-    Referer↔URL-params mismatch leak that high-end trackers catch.
+    NOTE: For concurrent-safety this function NEVER mutates `cfg`.
 
     `cfg` is the job-level override dict:
         {"enabled": bool, "mode": str, "value": str,
-         "platform_pool": str, "brand": str}
+         "platform_pool": str, "brand": str,
+         # ── 2026-06-11 pro-mode additions (all OPTIONAL) ──
+         "pro_mode": bool, "platform_weights": str (JSON),
+         "email_weights": str (JSON), "social_wrapper": bool,
+         "inapp_deep_path": bool, "search_engine": str,
+         "search_keywords": str, "country": str, "target_url": str,
+         "strip_search_path": bool, "network_click_chain": bool}
 
     Never raises — any unexpected input silently falls back to the
     legacy `_get_referer_from_ua(ua)` behaviour.
@@ -861,70 +860,125 @@ def _resolve_visit_referer(ua: str, cfg: Optional[Dict[str, Any]]) -> Tuple[str,
         if not cfg or not cfg.get("enabled"):
             ref = _get_referer_from_ua(ua)
             plat = _platform_from_referer_url(ref)
-            return ref, plat, ""
+            return ref, plat, "", {}
+
+        # ── 2026-06-11: PRO-MODE branch (weighted platform + email pools,
+        # geo-localized search, social wrappers, in-app deep paths). Falls
+        # back to legacy logic on ANY error so existing jobs are safe. ──
+        if cfg.get("pro_mode"):
+            try:
+                from referrer_pro import resolve_pro_visit
+                pro = resolve_pro_visit(
+                    ua=ua,
+                    platform_pool_value=str(cfg.get("platform_weights") or cfg.get("platform_pool") or ""),
+                    email_weights_value=str(cfg.get("email_weights") or ""),
+                    brand=str(cfg.get("brand") or ""),
+                    target_url=str(cfg.get("target_url") or ""),
+                    country=cfg.get("country") or None,
+                    search_engine=str(cfg.get("search_engine") or "google"),
+                    search_keywords=str(cfg.get("search_keywords") or cfg.get("value") or ""),
+                    social_wrapper_enabled=bool(cfg.get("social_wrapper", True)),
+                    inapp_deep_path_enabled=bool(cfg.get("inapp_deep_path", True)),
+                    strip_search_path=bool(cfg.get("strip_search_path", True)),
+                    network_click_chain_enabled=bool(cfg.get("network_click_chain", False)),
+                )
+                ref = pro.get("referer", "") or ""
+                plat = pro.get("platform", "") or ""
+                esp = pro.get("esp", "") or ""
+                extras = {
+                    "sec_fetch": pro.get("sec_fetch") or {},
+                    "utm_source": pro.get("utm_source", ""),
+                    "utm_medium": pro.get("utm_medium", ""),
+                    "network_click_referer": pro.get("network_click_referer", ""),
+                }
+                if ref or plat:
+                    return ref, plat, esp, extras
+                # Fall through to legacy resolver when pro returned nothing
+            except Exception as _pro_err:
+                logger.debug(f"referrer_pro fallback: {_pro_err}")
 
         mode  = (cfg.get("mode") or "auto").strip().lower()
         value = (cfg.get("value") or "")
 
         if mode == "auto":
             ref = _get_referer_from_ua(ua)
-            return ref, _platform_from_referer_url(ref), ""
+            return ref, _platform_from_referer_url(ref), "", {}
 
         if mode in ("direct", "none", ""):
-            return "", "", ""
+            return "", "", "", {}
 
         if mode == "custom":
             ref = value.strip()
             plat = _platform_from_referer_url(ref)
-            # If custom URL is an ESP click-tracking host, infer ESP too
             esp = _esp_from_referer_url(ref) if plat == "email" else ""
-            return ref, plat, esp
+            return ref, plat, esp, {}
 
         if mode == "random_list":
             lines = [ln.strip() for ln in value.splitlines() if ln.strip()]
             if not lines:
                 ref = _get_referer_from_ua(ua)
-                return ref, _platform_from_referer_url(ref), ""
+                return ref, _platform_from_referer_url(ref), "", {}
             ref = random.choice(lines)
             plat = _platform_from_referer_url(ref)
             esp = _esp_from_referer_url(ref) if plat == "email" else ""
-            return ref, plat, esp
+            return ref, plat, esp, {}
 
         if mode == "google_search":
             kws = [ln.strip() for ln in value.splitlines() if ln.strip()]
             if not kws:
-                return "https://www.google.com/", "google", ""
+                return "https://www.google.com/", "google", "", {}
             from urllib.parse import quote_plus
             return (
                 f"https://www.google.com/search?q={quote_plus(random.choice(kws))}",
                 "google",
                 "",
+                {},
             )
 
         if mode == "platform_pool":
-            pool_str = (cfg.get("platform_pool") or "").lower()
-            keys = [p.strip() for p in pool_str.split(",") if p.strip()]
-            keys = [k for k in keys if k in _PLATFORM_REFERER_POOL]
-            if not keys:
-                ref = _get_referer_from_ua(ua)
-                return ref, _platform_from_referer_url(ref), ""
-            chosen = random.choice(keys)
-            # ── 2026-06: Email source = full ESP-matching pipeline ──
-            # ESP is chosen per visit + Referer matches the ESP host
-            # so the destination tracker sees consistent signals.
+            # 2026-06-11: Accept JSON-dict weighted form too (forwards-
+            # compat with the new multi-select UI). Falls back to legacy
+            # equal-weight comma-list parsing on any error.
+            pool_raw = (cfg.get("platform_pool") or "").strip()
+            chosen = ""
+            if pool_raw.startswith("{") or pool_raw.startswith("["):
+                try:
+                    from referrer_pro import parse_weighted_pool, pick_weighted
+                    weighted = parse_weighted_pool(pool_raw)
+                    chosen = pick_weighted(weighted)
+                except Exception:
+                    chosen = ""
+            if not chosen:
+                pool_str = pool_raw.lower()
+                keys = [p.strip() for p in pool_str.split(",") if p.strip()]
+                keys = [k for k in keys if k in _PLATFORM_REFERER_POOL]
+                if not keys:
+                    ref = _get_referer_from_ua(ua)
+                    return ref, _platform_from_referer_url(ref), "", {}
+                chosen = random.choice(keys)
             if chosen == "email":
-                return _resolve_email_visit(cfg.get("brand", ""))
-            # Normalise "x" → "twitter" for the signal so the tracker's
-            # generate_platform_params() finds the right branch.
+                ew = cfg.get("email_weights")
+                if ew:
+                    try:
+                        from referrer_pro import (
+                            parse_email_weights as _pew,
+                            resolve_email_visit_weighted as _rev,
+                        )
+                        ref2, plat2, esp2 = _rev(_pew(str(ew)))
+                        return ref2, plat2, esp2, {}
+                    except Exception:
+                        pass
+                ref2, plat2, esp2 = _resolve_email_visit(cfg.get("brand", ""))
+                return ref2, plat2, esp2, {}
             signal = "twitter" if chosen == "x" else chosen
-            return _PLATFORM_REFERER_POOL[chosen], signal, ""
+            return _PLATFORM_REFERER_POOL.get(chosen, ""), signal, "", {}
 
         # Unknown mode → legacy fallback.
         ref = _get_referer_from_ua(ua)
-        return ref, _platform_from_referer_url(ref), ""
+        return ref, _platform_from_referer_url(ref), "", {}
     except Exception:
         ref = _get_referer_from_ua(ua)
-        return ref, _platform_from_referer_url(ref), ""
+        return ref, _platform_from_referer_url(ref), "", {}
 
 
 # Map ESP click-tracking host substrings → ESP short-name. Used when
@@ -5293,6 +5347,18 @@ async def run_real_user_traffic_job(
     referer_value: str = "",
     referer_platform_pool: str = "",
     referer_brand: str = "",
+    # ── 2026-06-11: Referrer Pro-Mode (weighted pools + realism layers)
+    # Backward-compatible: when pro_mode is False all new kwargs are
+    # ignored and the legacy referer override behaviour is preserved.
+    referer_pro_mode: bool = False,
+    referer_platform_weights: str = "",   # JSON dict {"facebook":40,"tiktok":30}
+    referer_email_weights: str = "",      # JSON dict {"empty":35,"gmail":20,...}
+    referer_social_wrapper: bool = True,
+    referer_inapp_deep: bool = True,
+    referer_search_engine: str = "google",
+    referer_search_keywords: str = "",
+    referer_strip_search_path: bool = True,
+    referer_network_click_chain: bool = False,
 ):
     """
     Main orchestrator. Emits progress into RUT_JOBS[job_id].
@@ -5309,6 +5375,17 @@ async def run_real_user_traffic_job(
         "value": referer_value or "",
         "platform_pool": referer_platform_pool or "",
         "brand": (referer_brand or "").strip()[:64],
+        # ── 2026-06-11 pro-mode additions (all OPTIONAL) ──
+        "pro_mode": bool(referer_pro_mode),
+        "platform_weights": referer_platform_weights or "",
+        "email_weights": referer_email_weights or "",
+        "social_wrapper": bool(referer_social_wrapper),
+        "inapp_deep_path": bool(referer_inapp_deep),
+        "search_engine": (referer_search_engine or "google").strip().lower(),
+        "search_keywords": referer_search_keywords or "",
+        "strip_search_path": bool(referer_strip_search_path),
+        "network_click_chain": bool(referer_network_click_chain),
+        "target_url": target_url or "",
     }
 
     # Guarantee chromium is installed BEFORE launching any visits.
@@ -6698,10 +6775,20 @@ async def run_real_user_traffic_job(
                 # tracker URL → eliminates the Referer ↔ URL-params
                 # MISMATCH leak AND keeps the ESP click-tracking host +
                 # URL `mc_cid`/`_kx` ids consistent for email visits.
-                _ua_referer, _kx_platform, _kx_esp = _resolve_visit_referer(ua, _referer_cfg)
+                _ua_referer, _kx_platform, _kx_esp, _pro_extras = _resolve_visit_referer(ua, _referer_cfg)
                 _ctx_headers = {"Accept-Language": geo["accept_language"]}
                 if _ua_referer:
                     _ctx_headers["Referer"] = _ua_referer
+
+                # 2026-06-11: Pro-mode extras — Sec-Fetch-* header family
+                # + UTM/network-click signals from the per-visit resolver.
+                # Empty dict for legacy / disabled cfg → safe no-op.
+                try:
+                    _sec_fetch = (_pro_extras or {}).get("sec_fetch") or {}
+                    if _sec_fetch:
+                        _ctx_headers.update(_sec_fetch)
+                except Exception:
+                    pass
 
                 # 2026-06: Augmented tracker URL for THIS visit. When a
                 # platform was chosen (FB / TikTok / Google / Email …),
@@ -6759,7 +6846,7 @@ async def run_real_user_traffic_job(
                     # the outer `_kx_platform` already drove the tracker
                     # URL rewrite for this visit — retry navigates to
                     # the SAME URL (no second handshake to compute).
-                    _ua_referer_retry, _, _ = _resolve_visit_referer(ua, _referer_cfg)
+                    _ua_referer_retry, _, _, _ = _resolve_visit_referer(ua, _referer_cfg)
                     _ctx_headers_retry = {"Accept-Language": geo["accept_language"]}
                     if _ua_referer_retry:
                         _ctx_headers_retry["Referer"] = _ua_referer_retry
