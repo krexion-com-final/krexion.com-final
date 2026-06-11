@@ -197,6 +197,14 @@ async def generate_unique_proxies(
     sticky_minutes: Optional[int] = None,
     job_id: Optional[str] = None,
     max_attempts_per_pick: int = 6,
+    # ── 2026-06-11: Multi-geo MIX mode ─────────────────────────────
+    # When `countries_pool` has 2+ entries, the generator picks a
+    # RANDOM country per proxy (e.g. ["US","CA","GB"] → output is a
+    # mixed-country batch). `states_pool` works the same way for the
+    # 2-letter US state filter. Single-entry lists silently degrade
+    # to scalar `country`/`state` so legacy callers see zero change.
+    countries_pool: Optional[List[str]] = None,
+    states_pool: Optional[List[str]] = None,
 ) -> List[str]:
     """Generate ``count`` ProxyJet proxy lines whose session_ids have
     never been used by this user before.
@@ -217,6 +225,28 @@ async def generate_unique_proxies(
             "Auto Mode (one-time setup)."
         )
 
+    # ── 2026-06-11: Normalise + validate MIX pools ────────────────
+    _clean_countries: Optional[List[str]] = None
+    if countries_pool:
+        c = [str(x).strip().upper() for x in countries_pool if str(x).strip()]
+        # Dedupe preserving order
+        seen = set()
+        c = [x for x in c if not (x in seen or seen.add(x))]
+        if len(c) >= 2:
+            _clean_countries = c
+        elif len(c) == 1 and not country:
+            country = c[0]  # auto-promote single entry to scalar
+
+    _clean_states: Optional[List[str]] = None
+    if states_pool:
+        s = [str(x).strip().upper() for x in states_pool if str(x).strip()]
+        seen_s = set()
+        s = [x for x in s if not (x in seen_s or seen_s.add(x))]
+        if len(s) >= 2:
+            _clean_states = s
+        elif len(s) == 1 and not state:
+            state = s[0]
+
     country = (country or creds.get("default_country") or DEFAULT_COUNTRY).upper()
     effective_state = (state or creds.get("default_state") or "").strip().upper() or None
     if count < 1:
@@ -229,6 +259,13 @@ async def generate_unique_proxies(
     inserts: List[Dict[str, Any]] = []
 
     for _ in range(count):
+        # ── 2026-06-11: Per-proxy random pick from MIX pools ─────
+        per_proxy_country = (
+            random.choice(_clean_countries) if _clean_countries else country
+        )
+        per_proxy_state = (
+            random.choice(_clean_states) if _clean_states else effective_state
+        )
         # Pick a session_id not yet used by this user. The session-id
         # space (~10⁹) is enormous vs the per-user history (tens of
         # thousands at most), so collisions are extremely rare — but
@@ -251,21 +288,21 @@ async def generate_unique_proxies(
         proxy_str, _ = build_proxy_string(
             username=creds["username"],
             password=creds["password"],
-            country=country,
+            country=per_proxy_country,
             session_id=sid,
             gateway=creds.get("gateway", DEFAULT_GATEWAY),
             server=creds.get("server", DEFAULT_SERVER),
             port=int(creds.get("port", DEFAULT_PORT)),
             product=creds.get("product", DEFAULT_PRODUCT),
-            state=effective_state,
+            state=per_proxy_state,
             sticky_minutes=sticky_minutes,
         )
         out.append(proxy_str)
         inserts.append({
             "user_id": user_id,
             "session_id": sid,
-            "country": country,
-            "state": effective_state,
+            "country": per_proxy_country,
+            "state": per_proxy_state,
             "created_at": now,
             "job_id": job_id,
             "exit_ip": None,

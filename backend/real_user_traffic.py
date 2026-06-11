@@ -5257,6 +5257,15 @@ async def run_real_user_traffic_job(
     proxyjet_on_demand: bool = False,
     proxyjet_country: str = "US",
     proxyjet_default_state: Optional[str] = None,
+    # ── 2026-06-11: Multi-geo MIX pools (per-visit random pick) ────
+    # When a pool has 2+ entries, each visit's ProxyJet request gets a
+    # random country (and/or random US state) from the pool — so one
+    # campaign can spread exit-IPs across multiple countries/states
+    # naturally. Single-entry or empty pools degrade to the scalar
+    # `proxyjet_country` / `proxyjet_default_state` exactly like before.
+    # When state_match is ON, the per-row data state still wins.
+    proxyjet_countries_pool: Optional[List[str]] = None,
+    proxyjet_states_pool: Optional[List[str]] = None,
     proxyjet_unique_retry_cap: int = 50,
     # 2026-01: per-job override for the stuck-watchdog inactivity
     # threshold (seconds the page's main-frame URL is allowed to stay
@@ -6292,6 +6301,23 @@ async def run_real_user_traffic_job(
             chosen_proxy: Optional[Dict[str, Any]] = None
             chosen_geo: Optional[Dict[str, Any]] = None
             last_reason = ""
+            # ── 2026-06-11: Multi-geo MIX pick for THIS visit ─────
+            # Country: if pool has 2+ entries, pick one at random for
+            # this visit. Otherwise fall back to scalar `proxyjet_country`.
+            # State: when state_match is ON, the row already pinned a
+            # state — we honour that. Otherwise, multi-state pool picks
+            # at random per visit. (`row_state_code` is already None
+            # when state_match is OFF for that row.)
+            _pj_country_pool = [c for c in (proxyjet_countries_pool or []) if c]
+            _pj_states_pool = [s for s in (proxyjet_states_pool or []) if s]
+            _visit_pj_country = (
+                random.choice(_pj_country_pool)
+                if len(_pj_country_pool) >= 2
+                else (proxyjet_country or "US")
+            )
+            _visit_pj_state = row_state_code
+            if not _visit_pj_state and len(_pj_states_pool) >= 2:
+                _visit_pj_state = random.choice(_pj_states_pool)
             while attempt < cap:
                 attempt += 1
                 if cancel_event.is_set():
@@ -6301,8 +6327,8 @@ async def run_real_user_traffic_job(
                         db,
                         engine_user_id or "",
                         count=1,
-                        country=proxyjet_country or "US",
-                        state=row_state_code,
+                        country=_visit_pj_country,
+                        state=_visit_pj_state,
                         job_id=job_id,
                     )
                 except Exception as e:  # noqa: BLE001

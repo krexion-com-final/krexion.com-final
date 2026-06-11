@@ -404,6 +404,13 @@ export default function RealUserTrafficPage() {
   const [stuckWatchdogSeconds, setStuckWatchdogSeconds] = useState(240);
   const [proxyJetCountry, setProxyJetCountry] = useState("US");
   const [proxyJetState, setProxyJetState] = useState("");
+  // ── 2026-06-11: ProxyJet Multi-Geo MIX ──────────────────────────
+  // When `pjGeoMode === "many"`, the engine picks a random
+  // country/state per visit from these pools. Single mode preserves
+  // legacy `proxyJetCountry` / `proxyJetState` behaviour exactly.
+  const [pjGeoMode, setPjGeoMode] = useState("one");   // "one" | "many"
+  const [pjCountriesPool, setPjCountriesPool] = useState([]);
+  const [pjStatesPool, setPjStatesPool] = useState([]);
   const [pjConfigured, setPjConfigured] = useState(null); // null=unknown, true/false
   // ── Inline UA Generator (so user doesn't have to leave RUT page) ──
   const [uaGenOpen, setUaGenOpen] = useState(false);
@@ -415,6 +422,12 @@ export default function RealUserTrafficPage() {
   // Uploaded Things — saved batch IDs (alternative to paste)
   const [uploadedLibrary, setUploadedLibrary] = useState([]);
   const [selectedUploadProxyId, setSelectedUploadProxyId] = useState("");
+  // ── 2026-06-11: Multi-batch uploaded proxies ───────────────────
+  // When 2+ batch IDs are selected, the backend merges + dedupes +
+  // shuffles them so the run picks a random interleave across all
+  // batches (e.g. US-CA + US-TX + DE-Berlin batches all blended).
+  // Single batch falls back to the legacy `upload_proxy_id` flow.
+  const [selectedUploadProxyIds, setSelectedUploadProxyIds] = useState([]);
   const [selectedUploadUaId, setSelectedUploadUaId] = useState("");         // legacy single-select (kept for backward compat)
   const [selectedUploadUaIds, setSelectedUploadUaIds] = useState([]);       // NEW: multi-select device UA batches
   const [selectedUploadDataId, setSelectedUploadDataId] = useState("");
@@ -1194,7 +1207,7 @@ export default function RealUserTrafficPage() {
     const isSmokeTest = !!opts.smokeTest;
     if (!linkId) return toast.error("Select a tracker link");
     // Validation: either paste OR uploaded batch OR ProxyJet Auto must be present
-    if (!useProxyJetAuto && !useStoredProxies && !selectedUploadProxyId && !proxies.trim()) {
+    if (!useProxyJetAuto && !useStoredProxies && !selectedUploadProxyId && selectedUploadProxyIds.length === 0 && !proxies.trim()) {
       return toast.error("Paste proxies, select an uploaded proxy batch, enable 'Use my stored proxies', or turn on ProxyJet Auto Mode");
     }
     if (useProxyJetAuto && !pjConfigured) {
@@ -1260,7 +1273,7 @@ export default function RealUserTrafficPage() {
       // so total wait collapses to max-of-N (~1-2 s on a typical link).
       // ────────────────────────────────────────────────────────────────
       const wantExcel = formFillEnabled && dataSource === "excel" && file && !selectedUploadDataId;
-      const wantProxies = !useProxyJetAuto && !useStoredProxies && !selectedUploadProxyId && proxies && proxies.trim();
+      const wantProxies = !useProxyJetAuto && !useStoredProxies && !selectedUploadProxyId && selectedUploadProxyIds.length === 0 && proxies && proxies.trim();
       const wantUas = !selectedUploadUaId && selectedUploadUaIds.length === 0 && userAgents && userAgents.trim();
       const wantAj = formFillEnabled && useCustomJson && !selectedUploadAjId && automationJson.trim();
       const wantTarget = !!targetScreenshotFile;
@@ -1331,9 +1344,19 @@ export default function RealUserTrafficPage() {
       fd.append("user_agents", (autoUaId || selectedUploadUaIds.length > 0) ? "" : userAgents);
       fd.append("use_stored_proxies", String(useStoredProxies));
       // Uploaded batches — backend prefers these over pasted content
-      const finalProxyId = selectedUploadProxyId || autoProxyId;
+      // ── 2026-06-11: Proxy multi-batch — mirrors the UA multi-batch
+      // pattern. When 2+ batches checked, send `upload_proxy_ids` (CSV)
+      // and the backend merges + shuffles. Single batch falls back to
+      // legacy `upload_proxy_id` for full backwards-compat (live-remove
+      // + auto-delete after use both depend on the singular ID path).
       const finalDataId = selectedUploadDataId || autoDataId;
-      if (finalProxyId) fd.append("upload_proxy_id", finalProxyId);
+      if (selectedUploadProxyIds.length >= 2) {
+        fd.append("upload_proxy_ids", selectedUploadProxyIds.join(","));
+      } else {
+        const finalProxyId =
+          (selectedUploadProxyIds[0] || selectedUploadProxyId || autoProxyId);
+        if (finalProxyId) fd.append("upload_proxy_id", finalProxyId);
+      }
       // UA: multi-batch mode wins if the user checked any; otherwise
       // fall back to legacy single-batch (backward-compat with deep
       // links / stored drafts / auto-created batches).
@@ -1369,6 +1392,19 @@ export default function RealUserTrafficPage() {
       fd.append("use_proxyjet_auto", String(useProxyJetAuto));
       fd.append("proxyjet_country", (proxyJetCountry || "US").toUpperCase());
       fd.append("proxyjet_state", (proxyJetState || "").toUpperCase());
+      // ── 2026-06-11: Multi-Geo MIX pools (CSV). Backend picks random
+      // country/state per visit when 2+ entries. Single mode → empty
+      // strings here → backend falls back to scalar fields above.
+      if (pjGeoMode === "many" && pjCountriesPool.length >= 2) {
+        fd.append("proxyjet_countries", pjCountriesPool.join(","));
+      } else {
+        fd.append("proxyjet_countries", "");
+      }
+      if (pjGeoMode === "many" && pjStatesPool.length >= 2) {
+        fd.append("proxyjet_states", pjStatesPool.join(","));
+      } else {
+        fd.append("proxyjet_states", "");
+      }
       // 2026-01: Per-job watchdog inactivity timeout. Pages stuck for
       // longer than this (URL not changing) are force-aborted. Default
       // 60 — raised from old hardcoded 25 to handle slow form-submit
@@ -1808,38 +1844,164 @@ export default function RealUserTrafficPage() {
                   account — no duplicate clicks on your offer URL, ever.
                 </p>
                 {useProxyJetAuto && (
-                  <div className="mt-3 flex items-center gap-2 flex-wrap">
-                    <Label className="text-xs text-zinc-300">Country:</Label>
-                    <select
-                      value={proxyJetCountry}
-                      onChange={(e) => {
-                        setProxyJetCountry(e.target.value);
-                        if (e.target.value !== "US") setProxyJetState("");
-                      }}
-                      className="h-8 px-2 rounded bg-zinc-800 border border-zinc-700 text-zinc-100 text-xs"
-                      data-testid="rut-proxyjet-country"
-                    >
-                      {["US","CA","GB","DE","FR","AU","BR","IN","JP","IT","ES","NL","MX"].map((c) => (
-                        <option key={c} value={c}>{c}</option>
-                      ))}
-                    </select>
-                    {proxyJetCountry === "US" && (
-                      <>
-                        <Label className="text-xs text-zinc-300 ml-2">State:</Label>
-                        <select
-                          value={proxyJetState}
-                          onChange={(e) => setProxyJetState(e.target.value)}
-                          className="h-8 px-2 rounded bg-zinc-800 border border-zinc-700 text-zinc-100 text-xs"
-                          data-testid="rut-proxyjet-state"
+                  <div className="mt-3 space-y-2">
+                    {/* ── Single / Multi toggle ──────────────────── */}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Label className="text-xs text-zinc-300">Geo:</Label>
+                      <div
+                        className="inline-flex rounded-md overflow-hidden border border-zinc-700 text-[10px]"
+                        data-testid="rut-pj-geo-mode"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => setPjGeoMode("one")}
+                          className={`px-2 py-0.5 ${pjGeoMode === "one" ? "bg-blue-600 text-white" : "bg-zinc-900 text-zinc-400 hover:text-white"}`}
                         >
-                          <option value="">Any</option>
-                          {["AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY"].map((s) => (
-                            <option key={s} value={s}>{s}</option>
+                          Single
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPjGeoMode("many")}
+                          className={`px-2 py-0.5 border-l border-zinc-700 ${pjGeoMode === "many" ? "bg-blue-600 text-white" : "bg-zinc-900 text-zinc-400 hover:text-white"}`}
+                        >
+                          Multi (random mix)
+                        </button>
+                      </div>
+                      {pjGeoMode === "many" && (
+                        <span className="text-[10px] text-blue-300">
+                          {pjCountriesPool.length >= 2
+                            ? `${pjCountriesPool.length} countries selected`
+                            : "Click 2+ countries below"}
+                          {pjStatesPool.length >= 2 && ` · ${pjStatesPool.length} states`}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* ── Single mode (legacy) ────────────────────── */}
+                    {pjGeoMode === "one" && (
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Label className="text-xs text-zinc-300">Country:</Label>
+                        <select
+                          value={proxyJetCountry}
+                          onChange={(e) => {
+                            setProxyJetCountry(e.target.value);
+                            if (e.target.value !== "US") setProxyJetState("");
+                          }}
+                          className="h-8 px-2 rounded bg-zinc-800 border border-zinc-700 text-zinc-100 text-xs"
+                          data-testid="rut-proxyjet-country"
+                        >
+                          {["US","CA","GB","DE","FR","AU","BR","IN","JP","IT","ES","NL","MX"].map((c) => (
+                            <option key={c} value={c}>{c}</option>
                           ))}
                         </select>
-                      </>
+                        {proxyJetCountry === "US" && (
+                          <>
+                            <Label className="text-xs text-zinc-300 ml-2">State:</Label>
+                            <select
+                              value={proxyJetState}
+                              onChange={(e) => setProxyJetState(e.target.value)}
+                              className="h-8 px-2 rounded bg-zinc-800 border border-zinc-700 text-zinc-100 text-xs"
+                              data-testid="rut-proxyjet-state"
+                            >
+                              <option value="">Any</option>
+                              {["AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY"].map((s) => (
+                                <option key={s} value={s}>{s}</option>
+                              ))}
+                            </select>
+                          </>
+                        )}
+                      </div>
                     )}
-                    <span className="text-[10px] text-indigo-300 w-full">
+
+                    {/* ── Multi mode (random mix) ─────────────────── */}
+                    {pjGeoMode === "many" && (
+                      <div className="space-y-2 bg-zinc-950/50 border border-zinc-800 rounded p-2">
+                        <div>
+                          <Label className="text-[11px] text-zinc-300 block mb-1">
+                            Countries — random pick per visit
+                          </Label>
+                          <div className="flex flex-wrap gap-1">
+                            {["US","CA","GB","DE","FR","AU","BR","IN","JP","IT","ES","NL","MX"].map((c) => {
+                              const active = pjCountriesPool.includes(c);
+                              return (
+                                <button
+                                  key={c}
+                                  type="button"
+                                  onClick={() =>
+                                    setPjCountriesPool((prev) =>
+                                      prev.includes(c)
+                                        ? prev.filter((k) => k !== c)
+                                        : [...prev, c]
+                                    )
+                                  }
+                                  className={`px-2 py-0.5 rounded text-[11px] border transition ${
+                                    active
+                                      ? "bg-blue-600 border-blue-500 text-white"
+                                      : "bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700"
+                                  }`}
+                                  data-testid={`rut-pj-country-${c}`}
+                                >
+                                  {c}
+                                </button>
+                              );
+                            })}
+                            <button
+                              type="button"
+                              onClick={() => setPjCountriesPool([])}
+                              className="ml-1 px-2 py-0.5 rounded text-[10px] bg-zinc-900 border border-zinc-700 text-zinc-400 hover:text-white"
+                              data-testid="rut-pj-countries-clear"
+                            >
+                              Clear
+                            </button>
+                          </div>
+                        </div>
+
+                        {(pjCountriesPool.includes("US") || pjCountriesPool.length === 0) && (
+                          <div>
+                            <Label className="text-[11px] text-zinc-300 block mb-1">
+                              US States — random pick per visit{" "}
+                              <span className="text-zinc-500">(optional — leave empty for any-state)</span>
+                            </Label>
+                            <div className="flex flex-wrap gap-1 max-h-24 overflow-y-auto">
+                              {["AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY"].map((s) => {
+                                const active = pjStatesPool.includes(s);
+                                return (
+                                  <button
+                                    key={s}
+                                    type="button"
+                                    onClick={() =>
+                                      setPjStatesPool((prev) =>
+                                        prev.includes(s)
+                                          ? prev.filter((k) => k !== s)
+                                          : [...prev, s]
+                                      )
+                                    }
+                                    className={`px-1.5 py-0.5 rounded text-[10px] border transition ${
+                                      active
+                                        ? "bg-emerald-600 border-emerald-500 text-white"
+                                        : "bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700"
+                                    }`}
+                                    data-testid={`rut-pj-state-${s}`}
+                                  >
+                                    {s}
+                                  </button>
+                                );
+                              })}
+                              <button
+                                type="button"
+                                onClick={() => setPjStatesPool([])}
+                                className="ml-1 px-2 py-0.5 rounded text-[10px] bg-zinc-900 border border-zinc-700 text-zinc-400 hover:text-white"
+                                data-testid="rut-pj-states-clear"
+                              >
+                                Clear
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    <span className="block text-[10px] text-indigo-300">
                       Anti-detect safeties (no-repeated-proxy + skip-duplicate-IP) auto-enabled.
                     </span>
                   </div>
@@ -1868,42 +2030,78 @@ export default function RealUserTrafficPage() {
                   Use my stored proxies
                 </label>
               </div>
-              {/* Uploaded proxy batch picker */}
+              {/* Uploaded proxy batch picker (multi-select since 2026-06-11) */}
               {uploadedLibrary.filter(u => u.type === "proxies").length > 0 && (
                 <div className="mb-2 p-2 bg-indigo-950/30 border border-indigo-900/50 rounded">
-                  <Label className="text-indigo-300 text-xs mb-1 block">
-                    Or pick a saved batch from <span className="font-semibold">Uploaded Things</span> (auto-deletes after use)
-                  </Label>
-                  <select
-                    value={selectedUploadProxyId}
-                    onChange={(e) => setSelectedUploadProxyId(e.target.value)}
-                    className="w-full h-8 px-2 rounded bg-zinc-800 border border-zinc-700 text-zinc-100 text-xs"
-                    data-testid="rut-upload-proxy-id"
-                  >
-                    <option value="">— paste manually below —</option>
-                    {uploadedLibrary.filter(u => u.type === "proxies").map((u) => (
-                      <option key={u.id} value={u.id}>
-                        {u.name} · {u.country_tag || "?"}{u.state_tag ? `/${u.state_tag}` : ""} · {u.item_count} proxies
-                      </option>
-                    ))}
-                  </select>
+                  <div className="flex items-center justify-between mb-1">
+                    <Label className="text-indigo-300 text-xs">
+                      Or pick saved batch(es) from <span className="font-semibold">Uploaded Things</span>
+                    </Label>
+                    {selectedUploadProxyIds.length > 0 && (
+                      <span className="text-[10px] text-blue-300">
+                        {selectedUploadProxyIds.length} batch{selectedUploadProxyIds.length === 1 ? "" : "es"} selected
+                        {selectedUploadProxyIds.length >= 2 && " · will be merged + shuffled"}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-1 max-h-32 overflow-y-auto">
+                    {uploadedLibrary.filter(u => u.type === "proxies").map((u) => {
+                      const active = selectedUploadProxyIds.includes(u.id);
+                      return (
+                        <button
+                          key={u.id}
+                          type="button"
+                          onClick={() =>
+                            setSelectedUploadProxyIds((prev) =>
+                              prev.includes(u.id)
+                                ? prev.filter((x) => x !== u.id)
+                                : [...prev, u.id]
+                            )
+                          }
+                          className={`px-2 py-1 rounded text-[11px] border transition text-left ${
+                            active
+                              ? "bg-indigo-600 border-indigo-500 text-white"
+                              : "bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700"
+                          }`}
+                          data-testid={`rut-upload-proxy-batch-${u.id}`}
+                        >
+                          {u.name} · {u.country_tag || "?"}{u.state_tag ? `/${u.state_tag}` : ""} · {u.item_count}
+                        </button>
+                      );
+                    })}
+                    {selectedUploadProxyIds.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedUploadProxyIds([])}
+                        className="px-2 py-1 rounded text-[10px] bg-zinc-900 border border-zinc-700 text-zinc-400 hover:text-white"
+                        data-testid="rut-upload-proxy-batches-clear"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                  <p className="text-[10px] text-zinc-500 mt-1">
+                    Multiple batches → merged + randomly interleaved per visit. Single batch → legacy behaviour (auto-delete after use).
+                  </p>
                 </div>
               )}
               <Textarea
                 data-testid="rut-proxies"
-                rows={selectedUploadProxyId ? 5 : 9}
+                rows={(selectedUploadProxyId || selectedUploadProxyIds.length > 0) ? 5 : 9}
                 placeholder={"user:pass@host:port\nuser:pass@host:port"}
                 value={proxies}
                 onChange={(e) => setProxies(e.target.value)}
-                disabled={useStoredProxies || !!selectedUploadProxyId}
+                disabled={useStoredProxies || !!selectedUploadProxyId || selectedUploadProxyIds.length > 0}
                 className="bg-zinc-800 border-zinc-700 text-zinc-100 font-mono text-xs disabled:opacity-50"
               />
               <p className="text-xs text-zinc-500 mt-1">
-                {selectedUploadProxyId
-                  ? "Using uploaded batch (will auto-delete after job)"
-                  : useStoredProxies
-                    ? "Using your saved proxies from the Proxies page."
-                    : `${proxyCount} proxies`}
+                {selectedUploadProxyIds.length >= 2
+                  ? `Using ${selectedUploadProxyIds.length} uploaded batches (merged + shuffled, batches preserved for re-use)`
+                  : (selectedUploadProxyId || selectedUploadProxyIds.length === 1)
+                    ? "Using uploaded batch (will auto-delete after job)"
+                    : useStoredProxies
+                      ? "Using your saved proxies from the Proxies page."
+                      : `${proxyCount} proxies`}
               </p>
             </div>
             <div>

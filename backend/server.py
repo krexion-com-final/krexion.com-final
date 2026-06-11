@@ -6725,6 +6725,7 @@ async def _rut_prepare_and_run(
 
         # ── 1. Proxies ────────────────────────────────────────────────
         upload_proxy_id = params.get("upload_proxy_id")
+        upload_proxy_ids_raw = params.get("upload_proxy_ids")
         use_stored_proxies = params.get("use_stored_proxies")
         paste_proxy_lines = params.get("paste_proxy_lines") or []
         use_proxyjet_auto = bool(params.get("use_proxyjet_auto"))
@@ -6886,24 +6887,90 @@ async def _rut_prepare_and_run(
                         count=gen_count,
                         country=params.get("proxyjet_country", "US"),
                         state=params.get("proxyjet_state") or None,
+                        countries_pool=params.get("proxyjet_countries") or None,
+                        states_pool=params.get("proxyjet_states") or None,
                         job_id=job_id,
                     )
                     if not proxy_lines:
                         return await _mark_failed("ProxyJet returned zero proxies — check credentials.")
+                    # ── 2026-06-11: Shuffle when MIX mode is on ────
+                    _mix_on = (
+                        len(params.get("proxyjet_countries") or []) >= 2
+                        or len(params.get("proxyjet_states") or []) >= 2
+                    )
+                    if _mix_on:
+                        import random as _r
+                        _r.shuffle(proxy_lines)
                     _pj_st = params.get("proxyjet_state")
+                    _pj_cs = params.get("proxyjet_countries") or []
+                    _pj_ss = params.get("proxyjet_states") or []
+                    _label = (
+                        f"mix[{','.join(_pj_cs)}]"
+                        if len(_pj_cs) >= 2
+                        else params.get('proxyjet_country', 'US')
+                    )
+                    _state_label = (
+                        f"-mix[{','.join(_pj_ss)}]"
+                        if len(_pj_ss) >= 2
+                        else (('-' + _pj_st) if _pj_st else '')
+                    )
                     await _set_step(
                         f"✓ Generated {len(proxy_lines)} unique ProxyJet proxies "
-                        f"(auto-mode · {params.get('proxyjet_country','US')}"
-                        f"{('-'+_pj_st) if _pj_st else ''})"
+                        f"(auto-mode · {_label}{_state_label})"
                     )
             except RuntimeError as e:
                 return await _mark_failed(str(e))
-        elif upload_proxy_id:
-            uploaded_proxy_lines = await _load_upload_items(user["id"], upload_proxy_id, "proxies")
-            if not uploaded_proxy_lines:
-                return await _mark_failed("Selected proxy upload is empty or not found")
-            proxy_lines = uploaded_proxy_lines
-            consume_upload_ids.append(upload_proxy_id)
+        elif upload_proxy_id or upload_proxy_ids_raw:
+            # ── 2026-06-11: Multi-batch uploaded proxies ────────────
+            # Mirror the UA multi-batch flow: gather + dedupe + shuffle.
+            proxy_batch_ids: List[str] = []
+            if upload_proxy_ids_raw:
+                proxy_batch_ids = [b.strip() for b in upload_proxy_ids_raw.split(",") if b.strip()]
+            elif upload_proxy_id:
+                proxy_batch_ids = [upload_proxy_id]
+            if len(proxy_batch_ids) == 1:
+                # Legacy single-batch path (preserves all live-remove +
+                # gsheet-write semantics that depend on a single
+                # `upload_proxy_id` reference in the engine).
+                uploaded_proxy_lines = await _load_upload_items(user["id"], proxy_batch_ids[0], "proxies")
+                if not uploaded_proxy_lines:
+                    return await _mark_failed("Selected proxy upload is empty or not found")
+                proxy_lines = uploaded_proxy_lines
+                consume_upload_ids.append(proxy_batch_ids[0])
+                upload_proxy_id = proxy_batch_ids[0]   # back-fill for downstream
+            else:
+                # 2+ batches → merge + dedupe + shuffle
+                batch_results = await asyncio.gather(
+                    *[_load_upload_items(user["id"], bid, "proxies") for bid in proxy_batch_ids],
+                    return_exceptions=True,
+                )
+                merged_proxy_lines: List[str] = []
+                seen_px: set = set()
+                for bid, batch_items in zip(proxy_batch_ids, batch_results):
+                    if isinstance(batch_items, Exception) or not batch_items:
+                        continue
+                    for px_line in batch_items:
+                        if px_line and px_line not in seen_px:
+                            seen_px.add(px_line)
+                            merged_proxy_lines.append(px_line)
+                    consume_upload_ids.append(bid)
+                if not merged_proxy_lines:
+                    return await _mark_failed("Selected proxy upload(s) are empty or not found")
+                # Random shuffle so the round-robin pick interleaves
+                # across batches (no batch-1-first / batch-2-second
+                # grouping in the run order — same fix we applied to
+                # multi-batch UAs).
+                import random as _r
+                _r.shuffle(merged_proxy_lines)
+                proxy_lines = merged_proxy_lines
+                # NOTE: For multi-batch, live-remove + gsheet-row-delete
+                # cannot target one specific batch deterministically
+                # (since a duplicate proxy line could exist in multiple
+                # batches). We pass `upload_proxy_id=None` to the
+                # engine so the live-remove hook is a no-op for these
+                # jobs — the user's batches remain intact after the
+                # run. They can manually clean up via "Uploaded Things".
+                upload_proxy_id = None
         elif use_stored_proxies:
             stored = await db.proxies.find(
                 {"user_id": user["id"], "status": {"$in": ["working", "active", None]}},
@@ -7251,6 +7318,9 @@ async def _rut_prepare_and_run(
             proxyjet_on_demand=bool(use_proxyjet_auto and not proxyjet_legacy_pregen),
             proxyjet_country=params.get("proxyjet_country", "US"),
             proxyjet_default_state=(params.get("proxyjet_state") or None),
+            # ── 2026-06-11: ProxyJet Multi-Geo MIX pools ────────────
+            proxyjet_countries_pool=list(params.get("proxyjet_countries") or []),
+            proxyjet_states_pool=list(params.get("proxyjet_states") or []),
             proxyjet_unique_retry_cap=int(params.get("proxyjet_unique_retry_cap") or 50),
             # 2026-01 — per-job watchdog inactivity threshold (seconds).
             # Default raised 60 → 240 (2026-05). UI exposes a number
@@ -7498,6 +7568,24 @@ async def rut_create_job(
     use_proxyjet_auto: bool = Form(False),
     proxyjet_country: str = Form("US"),
     proxyjet_state: str = Form(""),
+    # ── 2026-06-11: ProxyJet Multi-Geo MIX mode ─────────────────────
+    # CSV of country codes (e.g. "US,CA,GB") OR newline-separated. When
+    # 2+ entries, the per-visit ProxyJet call picks a RANDOM country
+    # per visit so the campaign's exit-IPs are spread across multiple
+    # countries naturally. Same for `proxyjet_states` (US 2-letter
+    # codes). When state_match_enabled is ON, per-row state still wins
+    # (the data file dictates which state to target). Single-entry /
+    # empty values silently fall back to scalar `proxyjet_country` /
+    # `proxyjet_state` so legacy single-geo flows are unaffected.
+    proxyjet_countries: str = Form(""),
+    proxyjet_states: str = Form(""),
+    # ── 2026-06-11: Multi-batch uploaded proxies ───────────────────
+    # Comma-separated list of proxy batch IDs. When provided, the
+    # engine merges all batches, dedupes lines, and SHUFFLES the
+    # merged list so the round-robin pick produces a random
+    # interleave of every batch (not batch1-first-then-batch2).
+    # Mirrors the existing `upload_ua_ids` semantics.
+    upload_proxy_ids: Optional[str] = Form(None),
     # ── 2026-05: Pre-flight Smoke Test ──────────────────────────────────
     # When True, the runner is forced to total_clicks=1, concurrency=1
     # and target_mode="clicks" so the user can validate their recording
@@ -7765,6 +7853,21 @@ async def rut_create_job(
         "use_proxyjet_auto": bool(use_proxyjet_auto),
         "proxyjet_country": (proxyjet_country or "US").strip().upper() or "US",
         "proxyjet_state": (proxyjet_state or "").strip().upper() or None,
+        # ── 2026-06-11: ProxyJet Multi-Geo MIX + Multi-batch proxies ─
+        # Parsed as CSV-or-newline tokens (case-insensitive, deduped).
+        # When 2+ countries: per-visit ProxyJet picks one at random.
+        # When 2+ states (US): same. Single-entry pools degrade silently.
+        "proxyjet_countries": [
+            x.strip().upper()
+            for x in (proxyjet_countries or "").replace(",", "\n").splitlines()
+            if x.strip()
+        ],
+        "proxyjet_states": [
+            x.strip().upper()
+            for x in (proxyjet_states or "").replace(",", "\n").splitlines()
+            if x.strip()
+        ],
+        "upload_proxy_ids": upload_proxy_ids,
         "paste_proxy_lines": paste_proxy_lines,
         "paste_ua_lines": paste_ua_lines,
         "smoke_test": bool(smoke_test),
@@ -14939,6 +15042,13 @@ class ProxyJetGenerateIn(BaseModel):
     count: int = 10
     country: Optional[str] = None
     state: Optional[str] = None
+    # ── 2026-06-11: Multi-geo MIX mode ────────────────────────────
+    # When `countries` has 2+ entries, the backend picks a RANDOM
+    # country per proxy. Same for `states` (US 2-letter codes).
+    # Single-entry / empty lists silently degrade to scalar
+    # `country`/`state` for backwards compatibility.
+    countries: Optional[List[str]] = None
+    states: Optional[List[str]] = None
     # 2026-06 — sticky/rotating selector. None or 0 = rotating (fresh
     # exit-IP per request). 1..120 = sticky session lasting N minutes
     # so the same exit-IP is held for that window — required for funnel
@@ -15087,10 +15197,27 @@ async def proxyjet_generate_batch(payload: ProxyJetGenerateIn,
             country=(payload.country or "").strip().upper() or None,
             state=(payload.state or "").strip().upper() or None,
             sticky_minutes=(int(payload.sticky_minutes) if payload.sticky_minutes else None),
+            countries_pool=payload.countries,
+            states_pool=payload.states,
         )
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return {"count": len(proxies), "proxies": proxies}
+    # ── 2026-06-11: When MIX mode is on, shuffle output so consumers
+    # never see grouped country/state batches in pick-order.
+    mix_on = bool(
+        (payload.countries and len([c for c in payload.countries if str(c).strip()]) >= 2)
+        or (payload.states and len([s for s in payload.states if str(s).strip()]) >= 2)
+    )
+    if mix_on:
+        import random as _r
+        _r.shuffle(proxies)
+    return {
+        "count": len(proxies),
+        "proxies": proxies,
+        "mix_mode": mix_on,
+        "countries_pool": payload.countries or [],
+        "states_pool": payload.states or [],
+    }
 
 
 @api_router.get("/proxyjet/usage")
