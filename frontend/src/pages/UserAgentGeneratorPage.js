@@ -88,6 +88,16 @@ export default function UserAgentGeneratorPage() {
   const [app, setApp] = useState("instagram");
   const [platform, setPlatform] = useState("android");
 
+  // ── 2026-06-11: Multi-select pools for App and Platform pickers ──
+  // When mode = "many" and pool has 2+ entries, the backend mixes them
+  // randomly per-UA. When pool has <2 entries, falls back to scalar
+  // app/platform exactly like before (zero behaviour change for users
+  // who keep the default "Single" mode).
+  const [appsPool, setAppsPool] = useState([]);
+  const [platformsPool, setPlatformsPool] = useState([]);
+  const [appMode, setAppMode] = useState("one");          // "one" | "many"
+  const [platformMode, setPlatformMode] = useState("one"); // "one" | "many"
+
   // Single-select picks
   const [deviceId, setDeviceId] = useState("");
   const [appVersion, setAppVersion] = useState("");
@@ -112,6 +122,8 @@ export default function UserAgentGeneratorPage() {
   const [loading, setLoading] = useState(false);
   const [downloadingXlsx, setDownloadingXlsx] = useState(false);
   const [results, setResults] = useState([]);
+  // ── 2026-06-11: Mix-mode metadata returned by backend ────────────
+  const [mixMeta, setMixMeta] = useState(null); // {mix_mode, apps_pool, platforms_pool, breakdown}
   const [options, setOptions] = useState(null);
   const [refreshingVersions, setRefreshingVersions] = useState(false);
 
@@ -213,6 +225,13 @@ export default function UserAgentGeneratorPage() {
   const buildBody = () => ({
     app,
     platform,
+    // ── 2026-06-11: Multi-app + Multi-platform mix pools ─────────
+    // Only sent when "Multi" mode is ON and at least 2 selected.
+    // Backend auto-degrades single-entry pools to scalar mode and
+    // ignores empty pools, so legacy single-pick behaviour is
+    // preserved exactly when these arrays are null.
+    apps: appMode === "many" && appsPool.length >= 2 ? appsPool : null,
+    platforms: platformMode === "many" && platformsPool.length >= 2 ? platformsPool : null,
     // Single picks (null if in multi mode or empty)
     device_id: deviceMode === "one" && deviceId ? deviceId : null,
     app_version: appVersionMode === "one" && appVersion ? appVersion : null,
@@ -251,7 +270,14 @@ export default function UserAgentGeneratorPage() {
       }
       const data = await r.json();
       setResults(data.user_agents || []);
-      toast.success(`Generated ${data.count} user agents`);
+      setMixMeta({
+        mix_mode: !!data.mix_mode,
+        apps_pool: data.apps_pool || [],
+        platforms_pool: data.platforms_pool || [],
+        breakdown: data.breakdown || { by_app: {}, by_platform: {} },
+      });
+      const mixSuffix = data.mix_mode ? " (mix mode)" : "";
+      toast.success(`Generated ${data.count} user agents${mixSuffix}`);
     } catch (e) {
       toast.error("Network error: " + e.message);
     } finally {
@@ -437,15 +463,47 @@ export default function UserAgentGeneratorPage() {
         <CardContent className="space-y-5">
           {/* App picker */}
           <div>
-            <Label className="text-zinc-300 mb-2 block">App / platform</Label>
+            <div className="flex items-center justify-between mb-2">
+              <Label className="text-zinc-300">App</Label>
+              <ModePill
+                mode={appMode}
+                onChange={(m) => setAppMode(m)}
+                testId="app-mode-toggle"
+              />
+            </div>
+            {appMode === "many" && (
+              <div className="mb-2 text-[11px] text-blue-300 bg-blue-950/40 border border-blue-900/60 rounded px-2 py-1.5">
+                <span className="font-semibold">Mix mode:</span>{" "}
+                Click 2+ apps below. Output will be randomly interleaved
+                (e.g. FB, IG, TT, FB, YT — not grouped).
+                {appsPool.length > 0 && (
+                  <span className="ml-1 text-blue-200">
+                    {" "}— {appsPool.length} selected
+                    {appsPool.length === 1 ? " (need at least 2 for mix)" : ""}
+                  </span>
+                )}
+              </div>
+            )}
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2">
               {APPS.map((a) => {
                 const Icon = a.icon;
-                const active = app === a.key;
+                const active = appMode === "many"
+                  ? appsPool.includes(a.key)
+                  : app === a.key;
                 return (
                   <button
                     key={a.key}
-                    onClick={() => setApp(a.key)}
+                    onClick={() => {
+                      if (appMode === "many") {
+                        setAppsPool((prev) =>
+                          prev.includes(a.key)
+                            ? prev.filter((k) => k !== a.key)
+                            : [...prev, a.key]
+                        );
+                      } else {
+                        setApp(a.key);
+                      }
+                    }}
                     className={`flex items-center justify-center gap-2 px-3 py-2 rounded-lg border text-sm transition ${
                       active
                         ? `${a.color} border-white/20 text-white`
@@ -459,19 +517,71 @@ export default function UserAgentGeneratorPage() {
                 );
               })}
             </div>
+            {appMode === "many" && (
+              <div className="mt-2 flex items-center gap-2 text-[11px] text-zinc-400">
+                <button
+                  type="button"
+                  onClick={() => setAppsPool(APPS.map((a) => a.key))}
+                  className="px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 hover:bg-zinc-700"
+                  data-testid="apps-select-all"
+                >
+                  Select all
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAppsPool([])}
+                  className="px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 hover:bg-zinc-700"
+                  data-testid="apps-clear"
+                >
+                  Clear
+                </button>
+              </div>
+            )}
           </div>
 
           {/* OS picker */}
           <div>
-            <Label className="text-zinc-300 mb-2 block">Operating System</Label>
+            <div className="flex items-center justify-between mb-2">
+              <Label className="text-zinc-300">Operating System</Label>
+              <ModePill
+                mode={platformMode}
+                onChange={(m) => setPlatformMode(m)}
+                testId="platform-mode-toggle"
+              />
+            </div>
+            {platformMode === "many" && (
+              <div className="mb-2 text-[11px] text-blue-300 bg-blue-950/40 border border-blue-900/60 rounded px-2 py-1.5">
+                <span className="font-semibold">Mix mode:</span>{" "}
+                Click 2+ platforms. Output randomly mixes Android / iOS /
+                Desktop UAs into one pool.
+                {platformsPool.length > 0 && (
+                  <span className="ml-1 text-blue-200">
+                    {" "}— {platformsPool.length} selected
+                    {platformsPool.length === 1 ? " (need at least 2 for mix)" : ""}
+                  </span>
+                )}
+              </div>
+            )}
             <div className="flex gap-2 flex-wrap">
-              {PLATFORMS.map((p) => {
+              {PLATFORMS.filter((p) => platformMode === "one" || p.key !== "any").map((p) => {
                 const Icon = p.icon;
-                const active = platform === p.key;
+                const active = platformMode === "many"
+                  ? platformsPool.includes(p.key)
+                  : platform === p.key;
                 return (
                   <button
                     key={p.key}
-                    onClick={() => setPlatform(p.key)}
+                    onClick={() => {
+                      if (platformMode === "many") {
+                        setPlatformsPool((prev) =>
+                          prev.includes(p.key)
+                            ? prev.filter((k) => k !== p.key)
+                            : [...prev, p.key]
+                        );
+                      } else {
+                        setPlatform(p.key);
+                      }
+                    }}
                     className={`flex items-center gap-2 px-4 py-2 rounded-lg border text-sm transition ${
                       active
                         ? "bg-blue-600 border-blue-500 text-white"
@@ -485,6 +595,26 @@ export default function UserAgentGeneratorPage() {
                 );
               })}
             </div>
+            {platformMode === "many" && (
+              <div className="mt-2 flex items-center gap-2 text-[11px] text-zinc-400">
+                <button
+                  type="button"
+                  onClick={() => setPlatformsPool(["android", "ios", "desktop"])}
+                  className="px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 hover:bg-zinc-700"
+                  data-testid="platforms-select-all"
+                >
+                  Select all
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPlatformsPool([])}
+                  className="px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 hover:bg-zinc-700"
+                  data-testid="platforms-clear"
+                >
+                  Clear
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Device + version pickers */}
@@ -752,8 +882,30 @@ export default function UserAgentGeneratorPage() {
             <div>
               <CardTitle className="text-white text-base">
                 Generated ({results.length.toLocaleString()})
+                {mixMeta?.mix_mode && (
+                  <Badge className="ml-2 bg-blue-900/60 text-blue-200 border border-blue-700/50 text-[10px]">
+                    MIX MODE — randomly interleaved
+                  </Badge>
+                )}
               </CardTitle>
-              <CardDescription>Click any row to copy just that one</CardDescription>
+              <CardDescription>
+                {mixMeta?.mix_mode ? (
+                  <span className="flex flex-wrap gap-1 mt-1" data-testid="ua-mix-breakdown">
+                    {Object.entries(mixMeta.breakdown?.by_app || {}).map(([k, v]) => (
+                      <span key={`app-${k}`} className="text-[11px] bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-zinc-300">
+                        {k}: <span className="text-blue-300 font-semibold">{v}</span>
+                      </span>
+                    ))}
+                    {Object.entries(mixMeta.breakdown?.by_platform || {}).map(([k, v]) => (
+                      <span key={`plat-${k}`} className="text-[11px] bg-zinc-800 border border-zinc-700 rounded px-2 py-0.5 text-zinc-300">
+                        {k}: <span className="text-emerald-300 font-semibold">{v}</span>
+                      </span>
+                    ))}
+                  </span>
+                ) : (
+                  "Click any row to copy just that one"
+                )}
+              </CardDescription>
             </div>
             <div className="flex gap-2 flex-wrap">
               <Button

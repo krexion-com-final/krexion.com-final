@@ -6949,6 +6949,18 @@ async def _rut_prepare_and_run(
                 consume_upload_ids.append(bid)
             if not merged_ua_lines:
                 return await _mark_failed("Selected user-agent upload(s) are empty or not found")
+            # ── 2026-06-11: Shuffle merged multi-batch UA list ───────
+            # Without this, batches stay grouped in load-order (batch1
+            # UAs first, batch2 UAs second, …). Because the runner's
+            # `pick_next_ua` is sequential round-robin, the FIRST N
+            # visits would all draw from batch1 (e.g. all Android),
+            # then batch2 (all iOS) — defeating the user's intent of a
+            # mixed device/platform pool. Shuffling once at load time
+            # gives a true random interleave for the entire job while
+            # keeping the deterministic round-robin pick (so we still
+            # don't repeat a UA until the whole pool is exhausted).
+            import random as _r
+            _r.shuffle(merged_ua_lines)
             ua_lines = merged_ua_lines
         else:
             ua_lines = paste_ua_lines
@@ -10976,6 +10988,16 @@ class UAGenerateRequest(BaseModel):
     regions: Optional[List[str]] = None         # 2–N region codes to cycle through
     resolution: Optional[str] = None
     resolutions: Optional[List[str]] = None     # 2–N resolutions to cycle through
+    # ── 2026-06-11: Multi-app + Multi-platform Mix Mode ────────────────
+    # When `apps` has 2+ entries, the generator picks a RANDOM app per UA
+    # from that list (e.g. ["facebook","instagram","tiktok"] → output is
+    # a randomly-interleaved mix). Single-app behaviour (`app` field) is
+    # preserved exactly when `apps` is None / empty.
+    # Same logic for `platforms`: ["android","ios","desktop"] picks a
+    # random kind per UA. Generated `results` list is always shuffled at
+    # the end so consumers never see grouped batches in output order.
+    apps: Optional[List[str]] = None            # 2–N app keys to mix randomly
+    platforms: Optional[List[str]] = None       # 2–N platform keys to mix randomly
     count: int = 10                  # up to 50,000
     format: Optional[str] = "json"   # "json" or "xlsx"
 
@@ -12102,6 +12124,36 @@ async def generate_user_agents(payload: UAGenerateRequest, user: dict = Depends(
     brand_filter = (payload.brand or "").lower().strip()
     want_format = (payload.format or "json").lower().strip()
 
+    # ── 2026-06-11: Multi-app + Multi-platform Mix Mode ──────────────────
+    # Validate `apps` pool (if provided). Falls back to single `app` mode
+    # silently on empty / all-invalid input — never breaks existing flow.
+    _ALLOWED_APPS = {"instagram","facebook","tiktok","pinterest","snapchat",
+                     "youtube","whatsapp","gsearch","gchrome","chrome"}
+    apps_pool: Optional[List[str]] = None
+    if payload.apps:
+        cleaned = [a.lower().strip() for a in payload.apps if a and a.lower().strip() in _ALLOWED_APPS]
+        # dedupe while preserving order
+        seen = set()
+        cleaned = [a for a in cleaned if not (a in seen or seen.add(a))]
+        if len(cleaned) >= 2:
+            apps_pool = cleaned
+        elif len(cleaned) == 1:
+            app = cleaned[0]   # promote single-entry list to scalar mode
+
+    _ALLOWED_PLATFORMS = {"android","ios","desktop"}  # "any" deliberately
+                                                     # excluded from MIX
+                                                     # mode — use explicit
+                                                     # ["android","ios","desktop"]
+    platforms_pool: Optional[List[str]] = None
+    if payload.platforms:
+        cleaned_p = [p.lower().strip() for p in payload.platforms if p and p.lower().strip() in _ALLOWED_PLATFORMS]
+        seen_p = set()
+        cleaned_p = [p for p in cleaned_p if not (p in seen_p or seen_p.add(p))]
+        if len(cleaned_p) >= 2:
+            platforms_pool = cleaned_p
+        elif len(cleaned_p) == 1:
+            platform = cleaned_p[0]
+
     # If user requested a specific device, resolve once up-front
     pinned_device = None
     pinned_kind = None
@@ -12127,26 +12179,31 @@ async def generate_user_agents(payload: UAGenerateRequest, user: dict = Depends(
             # if all same kind use that; else "mixed"
             multi_device_kind = (list(kinds_seen)[0] if len(kinds_seen) == 1 else "mixed")
 
-    def _pick_device_pool():
+    def _pick_device_pool_for(platform_value: str):
+        """Returns (base_pool, pool_kind) for the given platform value.
+        Honours pinned_device / multi_device_pool overrides exactly like
+        the legacy code did — those take precedence over `platform`."""
         if pinned_device:
             return [pinned_device], pinned_kind
         if multi_device_pool:
             return list(multi_device_pool), multi_device_kind
-        if platform == "ios":
+        if platform_value == "ios":
             return list(_IOS_DEVICES), "ios"
-        if platform == "android":
+        if platform_value == "android":
             return list(_ANDROID_DEVICES), "android"
-        if platform == "desktop":
+        if platform_value == "desktop":
             return list(_DESKTOP_DEVICES), "desktop"
-        # Any
-        pool = _ANDROID_DEVICES + _IOS_DEVICES
-        return pool, "mixed"
+        # "any" → android + iOS mix (desktop intentionally excluded to
+        # preserve legacy behaviour — for desktop you select it explicitly)
+        return _ANDROID_DEVICES + _IOS_DEVICES, "mixed"
 
-    base_pool, pool_kind = _pick_device_pool()
+    base_pool, pool_kind = _pick_device_pool_for(platform)
 
     # TikTok iOS runs on iPhone much more than iPad — stick to iPhones only so
     # every generated UA feels authentic to the platform.
-    if app == "tiktok" and not pinned_device:
+    # NOTE: in mix mode (apps_pool / platforms_pool) this filter is applied
+    # per-UA below instead, so the rule still holds when tiktok is picked.
+    if app == "tiktok" and not pinned_device and not apps_pool:
         if platform == "ios":
             base_pool = [d for d in base_pool if d.get("brand") == "iPhone"]
             pool_kind = "ios"
@@ -12156,19 +12213,37 @@ async def generate_user_agents(payload: UAGenerateRequest, user: dict = Depends(
                 if "and_ver" in d or d.get("brand") == "iPhone"
             ]
 
-    if brand_filter and brand_filter != "any" and not pinned_device:
+    def _apply_brand_filter(pool: List[dict]) -> List[dict]:
+        if not (brand_filter and brand_filter != "any" and not pinned_device):
+            return pool
         def _match(d):
             return (
                 brand_filter == (d.get("brand","").lower())
                 or brand_filter == (d.get("vendor","").lower())
                 or brand_filter in (d.get("name","").lower())
             )
-        filtered = [d for d in base_pool if _match(d)]
-        if filtered:
-            base_pool = filtered
+        filtered = [d for d in pool if _match(d)]
+        return filtered if filtered else pool
+
+    base_pool = _apply_brand_filter(base_pool)
 
     if not base_pool:
         raise HTTPException(status_code=400, detail="No devices match your filters")
+
+    # ── 2026-06-11: Pre-compute per-platform device pools for MIX mode ──
+    # When platforms_pool is set, the resolver picks one platform per UA
+    # and needs that platform's device pool ready (brand + tiktok filters
+    # already applied). Cache here so we don't redo it 50,000 times.
+    platform_pool_cache: Dict[str, Tuple[List[dict], str]] = {}
+    if platforms_pool:
+        for p_val in platforms_pool:
+            bp, pk = _pick_device_pool_for(p_val)
+            bp = _apply_brand_filter(bp)
+            if bp:
+                platform_pool_cache[p_val] = (bp, pk)
+        if not platform_pool_cache:
+            raise HTTPException(status_code=400, detail="No devices match your filters in any selected platform")
+
 
     # Validate resolution (if pinned)
     pinned_resolution = (payload.resolution or "").strip() or None
@@ -12231,8 +12306,33 @@ async def generate_user_agents(payload: UAGenerateRequest, user: dict = Depends(
 
     results = []
     for _ in range(count):
-        device = random.choice(base_pool)
-        kind = pool_kind if pool_kind != "mixed" else ("android" if "and_ver" in device else "ios")
+        # ── 2026-06-11: Per-UA MIX picks (apps + platforms) ──────────
+        # When apps_pool is set, pick a random app for THIS visit. Same
+        # for platforms_pool. Falls back to scalar app/platform exactly
+        # like the legacy single-pick path otherwise.
+        current_app = random.choice(apps_pool) if apps_pool else app
+
+        if platforms_pool:
+            chosen_platform = random.choice(platforms_pool)
+            current_pool, current_kind = platform_pool_cache[chosen_platform]
+        else:
+            current_pool, current_kind = base_pool, pool_kind
+
+        # TikTok realism rule applies per-UA in mix mode too — TikTok
+        # iOS = iPhone only (no iPad). Skip when device is pinned or the
+        # filter would empty the pool.
+        if current_app == "tiktok" and not pinned_device:
+            if current_kind == "ios":
+                _filtered = [d for d in current_pool if d.get("brand") == "iPhone"]
+                if _filtered:
+                    current_pool = _filtered
+            elif current_kind == "mixed":
+                _filtered = [d for d in current_pool if "and_ver" in d or d.get("brand") == "iPhone"]
+                if _filtered:
+                    current_pool = _filtered
+
+        device = random.choice(current_pool)
+        kind = current_kind if current_kind != "mixed" else ("android" if "and_ver" in device else "ios")
         if pinned_device:
             kind = pinned_kind
 
@@ -12248,7 +12348,7 @@ async def generate_user_agents(payload: UAGenerateRequest, user: dict = Depends(
         elif app_versions_pool:
             app_ver = random.choice(app_versions_pool)
         else:
-            app_ver = random.choice(_APP_VERSIONS.get(app, ["1.0.0"]))
+            app_ver = random.choice(_APP_VERSIONS.get(current_app, ["1.0.0"]))
         chrome_ver = random.choice(_CHROME_VERSIONS)
 
         # Per-UA region: pinned > pool > random
@@ -12265,45 +12365,45 @@ async def generate_user_agents(payload: UAGenerateRequest, user: dict = Depends(
             per_ua_resolution = random.choice(resolutions_pool)
 
         if kind == "android":
-            if app == "instagram":
+            if current_app == "instagram":
                 ua = _ua_instagram_android(device, app_ver, chrome_ver, region=region_for_ua, resolution=per_ua_resolution)
-            elif app == "facebook":
+            elif current_app == "facebook":
                 ua = _ua_facebook_android(device, app_ver, chrome_ver, region=region_for_ua)
-            elif app == "tiktok":
+            elif current_app == "tiktok":
                 ua = _ua_tiktok_android(device, app_ver, region=region_for_ua)
-            elif app == "pinterest":
+            elif current_app == "pinterest":
                 ua = _ua_pinterest_android(device, app_ver)
-            elif app == "snapchat":
+            elif current_app == "snapchat":
                 ua = _ua_snapchat_android(device, app_ver)
-            elif app == "youtube":
+            elif current_app == "youtube":
                 ua = _ua_youtube_android(device, app_ver, region=region_for_ua)
-            elif app == "whatsapp":
+            elif current_app == "whatsapp":
                 ua = _ua_whatsapp_android(device, app_ver, region=region_for_ua)
-            elif app == "gsearch":
+            elif current_app == "gsearch":
                 ua = _ua_gsearch_android(device, app_ver, region=region_for_ua)
-            elif app == "gchrome":
+            elif current_app == "gchrome":
                 ua = _ua_gchrome_android(device, app_ver, region=region_for_ua)
             else:
                 ua = _ua_chrome_android(device, chrome_ver)
             device_label = f"{device['brand']} {device['model']}"
         elif kind == "ios":
-            if app == "instagram":
+            if current_app == "instagram":
                 ua = _ua_instagram_ios(device, app_ver, region=region_for_ua, resolution=per_ua_resolution)
-            elif app == "facebook":
+            elif current_app == "facebook":
                 ua = _ua_facebook_ios(device, app_ver, region=region_for_ua)
-            elif app == "tiktok":
+            elif current_app == "tiktok":
                 ua = _ua_tiktok_ios(device, app_ver, region=region_for_ua)
-            elif app == "pinterest":
+            elif current_app == "pinterest":
                 ua = _ua_pinterest_ios(device, app_ver)
-            elif app == "snapchat":
+            elif current_app == "snapchat":
                 ua = _ua_snapchat_ios(device, app_ver)
-            elif app == "youtube":
+            elif current_app == "youtube":
                 ua = _ua_youtube_ios(device, app_ver, region=region_for_ua)
-            elif app == "whatsapp":
+            elif current_app == "whatsapp":
                 ua = _ua_whatsapp_ios(device, app_ver, region=region_for_ua)
-            elif app == "gsearch":
+            elif current_app == "gsearch":
                 ua = _ua_gsearch_ios(device, app_ver, region=region_for_ua)
-            elif app == "gchrome":
+            elif current_app == "gchrome":
                 ua = _ua_gchrome_ios(device, app_ver, region=region_for_ua)
             else:
                 ua = _ua_safari_ios(device)
@@ -12332,13 +12432,37 @@ async def generate_user_agents(payload: UAGenerateRequest, user: dict = Depends(
             "user_agent": ua,
             "device": device_label,
             "platform": kind,
-            "app": app,
-            "app_version": app_ver if app in _APP_VERSIONS else None,
+            "app": current_app,
+            "app_version": app_ver if current_app in _APP_VERSIONS else None,
             "os_version": os_version_display,
             "region": region_for_ua["code"],
             "country": region_for_ua["country"],
             "resolution": per_ua_resolution or (device.get("res") if kind != "desktop" else None),
         })
+
+    # ── 2026-06-11: Final shuffle so MIX-mode output is truly random,
+    # NOT grouped by app/platform. In single-app/single-platform mode
+    # this is a no-op (the loop already varies device/version per UA),
+    # so existing customers see exactly the same kind of pool — just
+    # with the previously-implicit ordering randomised, which removes
+    # one more pattern signal. Safe + backwards-compatible.
+    random.shuffle(results)
+
+    # ── 2026-06-11: Build mix-mode display labels + per-app/platform
+    # breakdown for the response, so the UI can show "Generated 1000:
+    # 248 FB-Android, 252 FB-iOS, …".
+    app_label_for_file = "mix" if apps_pool else app
+    platform_label_for_file = "mix" if platforms_pool else platform
+
+    breakdown_apps: Dict[str, int] = {}
+    breakdown_platforms: Dict[str, int] = {}
+    for r in results:
+        a = r.get("app") or ""
+        p = r.get("platform") or ""
+        if a:
+            breakdown_apps[a] = breakdown_apps.get(a, 0) + 1
+        if p:
+            breakdown_platforms[p] = breakdown_platforms.get(p, 0) + 1
 
     # XLSX export path
     if want_format == "xlsx":
@@ -12349,7 +12473,7 @@ async def generate_user_agents(payload: UAGenerateRequest, user: dict = Depends(
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, sheet_name='User Agents', index=False)
         output.seek(0)
-        download_name = f"user_agents_{app}_{platform}_{len(results)}.xlsx"
+        download_name = f"user_agents_{app_label_for_file}_{platform_label_for_file}_{len(results)}.xlsx"
         return Response(
             content=output.getvalue(),
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -12360,7 +12484,20 @@ async def generate_user_agents(payload: UAGenerateRequest, user: dict = Depends(
             }
         )
 
-    return {"user_agents": results, "count": len(results), "app": app, "platform": platform}
+    return {
+        "user_agents": results,
+        "count": len(results),
+        "app": app_label_for_file,
+        "platform": platform_label_for_file,
+        # Multi-mix metadata (empty / single-entry in legacy mode)
+        "mix_mode": bool(apps_pool or platforms_pool),
+        "apps_pool": apps_pool or [],
+        "platforms_pool": platforms_pool or [],
+        "breakdown": {
+            "by_app": breakdown_apps,
+            "by_platform": breakdown_platforms,
+        },
+    }
 
 
 # ==================== REAL TRAFFIC SENDER (via residential proxies) ====================
