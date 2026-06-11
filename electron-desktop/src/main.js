@@ -598,6 +598,76 @@ function checkForUpdatesManual() {
   checkForUpdatesAuto();
 }
 
+// ── IPC bridge for the in-app UpdateBanner ───────────────────────────────────
+// 2026-06-11: The React UpdateBanner (shared with the cloud web app)
+// previously POSTed to /api/system/install-update, which on Electron just
+// writes a flag file that nothing on the desktop watches — so the customer's
+// "Install update" click was a no-op. These two IPC channels let the
+// renderer talk straight to electron-updater so a single click downloads
+// (if needed) and installs the new build — no manual download / reinstall.
+//
+// Registered ONCE in the main process. The handlers swallow all errors so
+// a malformed renderer call can never crash the app.
+let updateIpcRegistered = false;
+function registerUpdateIpc() {
+  if (updateIpcRegistered) return;
+  updateIpcRegistered = true;
+
+  // Renderer asks "is there an update?" — used by the banner to refresh
+  // its visible/hidden state without waiting for the next 6 h auto-cycle.
+  ipcMain.handle('krexion:check-for-updates', async () => {
+    if (!app.isPackaged) {
+      return { ok: false, dev: true, version: app.getVersion() };
+    }
+    try {
+      const r = await autoUpdater.checkForUpdates();
+      const info = r && r.updateInfo ? r.updateInfo : null;
+      return {
+        ok: true,
+        currentVersion: app.getVersion(),
+        latestVersion: info ? info.version : null,
+        updateAvailable: Boolean(info && info.version && info.version !== app.getVersion()),
+      };
+    } catch (err) {
+      log.error('[ipc] check-for-updates failed', err);
+      return { ok: false, error: String(err && err.message || err) };
+    }
+  });
+
+  // Renderer asks "install the update now". electron-updater downloads
+  // (idempotent — does nothing if already cached) and then runs
+  // quitAndInstall which closes the app and launches the NSIS installer
+  // silently. The customer sees a brief progress dialog and the app
+  // restarts on the new version. No uninstall / reinstall by hand.
+  ipcMain.handle('krexion:install-update', async () => {
+    if (!app.isPackaged) {
+      return { ok: false, dev: true, message: 'Dev build — no installer to swap.' };
+    }
+    try {
+      // Make sure we have the latest manifest + binary cached.
+      await autoUpdater.checkForUpdates().catch(() => {});
+      await autoUpdater.downloadUpdate().catch(() => {});
+      log.info('[ipc] customer clicked Install update — running quitAndInstall');
+      isQuitting = true;
+      // Defer slightly so the renderer can show a "Restarting…" state
+      // before the window is destroyed.
+      setTimeout(() => {
+        try {
+          autoUpdater.quitAndInstall(false, true);
+        } catch (err) {
+          log.error('[ipc] quitAndInstall threw', err);
+        }
+      }, 250);
+      return { ok: true, restarting: true };
+    } catch (err) {
+      log.error('[ipc] install-update failed', err);
+      return { ok: false, error: String(err && err.message || err) };
+    }
+  });
+
+  log.info('[ipc] update bridge registered (krexion:check-for-updates, krexion:install-update)');
+}
+
 // ── Lifecycle ────────────────────────────────────────────────────────────────
 // Install the `app://` protocol request handler. Runs once `app` is ready
 // (otherwise `protocol.handle` throws). The handler resolves URLs like:
@@ -678,6 +748,7 @@ async function boot() {
     // check by ~3 s so a slow internet connection at startup never blocks
     // the customer from seeing the dashboard.
     configureAutoUpdater();
+    registerUpdateIpc();
     setTimeout(checkForUpdatesAuto, 3000);
     // Re-check every 6 hours while the app stays open (matches Spotify /
     // VS Code update cadence). 6 h = 21_600_000 ms.

@@ -59,6 +59,39 @@ export default function UpdateBanner() {
 
   const handleInstall = async () => {
     setInstalling(true);
+    // 2026-06-11: When running inside Electron Desktop, route the
+    // "Install update" click through the main process IPC bridge so
+    // electron-updater handles the download + quitAndInstall. This
+    // gives the customer a true one-click update — no uninstall /
+    // reinstall, no flag-file dance. Falls through to the HTTP path
+    // on the cloud web app and on Native (Inno-Setup) installs, both
+    // of which already work via /api/system/install-update.
+    const isElectron = typeof window !== "undefined"
+      && window.krexion
+      && window.krexion.isDesktop === true
+      && typeof window.krexion.installUpdate === "function";
+    if (isElectron) {
+      try {
+        toast.info(
+          "Update download ho raha hai. Tayyar hote hi Krexion automatically restart hoga — kuch karna nahi.",
+          { duration: 8000 }
+        );
+        const r = await window.krexion.installUpdate();
+        if (r && r.ok) {
+          // App is about to quit & relaunch on the new version.
+          setShowModal(false);
+        } else if (r && r.dev) {
+          toast.info("Dev build — packaged installer nahi hai. Production app pe yeh button kaam karega.");
+        } else {
+          toast.error((r && r.error) || "Update install nahi ho saka. Logs check karein: %APPDATA%\\Krexion-Desktop\\logs");
+        }
+      } catch (e) {
+        toast.error("Update bridge fail ho gaya. Electron logs dekhain.");
+      } finally {
+        setInstalling(false);
+      }
+      return;
+    }
     try {
       const token =
         localStorage.getItem("token") ||

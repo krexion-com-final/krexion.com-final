@@ -135,6 +135,21 @@ _CLOUD_PATH_PREFIXES: Tuple[str, ...] = (
 _CLOUD_PATH_EXACT: Tuple[str, ...] = (
     "/api/links",          # POST create, GET list
     "/api/customer-signup",  # public signup (if present)
+    # 2026-06-11: Admin-curated promotional / discount banners are
+    # authored in the cloud admin panel and stored in the cloud Mongo.
+    # Without this proxy entry, Electron/Native customers would only
+    # see banners from their LOCAL DB (which is always empty), so any
+    # discount / offer banner published on krexion.com would never
+    # reach the desktop app. Forwarding makes the banner system
+    # "publish once, show everywhere".
+    "/api/banners/active",
+    # 2026-06-11: Update-available notification banner. The cloud
+    # tracks the latest published release in `app_releases`. Native /
+    # Electron customers' local Mongo doesn't have those records, so
+    # without this proxy the UpdateBanner would never light up on
+    # their installed app even when a new version is out. Forwarding
+    # lets every surface see the same "vX.Y.Z is available" prompt.
+    "/api/system/public-latest",
 )
 
 

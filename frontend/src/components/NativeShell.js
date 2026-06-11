@@ -34,6 +34,7 @@ import {
 import axios from "axios";
 import { useBranding } from "../context/BrandingContext";
 import BannerBar from "./BannerBar";
+import UpdateBanner from "./UpdateBanner";
 import "./NativeShell.css";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -403,6 +404,7 @@ export default function NativeShell({ children }) {
           </div>
 
           <div className="knative-body" data-testid="native-body">
+            <UpdateBanner />
             <BannerBar />
             {children}
           </div>
