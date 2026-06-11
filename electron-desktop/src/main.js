@@ -18,7 +18,7 @@
 // Inno-Setup installer or web app. Both ship side-by-side.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const { app, BrowserWindow, Menu, Tray, dialog, shell, nativeImage, protocol, net } = require('electron');
+const { app, BrowserWindow, Menu, Tray, dialog, shell, nativeImage, protocol, net, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
