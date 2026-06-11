@@ -22,6 +22,7 @@ import UserAgentGeneratorPage from "./pages/UserAgentGeneratorPage";
 import UserAgentCheckerPage from "./pages/UserAgentCheckerPage";
 import FormFillerPage from "./pages/FormFillerPage";
 import RealUserTrafficPage from "./pages/RealUserTrafficPage";
+import BrowserProfilesPage from "./pages/BrowserProfilesPage";
 import VisualRecorderPage from "./pages/VisualRecorderPage";
 import UploadedThingsPage from "./pages/UploadedThingsPage";
 import AdsPowerPage from "./pages/AdsPowerPage";
@@ -283,6 +284,11 @@ function App() {
                       <Route path="/real-user-traffic" element={
                         <FeatureRoute feature="real_user_traffic">
                           <RealUserTrafficPage />
+                        </FeatureRoute>
+                      } />
+                      <Route path="/browser-profiles" element={
+                        <FeatureRoute feature="real_user_traffic">
+                          <BrowserProfilesPage />
                         </FeatureRoute>
                       } />
                       <Route path="/visual-recorder" element={

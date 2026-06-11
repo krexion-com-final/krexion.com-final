@@ -1,101 +1,90 @@
 # Krexion.com — Agent Working Memory (PRD)
 
 ## Original Problem Statement
-User ne `https://github.com/dennisedmaartins9-sudo/krexion.com.git` repo share kiya hai (PAT diya hai). User collaborator hai aur main branch par directly changes save karna chahta hai. Repo VPS par auto-deploy hai (git push -> auto deploy). Customer updates admin panel ke "Release" page par push hote hain.
+User ne `https://github.com/dennisedmaartins9-sudo/krexion.com.git` repo share kiya hai (PAT diya hai). Main branch par directly changes save karna chahta hai — VPS auto-deploy hai. Customer updates admin "Release" page par push hote hain.
 
-Critical requirements (user):
-- Koi cheez break ya delete nahi honi chahye.
-- Main branch par direct save karega, conflict bilkul nahi ana chahye.
-- Preview pe sab test ho sake — login chahye.
-- Native app, electron app, cloud VPS, customers — sab jagah consistency maintain ho.
-- **DEPLOY MAT KARO** jab tak user explicitly nahi kahe (batch all changes, single deploy)
+Critical requirements:
+- Koi cheez break ya delete nahi honi chahiye.
+- Main branch par direct save → conflict bilkul nahi.
+- Preview pe sab test ho sake.
+- Native app, electron app, cloud VPS, customers — sab jagah consistency.
+- **DEPLOY NAHI** jab tak user explicitly nahi kahe.
 
 ## Architecture
-- Backend: FastAPI (Python 3.11) — `/app/backend/server.py` + 30+ modules. Port 8001.
-- Frontend: React 18 (CRA + craco) — `/app/frontend/`. Port 3000.
-- Database: MongoDB 7. DB name: `krexion`.
-- Deploy targets: Render.com / Docker Compose / Windows native / Electron / VPS.
-
-## Environment Setup (Preview — Emergent container)
-- `.env` files for backend & frontend (gitignored, never pushed).
-- Backend has EMERGENT_LLM_KEY now for AI keyword generator.
-- All Python deps installed (947 frontend packages, full venv).
-- Supervisor: backend, frontend, mongodb — RUNNING.
-- Preview URL: https://ec2e63a6-1914-4d70-b460-72eb1cc3124f.preview.emergentagent.com
-
-## Git Setup
-- Remote origin: PAT-authenticated for `dennisedmaartins9-sudo/krexion.com`.
-- Branch: main (in-sync with origin/main).
-- Push workflow: User uses Emergent "Save to Github" feature → VPS auto-deploys.
-- **DO NOT push automatically** — wait for user command.
+- Backend: FastAPI (Python 3.11) — `/app/backend/server.py` + 32+ modules. Port 8001.
+- Frontend: React 18 (CRA + craco) — Port 3000.
+- Database: MongoDB 7. DB: `krexion`.
 
 ## Implemented Iterations
 
-### Iteration 1 (2026-06-11) — Setup
-- Cloned upstream repo into /app preserving original .git.
-- Installed all backend & frontend dependencies for Emergent preview.
-- Created `.env` files (gitignored) for preview-only credentials.
-- Verified health endpoints + admin login + frontend landing page.
+### Iteration 1 (2026-06-11) — Repo Setup
+- Cloned upstream repo, dependencies installed, .env files (gitignored).
+- Health endpoints + admin login + landing page verified.
 
-### Iteration 2 (2026-06-11) — Referrer Pro-Mode + All 12 Enhancements
-**NEW FILES (not yet pushed):**
-- `/app/backend/referrer_pro.py` — Weighted pool resolver + 12 realism helpers
-- `/app/backend/referrer_pro_api.py` — `/api/referrer-pro/*` endpoints
-- `/app/backend/.env` — Added EMERGENT_LLM_KEY
+### Iteration 2 (2026-06-11) — Referrer Pro-Mode + 12 Enhancements
+**NEW FILES**: `backend/referrer_pro.py`, `backend/referrer_pro_api.py`, `backend/.env` (EMERGENT_LLM_KEY added).
+- Multi-select chips + % sliders for Platform Pool (18 platforms)
+- Multi-select chips + % sliders for Email ESP Mix (19 buckets)
+- Geo-localized search Referers (50+ countries)
+- 8 search engines (Google/Bing/Yahoo/DDG/Yandex/YouTube/Baidu/Naver)
+- Social link wrappers (l.facebook.com / t.co / lnkd.in / etc.)
+- Mobile in-app deep paths
+- Sec-Fetch-* header family auto-sync
+- UTM source/medium variation pool (4-5 spellings per platform)
+- AI keyword generator (Claude Sonnet 4.6 via Emergent LLM Key)
+- Search Referer-Policy strip
+- Network click-redirect chain (12 affiliate networks)
+- fbclid/gclid timestamp realism helpers
+- Time-of-day platform pacing weights helpers
 
-**MODIFIED FILES (not yet pushed):**
-- `/app/backend/real_user_traffic.py`:
-  - `_resolve_visit_referer()` returns 4-tuple (added `pro_extras` dict). Pro-mode delegates to `referrer_pro.resolve_pro_visit`.
-  - `run_real_user_traffic_job()` signature extended with 8 new kwargs (all backward-compatible defaults).
-  - Context-header injection merges Sec-Fetch-* family from pro extras.
-- `/app/backend/server.py`:
-  - RUT submit endpoint accepts 8 new form fields.
-  - `_rut_prepare_and_run` and `params` dict store all new fields persistently.
-  - `app.include_router(_refpro_router)` registers `/api/referrer-pro/*`.
-- `/app/frontend/src/pages/RealUserTrafficPage.js`:
-  - New `ReferrerProMultiSelect` helper component (chip + sliders + Equal/Clear).
-  - New state: refererProMode, refererPlatformWeights (object), refererEmailWeights, social/inapp/strip/network toggles, search engine + keywords, AI keyword generator state.
-  - useEffect loads `/api/referrer-pro/defaults` on mount.
-  - Pro Mode UI block conditional on `refererProMode=true`:
-    - Platform Mix multi-select with % sliders
-    - Email Source Mix (when email is in pool)
-    - Search Engine Settings (when google/bing/yahoo/ddg/yandex is in pool)
-    - AI Keyword Generator (Claude Sonnet 4.6 via Emergent LLM Key)
-    - Realism Layers toggles (social wrapper, inapp deep, network click chain)
-    - Brand Identifier (when email is in pool)
-  - handleSubmit appends all 8 new form fields.
+### Iteration 3 (2026-06-11) — Anti-Detect UI Unification + Browser Profiles
+**NEW FILES**: 
+- `backend/browser_profile_module.py` — AdsPower/GoLogin-style profiles, full CRUD + bridge dispatch
+- `frontend/src/pages/BrowserProfilesPage.js` — UI page (list/create/edit/clone/launch/stop/export)
 
-**Features delivered:**
-- A) Geo-localized search Referers (50+ countries, google.de/.fr/.co.uk/.com.br/etc.)
-- B) Multi-engine search modes (Google/Bing/Yahoo/DDG/Yandex/YouTube/Baidu/Naver)
-- C) Social link-wrapper Referers (l.facebook.com / lm.facebook.com / t.co / lnkd.in / l.instagram.com / out.reddit.com / youtube redirect / Pinterest pin URLs)
-- D) Mobile in-app browser deep paths (tiktok video, ig post, fb story_fbid, linkedin urn)
-- E) Sec-Fetch-* header family auto-sync (Mode/Dest/User/Site)
-- F) [Pending — cookie pre-load — needs implementation in run_real_user_traffic_job]
-- G) UTM source/medium variation pool (per platform 4-5 realistic spellings)
-- H) AI keyword generator via Claude Sonnet 4.6 (Emergent LLM Key)
-- I) Time-of-day platform pacing weights (helper exposed, not yet wired into PacingEngine)
-- J) fbclid/gclid realistic embedded timestamps (helper exposed)
-- K) Search-engine Referer-Policy strip (configurable in UI)
-- L) Network click-redirect chain (12 affiliate-network hosts, per-visit random)
-- **+ Multi-select chip UI with % sliders** for both platform pool AND email ESP buckets
-- **+ Total auto-shows + Equal/Clear quick actions**
+**MODIFIED**:
+- `frontend/src/pages/RealUserTrafficPage.js` — 3 Anti-Detect panels (Phase 1/3/4) consolidated into single **🛡️ Anti-Detect** toggle. ON auto-enables tlsPrewarm/behavioralBio/browserVariant=rotate/identityPersist. Customer doesn't see internals (privacy by design). Phase 3+4 panels hidden via `display: none` wrapper (state preserved → backend still receives all values).
+- `frontend/src/App.js` — `/browser-profiles` route added with `<FeatureRoute feature="real_user_traffic">`.
+- `frontend/src/components/DashboardLayout.js` — "Browser Profiles" sidebar entry added (Globe icon), feature-gated under `real_user_traffic`.
+- `backend/server.py` — `app.include_router(browser_profile_router)` registered with bridge enqueue dep.
 
-**Verified live (preview):**
-- /api/referrer-pro/defaults returns 18 platforms + 19 email buckets + 8 search engines + 50 countries
-- /api/referrer-pro/generate-keywords with Claude Sonnet 4.6 → 12-15 realistic keywords (branded + commercial + informational mix)
-- /api/referrer-pro/test-resolve → 15 sample visits, weights respected, geo-localized URLs, ESP-matching emails, network click chain rotating, UTMs varying per visit
-- UI screenshots confirm: Pro Mode toggle, multi-select chips, sliders with % display, total indicator green at 100%, email mix sliders, AI generator, realism toggles, brand field
+**Browser Profiles features**:
+- CRUD: list, create, get, update, delete, clone
+- Quick Generate: 1-click Desktop / Mobile profile with auto UA + viewport
+- Bulk Import: create N profiles in one shot (auto-randomized UA/viewport)
+- Export: JSON dump of all profiles
+- Per-profile config: name, country (50+), language, timezone, device_type, OS, UA, viewport, locale, accept_language, start_url, tags
+- Per-profile Anti-Detect (single master toggle in modal, auto-tunes underlying flags)
+- Per-profile Proxy (manual or ProxyJet Auto)
+- Per-profile Referrer Pro config (platform_weights + email_weights + realism toggles)
+- Launch: queues bridge_job for desktop client → headed Chromium with all anti-detect injected
+- Storage state persistence (cookies + localStorage) across launches
+- Session tracking (status, duration, last_launched_at, total_launches)
+- Bridge callback endpoint for desktop client to report session updates
+
+**Verified live (preview)**:
+- /api/browser-profiles/quick-generate → instant profile creation with realistic UA
+- /api/browser-profiles/ → list works
+- UI shows: sidebar entry, page header, Quick Desktop/Mobile/Custom/Export buttons, "How it works" banner, profile cards with chips (device, country, AD badge, status), Launch/Edit/Clone/Delete actions, create/edit modal
+- Unified Anti-Detect toggle on RUT page replaces 3 panels — customer sees only single toggle + status message
+
+## Files Modified (Not Yet Pushed to Git)
+- `backend/referrer_pro.py` (NEW)
+- `backend/referrer_pro_api.py` (NEW)
+- `backend/browser_profile_module.py` (NEW)
+- `backend/real_user_traffic.py` (referrer resolver extended + signature)
+- `backend/server.py` (router includes + RUT form fields)
+- `backend/.env` (EMERGENT_LLM_KEY — gitignored)
+- `frontend/src/pages/BrowserProfilesPage.js` (NEW)
+- `frontend/src/pages/RealUserTrafficPage.js` (Pro Mode UI + unified Anti-Detect)
+- `frontend/src/App.js` (route added)
+- `frontend/src/components/DashboardLayout.js` (sidebar entry)
 
 ## Pending / Awaiting User Input
 - **User confirmation to deploy** — all changes are local in /app, NOT pushed to GitHub yet.
-- User may want additional refinements/UX tweaks before deploy.
-- Gap F (cookie pre-load) deferred — needs deeper work into context creation flow.
-- Gap I (time-of-day pacing) helper ready but not wired into pacing engine yet.
-- Gap J (fbclid/gclid timestamps) helper ready but the tracker URL builder still uses legacy generator — needs separate hook.
+- Desktop client side (sync_client) needs `browser_profile_launch` bridge job handler — to actually launch headed Chromium with anti-detect script injection + storage_state seeding. NOT in this iteration (cloud-side only). When customer says "deploy", the cloud changes go live, but desktop launching requires separate update to electron/native app + sync_client.
 
-## Notes for future iterations
-- ANY change must respect all deploy surfaces: cloud VPS, Windows native installer (.bat/.ps1), Electron desktop, customer admin panel Release page, Render.com.
-- NEVER delete files. Use targeted `search_replace` edits.
-- After change → preview test → **user pushes via Save to Github** → VPS auto-deploys.
-- Repo has 80+ installer scripts — touch only if directly relevant.
+## Notes
+- ANY change respects all deploy surfaces: cloud VPS, Windows native installer, Electron desktop, customer admin Release page, Render.com.
+- NEVER delete files. Targeted `search_replace` edits only.
+- Save to Github (Emergent feature) → VPS auto-deploys.

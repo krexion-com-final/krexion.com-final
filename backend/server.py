@@ -18709,6 +18709,29 @@ except Exception as _refpro_err:  # noqa: BLE001
     logger.error(f"Referrer Pro module failed to load: {_refpro_err}")
 
 # ─────────────────────────────────────────────────────────────────────
+# 2026-06-11: Browser Profiles module (AdsPower/GoLogin-style manual
+# anti-detect browsing profiles)
+# ─────────────────────────────────────────────────────────────────────
+try:
+    from browser_profile_module import router as _bp_router, _bind as _bp_bind
+    # bridge_enqueue is optional — falls back to "desktop required" message
+    _bridge_enqueue_fn = None
+    try:
+        from bridge_module import enqueue_job as _bridge_enqueue_fn  # type: ignore
+    except Exception:
+        _bridge_enqueue_fn = None
+    _bp_bind(
+        db=db,
+        get_current_user=get_current_user,
+        bridge_enqueue=_bridge_enqueue_fn,
+        ua_generate_func=None,
+    )
+    app.include_router(_bp_router)
+    logger.info("Browser Profiles module loaded — /api/browser-profiles/*")
+except Exception as _bp_err:  # noqa: BLE001
+    logger.error(f"Browser Profiles module failed to load: {_bp_err}")
+
+# ─────────────────────────────────────────────────────────────────────
 # CPI Module (Cost-Per-Install orchestrator)
 # ─────────────────────────────────────────────────────────────────────
 try:

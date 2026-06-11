@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { LayoutDashboard, Link2, MousePointerClick, DollarSign, Server, Menu, LogOut, User, Settings, TrendingUp, Upload, Mail, Phone, Filter, Smartphone, Search, ClipboardCheck, Fingerprint, Package, Apple, Cpu, Briefcase, ChevronDown, ChevronRight, Link as LinkIcon, Activity, Camera, UserPlus, KeyRound, Zap } from "lucide-react";
+import { LayoutDashboard, Link2, MousePointerClick, DollarSign, Server, Menu, LogOut, User, Settings, TrendingUp, Upload, Mail, Phone, Filter, Smartphone, Search, ClipboardCheck, Fingerprint, Package, Apple, Cpu, Briefcase, ChevronDown, ChevronRight, Link as LinkIcon, Activity, Camera, UserPlus, KeyRound, Zap, Globe } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "./ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "./ui/dropdown-menu";
@@ -88,6 +88,7 @@ export default function DashboardLayout({ children }) {
     { name: "UA Generator", path: "/ua-generator", icon: Smartphone, feature: "ua_generator" },
     { name: "UA Checker", path: "/ua-checker", icon: Search, feature: "ua_generator" },
     { name: "Real User Traffic", path: "/real-user-traffic", icon: Fingerprint, feature: "real_user_traffic" },
+    { name: "Browser Profiles", path: "/browser-profiles", icon: Globe, feature: "real_user_traffic" },
     { name: "Visual Recorder", path: "/visual-recorder", icon: Camera, feature: "real_user_traffic" },
     { name: "RPA Studio", path: "/rpa-studio", icon: Zap, feature: null },
     { name: "Uploaded Things", path: "/uploaded-things", icon: Package, feature: "real_user_traffic" },

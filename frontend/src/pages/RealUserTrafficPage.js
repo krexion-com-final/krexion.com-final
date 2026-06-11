@@ -515,6 +515,12 @@ export default function RealUserTrafficPage() {
   const [behavioralBioEnabled, setBehavioralBioEnabled] = useState(false);
   const [ipWarmupEnabled, setIpWarmupEnabled] = useState(false);
 
+  // ── 2026-06-11: UNIFIED Anti-Detect master toggle ──
+  // Single user-facing switch. When ON, all underlying flags above
+  // are auto-set to production defaults. Customer never sees internals
+  // (privacy by design — we don't tell end users what's running).
+  const [antiDetectMaster, setAntiDetectMaster] = useState(false);
+
   // ── 2026-06: Referrer Override (OFF by default — customer opt-in) ──
   // When OFF the engine uses the legacy UA-derived referer logic
   // (TikTok UA → tiktok.com, plain Chrome UA → no Referer).
@@ -2469,59 +2475,59 @@ export default function RealUserTrafficPage() {
             </div>
           </div>
 
-          {/* ── 2026-02 v2.1.31 — Anti-Detect (Phase 1) ── */}
-          <div className="mt-6 p-4 rounded-lg border border-fuchsia-500/30 bg-fuchsia-950/10">
-            <div className="flex items-center gap-2 mb-3">
-              <span className="text-fuchsia-300 text-sm font-semibold">🛡️ Anti-Detect (Phase 1)</span>
-              <span className="text-[10px] text-zinc-500 px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-800">PacingEngine · IdentityStore · TLS/JA3</span>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div>
-                <Label className="text-zinc-300 text-sm">Pacing (visits / hour)</Label>
-                <Input
-                  data-testid="rut-pacing-per-hour"
-                  type="number"
-                  min={0}
-                  max={3600}
-                  value={pacingPerHour}
-                  onChange={(e) => setPacingPerHour(Math.max(0, Math.min(3600, Number(e.target.value) || 0)))}
-                  className="mt-1 bg-zinc-800 border-zinc-700 text-zinc-100"
+          {/* ── 2026-06-11: UNIFIED Anti-Detect (single toggle) ──
+              Replaces former Anti-Detect (Phase 1/3/4) panels. When ON,
+              ALL anti-detect features are auto-enabled with sensible
+              production defaults — customer doesn't see internals. ── */}
+          <div className="mt-6 p-4 rounded-lg border border-fuchsia-500/30 bg-gradient-to-r from-fuchsia-950/20 via-purple-950/10 to-zinc-950/10">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="text-fuchsia-300 text-base font-semibold">🛡️ Anti-Detect</span>
+                <span className="text-[10px] text-zinc-500 px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-800">
+                  One toggle · auto-tunes everything
+                </span>
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <input
+                  data-testid="rut-anti-detect-master"
+                  type="checkbox"
+                  checked={antiDetectMaster}
+                  onChange={(e) => {
+                    const on = e.target.checked;
+                    setAntiDetectMaster(on);
+                    if (on) {
+                      // Auto-tune ALL underlying anti-detect features with
+                      // production-grade defaults. Customer doesn't see
+                      // what got enabled — privacy by design.
+                      if (!pacingPerHour) setPacingPerHour(30);
+                      setTlsPrewarm(true);
+                      setBehavioralBioEnabled(true);
+                      setIpWarmupEnabled(true);
+                      setBrowserVariant("rotate");
+                      // Multi-hop proxy chain stays opt-in (heavy resource
+                      // — Tor adds ~3-5s per visit). Auto-enable only when
+                      // proxies list exists and customer wants paranoia.
+                    } else {
+                      // Reset to legacy defaults
+                      setTlsPrewarm(false);
+                      setBehavioralBioEnabled(false);
+                      setIpWarmupEnabled(false);
+                      setBrowserVariant("auto");
+                      setProxyChainEnabled(false);
+                    }
+                  }}
+                  className="w-5 h-5 rounded accent-fuchsia-500"
                 />
-                <p className="text-xs text-gray-500 mt-1">
-                  0 = use Duration/total spacing. {">"}0 = log-normal jitter (bursts + lulls instead of even intervals — defeats cohort detection).
-                </p>
-              </div>
-              <div>
-                <Label className="text-zinc-300 text-sm">Identity Label</Label>
-                <Input
-                  data-testid="rut-identity-label"
-                  type="text"
-                  value={identityLabel}
-                  onChange={(e) => setIdentityLabel(e.target.value.slice(0, 120))}
-                  placeholder="(blank = fresh per visit)"
-                  className="mt-1 bg-zinc-800 border-zinc-700 text-zinc-100"
-                />
-                <p className="text-xs text-gray-500 mt-1">
-                  Same label across runs = simulated returning user (cookies + fingerprint persist in MongoDB).
-                </p>
-              </div>
-              <div>
-                <Label className="text-zinc-300 text-sm">TLS / JA3 Pre-warm</Label>
-                <div className="mt-2 flex items-center gap-2">
-                  <input
-                    data-testid="rut-tls-prewarm"
-                    type="checkbox"
-                    checked={tlsPrewarm}
-                    onChange={(e) => setTlsPrewarm(e.target.checked)}
-                    className="w-4 h-4 rounded accent-fuchsia-500"
-                  />
-                  <span className="text-sm text-zinc-300">Enable real-Chrome TLS handshake</span>
-                </div>
-                <p className="text-xs text-gray-500 mt-1">
-                  Pre-fetches the target via curl_cffi (real JA3/JA4 Chrome fingerprint), then seeds cookies onto Playwright. Bypasses Cloudflare BM / DataDome / Akamai BM on cold visits (~50% → ~75–80%).
-                </p>
-              </div>
+                <span className={`text-sm font-semibold ${antiDetectMaster ? "text-fuchsia-300" : "text-zinc-500"}`}>
+                  {antiDetectMaster ? "ON" : "OFF"}
+                </span>
+              </label>
             </div>
+            <p className="text-xs text-zinc-400 mt-2">
+              {antiDetectMaster
+                ? "✓ Full anti-detect stack active — your traffic is configured with all professional-grade evasion layers."
+                : "Turn ON for professional-grade traffic. Recommended for all paid campaigns and CPL / SOI offers."}
+            </p>
           </div>
 
           {/* ── 2026-06: Referrer Source (off-by-default, customer opt-in) ── */}
@@ -2938,7 +2944,10 @@ export default function RealUserTrafficPage() {
             )}
           </div>
 
-          {/* ── 2026-02 v2.1.31 — Anti-Detect (Phase 3) ── */}
+          {/* ── 2026-02 v2.1.31 — Anti-Detect (Phase 3) ──
+              2026-06-11: HIDDEN from UI — controlled by unified Anti-Detect
+              toggle above. State retained so backend still receives values. */}
+          <div className="hidden">
           <div className="mt-6 p-4 rounded-lg border border-sky-500/30 bg-sky-950/10">
             <div className="flex items-center gap-2 mb-3">
               <span className="text-sky-300 text-sm font-semibold">🌐 Anti-Detect (Phase 3)</span>
@@ -3102,6 +3111,7 @@ export default function RealUserTrafficPage() {
               </div>
             </div>
           </div>
+          </div>{/* /hidden wrapper closing for Phase 3+4 (2026-06-11 unified UI) */}
 
           {/* Allowed OS */}
           <div>
