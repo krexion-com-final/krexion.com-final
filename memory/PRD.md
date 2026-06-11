@@ -2,64 +2,72 @@
 
 ## Problem Statement (original)
 User owns `dennisedmaartins9-sudo/krexion.com` (private collaborator access).
-They want me to: (a) explore the repo end-to-end, (b) make bug fixes / feature
-changes, (c) push to `main` only when they say so, (d) ensure every push reaches
-*all surfaces* — Cloud VPS, Native Windows installer, Electron desktop app —
-without anything being lost or broken, (e) provide login for preview testing,
-and (f) keep the main branch conflict-free.
+They want: end-to-end repo exploration, bug fixes, push to `main` only when
+explicitly requested, builds reaching ALL surfaces (Cloud VPS, Native Windows,
+Electron desktop) with no regressions, login for preview testing, and a
+conflict-free main branch.
 
 ## Architecture
-- **Cloud (VPS)**: FastAPI backend + React frontend + MongoDB. Auto-deploys on
-  every push to `main` (`.github/workflows/deploy.yml`).
-- **Native Windows installer**: Inno-Setup bundle (~571 MB) with embedded
-  Python, MongoDB Portable, Edge WebView2, Playwright Chromium. Built only
-  when `backend/VERSION` changes (`build-windows-release.yml`).
-- **Electron Desktop**: `electron-desktop/` runs the same FastAPI backend on
-  127.0.0.1:8088 with `KREXION_MODE=native`. Uses `electron-updater` for
-  silent in-place upgrades. Built only when `backend/VERSION` changes
-  (`build-electron-desktop.yml`).
+- **Cloud (VPS)**: FastAPI + React + MongoDB. Auto-deploys on every push.
+- **Native Windows installer**: Inno-Setup ~571 MB with embedded Python,
+  MongoDB Portable, Edge WebView2, Playwright Chromium. Triggers on
+  `backend/VERSION` change only.
+- **Electron Desktop**: same backend on 127.0.0.1:8088 with KREXION_MODE=native.
+  Auto-updates via electron-updater. Triggers on `backend/VERSION` change only.
 
-## Iteration 1 — 2026-06-11 (release v2.1.38)
-**Root cause found:** commit `638d253` shipped the new browser-profile launch
-implementation but did NOT bump `backend/VERSION`. Consequence: only the cloud
-got the code; Native + Electron customers were stuck on v2.1.37 and the
-"Launch Browser Profile" feature silently failed on the desktop.
+## Iteration 1 — release v2.1.38 (2026-06-11)
+**Root cause:** commit `638d253` (browser-profile launch implementation) never
+bumped `backend/VERSION`, so Electron + Native builds never ran. Customer
+desktop apps stuck on v2.1.37 → "Launch Browser Profile" failed silently.
 
-**Changes (one commit, `949f1c6`):**
-1. `backend/VERSION` 2.1.37 → 2.1.38 — re-arms the Native + Electron build
-   workflows so the browser-profile launcher actually reaches customers.
-2. `backend/cloud_proxy_module.py` — forward `/api/banners/active` and
-   `/api/system/public-latest` to the cloud. Now admin-published promo
-   banners and the "new version available" prompt show up on Electron /
-   Native, not just on the cloud web app.
-3. `frontend/src/components/NativeShell.js` — render `<UpdateBanner />` next
-   to `<BannerBar />` so desktop customers actually see the in-app upgrade
-   prompt.
-4. `frontend/src/components/UpdateBanner.js` — when running inside Electron
-   (`window.krexion.isDesktop`), call `window.krexion.installUpdate()` over
-   IPC instead of POSTing `/api/system/install-update` (which is a no-op on
-   the desktop).
-5. `electron-desktop/src/preload.js` — expose `krexion.installUpdate()` and
-   `krexion.checkForUpdates()` via `contextBridge`.
-6. `electron-desktop/src/main.js` — register `ipcMain.handle` for both
-   channels. The install handler drives `electron-updater`:
-   `checkForUpdates` → `downloadUpdate` → `quitAndInstall(false, true)`.
-   Result: one-click in-place upgrade — no manual uninstall / reinstall.
+**Changes (commit `949f1c6`):**
+- `backend/VERSION` 2.1.37 → 2.1.38 to re-arm Electron + Native builds.
+- `backend/cloud_proxy_module.py` — proxy `/api/banners/active` and
+  `/api/system/public-latest` to cloud so discount banners and the
+  "new version available" prompt show up on Electron + Native too.
+- `frontend/src/components/NativeShell.js` — render `<UpdateBanner />` so
+  desktop customers see in-app upgrade prompt.
+- `frontend/src/components/UpdateBanner.js` — when in Electron, call
+  `window.krexion.installUpdate()` IPC instead of the no-op HTTP path.
+- `electron-desktop/src/preload.js` — expose `krexion.installUpdate()` +
+  `krexion.checkForUpdates()` via contextBridge.
+- `electron-desktop/src/main.js` — `ipcMain.handle()` for both channels
+  driving electron-updater → quitAndInstall.
 
-**Verification:**
-- Deploy to VPS workflow: ✅ success → https://krexion.com on v2.1.38.
-- Build Krexion Desktop (Electron) workflow: ✅ success →
-  `desktop-v2.1.38` GitHub release published (Krexion-Desktop-Setup-2.1.38.exe,
-  414 MB, with latest.yml manifest for auto-updater).
-- Build Native Windows Release workflow: ✅ success →
-  `v2.1.38` GitHub release published (Krexion-Setup-v2.1.38.exe, 571 MB).
-- `https://krexion.com/api/system/public-latest` → `current=2.1.38`.
+**Outcome:** all 3 workflows green. v2.1.38 + desktop-v2.1.38 published.
 
-## Backlog / Future
-- (Optional) Expand workflow `paths:` to include `backend/**.py` so a forgotten
-  VERSION bump can't strand desktop customers again.
-- (Optional) Move the auto-commit metadata in `.emergent/emergent.yml` to
-  `.gitignore` if the user doesn't want it churning the repo.
+## Iteration 2 — hotfix v2.1.39 (2026-06-11)
+**Regression in 2.1.38:** Electron app crashed at startup with
+"ipcMain is not defined". The previous edit added `ipcMain.handle(...)`
+calls in `main.js` but the original `require('electron')` destructure on
+line 21 was never updated to include `ipcMain` (the first search_replace
+silently dropped — only the function body and the boot() call landed).
+
+**Changes (commit `bbadaae`):**
+- `electron-desktop/src/main.js` line 21 — added `ipcMain` to the
+  destructure: `const { app, ..., net, ipcMain } = require('electron');`.
+- `backend/VERSION` 2.1.38 → 2.1.39 to force a new release so existing
+  v2.1.38 customers are auto-upgraded by electron-updater on next launch
+  (typically within seconds; manually via Help → Check for Updates).
+
+**Outcome:** all 3 workflows green. v2.1.39 + desktop-v2.1.39 published.
+- Cloud: `current=2.1.39`.
+- `node -c electron-desktop/src/main.js` → syntax OK.
+- All `ipcMain` references (lines 21, 618, 642) consistent.
+
+## Released versions on GitHub
+- v2.1.39 (Native), desktop-v2.1.39 — current
+- v2.1.38 (Native), desktop-v2.1.38 — withdrawn (Electron startup crash)
+- v2.1.37 (Native), desktop-v2.1.37 — last good before v2.1.38 series
+
+## Backlog
+- Expand workflow `paths:` to include `backend/**.py` and
+  `electron-desktop/**` so a forgotten VERSION bump can't strand desktop
+  customers again.
+- Consider a "What's New" modal on first launch after auto-update so
+  customers actually see new features (browser-profile etc.).
+- Consider auto-yanking broken GitHub releases (delete `latest.yml`) when
+  a regression is detected, so electron-updater stops serving them.
 
 ## Test credentials
 See `/app/memory/test_credentials.md`.
