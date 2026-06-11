@@ -220,6 +220,13 @@ function startBackend() {
     PYTHONIOENCODING: 'utf-8',
     PYTHONUTF8: '1',
     PYTHONDONTWRITEBYTECODE: '1',
+    // 2026-06-11 (v2.1.40): point Playwright at the bundled Chromium
+    // shipped under resources/krexion/chromium/. Without this the
+    // backend would look in %USERPROFILE%\AppData\Local\ms-playwright
+    // (electron-updater installs are per-user so that path is empty)
+    // and every Browser-Profile launch / RUT job would fail with
+    // "Executable doesn't exist at ... \chromium-headless-shell-...".
+    PLAYWRIGHT_BROWSERS_PATH: path.join(resourcesRoot, 'chromium'),
   };
 
   // Prefer uvicorn directly; server.py exposes `app` as a FastAPI instance.

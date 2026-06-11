@@ -29,7 +29,7 @@ import {
   Fingerprint, Package, Camera, UserPlus, Activity, ChevronDown, Bell,
   CloudUpload, HelpCircle, Plus, Crown, Minus, Square, X as XIcon,
   ListChecks, Tag, Layers, FileText, Wrench, KeyRound, PanelLeftClose,
-  PanelLeftOpen, RefreshCw, Zap
+  PanelLeftOpen, RefreshCw, Zap, Globe
 } from "lucide-react";
 import axios from "axios";
 import { useBranding } from "../context/BrandingContext";
@@ -78,6 +78,7 @@ const NAV_GROUPS = [
     label: "Traffic Engine",
     items: [
       { name: "Real-User Traffic", path: "/real-user-traffic", icon: Fingerprint, feature: "real_user_traffic" },
+      { name: "Browser Profiles",  path: "/browser-profiles",  icon: Globe,       feature: "real_user_traffic" },
       { name: "Visual Recorder",   path: "/visual-recorder",   icon: Camera,      feature: "real_user_traffic" },
       { name: "RPA Studio",        path: "/rpa-studio",        icon: Zap,         feature: null },
       { name: "Form Filler",       path: "/form-filler",       icon: FileText,    feature: "form_filler" },

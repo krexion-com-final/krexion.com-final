@@ -423,6 +423,68 @@ function prepareFrontend() {
   log('frontend: copied build/ → resources/krexion/frontend');
 }
 
+// ── 4.5 Playwright Chromium ──────────────────────────────────────────────────
+// 2026-06-11 (v2.1.40): Browser-Profile launch (and Real-User-Traffic, and
+// every heavy automation feature) requires a real Chromium binary at
+// runtime. Earlier Electron builds installed the Playwright Python package
+// but never ran `playwright install`, so the bundled app shipped with no
+// browser — on first launch the backend logged
+//   "Playwright chromium-headless-shell rev XXX missing"
+// and any feature that opens a profile failed silently.
+//
+// We mirror exactly what `.github/workflows/build-windows-release.yml`
+// does for the Inno-Setup native installer: invoke Playwright's CLI on the
+// build runner to download Chromium into a folder we then ship as part of
+// `resources/krexion/`. Backend (main.js → startBackend) sets
+// PLAYWRIGHT_BROWSERS_PATH to that folder so the browser is found offline.
+//
+// We ship BOTH `chromium` (full, used by headed Browser-Profile sessions)
+// and `chromium-headless-shell` (smaller, used by RUT / automation). The
+// runtime picks one based on the job kind. Yes this adds ~300 MB to the
+// installer, but the alternative is a feature that silently does nothing.
+function prepareChromium() {
+  const dest = path.join(RES, 'chromium');
+  if (fs.existsSync(dest)) {
+    const existing = fs.readdirSync(dest).filter((n) => n.startsWith('chromium'));
+    if (existing.length > 0) {
+      log(`chromium: cached (${existing.length} build(s) under ${dest}) — skipping`);
+      return;
+    }
+  }
+  fs.mkdirSync(dest, { recursive: true });
+
+  const pythonExe = path.join(RES, 'python', 'python.exe');
+  if (!fs.existsSync(pythonExe)) {
+    throw new Error('chromium: embedded python not found — preparePython() must run first');
+  }
+  const env = {
+    ...process.env,
+    PLAYWRIGHT_BROWSERS_PATH: dest,
+    PYTHONHOME: path.join(RES, 'python'),
+    PYTHONPATH: path.join(RES, 'python', 'Lib', 'site-packages'),
+    PYTHONIOENCODING: 'utf-8',
+    PYTHONUTF8: '1',
+  };
+  log('chromium: downloading via playwright install (this can take 5-10 min)');
+  // Don't throw on non-zero — Playwright sometimes reports rc=1 even when
+  // browsers are fully extracted. We verify by checking the dest folder.
+  const r = spawnSync(
+    pythonExe,
+    ['-m', 'playwright', 'install', 'chromium', 'chromium-headless-shell'],
+    { stdio: 'inherit', shell: false, env }
+  );
+  if (r.status !== 0) {
+    log(`chromium: playwright install exited rc=${r.status} — verifying folder before failing`);
+  }
+  const installed = fs.existsSync(dest)
+    ? fs.readdirSync(dest).filter((n) => n.startsWith('chromium'))
+    : [];
+  if (installed.length === 0) {
+    throw new Error('chromium: playwright install produced no browser folder under ' + dest);
+  }
+  log(`chromium: ready (${installed.join(', ')}) under ${dest}`);
+}
+
 // ── 5. Icon ──────────────────────────────────────────────────────────────────
 function prepareIcon() {
   const src = path.join(REPO, 'installer', 'krexion.ico');
@@ -443,6 +505,7 @@ function prepareIcon() {
   await prepareMongo();
   prepareBackend();
   prepareFrontend();
+  prepareChromium();
   prepareIcon();
   log('✅ resources ready at ' + RES);
 })().catch((err) => {
