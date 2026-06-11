@@ -413,7 +413,68 @@ async def launch_profile(request: Request, profile_id: str,
 
     bridge_job_id: Optional[str] = None
     desktop_available = False
-    if _BRIDGE_QUEUE is not None:
+
+    # 2026-06-11 (v2.1.41): When we ARE the customer's desktop client
+    # (Electron / Inno-Setup Native install, KREXION_MODE=native), bypass
+    # the bridge entirely and drive `browser_profile_launcher` in-process.
+    # The bridge queue is a cloud → customer's-PC relay; on the customer's
+    # PC there's nothing on the other side to pick the job up, so prior
+    # versions returned desktop_available=false and showed the misleading
+    # "install the Krexion desktop app" toast inside the desktop app.
+    _is_local_desktop = (os.environ.get("KREXION_MODE", "cloud").lower() == "native")
+    if _is_local_desktop:
+        try:
+            from browser_profile_launcher import launch_profile_session
+
+            async def _on_update(body: dict):
+                # Mirror the launcher's session updates straight into the
+                # local Mongo so the UI status badge (idle/launching/running)
+                # flips in real time — no cloud round-trip needed.
+                try:
+                    sid = str(body.get("session_id") or session_id)
+                    status = str(body.get("status") or "")
+                    if status:
+                        await _DB.browser_profile_sessions.update_one(
+                            {"id": sid},
+                            {"$set": {"status": status,
+                                      "fingerprint_hash": body.get("fingerprint_hash", ""),
+                                      "updated_at": _now_iso()}},
+                        )
+                        # Mirror onto the parent profile row too so the
+                        # card chip ("launching" → "running" → "idle") flips.
+                        if status == "running":
+                            await _DB.browser_profiles.update_one(
+                                {"id": profile_id, "user_id": uid},
+                                {"$set": {"status": "running"}},
+                            )
+                        elif status in ("stopped", "error"):
+                            await _DB.browser_profiles.update_one(
+                                {"id": profile_id, "user_id": uid},
+                                {"$set": {"status": "idle", "session_id": ""}},
+                            )
+                except Exception as e:
+                    logger.debug(f"local on_update failed: {e}")
+
+            # Fire-and-forget the headed browser. The launcher blocks for
+            # the lifetime of the user's manual browsing session, so we
+            # MUST background it — otherwise the HTTP request would hang
+            # until the user closes Chromium.
+            asyncio.create_task(launch_profile_session(
+                doc,
+                session_id=session_id,
+                start_url=session["start_url"],
+                on_session_update=_on_update,
+            ))
+            desktop_available = True
+            bridge_job_id = f"local:{session_id}"
+        except Exception as e:
+            logger.warning(f"local browser-profile launch failed: {e}")
+            # Don't fall through to the bridge on the local desktop —
+            # the bridge_enqueue would return None (no PC to relay to)
+            # and the user would see the misleading "install" toast.
+            desktop_available = False
+
+    elif _BRIDGE_QUEUE is not None:
         try:
             bridge_payload = {
                 "kind": "browser_profile_launch",
@@ -452,8 +513,18 @@ async def stop_profile(request: Request, profile_id: str):
         raise HTTPException(status_code=404, detail="Profile not found")
     sid = doc.get("session_id") or ""
 
-    # Push a stop bridge job to the desktop so the headed browser closes
-    if _BRIDGE_QUEUE is not None and sid:
+    # 2026-06-11 (v2.1.41): On the local desktop, stop the headed browser
+    # directly via the in-process launcher. Bridge-based stop only makes
+    # sense from cloud → customer's PC; trying to enqueue here would just
+    # be a no-op.
+    _is_local_desktop = (os.environ.get("KREXION_MODE", "cloud").lower() == "native")
+    if _is_local_desktop and sid:
+        try:
+            from browser_profile_launcher import request_stop
+            request_stop(sid)
+        except Exception as e:
+            logger.warning(f"local browser-profile stop failed: {e}")
+    elif _BRIDGE_QUEUE is not None and sid:
         try:
             await _BRIDGE_QUEUE(uid, {
                 "kind": "browser_profile_stop",
