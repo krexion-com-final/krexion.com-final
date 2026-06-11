@@ -377,6 +377,12 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
         "adspower/test": ("POST", "__adspower_test__"),
         # AdsPower bulk profile delete (UI on cloud, executes locally)
         "adspower/delete": ("POST", "__adspower_delete__"),
+        # 2026-06-11: Browser Profiles (AdsPower/GoLogin-style)
+        # — opens a HEADED Chromium for manual browsing with full
+        # Krexion anti-detect stack. Executes locally via
+        # browser_profile_launcher.launch_profile_session().
+        "browser-profile/launch": ("POST", "__browser_profile_launch__"),
+        "browser-profile/stop":   ("POST", "__browser_profile_stop__"),
     }
     if feature not in feature_routes:
         # v1.0.14 NEW: generic passthrough for the require_local_mode
@@ -699,6 +705,54 @@ async def _execute_job_locally(job: dict, jwt_token: str | None = None) -> dict:
         if res["ok"]:
             return {"status": "done", "result": res["data"]}
         return {"status": "failed", "error": res["error"]}
+
+    # ── 2026-06-11: Browser Profile launcher (manual anti-detect browsing) ──
+    if route == "__browser_profile_launch__":
+        try:
+            from browser_profile_launcher import launch_profile_session
+            import httpx as _httpx
+            profile_config = payload.get("profile_config") or {}
+            session_id = str(payload.get("session_id") or "")
+            start_url = str(payload.get("start_url") or "https://www.google.com/")
+
+            # Callback that POSTs session events back to the cloud
+            cloud_base = os.environ.get("KREXION_CLOUD_BASE", "https://krexion.com")
+            session_update_url = f"{cloud_base}/api/browser-profiles/_bridge/session-update"
+            bearer = jwt_token or ""
+
+            async def _on_update(body: dict):
+                try:
+                    async with _httpx.AsyncClient(timeout=20) as c:
+                        h = {"Content-Type": "application/json"}
+                        if bearer:
+                            h["Authorization"] = f"Bearer {bearer}"
+                        h["X-Krexion-License"] = LICENSE_KEY
+                        await c.post(session_update_url, json=body, headers=h)
+                except Exception as e:
+                    logger.debug(f"session update push failed: {e}")
+
+            # Run the launch in the BACKGROUND so the bridge job can be
+            # marked done immediately — the headed browser stays open
+            # for the customer to manually browse. Stop is delivered via
+            # a separate "browser-profile/stop" bridge job.
+            asyncio.create_task(launch_profile_session(
+                profile_config,
+                session_id=session_id,
+                start_url=start_url,
+                on_session_update=_on_update,
+            ))
+            return {"status": "done", "result": {"launched": True, "session_id": session_id}}
+        except Exception as e:
+            return {"status": "failed", "error": f"browser-profile launch failed: {e}"}
+
+    if route == "__browser_profile_stop__":
+        try:
+            from browser_profile_launcher import request_stop
+            session_id = str(payload.get("session_id") or "")
+            ok = request_stop(session_id)
+            return {"status": "done", "result": {"stopped": ok, "session_id": session_id}}
+        except Exception as e:
+            return {"status": "failed", "error": f"browser-profile stop failed: {e}"}
 
     url = f"{LOCAL_API_BASE}{route}"
     headers = {"Content-Type": "application/json"}

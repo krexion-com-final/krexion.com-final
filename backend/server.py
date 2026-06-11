@@ -18714,16 +18714,35 @@ except Exception as _refpro_err:  # noqa: BLE001
 # ─────────────────────────────────────────────────────────────────────
 try:
     from browser_profile_module import router as _bp_router, _bind as _bp_bind
-    # bridge_enqueue is optional — falls back to "desktop required" message
-    _bridge_enqueue_fn = None
-    try:
-        from bridge_module import enqueue_job as _bridge_enqueue_fn  # type: ignore
-    except Exception:
-        _bridge_enqueue_fn = None
+    # Bridge enqueue wrapper — adapts our (user_id, payload) interface to
+    # bridge_module.enqueue_bridge_job(user, feature, payload).
+    async def _bp_bridge_enqueue(user_id: str, payload: dict):
+        try:
+            from bridge_module import enqueue_bridge_job, is_user_local_online
+            status = await is_user_local_online(user_id)
+            if not status.get("online"):
+                return None
+            user_doc = await db.users.find_one({"id": user_id}, {"_id": 0, "id": 1, "email": 1})
+            if not user_doc:
+                return None
+            # Module can override which feature route to use (launch vs stop)
+            feature = str(payload.get("feature_override") or "browser-profile/launch")
+            res = await enqueue_bridge_job(
+                user_doc,
+                feature,
+                payload,
+                wait_for_result=False,
+            )
+            return (res or {}).get("job_id")
+        except HTTPException:
+            return None
+        except Exception as e:
+            logger.warning(f"bridge enqueue (browser-profile) failed: {e}")
+            return None
     _bp_bind(
         db=db,
         get_current_user=get_current_user,
-        bridge_enqueue=_bridge_enqueue_fn,
+        bridge_enqueue=_bp_bridge_enqueue,
         ua_generate_func=None,
     )
     app.include_router(_bp_router)

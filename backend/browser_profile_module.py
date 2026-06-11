@@ -450,6 +450,21 @@ async def stop_profile(request: Request, profile_id: str):
     doc = await _DB.browser_profiles.find_one({"id": profile_id, "user_id": uid})
     if not doc:
         raise HTTPException(status_code=404, detail="Profile not found")
+    sid = doc.get("session_id") or ""
+
+    # Push a stop bridge job to the desktop so the headed browser closes
+    if _BRIDGE_QUEUE is not None and sid:
+        try:
+            await _BRIDGE_QUEUE(uid, {
+                "kind": "browser_profile_stop",
+                "user_id": uid,
+                "profile_id": profile_id,
+                "session_id": sid,
+                "feature_override": "browser-profile/stop",
+            })
+        except Exception as e:
+            logger.warning(f"stop bridge enqueue failed: {e}")
+
     await _DB.browser_profiles.update_one(
         {"id": profile_id, "user_id": uid},
         {"$set": {"status": "stopped", "session_id": ""}},
