@@ -10247,46 +10247,62 @@ async def _smart_select_with_fallback(page, selector: str, value: Any,
     val = "" if value is None else str(value)
     match_by = (match_by or "label").lower().strip()
 
-    # ── 2026-05 (RUT vs Visual-Recorder parity fix) ─────────────────────
+    # ── 2026-05 / 2026-06 (RUT vs Visual-Recorder parity fix) ───────────
     # Build value-variants the same way the Visual Recorder live-test
-    # path does (visual_recorder._smart_select_option). Symptom this
-    # fixes: a JSON recorded with `#birth_month` value="6" works during
-    # the recorder's own live test (because the recorder tries "6" →
-    # "06" → "June" → "Jun"), but RUT replay used to try ONLY "6" and
-    # the offer page's dropdown only has `<option>June</option>` labels
-    # (no numeric `value=` attribute) — so step #16 (select #birth_month)
-    # times out and the whole visit fails. By mirroring the recorder's
-    # candidate list here, RUT now succeeds on the SAME JSON the user
-    # tested in the recorder.
-    _MONTHS_FULL = (
-        "January", "February", "March", "April", "May", "June",
-        "July", "August", "September", "October", "November", "December",
-    )
+    # path does. We delegate to the shared `value_normalizer` so both
+    # call sites stay in sync. Symptom this fixes:
+    #   • a JSON recorded with `#birth_month` value="6" works during the
+    #     recorder's own live test (because the recorder tries "6" →
+    #     "06" → "June" → "Jun"), but RUT replay used to try ONLY "6"
+    #     and the offer page's dropdown only has `<option>June</option>`
+    #     labels (no numeric `value=` attribute) — so step #16
+    #     (select #birth_month) times out and the whole visit fails.
+    #   • US state dropdowns with full names (e.g. "<option>Texas</option>")
+    #     bound to a CSV column that stores the abbreviation ("TX").
+    #   • Date-of-birth single-field inputs bound to a column with a
+    #     different date format (e.g. data is "1990-05-15" but form
+    #     expects "05/15/1990"). The shared helper expands the parsed
+    #     date into every common format.
     val_variants: List[str] = []
     _seen_v: set = set()
-    def _add_v(x: str) -> None:
-        if x and x not in _seen_v:
-            _seen_v.add(x)
-            val_variants.append(x)
-    _add_v(val)
-    _add_v(val.strip())
-    if val.strip().isdigit():
-        _n = int(val.strip())
-        _add_v(f"{_n:02d}")     # zero-padded ("6"  → "06")
-        _add_v(str(_n))          # un-padded   ("06" → "6")
-        if 1 <= _n <= 12:        # month-number → month-name
-            _full = _MONTHS_FULL[_n - 1]
-            _abbrev = _full[:3]
-            for _v in (_full, _abbrev, _full.lower(), _abbrev.lower(),
-                       _full.upper(), _abbrev.upper()):
-                _add_v(_v)
-    else:
-        _lv = val.strip().lower()
-        for _i, _m in enumerate(_MONTHS_FULL, start=1):
-            if _lv == _m.lower() or _lv == _m.lower()[:3]:
-                _add_v(str(_i))
-                _add_v(f"{_i:02d}")
-                break
+    try:
+        from value_normalizer import expand_value_variants
+        for _v in expand_value_variants(val):
+            if _v and _v not in _seen_v:
+                _seen_v.add(_v)
+                val_variants.append(_v)
+    except Exception:
+        # Defensive: if the helper import fails, fall back to local logic
+        pass
+    if not val_variants:
+        # Local fallback identical to the pre-2026-06 logic
+        _MONTHS_FULL = (
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December",
+        )
+        def _add_v(x: str) -> None:
+            if x and x not in _seen_v:
+                _seen_v.add(x)
+                val_variants.append(x)
+        _add_v(val)
+        _add_v(val.strip())
+        if val.strip().isdigit():
+            _n = int(val.strip())
+            _add_v(f"{_n:02d}")
+            _add_v(str(_n))
+            if 1 <= _n <= 12:
+                _full = _MONTHS_FULL[_n - 1]
+                _abbrev = _full[:3]
+                for _v in (_full, _abbrev, _full.lower(), _abbrev.lower(),
+                           _full.upper(), _abbrev.upper()):
+                    _add_v(_v)
+        else:
+            _lv = val.strip().lower()
+            for _i, _m in enumerate(_MONTHS_FULL, start=1):
+                if _lv == _m.lower() or _lv == _m.lower()[:3]:
+                    _add_v(str(_i))
+                    _add_v(f"{_i:02d}")
+                    break
 
     # ── Build match-strategy attempts (label / value / index) ──
     # We iterate every value-variant × (label, value) so date / month /

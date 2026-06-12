@@ -2247,16 +2247,31 @@ _MONTH_NAMES = [
 
 
 async def _smart_select_option(page: Any, selector: str, live_val: str, match_by: str) -> Tuple[bool, Optional[str]]:
-    """Try selecting an <option> using multiple value variants so common
-    date / numeric dropdowns work even when the recorded value format
-    doesn't exactly match the option attribute.
+    """Try selecting an <option> using a comprehensive variant list so
+    common date / state / number dropdowns work even when the recorded
+    value's format differs from the option attribute.
 
-    Variants tried (in order):
-      - the live_val as-is (label, then value, then by index for digits)
-      - zero-padded version  ("6" → "06")
-      - un-padded version    ("06" → "6")
-      - month-name variants  ("6" → "June", "Jun")
-      - month-number from name ("June" → "6", "06")
+    Variants tried (in order, from `value_normalizer.expand_value_variants`):
+      - the live_val as-is + case variants
+      - zero-padded / un-padded numeric ("6" ↔ "06")
+      - month-name variants ("6" ↔ "June" ↔ "Jun")
+      - US state code ↔ full name ("TX" ↔ "Texas")
+      - Canadian province code ↔ full name ("ON" ↔ "Ontario")
+      - boolean variants ("y" ↔ "yes" ↔ "true" ↔ "1")
+      - date parsed → all formats (split fields too: year, month, day)
+
+    PHASE 1 (instant, ~10ms): JS-driven set via page.evaluate. Sets the
+    underlying <select>.value AND dispatches native `input`+`change`
+    events plus jQuery .trigger('change') + selectpicker.refresh +
+    chosen:updated — so any custom UI wrapper (Bootstrap-Select / Select2
+    / Chosen / React-Select / nice-select / generic-custom) re-renders
+    its visible widget and any form validators see the change. THIS is
+    the fix for the "dropdown shows empty / Next button does nothing"
+    bug on custom-UI offer forms.
+
+    PHASE 2 (fallback, slower): Playwright's `page.select_option()`
+    against each variant × (label, value) — only reached if PHASE 1
+    didn't succeed (e.g. cross-origin iframe).
 
     Returns (success, variant_used).
     """
@@ -2264,34 +2279,90 @@ async def _smart_select_option(page: Any, selector: str, live_val: str, match_by
     if not val:
         return False, None
 
-    candidates: List[str] = [val]
-    # Numeric variants (zero-pad / un-pad)
-    if val.isdigit():
-        n = int(val)
-        padded = f"{n:02d}"
-        unpadded = str(n)
-        for v in (padded, unpadded):
-            if v not in candidates:
-                candidates.append(v)
-        # Month: number → name (full + abbrev)
-        if 1 <= n <= 12:
-            full = _MONTH_NAMES[n - 1]
-            abbrev = full[:3]
-            for v in (full, abbrev, full.lower(), abbrev.lower(), full.upper(), abbrev.upper()):
-                if v not in candidates:
-                    candidates.append(v)
-    else:
-        # Month name → number variants
-        lower = val.lower()
-        for i, m in enumerate(_MONTH_NAMES, start=1):
-            if lower == m.lower() or lower == m.lower()[:3]:
-                for v in (str(i), f"{i:02d}"):
-                    if v not in candidates:
-                        candidates.append(v)
-                break
+    try:
+        from value_normalizer import expand_value_variants
+        candidates: List[str] = expand_value_variants(live_val)
+    except Exception:
+        # Defensive: if module fails to import for any reason, fall back
+        # to the raw value only — the loop below will still attempt it.
+        candidates = [val]
+    if not candidates:
+        candidates = [val]
 
-    primary_modes = ("label", "value") if match_by == "label" else ("value", "label")
+    # ── PHASE 1: JS-driven set (works for hidden / custom-UI selects) ──
+    _js_set_select = """
+    (function(args) {
+        var selector  = args.selector;
+        var rawList   = args.rawList && args.rawList.length ? args.rawList : [args.raw];
+        var byLabel   = args.byLabel;
+        function findOpt(el, raw, byLabel) {
+            var want = String(raw);
+            var wantTrim = want.trim().toLowerCase();
+            for (var i = 0; i < el.options.length; i++) {
+                var o = el.options[i];
+                if (byLabel) {
+                    var t = (o.text || '').trim().toLowerCase();
+                    var l = (o.label || '').trim().toLowerCase();
+                    if (t === wantTrim || l === wantTrim) return o;
+                } else {
+                    if (String(o.value) === want) return o;
+                }
+            }
+            // Try the OTHER strategy if the primary didn't match
+            for (var i = 0; i < el.options.length; i++) {
+                var o = el.options[i];
+                if (byLabel) {
+                    if (String(o.value) === want) return o;
+                } else {
+                    var t = (o.text || '').trim().toLowerCase();
+                    if (t === wantTrim) return o;
+                }
+            }
+            return null;
+        }
+        var el = null;
+        try { el = document.querySelector(selector); } catch (e) { return {ok: false}; }
+        if (!el || el.tagName !== 'SELECT') return {ok: false};
+        var opt = null;
+        for (var r = 0; r < rawList.length && !opt; r++) {
+            opt = findOpt(el, rawList[r], byLabel);
+        }
+        if (!opt) return {ok: false};
+        el.value = opt.value;
+        try { el.dispatchEvent(new Event('input',  {bubbles: true})); } catch (e) {}
+        try { el.dispatchEvent(new Event('change', {bubbles: true})); } catch (e) {}
+        try {
+            if (window.jQuery && window.jQuery(el).length) {
+                window.jQuery(el).val(opt.value).trigger('change');
+                try { window.jQuery(el).selectpicker('refresh'); } catch (e) {}
+                try { window.jQuery(el).trigger('chosen:updated'); } catch (e) {}
+            }
+        } catch (e) {}
+        // Blur after change — some forms validate on blur, not change.
+        try { el.dispatchEvent(new Event('blur', {bubbles: true})); } catch (e) {}
+        return {ok: true, value: opt.value, label: opt.text};
+    })
+    """
+    try:
+        js_result = await asyncio.wait_for(
+            page.evaluate(
+                _js_set_select,
+                {
+                    "selector": selector,
+                    "raw": val,
+                    "rawList": candidates,
+                    "byLabel": (match_by != "value"),
+                },
+            ),
+            timeout=4.0,
+        )
+        if isinstance(js_result, dict) and js_result.get("ok"):
+            return True, js_result.get("label") or js_result.get("value") or val
+    except Exception:
+        pass
 
+    # ── PHASE 2: Playwright select_option fallback ──
+    primary_modes = ("label", "value") if match_by != "value" else ("value", "label")
     for candidate in candidates:
         for mode in primary_modes:
             try:
