@@ -4,6 +4,8 @@ import ReactFlow, {
   Background,
   Controls,
   MiniMap,
+  Handle,
+  Position,
   applyNodeChanges,
   applyEdgeChanges,
   addEdge,
@@ -39,8 +41,12 @@ const authH = () => ({
   "Content-Type": "application/json",
 });
 
-// Inline node component — small, color-coded, shows type + first param value
-const FlowNode = ({ data }) => (
+// Inline node component — small, color-coded, shows type + first param value.
+// 2026-06: added explicit source/target Handles (the small dots on the
+// left/right edges of the node) so users can DRAG one node onto another
+// to draw an edge. Without these handles ReactFlow's onConnect never
+// fires — that was THE reason the canvas felt "unconnectable".
+const FlowNode = ({ data, selected }) => (
   <div
     style={{
       background: data.color || "#1e293b",
@@ -48,16 +54,42 @@ const FlowNode = ({ data }) => (
       borderRadius: 10,
       padding: "10px 14px",
       minWidth: 160,
-      border: data.selected ? "2px solid #60a5fa" : "1px solid rgba(255,255,255,.15)",
+      border: (selected || data.selected) ? "2px solid #60a5fa" : "1px solid rgba(255,255,255,.15)",
       boxShadow: "0 6px 16px rgba(0,0,0,.4)",
       fontFamily: "ui-sans-serif, system-ui",
+      position: "relative",
     }}
     data-testid={`rpa-node-${data.type}`}
   >
+    {/* Target handle — incoming edges land here (left side) */}
+    <Handle
+      type="target"
+      position={Position.Left}
+      style={{
+        background: "#60a5fa",
+        width: 10,
+        height: 10,
+        border: "2px solid #0f172a",
+      }}
+      data-testid={`rpa-node-${data.type}-target`}
+    />
     <div style={{ fontWeight: 600, fontSize: 13, opacity: 0.95 }}>{data.label || data.type}</div>
     <div style={{ fontSize: 11, opacity: 0.75, marginTop: 4, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
       {data.summary || data.type}
     </div>
+    {/* Source handle — drag from here onto the next node's left handle
+        to draw an edge / sequence link */}
+    <Handle
+      type="source"
+      position={Position.Right}
+      style={{
+        background: "#22c55e",
+        width: 10,
+        height: 10,
+        border: "2px solid #0f172a",
+      }}
+      data-testid={`rpa-node-${data.type}-source`}
+    />
   </div>
 );
 
@@ -148,10 +180,21 @@ export default function RPAStudioPage() {
     (nodeType) => {
       const typeInfo = typeLookup[nodeType] || {};
       const newId = `n_${Math.random().toString(36).slice(2, 9)}`;
+      // 2026-06: Auto-position the new node to the RIGHT of the currently
+      // selected one (or last-added one) and auto-create an edge from
+      // selected → new. This gives users the "click click click → sequence"
+      // workflow they expected, without making them drag from handles every
+      // time. They can still drag from the green handle to re-route.
+      const prevId = selectedNodeId;
+      const prevNode = prevId ? nodes.find((n) => n.id === prevId) : null;
+      const basePos = prevNode?.position || { x: 200, y: 100 };
+      const newPos = prevNode
+        ? { x: basePos.x + 220, y: basePos.y + (Math.random() * 20 - 10) }
+        : { x: 200 + Math.random() * 250, y: 100 + Math.random() * 250 };
       const newNode = {
         id: newId,
         type: "rpa",
-        position: { x: 200 + Math.random() * 250, y: 100 + Math.random() * 250 },
+        position: newPos,
         data: {
           type: nodeType,
           label: typeInfo.label || nodeType,
@@ -162,10 +205,27 @@ export default function RPAStudioPage() {
         },
       };
       setNodes((nds) => [...nds, newNode]);
+      if (prevId && prevId !== newId) {
+        // Auto-connect prev → new (skip if user already has an outgoing
+        // edge from prev — they probably want a different topology).
+        setEdges((eds) => {
+          const hasOut = eds.some((e) => e.source === prevId);
+          if (hasOut) return eds;
+          return addEdge(
+            {
+              source: prevId,
+              target: newId,
+              animated: true,
+              style: { stroke: "#60a5fa", strokeWidth: 2 },
+            },
+            eds
+          );
+        });
+      }
       setSelectedNodeId(newId);
       toast.success(`Added: ${typeInfo.label || nodeType}`);
     },
-    [typeLookup]
+    [typeLookup, selectedNodeId, nodes]
   );
 
   const deleteNode = (nodeId) => {

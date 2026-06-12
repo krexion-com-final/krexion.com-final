@@ -43,6 +43,8 @@ import {
   Brain,
   Trash,
   FastForward,
+  GitBranch,
+  X,
 } from "lucide-react";
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
@@ -55,8 +57,97 @@ const authH = () => ({
   "Content-Type": "application/json",
 });
 
-// Keyboard-shortcut hint shown inside the tool buttons. Each tool gets
-// a number key 1-8 matching its position in TOOLS.
+// 2026-06 — Friendly auto-label for a recorded step. The step list
+// previously fell back to `s.action` which made 8 consecutive clicks
+// all read "click" / "click" / "click". This helper turns each step
+// into a descriptive 1-line label like "Click: Next button" or
+// "Dropdown → {{state}}" so the recording is glanceable at a scroll.
+// User can still rename manually via inline-edit; this is just the
+// auto-default when `s.name` is empty.
+function getStepDisplayName(s) {
+  if (s?.name) return s.name;
+  const a = (s?.action || "").toLowerCase();
+  // Short, value-aware preview helpers
+  const _val = (v, n = 24) => {
+    const x = (v == null ? "" : String(v)).trim();
+    if (!x) return "";
+    return x.length > n ? x.slice(0, n - 1) + "…" : x;
+  };
+  const _sel = (v, n = 24) => _val(v, n);
+  switch (a) {
+    case "click": {
+      // Recorder stamps `text` on click steps when the element had visible text
+      const t = _val(s.text, 26);
+      if (t) return `Click: ${t}`;
+      const sel = _sel(s.selector, 30);
+      return sel ? `Click ${sel}` : "Click";
+    }
+    case "fill":
+    case "type": {
+      const v = _val(s.value, 22);
+      const sel = _sel(s.selector, 20);
+      if (v) return `Type → ${v}${sel ? "  (" + sel + ")" : ""}`;
+      return sel ? `Type ${sel}` : "Type";
+    }
+    case "select": {
+      const v = _val(s.value, 22);
+      const sel = _sel(s.selector, 20);
+      if (v) return `Dropdown → ${v}${sel ? "  (" + sel + ")" : ""}`;
+      return sel ? `Dropdown ${sel}` : "Dropdown";
+    }
+    case "check":
+      return s.selector ? `Check ${_sel(s.selector, 30)}` : "Check Box";
+    case "uncheck":
+      return s.selector ? `Uncheck ${_sel(s.selector, 30)}` : "Uncheck";
+    case "wait":
+      return `Wait ${s.ms || 0}ms`;
+    case "wait_for_selector":
+      return `Wait for selector ${_sel(s.selector, 26)}`;
+    case "wait_for_text":
+      return `Wait for text "${_val(s.text, 24)}"`;
+    case "wait_for_url":
+      return `Wait for URL ${_val(s.url || s.value, 28)}`;
+    case "wait_for_load":
+      return "Wait for page load";
+    case "navigate":
+    case "goto": {
+      const u = _val(s.url || s.value, 36);
+      return u ? `Go to ${u}` : "Navigate";
+    }
+    case "screenshot":
+      return s.name || "📷 Screenshot";
+    case "press":
+      return `Press ${s.key || ""}`.trim();
+    case "scroll":
+      return s.dir === "up" ? "Scroll ↑" : "Scroll ↓";
+    case "hover":
+      return s.selector ? `Hover ${_sel(s.selector, 28)}` : "Hover";
+    case "evaluate":
+      return s.script ? `Run JS: ${_val(s.script, 30)}` : "Run JS";
+    case "dismiss_popups":
+      return "Dismiss popups";
+    case "extract":
+      return `Extract → ${_val(s.var_name || s.var || "var", 18)}`;
+    case "random_pick":
+      return "🎲 Random Pick";
+    case "random_click":
+      return "🎯 Random Click";
+    case "auto_continue":
+    case "auto_continue_survey":
+      return "🔄 Auto-Continue";
+    case "branch": {
+      const n = Array.isArray(s.branches) ? s.branches.length : 0;
+      return `🔀 If / Else (${n} branch${n === 1 ? "" : "es"})`;
+    }
+    case "close":
+    case "close_browser":
+      return "✖ Close Browser";
+    default:
+      return s.action || "step";
+  }
+}
+
+
 const TOOLS = [
   { id: "default",   icon: Hand,        label: "Click",       key: "1", help: "Normal click — captures button/link text" },
   { id: "form_fill", icon: Type,        label: "Form Fill",   key: "2", help: "Click an input, then bind to Excel column" },
@@ -73,6 +164,13 @@ const TOOLS = [
   // confirmation Capture so post-submit pixel chains don't keep the
   // tile alive on slower VPSes).
   { id: "close_browser", icon: XCircle, label: "Close Browser", key: "9", help: "Insert a close-browser step — RUT runner will end this visit's browser immediately when reached (frees RAM for next worker)" },
+  // 2026-06: "If / Else" — conditional branch. Opens a modal where the
+  // user defines 2 (or more) branches, each with a condition (URL
+  // contains / selector visible / text visible) and the steps to run
+  // when that branch wins. Backed by the existing {"action":"branch"}
+  // engine which RACES all branch conditions in parallel and runs
+  // whichever resolves first.
+  { id: "branch", icon: GitBranch, label: "If / Else", key: "i", help: "Conditional step — different sub-steps run depending on URL / visible element / text. Use when an offer page randomly shows phone OR email OR survey." },
 ];
 
 // Device-viewport presets — applied at session start so the recording
@@ -149,6 +247,13 @@ export default function VisualRecorderPage() {
   const [tool, setTool] = useState("default");
   const [pendingFormFill, setPendingFormFill] = useState(null); // {selector, header_name?}
   const [pendingDropdown, setPendingDropdown] = useState(null); // {selector, options:[{value,label,...}], element}
+  // 2026-06: If / Else branch editor modal. When non-null an overlay
+  // dialog appears letting the user define 2+ branches with conditions
+  // (URL contains / selector visible / text visible) and the inline
+  // steps to run when each branch wins.
+  //   { mode: "create" | "edit", insertIndex: number|null,
+  //     editStepIndex: number|null, draft: <branch step JSON> }
+  const [branchEditor, setBranchEditor] = useState(null);
   const [pendingRandom, setPendingRandom] = useState([]); // texts collected so far (legacy click-to-pool flow)
   // 2026-01: NEW Random Pick checklist flow
   //   detectedClickables: full list returned by /detect-clickables (one per page)
@@ -866,6 +971,67 @@ export default function VisualRecorderPage() {
       refreshScreenshot();
     } catch (err) {
       toast.error(`Click failed: ${err.message || err}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // ── 2026-06: If / Else branch — submit the assembled draft ────────
+  // Inserts the branch step at `branchEditor.insertIndex` (or appends
+  // at the end if null). After insert the user can use the existing
+  // "Edit Raw JSON" on the step to fine-tune nested steps, OR drag
+  // existing recorded steps INTO branches via the Branch Editor UI's
+  // "Move into branch" affordance (covered in a follow-up iteration).
+  const submitBranch = async () => {
+    if (!branchEditor || !sessionId) return;
+    const draft = branchEditor.draft || {};
+    // ── Validate ──
+    if (!Array.isArray(draft.branches) || draft.branches.length < 1) {
+      toast.error("Add at least one branch");
+      return;
+    }
+    for (let i = 0; i < draft.branches.length; i++) {
+      const b = draft.branches[i];
+      const c = b?.condition || {};
+      const ct = (c.type || "").trim();
+      if (!ct) { toast.error(`Branch #${i + 1}: pick a condition type`); return; }
+      if (ct === "selector_visible" || ct === "selector_attached") {
+        if (!(c.selector || "").trim()) { toast.error(`Branch #${i + 1}: selector is required`); return; }
+      } else if (ct === "text_visible") {
+        if (!(c.text || "").trim()) { toast.error(`Branch #${i + 1}: text is required`); return; }
+      } else if (ct === "url_contains" || ct === "url_matches") {
+        if (!(c.value || "").trim()) { toast.error(`Branch #${i + 1}: URL fragment / pattern is required`); return; }
+      }
+    }
+    // Normalise the step shape the backend expects
+    const cleanBranches = draft.branches.map((b) => ({
+      name: (b.name || "").trim() || "Path",
+      condition: { ...b.condition, timeout_ms: Number(b.condition.timeout_ms) || Number(draft.timeout_ms) || 12000 },
+      steps: Array.isArray(b.steps) ? b.steps : [],
+    }));
+    const step = {
+      action: "branch",
+      name: (draft.name || "If / Else").trim(),
+      timeout_ms: Number(draft.timeout_ms) || 12000,
+      branches: cleanBranches,
+      default_steps: Array.isArray(draft.default_steps) ? draft.default_steps : [],
+    };
+    setBusy(true);
+    try {
+      // Append at end when insertIndex is null
+      const position = (branchEditor.insertIndex == null) ? (steps.length || 0) : branchEditor.insertIndex;
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/manual-step`, {
+        method: "POST",
+        headers: authH(),
+        body: JSON.stringify({ step, position }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.added) throw new Error(d.reason || d.detail || `HTTP ${r.status}`);
+      toast.success(`🔀 If/Else inserted (${cleanBranches.length} branches)`);
+      setBranchEditor(null);
+      refreshState();
+    } catch (err) {
+      toast.error(`Insert branch failed: ${err.message || err}`);
     } finally {
       setBusy(false);
     }
@@ -3113,6 +3279,25 @@ export default function VisualRecorderPage() {
                           })();
                           return;
                         }
+                        // 2026-06: `branch` (If/Else) is also an instant-
+                        // dialog tool — opens the branch builder modal
+                        // instead of waiting for a screen click.
+                        if (t.id === "branch") {
+                          setBranchEditor({
+                            mode: "create",
+                            insertIndex: null,  // append at end
+                            draft: {
+                              name: "If / Else",
+                              timeout_ms: 12000,
+                              branches: [
+                                { name: "Path A", condition: { type: "selector_visible", selector: "" }, steps: [] },
+                                { name: "Path B", condition: { type: "selector_visible", selector: "" }, steps: [] },
+                              ],
+                              default_steps: [],
+                            },
+                          });
+                          return;
+                        }
                         setTool(t.id);
                         if (t.id !== "random" && t.id !== "random_click") {
                           setPendingRandom([]);
@@ -3697,20 +3882,26 @@ export default function VisualRecorderPage() {
                       {sm.icon}
                     </span>
                     <div className="flex-1 min-w-0">
-                      {/* Inline-editable name (click to edit) */}
+                      {/* Inline-editable name (click to edit). Default is
+                          the friendly auto-label from getStepDisplayName
+                          (e.g. "Click: Next button" / "Dropdown → {{state}}")
+                          instead of the bare action verb. */}
                       <input
                         type="text"
-                        defaultValue={s.name || s.action}
+                        defaultValue={s.name || getStepDisplayName(s)}
                         onBlur={(e) => {
                           const newName = (e.target.value || "").trim();
-                          if (newName && newName !== (s.name || s.action)) renameStep(i, newName);
+                          const autoName = getStepDisplayName(s);
+                          // Only persist if user actually changed it AWAY
+                          // from both the existing name and the auto-label.
+                          if (newName && newName !== (s.name || autoName)) renameStep(i, newName);
                         }}
                         onKeyDown={(e) => {
                           if (e.key === "Enter") e.target.blur();
-                          if (e.key === "Escape") { e.target.value = s.name || s.action; e.target.blur(); }
+                          if (e.key === "Escape") { e.target.value = s.name || getStepDisplayName(s); e.target.blur(); }
                         }}
                         className="w-full bg-transparent border-0 border-b border-transparent hover:border-zinc-700 focus:border-emerald-500 focus:outline-none text-zinc-300 font-medium px-0 py-0 text-xs"
-                        title={`Rename step (was: ${s.action})`}
+                        title={`Rename step (action: ${s.action})`}
                         data-testid={`vr-step-name-${i}`}
                       />
                       <div className="text-zinc-500 truncate">
@@ -4520,6 +4711,287 @@ export default function VisualRecorderPage() {
           a Live Test failure, without deleting + re-recording.
           `action` is shown read-only — changing it would break replay
           semantics (delete + re-record instead). ────────────────── */}
+      {/* ── 2026-06: If / Else Branch Editor modal ───────────────────
+          Lets the user define a conditional branch step without having
+          to edit raw JSON. Each branch has a condition (URL contains /
+          selector visible / text visible / etc.) and a list of nested
+          steps that run when that branch wins. Branches race in
+          parallel — first matching condition wins; falls back to
+          `default_steps` if none match within `timeout_ms`.
+
+          Initial nested steps default to a simple [wait 500ms]; the user
+          can refine via the existing "Edit Raw JSON" affordance on the
+          parent branch step after insert. ─────────────────────────── */}
+      {branchEditor && (
+        <div
+          className="fixed inset-0 z-50 flex items-stretch justify-end pointer-events-none"
+          data-testid="vr-branch-modal-backdrop"
+        >
+          <div
+            className="absolute inset-0 pointer-events-auto bg-black/30"
+            onClick={() => setBranchEditor(null)}
+          />
+          <div
+            className="relative w-full max-w-xl bg-zinc-950/95 border-l border-zinc-800 shadow-2xl backdrop-blur-md pointer-events-auto flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+            data-testid="vr-branch-modal"
+          >
+            <div className="flex items-center justify-between p-4 border-b border-zinc-800">
+              <div className="flex items-center gap-2">
+                <GitBranch className="w-4 h-4 text-fuchsia-400" />
+                <h3 className="text-sm font-semibold text-zinc-100">
+                  If / Else Branch
+                </h3>
+                <span className="px-1.5 py-0.5 rounded bg-fuchsia-900/40 border border-fuchsia-700/50 text-fuchsia-200 text-[10px] font-mono uppercase">
+                  conditional
+                </span>
+              </div>
+              <button
+                onClick={() => setBranchEditor(null)}
+                className="text-zinc-500 hover:text-zinc-200"
+                data-testid="vr-branch-modal-close"
+                title="Close"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 space-y-4 text-xs">
+              <div className="text-zinc-400 leading-relaxed">
+                Use this when a page can show <b>different forms randomly</b>
+                {" "}— e.g. sometimes <i>phone</i>, sometimes <i>email</i>,
+                sometimes a survey. The first branch whose condition becomes
+                true within the timeout will run. If <b>none</b> match, the
+                Default Steps run.
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[10px] uppercase text-zinc-500 mb-1">
+                    Step name
+                  </label>
+                  <input
+                    type="text"
+                    value={branchEditor.draft.name || ""}
+                    onChange={(e) => setBranchEditor((bx) => ({
+                      ...bx, draft: { ...bx.draft, name: e.target.value }
+                    }))}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded px-2 py-1.5 text-zinc-200"
+                    placeholder="e.g. Page picker"
+                    data-testid="vr-branch-name"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] uppercase text-zinc-500 mb-1">
+                    Race timeout (ms)
+                  </label>
+                  <input
+                    type="number"
+                    min={1000}
+                    step={500}
+                    value={branchEditor.draft.timeout_ms || 12000}
+                    onChange={(e) => setBranchEditor((bx) => ({
+                      ...bx, draft: { ...bx.draft, timeout_ms: Math.max(1000, Number(e.target.value) || 12000) }
+                    }))}
+                    className="w-full bg-zinc-900 border border-zinc-800 rounded px-2 py-1.5 text-zinc-200 font-mono"
+                    data-testid="vr-branch-timeout"
+                  />
+                </div>
+              </div>
+
+              {/* Branches list */}
+              <div className="space-y-3">
+                {(branchEditor.draft.branches || []).map((b, bi) => (
+                  <div
+                    key={bi}
+                    className="rounded-lg border border-fuchsia-900/40 bg-fuchsia-950/10 p-3 space-y-2"
+                    data-testid={`vr-branch-row-${bi}`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 flex-1">
+                        <span className="text-fuchsia-300 font-mono text-[10px]">#{bi + 1}</span>
+                        <input
+                          type="text"
+                          value={b.name || ""}
+                          onChange={(e) => setBranchEditor((bx) => {
+                            const arr = [...(bx.draft.branches || [])];
+                            arr[bi] = { ...arr[bi], name: e.target.value };
+                            return { ...bx, draft: { ...bx.draft, branches: arr } };
+                          })}
+                          placeholder={`Path ${String.fromCharCode(65 + bi)}`}
+                          className="flex-1 bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-zinc-200"
+                          data-testid={`vr-branch-name-${bi}`}
+                        />
+                      </div>
+                      {(branchEditor.draft.branches || []).length > 1 && (
+                        <button
+                          onClick={() => setBranchEditor((bx) => {
+                            const arr = (bx.draft.branches || []).filter((_, i) => i !== bi);
+                            return { ...bx, draft: { ...bx.draft, branches: arr } };
+                          })}
+                          className="text-rose-400 hover:text-rose-300 p-1"
+                          title="Remove this branch"
+                          data-testid={`vr-branch-remove-${bi}`}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2">
+                      <div className="col-span-1">
+                        <label className="block text-[10px] uppercase text-zinc-500 mb-1">
+                          When
+                        </label>
+                        <select
+                          value={b.condition?.type || "selector_visible"}
+                          onChange={(e) => setBranchEditor((bx) => {
+                            const arr = [...(bx.draft.branches || [])];
+                            arr[bi] = {
+                              ...arr[bi],
+                              condition: { ...(arr[bi].condition || {}), type: e.target.value }
+                            };
+                            return { ...bx, draft: { ...bx.draft, branches: arr } };
+                          })}
+                          className="w-full bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-zinc-200"
+                          data-testid={`vr-branch-cond-type-${bi}`}
+                        >
+                          <option value="selector_visible">Element visible</option>
+                          <option value="selector_attached">Element exists (hidden ok)</option>
+                          <option value="text_visible">Text appears</option>
+                          <option value="url_contains">URL contains</option>
+                          <option value="url_matches">URL matches regex</option>
+                        </select>
+                      </div>
+                      <div className="col-span-2">
+                        <label className="block text-[10px] uppercase text-zinc-500 mb-1">
+                          {(() => {
+                            const t = b.condition?.type || "selector_visible";
+                            if (t === "text_visible") return "Text to wait for";
+                            if (t === "url_contains") return "URL fragment (e.g. /phone)";
+                            if (t === "url_matches") return "URL regex (e.g. thank-?you)";
+                            return "CSS selector (e.g. input[name=phone])";
+                          })()}
+                        </label>
+                        <input
+                          type="text"
+                          value={(() => {
+                            const c = b.condition || {};
+                            const t = c.type || "selector_visible";
+                            if (t === "text_visible") return c.text || "";
+                            if (t === "url_contains" || t === "url_matches") return c.value || "";
+                            return c.selector || "";
+                          })()}
+                          onChange={(e) => setBranchEditor((bx) => {
+                            const arr = [...(bx.draft.branches || [])];
+                            const c = { ...(arr[bi].condition || {}) };
+                            const t = c.type || "selector_visible";
+                            if (t === "text_visible") c.text = e.target.value;
+                            else if (t === "url_contains" || t === "url_matches") c.value = e.target.value;
+                            else c.selector = e.target.value;
+                            arr[bi] = { ...arr[bi], condition: c };
+                            return { ...bx, draft: { ...bx.draft, branches: arr } };
+                          })}
+                          placeholder={(() => {
+                            const t = b.condition?.type || "selector_visible";
+                            if (t === "text_visible") return "Birthday";
+                            if (t === "url_contains") return "/phone-question";
+                            if (t === "url_matches") return "thank.?you|congrats";
+                            return "input[name=phone]";
+                          })()}
+                          className="w-full bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-zinc-200 font-mono"
+                          data-testid={`vr-branch-cond-value-${bi}`}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="text-[10px] text-zinc-500">
+                      Steps to run when this branch wins: <span className="text-fuchsia-300 font-mono">
+                        {(b.steps || []).length}
+                      </span>
+                      {(b.steps || []).length === 0 && (
+                        <span> — use <b>Edit Raw JSON</b> on this branch step after insert to add nested actions, or insert a quick wait below.</span>
+                      )}
+                      <button
+                        onClick={() => setBranchEditor((bx) => {
+                          const arr = [...(bx.draft.branches || [])];
+                          const cur = Array.isArray(arr[bi].steps) ? arr[bi].steps : [];
+                          arr[bi] = { ...arr[bi], steps: [...cur, { action: "wait", ms: 500, source: "manual" }] };
+                          return { ...bx, draft: { ...bx.draft, branches: arr } };
+                        })}
+                        className="ml-2 px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[10px]"
+                        data-testid={`vr-branch-add-wait-${bi}`}
+                      >
+                        + wait 500ms
+                      </button>
+                    </div>
+                  </div>
+                ))}
+
+                <button
+                  onClick={() => setBranchEditor((bx) => {
+                    const arr = bx.draft.branches || [];
+                    const newBranch = {
+                      name: `Path ${String.fromCharCode(65 + arr.length)}`,
+                      condition: { type: "selector_visible", selector: "" },
+                      steps: [],
+                    };
+                    return { ...bx, draft: { ...bx.draft, branches: [...arr, newBranch] } };
+                  })}
+                  className="w-full px-3 py-2 rounded-lg border border-dashed border-fuchsia-700/40 hover:border-fuchsia-500 hover:bg-fuchsia-900/10 text-fuchsia-300 text-xs font-medium transition-colors"
+                  data-testid="vr-branch-add"
+                >
+                  + Add another branch
+                </button>
+              </div>
+
+              {/* Default steps fall-back hint */}
+              <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+                <div className="text-[10px] uppercase text-zinc-500 mb-1">
+                  Default steps
+                </div>
+                <div className="text-zinc-400 text-[11px]">
+                  If <b>no branch</b> matches within {(branchEditor.draft.timeout_ms || 12000)}ms,
+                  these run instead.{" "}
+                  <span className="text-zinc-500">
+                    Currently <span className="text-fuchsia-300 font-mono">{(branchEditor.draft.default_steps || []).length}</span> step{(branchEditor.draft.default_steps || []).length === 1 ? "" : "s"}.
+                    Add a quick wait below, or refine via &quot;Edit Raw JSON&quot; on the parent step after insert.
+                  </span>
+                </div>
+                <button
+                  onClick={() => setBranchEditor((bx) => {
+                    const cur = Array.isArray(bx.draft.default_steps) ? bx.draft.default_steps : [];
+                    return { ...bx, draft: { ...bx.draft, default_steps: [...cur, { action: "wait", ms: 500, source: "manual" }] } };
+                  })}
+                  className="mt-2 px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[10px]"
+                  data-testid="vr-branch-add-default-wait"
+                >
+                  + wait 500ms (default)
+                </button>
+              </div>
+            </div>
+
+            <div className="border-t border-zinc-800 p-3 flex items-center justify-between gap-2">
+              <button
+                onClick={() => setBranchEditor(null)}
+                className="px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs"
+                data-testid="vr-branch-cancel"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitBranch}
+                disabled={busy}
+                className="px-4 py-1.5 rounded bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-50 text-white text-xs font-semibold"
+                data-testid="vr-branch-save"
+              >
+                {busy ? "Inserting…" : "Insert branch step"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {editingStep && (
         <div
           className="fixed inset-0 z-50 flex items-stretch justify-end pointer-events-none"
