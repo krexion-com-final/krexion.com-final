@@ -6802,6 +6802,25 @@ async def run_real_user_traffic_job(
                 # MISMATCH leak AND keeps the ESP click-tracking host +
                 # URL `mc_cid`/`_kx` ids consistent for email visits.
                 _ua_referer, _kx_platform, _kx_esp, _pro_extras = _resolve_visit_referer(ua, _referer_cfg)
+                # ── 2026-06-12 (referrer header fix) ────────────────────────
+                # Chromium's NetworkService SILENTLY DROPS the "Referer"
+                # header from `extra_http_headers` for the initial
+                # navigation — it considers Referer an internally-managed
+                # header. The ONLY supported way to set Referer for the
+                # very first request is the `referer=` keyword arg of
+                # `page.goto(...)` (see Playwright docs + upstream issue
+                # microsoft/playwright#3597). Without this, all the careful
+                # UA-derived TikTok/Facebook detection AND the user's
+                # custom-URL override were arriving at the target as an
+                # empty Referer — exactly the bug the customer reported.
+                # We KEEP it in extra_http_headers too because subsequent
+                # navigations (e.g. form-reload after AJAX → page change)
+                # do honour it; only the FIRST goto needed the explicit
+                # referer kwarg. Build a small kwargs dict so all gotos
+                # that touch the offer page can splat it in via **.
+                _goto_referer_kw: Dict[str, Any] = {}
+                if _ua_referer:
+                    _goto_referer_kw["referer"] = _ua_referer
                 _ctx_headers = {"Accept-Language": geo["accept_language"]}
                 if _ua_referer:
                     _ctx_headers["Referer"] = _ua_referer
@@ -6873,6 +6892,14 @@ async def run_real_user_traffic_job(
                     # URL rewrite for this visit — retry navigates to
                     # the SAME URL (no second handshake to compute).
                     _ua_referer_retry, _, _, _ = _resolve_visit_referer(ua, _referer_cfg)
+                    # 2026-06-12 (referrer header fix) — update goto-kwargs
+                    # so the re-attempted navigation also sends the right
+                    # Referer via `page.goto(..., referer=...)`. The retry
+                    # branch may have re-rolled a different platform pool
+                    # selection — honour whatever the resolver picked this
+                    # time.
+                    _goto_referer_kw = {"referer": _ua_referer_retry} if _ua_referer_retry else {}
+                    _ua_referer = _ua_referer_retry  # keep main loop's var in sync
                     _ctx_headers_retry = {"Accept-Language": geo["accept_language"]}
                     if _ua_referer_retry:
                         _ctx_headers_retry["Referer"] = _ua_referer_retry
@@ -7241,7 +7268,13 @@ async def run_real_user_traffic_job(
                         # response received) instead of full DOM — many
                         # transient tunnel hiccups resolve mid-flight.
                         _wait_until = "commit" if same_proxy_retry > 0 else "domcontentloaded"
-                        resp = await page.goto(_visit_target_url, timeout=35000, wait_until=_wait_until)
+                        # 2026-06-12 (referrer header fix): explicit
+                        # `referer=` kwarg — Chromium ignores
+                        # extra_http_headers["Referer"] on the first
+                        # navigation, so this is the ONLY reliable way
+                        # to make the target see the configured referer
+                        # (TikTok / custom URL / platform pool / …).
+                        resp = await page.goto(_visit_target_url, timeout=35000, wait_until=_wait_until, **_goto_referer_kw)
                         goto_exc = None
                         break
                     except Exception as _ge:
@@ -7413,10 +7446,17 @@ async def run_real_user_traffic_job(
                                         entry["bypass_used"] = True
                                         entry["bypass_exit_ip"] = _exit_ip_for_bypass
                                         entry["bypass_offer_url"] = _bypass_offer_url
+                                        # 2026-06-12 (referrer fix): same
+                                        # `referer=` kwarg here — the
+                                        # bypass page just resolved the
+                                        # bot-detection challenge; the
+                                        # actual offer-page goto still
+                                        # needs the configured referer.
                                         resp = await page.goto(
                                             _bypass_offer_url,
                                             timeout=90000,
                                             wait_until="domcontentloaded",
+                                            **_goto_referer_kw,
                                         )
                                         goto_exc = None  # clear → success path
                                     except Exception as _bp_e:
@@ -8258,8 +8298,13 @@ async def run_real_user_traffic_job(
 
                             # Reload form page so invalid state is cleared
                             try:
+                                # 2026-06-12 (referrer fix): pass the
+                                # configured referer on the form-reload
+                                # too so retried leads still arrive with
+                                # the right Referer header.
                                 await page.goto(_visit_target_url, timeout=90000,
-                                                wait_until="domcontentloaded")
+                                                wait_until="domcontentloaded",
+                                                **_goto_referer_kw)
                                 await page.wait_for_timeout(700 + random.randint(0, 500))
                                 try:
                                     await page.wait_for_load_state("networkidle", timeout=15000)
