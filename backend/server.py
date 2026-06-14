@@ -7355,6 +7355,10 @@ async def _rut_prepare_and_run(
             referer_search_keywords=str(params.get("referer_search_keywords") or ""),
             referer_strip_search_path=bool(params.get("referer_strip_search_path", True)),
             referer_network_click_chain=bool(params.get("referer_network_click_chain", False)),
+            # 2026-01 — Pass-Referer-To-Offer (server-side tracker
+            # resolve + direct offer navigation, see RUT engine
+            # for behaviour). Default OFF preserves legacy path.
+            referer_pass_to_offer=bool(params.get("referer_pass_to_offer", False)),
         )
     except Exception as e:  # noqa: BLE001
         logger.exception(f"_rut_prepare_and_run crashed for job {job_id}: {e}")
@@ -7644,6 +7648,15 @@ async def rut_create_job(
     referer_search_keywords: str = Form(""),      # Newline-separated keyword pool
     referer_strip_search_path: bool = Form(True), # Real Chrome Referrer-Policy
     referer_network_click_chain: bool = Form(False),  # One optional 302 hop
+    # ── 2026-01 — Pass-Referer-To-Offer (direct offer navigation) ────
+    # OFF (default) → legacy: bot navigates tracker → 302 → offer.
+    #                  Offer sees Krexion origin per browser policy.
+    # ON  → bot resolves tracker SERVER-SIDE (click is still recorded
+    #       w/ proxy exit-IP via X-Forwarded-For), then Chromium
+    #       navigates DIRECTLY to the resolved offer URL with the
+    #       chosen Referer. Offer sees the EXACT chosen Referer
+    #       (TikTok / custom URL / platform pool / etc.).
+    referer_pass_to_offer: bool = Form(False),
     user: dict = Depends(get_current_user_with_fresh_data),
     _cloud_gate: bool = Depends(require_local_mode),
 ):
@@ -7902,6 +7915,8 @@ async def rut_create_job(
         "referer_search_keywords": (referer_search_keywords or "")[:8000],
         "referer_strip_search_path": bool(referer_strip_search_path),
         "referer_network_click_chain": bool(referer_network_click_chain),
+        # 2026-01 — Pass-Referer-To-Offer (direct offer navigation)
+        "referer_pass_to_offer": bool(referer_pass_to_offer),
     }
     # A job is auto-resumable on backend restart only if it has no in-memory
     # bytes attached (Mongo can't store huge UploadFile blobs efficiently

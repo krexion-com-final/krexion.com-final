@@ -2541,6 +2541,72 @@ async def _probe_proxy_geo(proxy: Dict[str, Any], ua: str) -> Dict[str, Any]:
             result["accept_language"] = lang_map.get(cc, "en-US,en;q=0.9")
             result["locale"] = locale_map.get(cc, "en-US")
             result["ok"] = True
+
+            # ── 2026-01 STRICT VPN CHECK — multi-source consensus ────
+            # Even when ONE source said "not VPN", cross-check the
+            # OTHER source(s) so a single false-negative can't let
+            # a datacenter/VPN exit slip through skip_vpn=True.
+            # Strategy: if the WINNING source said is_vpn=False, fire
+            # a quick cross-check against the OTHER endpoint. If THAT
+            # one flags VPN/proxy/hosting, override is_vpn=True. A
+            # single positive from any source is enough to mark the
+            # IP as VPN — this is the strictest possible policy and
+            # matches the user's requirement ("VPN proxy par bhi
+            # kaam ho jata hai — yeh ban'd hona chahiye").
+            #
+            # Also add proxycheck.io (no API key needed for ≤100/day,
+            # serves as an INDEPENDENT third opinion when the first
+            # two disagree). proxycheck.io is one of the most
+            # accurate free providers for datacenter/VPN detection.
+            if not result.get("is_vpn") and result.get("exit_ip"):
+                _xcheck_ip = result["exit_ip"]
+                try:
+                    # Cross-check via the OPPOSITE endpoint. We use a
+                    # public no-proxy probe (these endpoints are happy
+                    # to be queried with the IP in the path; no proxy
+                    # needed and it's faster).
+                    async with httpx.AsyncClient(
+                        timeout=httpx.Timeout(5.0, connect=3.0),
+                        verify=False,
+                    ) as _xc:
+                        # 1. ip-api.com cross-check
+                        try:
+                            _r1 = await _xc.get(
+                                f"http://ip-api.com/json/{_xcheck_ip}"
+                                "?fields=status,proxy,hosting"
+                            )
+                            if _r1.status_code == 200:
+                                _d1 = _r1.json()
+                                if _d1.get("status") == "success" and (
+                                    _d1.get("proxy") or _d1.get("hosting")
+                                ):
+                                    result["is_vpn"] = True
+                                    result["vpn_source"] = "ip-api-xcheck"
+                        except Exception:
+                            pass
+                        # 2. proxycheck.io independent third source
+                        if not result.get("is_vpn"):
+                            try:
+                                _r2 = await _xc.get(
+                                    f"https://proxycheck.io/v2/{_xcheck_ip}"
+                                    "?vpn=1&risk=1"
+                                )
+                                if _r2.status_code == 200:
+                                    _d2 = _r2.json()
+                                    _node = _d2.get(_xcheck_ip) or {}
+                                    if isinstance(_node, dict):
+                                        _proxy_flag = str(_node.get("proxy", "")).lower() == "yes"
+                                        _ptype = str(_node.get("type", "")).lower()
+                                        if _proxy_flag or _ptype in (
+                                            "vpn", "tor", "compromised server",
+                                            "public proxy", "hosting", "web proxy",
+                                        ):
+                                            result["is_vpn"] = True
+                                            result["vpn_source"] = "proxycheck.io"
+                            except Exception:
+                                pass
+                except Exception as _xc_e:
+                    logger.debug(f"VPN cross-check failed (non-blocking): {_xc_e}")
     except Exception as e:
         logger.debug(f"Proxy geo probe failed: {e}")
     return result
@@ -5368,6 +5434,15 @@ async def run_real_user_traffic_job(
     referer_search_keywords: str = "",
     referer_strip_search_path: bool = True,
     referer_network_click_chain: bool = False,
+    # ── 2026-01: PASS-REFERER-TO-OFFER ───────────────────────────────
+    # When True, the bot RESOLVES the Krexion tracker server-side
+    # (records the click with the proxy's exit IP via X-Forwarded-For)
+    # then navigates Chromium DIRECTLY to the resolved offer URL with
+    # the chosen Referer. Result: the offer sees the EXACT chosen
+    # Referer (TikTok / custom URL / platform pool / search engine /
+    # etc.) instead of the Krexion origin that a 302 hop would
+    # otherwise expose. Default OFF — fully backwards-compatible.
+    referer_pass_to_offer: bool = False,
 ):
     """
     Main orchestrator. Emits progress into RUT_JOBS[job_id].
@@ -5395,6 +5470,9 @@ async def run_real_user_traffic_job(
         "strip_search_path": bool(referer_strip_search_path),
         "network_click_chain": bool(referer_network_click_chain),
         "target_url": target_url or "",
+        # 2026-01 — Pass-Referer-To-Offer (server-side tracker resolve +
+        # direct offer navigation so the chosen Referer reaches the offer).
+        "pass_to_offer": bool(referer_pass_to_offer),
     }
 
     # Guarantee chromium is installed BEFORE launching any visits.
@@ -6488,9 +6566,25 @@ async def run_real_user_traffic_job(
         push_live_step(job_id, i + 1, "geo", "ok" if geo["ok"] else "failed",
                        f"Exit {entry['exit_ip'] or '?'} · {entry['country'] or '?'}, {entry['city'] or '?'}")
 
-        if not geo["ok"]:
-            entry["status"] = "failed"
-            entry["error"] = "Proxy unreachable (ip-api probe failed)"
+        if not geo["ok"] or not (geo.get("exit_ip") or "").strip():
+            # 2026-01 STRICT — Treat any unreachable / no-exit-IP proxy
+            # as a SKIPPED dead proxy (not a hard "failed"). This:
+            #   • Prevents UA/lead consumption for proxies that never
+            #     yielded a real residential exit IP
+            #   • Keeps the visit out of the "failed" count (which is
+            #     reserved for genuine offer/automation failures)
+            #   • Plays nicely with the strict click-log gate — no
+            #     "unknown" placeholder rows can ever reach clicks
+            #     collection from this code path
+            entry["status"] = "skipped_dead_proxy"
+            entry["error"] = (
+                "Proxy yielded no valid exit IP (geo probe unreachable / "
+                "blank IP) — rotating to next proxy"
+            )
+            push_live_step(
+                job_id, i + 1, "geo", "skipped",
+                "Proxy unreachable / blank IP — skipped (no UA / lead consumed)",
+            )
             return await _record(job_id, entry, report, report_lock, db)
 
         # Pre-filter: country
@@ -6851,6 +6945,52 @@ async def run_real_user_traffic_job(
                         brand=(_referer_cfg.get("brand") or ""),
                     ),
                 )
+                # ── 2026-01: PASS-REFERER-TO-OFFER bypass ────────────────
+                # Toggle ON  → resolve the tracker server-side (records
+                # click w/ exit_ip via X-Forwarded-For), then point the
+                # browser DIRECTLY at the resolved offer URL with the
+                # SAME chosen Referer. Result: offer sees the exact
+                # TikTok/custom/platform-pool Referer the operator
+                # configured — not the Krexion origin a 302 would leak.
+                # Toggle OFF → legacy path (browser navigates tracker → 302
+                # → offer; offer sees Krexion origin per browser policy).
+                # SAFETY: requires both a non-empty chosen Referer AND a
+                # successful 3xx from the server-side tracker resolve.
+                # If either fails we silently fall back to the legacy
+                # path so the visit still completes.
+                _ptro_swapped = False
+                try:
+                    if (
+                        _referer_cfg.get("pass_to_offer")
+                        and _ua_referer
+                        and _visit_target_url
+                    ):
+                        _resolved_offer_direct = await _resolve_tracker_via_localhost(
+                            _visit_target_url,
+                            geo.get("exit_ip") or "",
+                            ua,
+                            timeout=8.0,
+                        )
+                        if _resolved_offer_direct:
+                            _visit_target_url = _resolved_offer_direct
+                            _ptro_swapped = True
+                            try:
+                                push_live_step(
+                                    job_id, i + 1, "referer",
+                                    "info",
+                                    f"Pass-Referer-To-Offer: browser → offer directly with Referer={_ua_referer[:80]}",
+                                )
+                            except Exception:
+                                pass
+                except Exception as _ptro_e:
+                    try:
+                        push_live_step(
+                            job_id, i + 1, "referer",
+                            "warn",
+                            f"Pass-Referer-To-Offer fallback (legacy path): {str(_ptro_e)[:120]}",
+                        )
+                    except Exception:
+                        pass
                 # 2026-01: Sec-CH-UA client hint headers matching UA's
                 # Chrome version + OS. MaxMind / IPQS / Anura cross-check
                 # these against the UA — a mismatch is a HARD bot signal.
@@ -12836,6 +12976,11 @@ async def _log_click_for_link(
         user_db = client[db_name]
 
         exit_ip = (entry.get("exit_ip") or "").strip()
+        # 2026-01 STRICT — additional safety: treat literal placeholder
+        # strings as empty so they never reach the DB. Some legacy paths
+        # (e.g. geo-probe failure fallbacks) emit these as exit_ip.
+        if exit_ip.lower() in {"unknown", "none", "null"}:
+            exit_ip = ""
         is_vpn = bool(entry.get("status") == "skipped_vpn" or entry.get("is_vpn"))
         ua = entry.get("ua") or ""
         device_display = entry.get("device_name") or entry.get("os") or "Unknown"
@@ -12863,6 +13008,48 @@ async def _log_click_for_link(
             return
 
         # ── Branch B: regular INSERT (early=True OR no early row) ─────
+        # 2026-01 STRICT MODE: Only insert when offer ACTUALLY opened
+        # (status == "ok") AND we have a real residential exit IP.
+        # Skipped/failed visits (skipped_vpn, skipped_duplicate_ip,
+        # skipped_dead_proxy, skipped_country, skipped_state_mismatch,
+        # failed, invalid_data, ...) are NOT logged to the clicks
+        # collection. This eliminates the "unknown" placeholder rows
+        # that polluted the per-link click count, the duplicate-IP set
+        # display, and the analytics dashboard. The visit is still
+        # accounted for in the job summary (counters in `_record`) —
+        # we just don't pretend a click happened when the offer was
+        # never reached.
+        #
+        # The `early=True` branch (insert right after successful
+        # page.goto) is exempt from the status check (status not set
+        # yet at that point), but ALSO requires a valid residential
+        # exit IP — otherwise the "unknown" placeholder row would still
+        # leak in via the early path.
+        if early:
+            if not exit_ip:
+                try:
+                    logger.debug(
+                        f"[strict-log] dropping EARLY click row · no valid exit_ip "
+                        f"(raw={entry.get('exit_ip')!r})"
+                    )
+                except Exception:
+                    pass
+                return
+        else:
+            _status_ok = (entry.get("status") or "").strip().lower() == "ok"
+            _ip_ok = bool(exit_ip)
+            if not (_status_ok and _ip_ok):
+                # Silently skip — counters in _record already reflect
+                # the visit's true outcome (skipped / failed / etc.).
+                try:
+                    logger.debug(
+                        f"[strict-log] dropping click row · status={entry.get('status')} · "
+                        f"exit_ip={exit_ip!r}"
+                    )
+                except Exception:
+                    pass
+                return
+
         new_id = str(_uuid.uuid4())
         click_doc = {
             "id": new_id,

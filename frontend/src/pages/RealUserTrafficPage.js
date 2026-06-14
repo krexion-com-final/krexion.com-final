@@ -571,6 +571,10 @@ export default function RealUserTrafficPage() {
   const [refererInappDeep, setRefererInappDeep] = useState(true);
   const [refererStripSearchPath, setRefererStripSearchPath] = useState(true);
   const [refererNetworkClickChain, setRefererNetworkClickChain] = useState(false);
+  // 2026-01 — Pass-Referer-To-Offer (direct offer navigation so the
+  // offer sees the EXACT chosen Referer instead of Krexion origin).
+  // Default OFF — preserves legacy behavior for existing users.
+  const [refererPassToOffer, setRefererPassToOffer] = useState(false);
   // Search-engine sub-options for the search-Referer rotation
   const [refererSearchEngine, setRefererSearchEngine] = useState("google");
   const [refererSearchKeywords, setRefererSearchKeywords] = useState("");
@@ -1450,6 +1454,8 @@ export default function RealUserTrafficPage() {
       fd.append("referer_search_keywords", refererSearchKeywords || "");
       fd.append("referer_strip_search_path", String(!!refererStripSearchPath));
       fd.append("referer_network_click_chain", String(!!refererNetworkClickChain));
+      // 2026-01 — Pass-Referer-To-Offer (direct offer navigation).
+      fd.append("referer_pass_to_offer", String(!!refererPassToOffer));
 
       fd.append("form_fill_enabled", String(formFillEnabled));
       if (formFillEnabled) {
@@ -2763,6 +2769,39 @@ export default function RealUserTrafficPage() {
                   </span>
                 </div>
               </div>
+            )}
+
+            {/* 2026-01 — Pass-Referer-To-Offer (universal toggle, works in every referer mode) */}
+            {refererOverrideEnabled && (
+              <label
+                className="flex items-start gap-3 text-xs text-zinc-200 cursor-pointer p-3 mb-3 rounded-md border-2 border-emerald-500/60 bg-emerald-950/40 hover:bg-emerald-950/60 transition"
+                data-testid="rut-pass-referer-to-offer-label"
+              >
+                <input
+                  data-testid="rut-pass-referer-to-offer"
+                  type="checkbox"
+                  checked={refererPassToOffer}
+                  onChange={(e) => setRefererPassToOffer(e.target.checked)}
+                  className="w-5 h-5 rounded accent-emerald-500 mt-0.5"
+                />
+                <span className="flex flex-col gap-1 flex-1">
+                  <span className="font-semibold text-emerald-300 text-sm flex items-center gap-2">
+                    🎯 Pass Referer to Offer (direct offer navigation)
+                    <span className="text-[10px] font-normal text-emerald-400 px-2 py-0.5 rounded bg-emerald-900/50 border border-emerald-600/50">
+                      RECOMMENDED
+                    </span>
+                  </span>
+                  <span className="text-zinc-300 text-[12px] leading-relaxed">
+                    Without this, the bot navigates <span className="text-zinc-400">tracker → 302 → offer</span> and the browser's referrer policy STRIPS your chosen Referer down to the Krexion origin — so the offer sees <span className="text-amber-400">https://krexion.com</span> (or empty) instead of TikTok / your custom URL.
+                  </span>
+                  <span className="text-emerald-200 text-[12px] leading-relaxed">
+                    Turn ON → Krexion resolves the tracker <span className="text-emerald-300">server-side</span> (click is still recorded with the proxy exit IP via <code className="text-emerald-200">X-Forwarded-For</code>) and Chromium navigates <span className="text-emerald-300">directly to the offer URL</span> with the EXACT Referer you picked (TikTok / custom URL / platform pool / Google search / Facebook wrapper / etc.).
+                  </span>
+                  <span className="text-zinc-400 text-[11px] leading-relaxed italic">
+                    Safe fallback: if the server-side resolve fails for any reason, the visit silently falls back to the legacy tracker path so it still completes.
+                  </span>
+                </span>
+              </label>
             )}
 
             {refererOverrideEnabled && (
