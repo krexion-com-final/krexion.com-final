@@ -1280,16 +1280,34 @@ def coerce_ua_for_platform(ua: str, platform: str) -> str:
                     count=1,
                 )
 
-        # iOS realism: real FBIOS UAs include the AppleWebKit/Mobile token
-        # and end with the bracketed marker block (NO Safari/version
-        # token). If the UA has Safari/... we trim it so the FBAN bracket
-        # is the final token like real captures.
-        if family == "ios" and p in ("facebook", "messenger"):
+        # iOS realism: real in-app webview UAs DROP the
+        # `Version/<X.X>` and `Safari/<X.X.X>` tokens that plain Safari
+        # carries, then append the app-specific marker block. UA parsers
+        # scan left-to-right and stop at `Safari/...` — if we leave that
+        # token in place, the tracker classifies the click as Safari and
+        # ignores everything after, hiding the in-app signature.
+        # Apple's iOS 26 / Safari 26 UAs additionally FREEZE the OS
+        # version at 18_6 and remove device model tokens (privacy by
+        # design — see Safari 26 release notes). We preserve that
+        # freezing — we ONLY strip Version/X + Safari/X and ensure the
+        # `Mobile/<build>` token stays in place since real in-app
+        # captures keep it.
+        if family == "ios" and p in (
+            "facebook", "messenger", "tiktok", "instagram",
+            "snapchat", "linkedin", "twitter",
+        ):
+            # 1. Strip the trailing `Safari/<X.X.X>` token (real in-app
+            #    UAs don't carry it).
             new_ua = re.sub(r"\s+Safari/[\d.]+\s*$", "", new_ua).rstrip()
-            # FBIOS UAs use Mobile/<build> instead of plain Mobile/15E148.
-            # Leave existing Mobile/xxx if present, else inject a recent one.
+            # 2. Strip the `Version/<X.X>` token (modern iOS in-app
+            #    webviews omit it; FBAN/musical_ly/Instagram all replace
+            #    that slot with their own version block).
+            new_ua = re.sub(r"\s+Version/[\d.]+\b", "", new_ua)
+            # 3. Ensure a `Mobile/<build>` token exists — real captures
+            #    always have one. iOS Safari 26 emits `Mobile/15E148`
+            #    (frozen) so we use the same default if missing.
             if "Mobile/" not in new_ua:
-                new_ua += " Mobile/22D5055b"
+                new_ua += " Mobile/15E148"
 
         # Final append — ensure a single space separator.
         sep = " " if not new_ua.endswith(" ") else ""

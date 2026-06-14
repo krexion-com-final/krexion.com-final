@@ -53,6 +53,55 @@ handlers landed).
 - Existing 2.1.39 Electron customers will be auto-upgraded on next launch
   via electron-updater.
 
+## Iteration 9 — v2.1.47 (iOS in-app UA cleanup — Version/Safari token strip)
+**Root cause:** v2.1.46 appended the in-app webview suffix at the END
+of the UA but kept the `Version/<X.X>` and `Safari/<X.X.X>` tokens that
+modern iOS Safari emits. UA parsers (HasOffers, CAKE, Affise, Voluum,
+ua-parser-js, woothee, useragent-npm) scan left-to-right and stop at the
+first known browser token they recognise — they hit `Safari/604.1` and
+classified the click as **Safari**, ignoring everything after. So the
+in-app suffix was technically present in the UA header but invisible to
+tracker UIs and many fraud-detection layers.
+
+Real iOS in-app captures (verified against `whatismybrowser` corpus
+2026-06 + Apple's Safari 26 release notes) **drop** both tokens:
+- `Version/<X.X>` — replaced by the app-specific version block
+- `Safari/<X.X.X>` — never present in real in-app UAs
+And keep the `Mobile/<build>` token between AppleWebKit and the marker
+block.
+
+**Fix:**
+- `backend/referrer_pro.py` (coerce_ua_for_platform iOS branch): now
+  strips `Version/<X.X>` AND `Safari/<X.X.X>` for ALL in-app platforms
+  on iOS — `facebook` / `messenger` (was already there) PLUS `tiktok` /
+  `instagram` / `snapchat` / `linkedin` / `twitter`. Ensures
+  `Mobile/<build>` token exists (injects `Mobile/15E148` — the frozen
+  iOS 26 default — if missing).
+
+**Result:** iOS TikTok UA now reads identically to real captures:
+```
+Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15
+(KHTML, like Gecko) Mobile/15E148 musical_ly_2033070000 JsSdk/1.0
+NetType/5G AppName/musical_ly app_version/33.7.0 ByteLocale/en-CA
+Region/US BytedanceWebview/d61a8b9
+```
+Tracker parsers scanning left-to-right now hit `musical_ly` before any
+Safari/Version token → click is correctly attributed to the in-app
+source AND fraud detectors see the full TikTok signature.
+
+**Apple iOS 26 / Safari 26 context:** Apple shifted to year-aligned
+versioning at WWDC 2025 (iOS 18 → iOS 26). Modern iOS Safari emits a
+**frozen** `iPhone OS 18_6` in the parenthesised OS slot regardless of
+actual iOS version (privacy by design — see Safari 26 release notes).
+Device model tokens are also removed. So `Apple Unknown iOS iOS 26.3`
+shown on the tracker for a v2.1.47 click is the CORRECT modern
+iOS-Safari signature, not a parser failure — Apple deliberately hides
+the device.
+
+**Backward-compatibility:** Android branch unchanged. Desktop UAs still
+untouched. iOS UAs with existing in-app markers still short-circuit via
+the idempotency check.
+
 ## Iteration 8 — v2.1.46 (Anti-fraud: UA ↔ Referer consistency coercion)
 **Root cause:** When the operator picked a Referer for an in-app platform
 (Facebook / TikTok / Instagram / Snapchat / Messenger / LinkedIn / Twitter)
@@ -86,7 +135,8 @@ and the UA already carries the matching markers — so coerce is a no-op
 via the idempotency check. Existing jobs see zero change.
 
 ## Released versions
-- v2.1.46 (Native + Desktop) — UA ↔ Referer consistency (this iteration).
+- v2.1.47 (Native + Desktop) — iOS in-app UA cleanup (this iteration).
+- v2.1.46 (Native + Desktop) — UA ↔ Referer consistency coercion.
 - v2.1.40 — Browser Profile end-to-end across 3 surfaces.
 - v2.1.39 — Browser Profile menu missing on desktop.
 - v2.1.38 desktop — withdrawn (Electron startup crash).
