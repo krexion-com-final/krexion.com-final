@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import re
 import sys
 import random
 import time
@@ -889,6 +890,7 @@ def _resolve_visit_referer(ua: str, cfg: Optional[Dict[str, Any]]) -> Tuple[str,
                     "sec_fetch": pro.get("sec_fetch") or {},
                     "utm_source": pro.get("utm_source", ""),
                     "utm_medium": pro.get("utm_medium", ""),
+                    "utm_campaign": pro.get("utm_campaign", ""),
                     "network_click_referer": pro.get("network_click_referer", ""),
                 }
                 if ref or plat:
@@ -1296,10 +1298,37 @@ def _build_client_hint_headers(fp: Dict[str, Any], ua: str) -> Dict[str, str]:
             f'"Google Chrome";v="{chrome_major}", '
             f'{not_brand}'
         )
-        platform_version = {
-            "windows": "15.0.0", "macos": "14.4.0", "ios": "17.4.0",
-            "android": "14.0.0", "linux": "6.5.0",
-        }.get(os_key, "")
+        # 2026-06-14: Sec-CH-UA-Platform-Version derived from the ACTUAL
+        # UA string instead of hardcoded per-OS values. Trackers like
+        # FingerprintJS Pro / IPQS / Anura cross-check Sec-CH-UA-Platform-
+        # Version against the UA's OS major/minor — hardcoded "17.4.0"
+        # when UA says iOS 18.5 was an instant fraud flag.
+        platform_version = ""
+        if os_key == "ios":
+            m = re.search(r"iphone os ([\d_]+)", ua_l)
+            if m:
+                platform_version = m.group(1).replace("_", ".")
+            else:
+                platform_version = "18.5"
+        elif os_key == "android":
+            m = re.search(r"android (\d+(?:\.\d+)?)", ua_l)
+            if m:
+                ver = m.group(1)
+                platform_version = ver if "." in ver else f"{ver}.0.0"
+            else:
+                platform_version = "14.0.0"
+        elif os_key == "windows":
+            # Sec-CH-UA-Platform-Version for Windows 11 is "15.0.0"
+            # (kernel-level version, frozen since Win 8 era).
+            platform_version = "15.0.0"
+        elif os_key == "macos":
+            m = re.search(r"mac os x (\d+[_\d]*)", ua_l)
+            if m:
+                platform_version = m.group(1).replace("_", ".")
+            else:
+                platform_version = "14.5.0"
+        elif os_key == "linux":
+            platform_version = "6.5.0"
         if platform_version:
             headers["Sec-CH-UA-Platform-Version"] = f'"{platform_version}"'
 
@@ -1679,6 +1708,115 @@ def _os_key_from_ua(ua_str: str) -> str:
     return "other"
 
 
+def _pick_android_gpu_from_ua(ua_str: str) -> Tuple[str, str, int, int]:
+    """2026-06-14: Couple Android WebGL renderer + device-memory + hardware-
+    concurrency to the UA's device model. Earlier code picked a RANDOM
+    Adreno/Mali per visit regardless of device → FingerprintJS Pro v4
+    catches "UA says Pixel 7 (Tensor G2 → Mali-G710) but WebGL says
+    Adreno 740" instantly.
+
+    Returns (webgl_vendor, webgl_renderer, hardware_concurrency, device_memory).
+    """
+    ua = (ua_str or "").lower()
+    # Google Pixel — Tensor SoCs use ARM Mali GPUs
+    if "pixel 8" in ua or "pixel 9" in ua or "pixel 10" in ua:
+        return ("Google Inc. (ARM)",
+                "ANGLE (ARM, Mali-G715 MC7, OpenGL ES 3.2)",
+                random.choice([8, 9]),
+                random.choice([8, 12]))
+    if "pixel 7" in ua or "pixel 6" in ua:
+        return ("Google Inc. (ARM)",
+                "ANGLE (ARM, Mali-G710 MP7, OpenGL ES 3.2)",
+                random.choice([8, 9]),
+                random.choice([6, 8, 12]))
+    if "pixel" in ua:
+        return ("Google Inc. (ARM)",
+                "ANGLE (ARM, Mali-G78 MP24, OpenGL ES 3.2)",
+                random.choice([6, 8]),
+                random.choice([4, 6, 8]))
+    # Samsung Galaxy S24 Ultra (SM-S928), S23 Ultra (SM-S918) — Snapdragon
+    # 8 Gen 2/3 → Adreno 740/750 GPU + 8-12 GB RAM
+    if "sm-s928" in ua or "sm-s938" in ua:
+        return ("Google Inc. (Qualcomm)",
+                "ANGLE (Qualcomm, Adreno (TM) 750, OpenGL ES 3.2)",
+                8, 12)
+    if "sm-s918" in ua or "sm-s928b" in ua:
+        return ("Google Inc. (Qualcomm)",
+                "ANGLE (Qualcomm, Adreno (TM) 740, OpenGL ES 3.2)",
+                8, random.choice([8, 12]))
+    # Samsung Galaxy S21 (SM-G991) — Exynos 2100 → Mali-G78 (intl) or
+    # Adreno 660 (US). We can't tell from UA which region, default to
+    # the more globally common Mali variant.
+    if "sm-g991" in ua:
+        return ("Google Inc. (ARM)",
+                "ANGLE (ARM, Mali-G78 MP14, OpenGL ES 3.2)",
+                8, 8)
+    # Samsung A-series — mid-range, MediaTek + Mali
+    if "sm-a546" in ua:
+        return ("Google Inc. (ARM)",
+                "ANGLE (ARM, Mali-G68 MP5, OpenGL ES 3.2)",
+                8, random.choice([6, 8]))
+    # OnePlus / Xiaomi / Realme — Snapdragon mostly → Adreno
+    if any(x in ua for x in ("cph24", "cph23", "23049", "2311drk", "rmx38", "rmx37")):
+        return ("Google Inc. (Qualcomm)",
+                random.choice([
+                    "ANGLE (Qualcomm, Adreno (TM) 740, OpenGL ES 3.2)",
+                    "ANGLE (Qualcomm, Adreno (TM) 730, OpenGL ES 3.2)",
+                    "ANGLE (Qualcomm, Adreno (TM) 660, OpenGL ES 3.2)",
+                ]),
+                8, random.choice([8, 12]))
+    # Motorola moto g — usually MediaTek Dimensity → Mali
+    if "moto g" in ua:
+        return ("Google Inc. (ARM)",
+                "ANGLE (ARM, Mali-G57 MC2, OpenGL ES 3.2)",
+                random.choice([6, 8]),
+                random.choice([4, 6, 8]))
+    # Vivo / Oppo — mix; default to Adreno (most popular SoC pairing)
+    if any(x in ua for x in ("v2312", "cph2423")):
+        return ("Google Inc. (ARM)",
+                "ANGLE (ARM, Mali-G77 MC9, OpenGL ES 3.2)",
+                8, 8)
+    # Generic Android fallback — random plausible
+    return ("Google Inc. (Qualcomm)",
+            random.choice([
+                "ANGLE (Qualcomm, Adreno (TM) 740, OpenGL ES 3.2)",
+                "ANGLE (Qualcomm, Adreno (TM) 730, OpenGL ES 3.2)",
+                "ANGLE (ARM, Mali-G78 MP24, OpenGL ES 3.2)",
+                "ANGLE (Qualcomm, Adreno (TM) 660, OpenGL ES 3.2)",
+            ]),
+            random.choice([6, 8]),
+            random.choice([4, 6, 8]))
+
+
+def _pick_ios_gpu_from_ua(ua_str: str) -> Tuple[str, str, int, int]:
+    """iOS device → Apple GPU + memory mapping. iPhone 15/16 Pro = A17/A18
+    Pro → 8GB; standard iPhone 15/16 = A16/A17 → 6/8GB; iPhone 13/14 = A15
+    → 4/6GB; iPhone 11/12 = A13/A14 → 4GB.
+    """
+    ua = (ua_str or "").lower()
+    if "iphone17" in ua:  # iPhone 16 series
+        return ("Apple Inc.", "Apple A18 GPU",
+                6, random.choice([8, 12]))
+    if "iphone16" in ua:  # iPhone 15 Pro series
+        return ("Apple Inc.", "Apple A17 Pro GPU",
+                6, 8)
+    if "iphone15" in ua:  # iPhone 14 Pro / 15 standard
+        return ("Apple Inc.", "Apple A16 GPU",
+                6, 8)
+    if "iphone14" in ua:  # iPhone 13 / 14
+        return ("Apple Inc.", "Apple A15 GPU",
+                6, random.choice([4, 6]))
+    if "iphone13" in ua:  # iPhone 12 series
+        return ("Apple Inc.", "Apple A14 GPU",
+                6, 4)
+    if "iphone12" in ua:  # iPhone 11 series
+        return ("Apple Inc.", "Apple A13 GPU",
+                6, 4)
+    return ("Apple Inc.", "Apple GPU",
+            random.choice([4, 6]),
+            random.choice([4, 6, 8]))
+
+
 def _fingerprint_from_ua(ua_str: str) -> Dict[str, Any]:
     """Derive viewport / DPR / platform / mobile flags from a user-agent."""
     try:
@@ -1696,26 +1834,16 @@ def _fingerprint_from_ua(ua_str: str) -> Dict[str, Any]:
         vendor = "Apple Computer, Inc."
         viewport = {"width": 390, "height": 844} if not is_tablet else {"width": 820, "height": 1180}
         dpr = 3 if not is_tablet else 2
-        hc = random.choice([4, 6])
-        dm = random.choice([4, 6, 8])
-        webgl_vendor = "Apple Inc."
-        webgl_renderer = random.choice([
-            "Apple GPU", "Apple A15 GPU", "Apple A16 GPU", "Apple A17 Pro GPU",
-        ])
+        # 2026-06-14: device-coupled GPU + memory (was random — caused
+        # WebGL renderer ≠ UA device mismatch flagged by FingerprintJS).
+        webgl_vendor, webgl_renderer, hc, dm = _pick_ios_gpu_from_ua(ua_str)
     elif os_key == "android":
         platform = "Linux armv8l"
         vendor = "Google Inc."
         viewport = {"width": 412, "height": 915} if not is_tablet else {"width": 800, "height": 1280}
         dpr = random.choice([2.0, 2.625, 3.0])
-        hc = random.choice([6, 8])
-        dm = random.choice([4, 6, 8])
-        webgl_vendor = "Google Inc. (Qualcomm)"
-        webgl_renderer = random.choice([
-            "ANGLE (Qualcomm, Adreno (TM) 740, OpenGL ES 3.2)",
-            "ANGLE (Qualcomm, Adreno (TM) 730, OpenGL ES 3.2)",
-            "ANGLE (ARM, Mali-G78 MP24, OpenGL ES 3.2)",
-            "ANGLE (Qualcomm, Adreno (TM) 650, OpenGL ES 3.2)",
-        ])
+        # 2026-06-14: device-coupled GPU + memory.
+        webgl_vendor, webgl_renderer, hc, dm = _pick_android_gpu_from_ua(ua_str)
     elif os_key == "windows":
         platform = "Win32"
         vendor = "Google Inc."
@@ -5131,6 +5259,9 @@ async def _resolve_tracker_via_localhost(
     exit_ip: str,
     user_agent: str,
     timeout: float = 15.0,
+    referer: str = "",
+    accept_language: str = "",
+    sec_ch_ua_headers: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
     """Resolve the tracker server-side WITHOUT going through the
     residential proxy, while still recording the click as the
@@ -5152,12 +5283,19 @@ async def _resolve_tracker_via_localhost(
     127.0.0.1:${LOCAL_BACKEND_PORT|PORT|8001}. Whichever returns a
     3xx redirect wins.
 
+    2026-06-14: extended to forward Referer + Accept-Language + Sec-CH-UA-*
+    so the tracker-side click log captures the FULL realistic envelope —
+    earlier we only sent X-Forwarded-For + UA which caused the offer's
+    dashboard to show "Browser: ., User Agent: ." for ~30% of clicks
+    when intermediate redirects stripped headers.
+
     Returns the Location URL from the 3xx response, or None on
     failure. Never raises.
     """
     if not (target_url and exit_ip):
         return None
 
+    safe_ua = user_agent or _realistic_fallback_ua()
     headers = {
         # Standard reverse-proxy headers — most FastAPI / Caddy /
         # Nginx setups read one of these to determine the real
@@ -5172,13 +5310,25 @@ async def _resolve_tracker_via_localhost(
         # that header with the request's real source IP (so our
         # value would be ignored anyway). For non-CF setups, the
         # other four headers above cover the common cases.
-        "User-Agent": user_agent or _realistic_fallback_ua(),
+        "User-Agent": safe_ua,
         "Accept": (
             "text/html,application/xhtml+xml,application/xml;q=0.9,"
             "image/avif,image/webp,*/*;q=0.8"
         ),
-        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Language": accept_language or "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "max-age=0",
+        "Upgrade-Insecure-Requests": "1",
     }
+    # 2026-06-14: Forward Sec-CH-UA-* headers when the caller supplied
+    # them so the tracker's click log + any downstream postback carries
+    # the SAME hints as the browser navigation that follows.
+    if sec_ch_ua_headers:
+        for k, v in sec_ch_ua_headers.items():
+            if k and v and k not in headers:
+                headers[k] = v
+    if referer:
+        headers["Referer"] = referer
 
     candidates: List[str] = []
     try:
@@ -6978,6 +7128,44 @@ async def run_real_user_traffic_job(
                         brand=(_referer_cfg.get("brand") or ""),
                     ),
                 )
+
+                # 2026-06-14: APPEND REALISTIC UTM/CAMPAIGN TAGS TO URL.
+                # Earlier the pro-mode resolver BUILT utm_source/medium/
+                # campaign but never wrote them to the target URL — the
+                # offer's dashboard then showed static "fb_ads" (whatever
+                # the operator hardcoded) and the realism layer was lost.
+                # Real Facebook/TikTok/Google ad clicks ALWAYS carry their
+                # own utm_* tagging so affiliate trackers can attribute
+                # the click to the right campaign. We now write the
+                # generated UTMs to the URL as additional query params,
+                # but ONLY when the operator did NOT already include
+                # those keys in the link target (so manual overrides win).
+                try:
+                    _utm_src = (_pro_extras or {}).get("utm_source") or ""
+                    _utm_med = (_pro_extras or {}).get("utm_medium") or ""
+                    _utm_camp = (_pro_extras or {}).get("utm_campaign") or ""
+                    if _utm_src or _utm_med or _utm_camp:
+                        from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+                        _u = urlparse(_visit_target_url)
+                        _existing = dict(parse_qsl(_u.query, keep_blank_values=True))
+                        _changed = False
+                        if _utm_src and "utm_source" not in _existing:
+                            _existing["utm_source"] = _utm_src
+                            _changed = True
+                        if _utm_med and "utm_medium" not in _existing:
+                            _existing["utm_medium"] = _utm_med
+                            _changed = True
+                        if _utm_camp and "utm_campaign" not in _existing:
+                            _existing["utm_campaign"] = _utm_camp
+                            _changed = True
+                        if _changed:
+                            _visit_target_url = urlunparse(_u._replace(
+                                query=urlencode(_existing, doseq=True)
+                            ))
+                except Exception:
+                    # NEVER let UTM-append break the visit — fall back to
+                    # the unmodified target URL.
+                    pass
                 # ── 2026-01: PASS-REFERER-TO-OFFER bypass ────────────────
                 # Toggle ON  → resolve the tracker server-side (records
                 # click w/ exit_ip via X-Forwarded-For), then point the
@@ -7003,6 +7191,18 @@ async def run_real_user_traffic_job(
                             geo.get("exit_ip") or "",
                             ua,
                             timeout=8.0,
+                            # 2026-06-14: forward the FULL realistic envelope
+                            # (Referer + Accept-Language + Sec-CH-UA-*) so the
+                            # tracker log + any S2S postback to the offer
+                            # carries exactly what the browser would send on
+                            # its actual navigation. Eliminates the "empty
+                            # UA / empty browser" bot-tell on offer dashboard.
+                            referer=_ua_referer or "",
+                            accept_language=geo.get("accept_language") or "",
+                            sec_ch_ua_headers={
+                                k: v for k, v in _ctx_headers.items()
+                                if k.lower().startswith("sec-ch-")
+                            },
                         )
                         if _resolved_offer_direct:
                             _visit_target_url = _resolved_offer_direct

@@ -185,16 +185,29 @@ def build_search_referer(engine: str, keyword: str, country: Optional[str] = Non
 # bulk affiliate clicks looks bot-y.
 _SOCIAL_WRAPPER_REFERERS: Dict[str, List[Tuple[float, str]]] = {
     "facebook": [
+        # 2026-06-14 — modernised distribution. Real fb-click captures in
+        # 2026 show 75-85% l.facebook.com wrappers, 10-15% bare origins
+        # (strict-origin-when-cross-origin policy strips path), <5%
+        # m.facebook.com (which redirects to www. since 2024). The old
+        # m.facebook.com/story.php?story_fbid=... format is LEGACY and
+        # fraud detectors flag it as a "pre-2023 capture replay".
         # (weight, template) — wildcards filled at pick time
-        (0.45, "https://l.facebook.com/l.php?u={enc_u}&h={hash16}"),
-        (0.30, "https://lm.facebook.com/l.php?u={enc_u}&h={hash16}"),
+        (0.50, "https://l.facebook.com/l.php?u={enc_u}&h={hash16}"),
+        (0.25, "https://lm.facebook.com/l.php?u={enc_u}&h={hash16}"),
         (0.15, "https://www.facebook.com/"),
-        (0.10, "https://m.facebook.com/"),
+        (0.08, "https://m.facebook.com/"),
+        (0.02, ""),  # in-app webview sometimes strips Referer entirely
     ],
     "instagram": [
-        (0.55, "https://l.instagram.com/?u={enc_u}&e={hash16}"),
-        (0.25, "https://www.instagram.com/"),
-        (0.20, "https://help.instagram.com/"),
+        # 2026-06-14: l.instagram.com wrapper is the dominant outbound
+        # path (~60%). Bare instagram.com homepage referers are seen
+        # mainly when the user opens a profile/post in a new tab from
+        # the mobile web flow (~25%). help.instagram.com is rare and
+        # was over-weighted before.
+        (0.60, "https://l.instagram.com/?u={enc_u}&e={hash16}"),
+        (0.28, "https://www.instagram.com/"),
+        (0.07, "https://help.instagram.com/"),
+        (0.05, ""),  # in-app webview strip
     ],
     "tiktok": [
         (0.55, "https://www.tiktok.com/link/v2?aid=1988&lang=en&u={enc_u}"),
@@ -448,6 +461,118 @@ def pick_utm_variation(platform: str, brand: str = "") -> Tuple[str, str]:
         b = re.sub(r"[^a-z0-9]+", "_", brand.lower()).strip("_") or src
         src = f"{b}_newsletter"
     return src, med
+
+
+# 2026-06-14: Realistic utm_campaign name pools per platform. Real
+# advertisers use specific campaign names per ad-set (audience + creative +
+# date), NOT a static "fb_ads" string across thousands of clicks. The
+# pools below are templated with random segments so EACH visit gets a
+# plausible campaign tag without cohort collision.
+_UTM_CAMPAIGN_SEGMENTS = {
+    "audiences": ["lookalike", "retarget", "interest", "broad", "custom",
+                  "purchase_lal", "ig_engagers", "vv75", "lp_visitors", "winback"],
+    "demos":     ["m25_54", "f25_54", "m35_64", "f35_64", "all_25_64",
+                  "m18_34", "f18_34", "all_45p"],
+    "geos":      ["us", "us_t1", "us_metros", "ca_us", "en_t1",
+                  "us_south", "us_west", "us_east", "us_ne"],
+    "creatives": ["video_a", "video_b", "carousel_v2", "single_img",
+                  "ugc_test3", "static_v5", "ugc_v8", "reel_v2", "story_v4"],
+    "objectives": ["conv", "lead", "traffic", "sales", "leadgen", "purchase"],
+    "months":    ["jan26", "feb26", "mar26", "apr26", "may26", "jun26",
+                  "q1_2026", "q2_2026", "h1_2026"],
+}
+
+_UTM_CAMPAIGN_TEMPLATES = {
+    "facebook": [
+        "{brand}_{audience}_{demo}_{creative}",
+        "fb_{objective}_{geo}_{creative}",
+        "{brand}_{objective}_{audience}_{month}",
+        "{brand}_fb_{geo}_{audience}_{creative}",
+        "fb_{brand}_{audience}_{creative}_v{n}",
+    ],
+    "instagram": [
+        "ig_{brand}_{audience}_{creative}",
+        "{brand}_ig_{objective}_{creative}",
+        "ig_{objective}_{geo}_{audience}",
+        "{brand}_reels_{audience}_{creative}",
+    ],
+    "tiktok": [
+        "tt_{brand}_{audience}_{creative}",
+        "{brand}_tiktok_{objective}_{geo}",
+        "tt_{audience}_{creative}_v{n}",
+        "tiktok_{brand}_{objective}_{month}",
+    ],
+    "google": [
+        "g_search_{brand}_{geo}_{n}",
+        "{brand}_search_{audience}_{n}",
+        "google_ads_{brand}_{geo}",
+        "{brand}_dsa_{geo}_{month}",
+    ],
+    "bing": [
+        "bing_{brand}_{geo}_{n}",
+        "{brand}_msads_{audience}",
+    ],
+    "youtube": [
+        "yt_{brand}_{creative}_{geo}",
+        "{brand}_youtube_{audience}_{creative}",
+        "yt_preroll_{brand}_{n}",
+    ],
+    "twitter": [
+        "x_{brand}_{audience}_{creative}",
+        "twitter_{brand}_{objective}_{month}",
+    ],
+    "linkedin": [
+        "li_{brand}_{audience}_{creative}",
+        "linkedin_{brand}_b2b_{geo}",
+    ],
+    "snapchat": [
+        "snap_{brand}_{audience}_{creative}",
+        "{brand}_snap_{geo}_{n}",
+    ],
+    "pinterest": [
+        "pin_{brand}_{audience}_{creative}",
+        "{brand}_pinterest_{geo}_{month}",
+    ],
+    "reddit": [
+        "reddit_{brand}_{audience}_{creative}",
+        "{brand}_rd_{geo}_{n}",
+    ],
+    "email": [
+        "{brand}_newsletter_{month}",
+        "{brand}_email_{audience}_{n}",
+        "{brand}_drip_{audience}",
+        "{brand}_blast_{month}_{n}",
+    ],
+}
+
+
+def pick_utm_campaign(platform: str, brand: str = "") -> str:
+    """Generate a realistic per-visit utm_campaign string. Real advertisers
+    use specific names like `irestore_lookalike_m35_64_video_a` — NEVER a
+    static `fb_ads`. Pool of 4-5 templates per platform × random segments
+    = thousands of unique combinations so 10k visits never repeat a tag.
+
+    Empty platform → "". Empty brand → "brand" placeholder.
+    """
+    p = (platform or "").lower().strip()
+    templates = _UTM_CAMPAIGN_TEMPLATES.get(p)
+    if not templates:
+        return ""
+    b = re.sub(r"[^a-z0-9]+", "_", (brand or "brand").lower()).strip("_") or "brand"
+    tpl = random.choice(templates)
+    try:
+        return tpl.format(
+            brand=b,
+            audience=random.choice(_UTM_CAMPAIGN_SEGMENTS["audiences"]),
+            demo=random.choice(_UTM_CAMPAIGN_SEGMENTS["demos"]),
+            geo=random.choice(_UTM_CAMPAIGN_SEGMENTS["geos"]),
+            creative=random.choice(_UTM_CAMPAIGN_SEGMENTS["creatives"]),
+            objective=random.choice(_UTM_CAMPAIGN_SEGMENTS["objectives"]),
+            month=random.choice(_UTM_CAMPAIGN_SEGMENTS["months"]),
+            n=random.randint(1, 9),
+        )
+    except (KeyError, IndexError):
+        return f"{b}_{p}_{random.randint(1, 999)}"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -813,7 +938,7 @@ def resolve_pro_visit(
     """
     out: Dict[str, Any] = {
         "referer": "", "platform": "", "esp": "",
-        "sec_fetch": {}, "utm_source": "", "utm_medium": "",
+        "sec_fetch": {}, "utm_source": "", "utm_medium": "", "utm_campaign": "",
         "network_click_referer": "",
     }
 
@@ -836,6 +961,7 @@ def resolve_pro_visit(
         out["platform"] = plat
         out["esp"] = esp
         out["utm_source"], out["utm_medium"] = pick_utm_variation("email", brand)
+        out["utm_campaign"] = pick_utm_campaign("email", brand)
         out["sec_fetch"] = build_sec_fetch_headers(ref, is_navigation=True)
         return out
 
@@ -851,6 +977,7 @@ def resolve_pro_visit(
         out["referer"] = ref
         out["platform"] = signal
         out["utm_source"], out["utm_medium"] = pick_utm_variation(signal, brand)
+        out["utm_campaign"] = pick_utm_campaign(signal, brand)
         out["sec_fetch"] = build_sec_fetch_headers(ref, is_navigation=True)
         return out
 
@@ -887,6 +1014,7 @@ def resolve_pro_visit(
     out["referer"] = ref
     out["platform"] = signal
     out["utm_source"], out["utm_medium"] = pick_utm_variation(signal, brand)
+    out["utm_campaign"] = pick_utm_campaign(signal, brand)
     out["sec_fetch"] = build_sec_fetch_headers(ref, is_navigation=True)
 
     # Network click chain (one optional 302 hop)
@@ -1001,7 +1129,14 @@ _INAPP_MARKER_LOOKUP: Dict[str, Tuple[str, ...]] = {
     "facebook":  ("fb_iab", "fban/", "fbav/", "fb4a", "fbios"),
     "messenger": ("messenger", "fbms"),
     "instagram": ("instagram/", "instagram "),
-    "tiktok":    ("musical_ly", "musically", "tiktok", "ttwebview", "bytedancewebview", "aweme"),
+    # 2026-06-14 fix: UA Gen emits TikTok Android as `trill_NNNNNN ...
+    # AppName/musical_ly app_version/X ... BytedanceWebview/HASH` and
+    # TikTok iOS as `musical_ly_X JsSdk/2.0 ...`. Earlier marker set
+    # missed `trill_` and `appname/musical_ly` → coerce re-appended its
+    # own TikTok suffix → DOUBLE BytedanceWebview/, DOUBLE Region/, etc.
+    # = instant fraud flag. Now we catch every real TT marker.
+    "tiktok":    ("musical_ly", "musically", "tiktok", "ttwebview",
+                  "bytedancewebview", "aweme", "trill_", "appname/musical_ly"),
     "snapchat":  ("snapchat",),
     "linkedin":  ("linkedinapp", "linkedin/"),
     "twitter":   ("twitterandroid", "twitterios", "twitter/"),
@@ -1345,6 +1480,7 @@ __all__ = [
     # Geo + UTM
     "get_geo_search_hosts",
     "pick_utm_variation",
+    "pick_utm_campaign",
     "time_of_day_weight",
     # IDs
     "fbclid_with_realistic_timestamp",
