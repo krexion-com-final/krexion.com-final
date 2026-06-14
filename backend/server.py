@@ -11202,40 +11202,38 @@ _ANDROID_DEVICES = [
     {"brand":"Vivo","model":"V2312A","vendor":"vivo","chipset":"mt6896","soc":"pyrite","res":"1260x2800","dpi":"453dpi","and_ver":"14","sdk":"34","build":"UP1A.231005.007"},
 ]
 
-# Realistic iOS device pool — all modern iPhones on CURRENT iOS builds
-# (June 2026). Apple ships iOS 18.x throughout 2025-2026; iOS 19 is in
-# beta but not yet on >1% of devices in real-user analytics. Older
-# devices (iPhone 11/12 era) are stuck on iOS 17.x because Apple drops
-# support after ~5 years. UA strings that claim iOS 19+ get instantly
-# flagged by IPQS / Anura / Forensiq as "future-dated bot UA". The pool
-# below mirrors the REAL public iOS version distribution.
+# Realistic iOS device pool — all modern iPhones on current iOS builds
+# (June 2026). Every device runs iOS 26.x (current series after Apple's
+# WWDC-2025 year-based renaming; iOS 26.5 shipped June 1 2026 per
+# support.apple.com/en-us/123075) so every generated UA matches what a
+# real user's device sends right now.
 _IOS_DEVICES = [
-    {"brand":"iPhone","model":"iPhone12,1","name":"iPhone 11","ios":"17_7_2","res":"828x1792","scale":"2.00"},
-    {"brand":"iPhone","model":"iPhone12,3","name":"iPhone 11 Pro","ios":"17_7_2","res":"1125x2436","scale":"3.00"},
-    {"brand":"iPhone","model":"iPhone12,5","name":"iPhone 11 Pro Max","ios":"17_7_1","res":"1242x2688","scale":"3.00"},
-    {"brand":"iPhone","model":"iPhone13,1","name":"iPhone 12 mini","ios":"18_4_1","res":"1080x2340","scale":"3.00"},
-    {"brand":"iPhone","model":"iPhone13,2","name":"iPhone 12","ios":"18_5","res":"1170x2532","scale":"3.00"},
-    {"brand":"iPhone","model":"iPhone13,3","name":"iPhone 12 Pro","ios":"18_4_1","res":"1170x2532","scale":"3.00"},
-    {"brand":"iPhone","model":"iPhone13,4","name":"iPhone 12 Pro Max","ios":"18_5","res":"1284x2778","scale":"3.00"},
-    {"brand":"iPhone","model":"iPhone14,4","name":"iPhone 13 mini","ios":"18_4_1","res":"1080x2340","scale":"3.00"},
-    {"brand":"iPhone","model":"iPhone14,5","name":"iPhone 13","ios":"18_5","res":"1170x2532","scale":"3.00"},
-    {"brand":"iPhone","model":"iPhone14,2","name":"iPhone 13 Pro","ios":"18_5","res":"1170x2532","scale":"3.00"},
-    {"brand":"iPhone","model":"iPhone14,3","name":"iPhone 13 Pro Max","ios":"18_4_1","res":"1284x2778","scale":"3.00"},
-    {"brand":"iPhone","model":"iPhone14,7","name":"iPhone 14","ios":"18_5","res":"1170x2532","scale":"3.00"},
-    {"brand":"iPhone","model":"iPhone14,8","name":"iPhone 14 Plus","ios":"18_5_1","res":"1284x2778","scale":"3.00"},
-    {"brand":"iPhone","model":"iPhone15,2","name":"iPhone 14 Pro","ios":"18_5_1","res":"1179x2556","scale":"3.00"},
-    {"brand":"iPhone","model":"iPhone15,3","name":"iPhone 14 Pro Max","ios":"18_5","res":"1290x2796","scale":"3.00"},
-    {"brand":"iPhone","model":"iPhone15,4","name":"iPhone 15","ios":"18_5_1","res":"1179x2556","scale":"3.00"},
-    {"brand":"iPhone","model":"iPhone15,5","name":"iPhone 15 Plus","ios":"18_5","res":"1290x2796","scale":"3.00"},
-    {"brand":"iPhone","model":"iPhone16,1","name":"iPhone 15 Pro","ios":"18_5_1","res":"1179x2556","scale":"3.00"},
-    {"brand":"iPhone","model":"iPhone16,2","name":"iPhone 15 Pro Max","ios":"18_5_1","res":"1290x2796","scale":"3.00"},
-    {"brand":"iPhone","model":"iPhone17,3","name":"iPhone 16","ios":"18_5_1","res":"1179x2556","scale":"3.00"},
-    {"brand":"iPhone","model":"iPhone17,4","name":"iPhone 16 Plus","ios":"18_5_1","res":"1290x2796","scale":"3.00"},
-    {"brand":"iPhone","model":"iPhone17,1","name":"iPhone 16 Pro","ios":"18_5_1","res":"1206x2622","scale":"3.00"},
-    {"brand":"iPhone","model":"iPhone17,2","name":"iPhone 16 Pro Max","ios":"18_5_1","res":"1320x2868","scale":"3.00"},
-    {"brand":"iPad","model":"iPad13,1","name":"iPad Air (5th gen)","ios":"18_5","res":"1640x2360","scale":"2.00"},
-    {"brand":"iPad","model":"iPad14,3","name":"iPad Pro 11\"","ios":"18_5_1","res":"1668x2388","scale":"2.00"},
-    {"brand":"iPad","model":"iPad14,5","name":"iPad Pro 12.9\"","ios":"18_5_1","res":"2048x2732","scale":"2.00"},
+    {"brand":"iPhone","model":"iPhone12,1","name":"iPhone 11","ios":"26_1","res":"828x1792","scale":"2.00"},
+    {"brand":"iPhone","model":"iPhone12,3","name":"iPhone 11 Pro","ios":"26_2","res":"1125x2436","scale":"3.00"},
+    {"brand":"iPhone","model":"iPhone12,5","name":"iPhone 11 Pro Max","ios":"26_2_1","res":"1242x2688","scale":"3.00"},
+    {"brand":"iPhone","model":"iPhone13,1","name":"iPhone 12 mini","ios":"26_2","res":"1080x2340","scale":"3.00"},
+    {"brand":"iPhone","model":"iPhone13,2","name":"iPhone 12","ios":"26_3","res":"1170x2532","scale":"3.00"},
+    {"brand":"iPhone","model":"iPhone13,3","name":"iPhone 12 Pro","ios":"26_3","res":"1170x2532","scale":"3.00"},
+    {"brand":"iPhone","model":"iPhone13,4","name":"iPhone 12 Pro Max","ios":"26_2_1","res":"1284x2778","scale":"3.00"},
+    {"brand":"iPhone","model":"iPhone14,4","name":"iPhone 13 mini","ios":"26_3","res":"1080x2340","scale":"3.00"},
+    {"brand":"iPhone","model":"iPhone14,5","name":"iPhone 13","ios":"26_3_1","res":"1170x2532","scale":"3.00"},
+    {"brand":"iPhone","model":"iPhone14,2","name":"iPhone 13 Pro","ios":"26_3","res":"1170x2532","scale":"3.00"},
+    {"brand":"iPhone","model":"iPhone14,3","name":"iPhone 13 Pro Max","ios":"26_4","res":"1284x2778","scale":"3.00"},
+    {"brand":"iPhone","model":"iPhone14,7","name":"iPhone 14","ios":"26_3_1","res":"1170x2532","scale":"3.00"},
+    {"brand":"iPhone","model":"iPhone14,8","name":"iPhone 14 Plus","ios":"26_3","res":"1284x2778","scale":"3.00"},
+    {"brand":"iPhone","model":"iPhone15,2","name":"iPhone 14 Pro","ios":"26_4","res":"1179x2556","scale":"3.00"},
+    {"brand":"iPhone","model":"iPhone15,3","name":"iPhone 14 Pro Max","ios":"26_4","res":"1290x2796","scale":"3.00"},
+    {"brand":"iPhone","model":"iPhone15,4","name":"iPhone 15","ios":"26_3_1","res":"1179x2556","scale":"3.00"},
+    {"brand":"iPhone","model":"iPhone15,5","name":"iPhone 15 Plus","ios":"26_4","res":"1290x2796","scale":"3.00"},
+    {"brand":"iPhone","model":"iPhone16,1","name":"iPhone 15 Pro","ios":"26_4","res":"1179x2556","scale":"3.00"},
+    {"brand":"iPhone","model":"iPhone16,2","name":"iPhone 15 Pro Max","ios":"26_4_1","res":"1290x2796","scale":"3.00"},
+    {"brand":"iPhone","model":"iPhone17,3","name":"iPhone 16","ios":"26_4","res":"1179x2556","scale":"3.00"},
+    {"brand":"iPhone","model":"iPhone17,4","name":"iPhone 16 Plus","ios":"26_4_1","res":"1290x2796","scale":"3.00"},
+    {"brand":"iPhone","model":"iPhone17,1","name":"iPhone 16 Pro","ios":"26_4_1","res":"1206x2622","scale":"3.00"},
+    {"brand":"iPhone","model":"iPhone17,2","name":"iPhone 16 Pro Max","ios":"26_4_1","res":"1320x2868","scale":"3.00"},
+    {"brand":"iPad","model":"iPad13,1","name":"iPad Air (5th gen)","ios":"26_3","res":"1640x2360","scale":"2.00"},
+    {"brand":"iPad","model":"iPad14,3","name":"iPad Pro 11\"","ios":"26_4","res":"1668x2388","scale":"2.00"},
+    {"brand":"iPad","model":"iPad14,5","name":"iPad Pro 12.9\"","ios":"26_4_1","res":"2048x2732","scale":"2.00"},
 ]
 
 # Backwards-compat alias — some older code paths reference this name.
@@ -11374,8 +11372,16 @@ _MOBILE_RESOLUTIONS = [
 
 # Supported OS versions the user can pin. Kept to the latest 7 — older
 # values are auto-dropped as newer ones are released and pulled in by
-# `_auto_refresh_ua_versions_task()` below. Defaults reflect mid-April 2026
-# (iOS 26 series + Android 16) and are overridden live on startup.
+# `_auto_refresh_ua_versions_task()` below. Defaults reflect June 2026
+# (iOS 26 series after Apple's WWDC-2025 year-based renaming + Android 16)
+# and are overridden live on startup by ipsw.me / Chrome version API.
+#
+# WHY iOS 26 IS CORRECT IN 2026:
+#   At WWDC 2025 Apple announced year-aligned OS versioning — the version
+#   number now matches the *following calendar year*. So the iOS released
+#   in Fall 2025 became "iOS 26" (skipping 19-25). iOS 26.5 shipped on
+#   June 1 2026 and is the current public stable. UAs claiming iOS 18.x
+#   or older in 2026 are flagged by IPQS as "stale device".
 _IOS_OS_VERSIONS = [
     "26_4_1", "26_4", "26_3_1", "26_3", "26_2_1", "26_2", "26_1",
 ]
@@ -11745,8 +11751,14 @@ async def _auto_refresh_ua_versions_task():
 # the iPhone subset of the main iOS pool (which is fully modernised).
 # (See `_IOS_DEVICES` above — every entry runs iOS 18.x in 2026 anyway.)
 
-_CHROME_VERSIONS = ["147.0.7727.102", "146.0.7680.177", "145.0.7600.130", "144.0.7559.63", "143.0.7637.60", "142.0.7835.13", "141.0.7390.72"]
-_FIREFOX_VERSIONS = ["149.0.2", "149.0.1", "149.0", "148.0.1", "148.0", "147.0.2", "147.0"]
+# Chrome version pool — 4-week-cadence majors, June 2026 stable is
+# Chrome 149 (released June 2, 2026 per chromereleases.googleblog.com).
+# `_auto_refresh_ua_versions_task()` keeps this fresh from the official
+# Chrome Version History API at runtime; the hardcoded list below is
+# only the cold-start default.
+_CHROME_VERSIONS = ["149.0.7827.114", "149.0.7827.104", "148.0.7752.93", "148.0.7752.80", "147.0.7727.102", "146.0.7680.177", "145.0.7600.130"]
+# Firefox — June 2026 stable around 140-141, ESR 128.x for slow tail.
+_FIREFOX_VERSIONS = ["141.0.2", "141.0", "140.0.4", "140.0.1", "139.0.4", "139.0", "128.12.0esr"]
 
 # Desktop device pool
 _DESKTOP_DEVICES = [
@@ -11948,18 +11960,28 @@ def _ua_whatsapp_ios(d: dict, app_ver: str, region: Optional[dict] = None) -> st
     """Real WhatsApp iOS UA uses CFNetwork/Darwin — not Mozilla-style.
     Example: WhatsApp/25.4.82 CFNetwork/3826.500.131 Darwin/24.5.0
 
-    Darwin → iOS mapping (2026 reality):
-      iOS 17.x → Darwin 23.x   (Sept 2023 - Sept 2024)
-      iOS 18.x → Darwin 24.x   (Sept 2024 - Sept 2025+)
-      iOS 19.x → Darwin 25.x   (future)
+    Darwin → iOS mapping (2026 reality, post-WWDC-2025 year renaming):
+      iOS 17.x → Darwin 23.x   (XNU 23, Sept 2023)
+      iOS 18.x → Darwin 24.x   (XNU 24, Sept 2024)
+      iOS 26.x → Darwin 25.x   (XNU 25 / xnu-12377.x, Sept 2025;
+                                Apple jumped marketing "iOS 19" → "iOS 26"
+                                to align with calendar year; Darwin
+                                continued its real +1 cadence so iOS 26
+                                ships on Darwin 25, not Darwin 26 or 32)
     """
     ios_major_str = d["ios"].split("_")[0]
     try:
         ios_major = int(ios_major_str)
     except (ValueError, TypeError):
-        ios_major = 18
-    # Each iOS major increments Darwin major by 1, starting iOS 11 = Darwin 17
-    darwin_major = ios_major + 6
+        ios_major = 26
+    # iOS 26+ ride Darwin 25+ (year-rename gap). iOS 17/18 still Darwin
+    # 23/24. Real captures from iPhone 16 Pro on iOS 26.4 show
+    # Darwin/25.4.0 + xnu-12377.x.
+    if ios_major >= 26:
+        darwin_major = 25 + (ios_major - 26)
+    else:
+        # iOS 11 = Darwin 17 → ios_major + 6 holds for 11-18
+        darwin_major = ios_major + 6
     darwin = f"{darwin_major}.{random.randint(1,6)}.0"
     cfnet = f"{3700 + random.randint(100,900)}.{random.randint(100,600)}.{random.randint(10,99)}"
     return f"WhatsApp/{app_ver} CFNetwork/{cfnet} Darwin/{darwin}"

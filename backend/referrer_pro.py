@@ -352,9 +352,32 @@ def build_inapp_deep_referer(platform: str) -> str:
         post_id = "".join(random.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_", k=11))
         return f"https://www.instagram.com/p/{post_id}/"
     if p == "facebook":
-        page_id = str(random.randint(10**14, 10**15 - 1))
-        post_id = str(random.randint(10**14, 10**15 - 1))
-        return f"https://m.facebook.com/story.php?story_fbid={post_id}&id={page_id}"
+        # 2026-06-14: m.facebook.com/story.php?story_fbid=...&id=... is a
+        # LEGACY 2018-2022 format. Real Facebook in 2026 has fully
+        # deprecated m.facebook.com (auto-redirects to www.) and uses
+        # pfbid-prefixed post tokens. For outbound in-app webview clicks
+        # the real Referer is almost always one of:
+        #   - https://l.facebook.com/l.php?u=<enc>&h=<hash16>   (~70%)
+        #   - https://www.facebook.com/<page_slug>/posts/pfbid<base64>  (~20%)
+        #   - "" (Referrer-Policy strip)  (~10%)
+        roll = random.random()
+        if roll < 0.70:
+            # Modern outbound wrapper — matches the FB linkshim format
+            enc_u = "https%3A%2F%2Fwww.facebook.com%2F"
+            hash16 = "".join(random.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_", k=16))
+            return f"https://l.facebook.com/l.php?u={enc_u}&h=AT{hash16}"
+        elif roll < 0.90:
+            # Modern post deep-link with pfbid token
+            page_slug = random.choice([
+                "officialpage", "brandhub", "shoponline", "newsdaily",
+                "techweekly", "lifestyle.daily", "deals.today"
+            ])
+            pfbid = "pfbid0" + "".join(random.choices(
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+                k=49))
+            return f"https://www.facebook.com/{page_slug}/posts/{pfbid}"
+        else:
+            return ""
     if p == "snapchat":
         return "https://www.snapchat.com/discover"
     if p == "linkedin":
