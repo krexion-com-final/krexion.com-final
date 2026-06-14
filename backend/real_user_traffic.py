@@ -5443,6 +5443,17 @@ async def run_real_user_traffic_job(
     # etc.) instead of the Krexion origin that a 302 hop would
     # otherwise expose. Default OFF — fully backwards-compatible.
     referer_pass_to_offer: bool = False,
+    # ── 2026-06-14: UA ↔ Referer consistency coercion ──────────────
+    # When True (default for new jobs), the engine coerces the per-visit
+    # UA to carry the matching in-app webview markers when the chosen
+    # referer is an in-app platform (Facebook / TikTok / Instagram /
+    # Snapchat / Messenger / LinkedIn / Twitter) AND the UA is a
+    # mobile UA. Desktop UAs are left untouched (legit on desktop).
+    # Eliminates the "Referer=facebook.com + UA=plain Chrome mobile"
+    # mismatch that fraud detectors (Anura/IPQS/Forensiq/Singular/
+    # AppsFlyer Protect360/Adjust/Forter) flag as bot traffic.
+    # See referrer_pro.coerce_ua_for_platform for the full reference.
+    referer_match_ua_to_platform: bool = True,
 ):
     """
     Main orchestrator. Emits progress into RUT_JOBS[job_id].
@@ -5473,6 +5484,8 @@ async def run_real_user_traffic_job(
         # 2026-01 — Pass-Referer-To-Offer (server-side tracker resolve +
         # direct offer navigation so the chosen Referer reaches the offer).
         "pass_to_offer": bool(referer_pass_to_offer),
+        # 2026-06-14 — UA ↔ Referer coercion toggle (anti-fraud).
+        "match_ua_to_platform": bool(referer_match_ua_to_platform),
     }
 
     # Guarantee chromium is installed BEFORE launching any visits.
@@ -6896,6 +6909,26 @@ async def run_real_user_traffic_job(
                 # MISMATCH leak AND keeps the ESP click-tracking host +
                 # URL `mc_cid`/`_kx` ids consistent for email visits.
                 _ua_referer, _kx_platform, _kx_esp, _pro_extras = _resolve_visit_referer(ua, _referer_cfg)
+                # ── 2026-06-14: UA ↔ Referer consistency coercion ────
+                # When the chosen referer is an in-app platform (FB /
+                # TikTok / IG / Snapchat / Messenger / LinkedIn /
+                # Twitter) AND the operator's UA is a mobile UA without
+                # the matching in-app markers, append the realistic
+                # in-app webview suffix so the per-visit signature is
+                # internally consistent. Desktop UAs are left alone
+                # (real desktop users on these sites stay in-browser).
+                # Toggle is ON by default for new jobs — old jobs that
+                # never set the flag get the safer/realer default too.
+                if _referer_cfg.get("match_ua_to_platform", True) and _kx_platform:
+                    try:
+                        from referrer_pro import coerce_ua_for_platform as _coerce_ua
+                        _coerced_ua = _coerce_ua(ua, _kx_platform)
+                        if _coerced_ua and _coerced_ua != ua:
+                            ua = _coerced_ua
+                    except Exception:
+                        # Never fail a visit because of UA coerce —
+                        # legacy UA remains in use.
+                        pass
                 # ── 2026-06-12 (referrer header fix) ────────────────────────
                 # Chromium's NetworkService SILENTLY DROPS the "Referer"
                 # header from `extra_http_headers` for the initial
@@ -7031,7 +7064,19 @@ async def run_real_user_traffic_job(
                     # the outer `_kx_platform` already drove the tracker
                     # URL rewrite for this visit — retry navigates to
                     # the SAME URL (no second handshake to compute).
-                    _ua_referer_retry, _, _, _ = _resolve_visit_referer(ua, _referer_cfg)
+                    _ua_referer_retry, _retry_platform, _, _ = _resolve_visit_referer(ua, _referer_cfg)
+                    # 2026-06-14: keep UA coerced in retry path too (the
+                    # context was destroyed but the per-visit UA can
+                    # still be adjusted if the resolver re-rolled a
+                    # different platform).
+                    if _referer_cfg.get("match_ua_to_platform", True) and _retry_platform:
+                        try:
+                            from referrer_pro import coerce_ua_for_platform as _coerce_ua
+                            _coerced_retry = _coerce_ua(ua, _retry_platform)
+                            if _coerced_retry and _coerced_retry != ua:
+                                ua = _coerced_retry
+                        except Exception:
+                            pass
                     # 2026-06-12 (referrer header fix) — update goto-kwargs
                     # so the re-attempted navigation also sends the right
                     # Referer via `page.goto(..., referer=...)`. The retry

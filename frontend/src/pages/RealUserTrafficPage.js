@@ -575,6 +575,14 @@ export default function RealUserTrafficPage() {
   // offer sees the EXACT chosen Referer instead of Krexion origin).
   // Default OFF — preserves legacy behavior for existing users.
   const [refererPassToOffer, setRefererPassToOffer] = useState(false);
+  // 2026-06-14 — UA ↔ Referer coercion (anti-fraud). When ON and the
+  // resolved Referer is an in-app platform (FB/TikTok/IG/Snapchat/…)
+  // the engine appends realistic in-app webview markers to the
+  // per-visit mobile UA so Anura/IPQS/Forensiq/Singular/AppsFlyer
+  // Protect360 don't flag the visit as bot due to a mismatched
+  // Referer↔UA signature. Default ON — recommended for all paid-
+  // social traffic.
+  const [refererMatchUaToPlatform, setRefererMatchUaToPlatform] = useState(true);
   // Search-engine sub-options for the search-Referer rotation
   const [refererSearchEngine, setRefererSearchEngine] = useState("google");
   const [refererSearchKeywords, setRefererSearchKeywords] = useState("");
@@ -1456,6 +1464,8 @@ export default function RealUserTrafficPage() {
       fd.append("referer_network_click_chain", String(!!refererNetworkClickChain));
       // 2026-01 — Pass-Referer-To-Offer (direct offer navigation).
       fd.append("referer_pass_to_offer", String(!!refererPassToOffer));
+      // 2026-06-14 — UA ↔ Referer coercion (anti-fraud, default ON).
+      fd.append("referer_match_ua_to_platform", String(!!refererMatchUaToPlatform));
 
       fd.append("form_fill_enabled", String(formFillEnabled));
       if (formFillEnabled) {
@@ -3077,6 +3087,19 @@ export default function RealUserTrafficPage() {
                             className="w-4 h-4 rounded accent-fuchsia-500"
                           />
                           <span>Mobile in-app deep paths <span className="text-zinc-500">(tiktok video/post URLs)</span></span>
+                        </label>
+                        <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer">
+                          <input
+                            data-testid="rut-pro-match-ua-platform"
+                            type="checkbox"
+                            checked={refererMatchUaToPlatform}
+                            onChange={(e) => setRefererMatchUaToPlatform(e.target.checked)}
+                            className="w-4 h-4 rounded accent-emerald-500"
+                          />
+                          <span className="text-emerald-200">
+                            🛡️ Match UA to Referer
+                            <span className="text-zinc-500"> (auto-append FB_IAB / BytedanceWebview / Instagram markers so mobile traffic matches real in-app clicks — kills the #1 fraud signal)</span>
+                          </span>
                         </label>
                         <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer">
                           <input

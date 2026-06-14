@@ -53,11 +53,42 @@ handlers landed).
 - Existing 2.1.39 Electron customers will be auto-upgraded on next launch
   via electron-updater.
 
+## Iteration 8 — v2.1.46 (Anti-fraud: UA ↔ Referer consistency coercion)
+**Root cause:** When the operator picked a Referer for an in-app platform
+(Facebook / TikTok / Instagram / Snapchat / Messenger / LinkedIn / Twitter)
+via `platform_pool` or `custom`/`random_list` but the rotating UA list
+contained plain Chrome/Safari mobile UAs, the Referer↔UA combination did
+NOT match real-world in-app webview signatures. Real mobile FB/TikTok ad
+clicks always carry `[FB_IAB/FB4A;FBAV/…]` / `BytedanceWebview` /
+`Instagram …` markers in the UA, so plain-Chrome + FB referer was a
+fraud-detector hard signal (Anura / IPQS / Forensiq / Singular /
+AppsFlyer Protect360 / Adjust / Forter all flag this combination).
+
+**Fix:**
+- `backend/referrer_pro.py`: added `build_inapp_ua_suffix(platform, ua)`,
+  `coerce_ua_for_platform(ua, platform)`, `_is_mobile_ua`,
+  `_ua_has_inapp_marker` + realistic version pools (FBAV, FBBV, FBRV,
+  BytedanceWebview hash, IG/TikTok/Snapchat/LinkedIn versions, TikTok
+  region+locale). Pure functions, never raise, idempotent, desktop UAs
+  untouched.
+- `backend/real_user_traffic.py`: new param
+  `referer_match_ua_to_platform: bool = True` plumbed into `_referer_cfg`.
+  Initial + retry paths in `process_one` worker call
+  `coerce_ua_for_platform(ua, platform)` after `_resolve_visit_referer`.
+- `backend/server.py`: Form field + persistence + engine call wiring.
+  Default `.get(..., True)` so legacy jobs also get the safer default.
+- `frontend/src/pages/RealUserTrafficPage.js`: new toggle "🛡️ Match UA
+  to Referer" in the Pro-Mode realism panel (default ON).
+
+**Backward-compatibility:** When override is disabled (legacy `auto`
+mode), `_resolve_visit_referer` already returns the UA-derived referer
+and the UA already carries the matching markers — so coerce is a no-op
+via the idempotency check. Existing jobs see zero change.
+
 ## Released versions
-- v2.1.40 (Native), desktop-v2.1.40 — current. Browser Profile works end
-  to end on all 3 surfaces.
-- v2.1.39 (Native), desktop-v2.1.39 — Browser Profile menu missing on
-  desktop; launch would have failed even if reached.
+- v2.1.46 (Native + Desktop) — UA ↔ Referer consistency (this iteration).
+- v2.1.40 — Browser Profile end-to-end across 3 surfaces.
+- v2.1.39 — Browser Profile menu missing on desktop.
 - v2.1.38 desktop — withdrawn (Electron startup crash).
 
 ## Backlog

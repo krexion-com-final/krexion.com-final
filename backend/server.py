@@ -7359,6 +7359,10 @@ async def _rut_prepare_and_run(
             # resolve + direct offer navigation, see RUT engine
             # for behaviour). Default OFF preserves legacy path.
             referer_pass_to_offer=bool(params.get("referer_pass_to_offer", False)),
+            # 2026-06-14 — UA ↔ Referer coercion (default True for new
+            # jobs; legacy jobs that never set the key also get the
+            # safer/realer default via `.get(..., True)`).
+            referer_match_ua_to_platform=bool(params.get("referer_match_ua_to_platform", True)),
         )
     except Exception as e:  # noqa: BLE001
         logger.exception(f"_rut_prepare_and_run crashed for job {job_id}: {e}")
@@ -7657,6 +7661,14 @@ async def rut_create_job(
     #       chosen Referer. Offer sees the EXACT chosen Referer
     #       (TikTok / custom URL / platform pool / etc.).
     referer_pass_to_offer: bool = Form(False),
+    # ── 2026-06-14: UA ↔ Referer coercion (anti-fraud) ──────────────
+    # Default True — when the chosen referer is an in-app platform
+    # (FB/TikTok/IG/Snapchat/Messenger/LinkedIn/Twitter) and the rotating
+    # UA is a mobile UA without the matching in-app markers, the engine
+    # coerces the UA to carry realistic in-app webview tokens. Desktop
+    # UAs are left untouched. Eliminates the "Referer=facebook.com +
+    # UA=plain Chrome mobile" mismatch that fraud detectors flag.
+    referer_match_ua_to_platform: bool = Form(True),
     user: dict = Depends(get_current_user_with_fresh_data),
     _cloud_gate: bool = Depends(require_local_mode),
 ):
@@ -7917,6 +7929,8 @@ async def rut_create_job(
         "referer_network_click_chain": bool(referer_network_click_chain),
         # 2026-01 — Pass-Referer-To-Offer (direct offer navigation)
         "referer_pass_to_offer": bool(referer_pass_to_offer),
+        # 2026-06-14 — UA ↔ Referer coercion (anti-fraud, default ON).
+        "referer_match_ua_to_platform": bool(referer_match_ua_to_platform),
     }
     # A job is auto-resumable on backend restart only if it has no in-memory
     # bytes attached (Mongo can't store huge UploadFile blobs efficiently
@@ -8038,6 +8052,8 @@ async def rut_create_job(
             "referer_search_keywords": (referer_search_keywords or "")[:8000],
             "referer_strip_search_path": bool(referer_strip_search_path),
             "referer_network_click_chain": bool(referer_network_click_chain),
+            # 2026-06-14 — UA ↔ Referer coercion (persisted)
+            "referer_match_ua_to_platform": bool(referer_match_ua_to_platform),
         }},
         upsert=True,
     )
