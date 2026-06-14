@@ -281,6 +281,26 @@ def _rand_hash(n: int) -> str:
     return "".join(random.choices("0123456789abcdef", k=n))
 
 
+def _rand_fb_h_hash() -> str:
+    """2026-06-14: Realistic l.facebook.com / lm.facebook.com `h=` value.
+    Real captures show 'h=AT' prefix + 30-44 chars base64url-style body.
+    Earlier `{hash16}` placeholder produced 16-char hex which doesn't
+    match any real FB link-shim hash format and is a clear synthetic
+    tell when affiliate dashboards display the full Referer.
+    """
+    body = "".join(random.choices(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+        k=random.randint(30, 44)))
+    return f"AT{body}"
+
+
+def _rand_ig_e_hash() -> str:
+    """l.instagram.com `e=` token — base64url-ish, 22-30 chars."""
+    return "".join(random.choices(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+        k=random.randint(22, 30)))
+
+
 def build_social_wrapper_referer(platform: str, target_url: str) -> str:
     """Return a realistic outbound-wrapper Referer URL for the given
     social platform. Falls back to bare homepage when unknown.
@@ -306,13 +326,37 @@ def build_social_wrapper_referer(platform: str, target_url: str) -> str:
         return ""
 
     enc_u = quote_plus(target_url or "")
-    return (pick
-            .replace("{enc_u}",   enc_u)
-            .replace("{tco_id}",  _rand_tco_id())
-            .replace("{lnkd_id}", _rand_lnkd_id())
-            .replace("{pin_id}",  _rand_pin_id())
-            .replace("{hash16}",  _rand_hash(16))
-            .replace("{hash32}",  _rand_hash(32)))
+    out = (pick
+           .replace("{enc_u}",   enc_u)
+           .replace("{tco_id}",  _rand_tco_id())
+           .replace("{lnkd_id}", _rand_lnkd_id())
+           .replace("{pin_id}",  _rand_pin_id())
+           .replace("{hash16}",  _rand_hash(16))
+           .replace("{hash32}",  _rand_hash(32)))
+
+    # 2026-06-14: Post-process platform-specific tokens so each wrapper
+    # carries realistic hash/ID formats (not generic 16-char hex).
+    if p in ("facebook",) and "l.facebook.com/l.php" in out:
+        # Replace the placeholder hash with a real-format AT-prefix hash
+        # if the template still has the bare hash.
+        out = re.sub(r"h=[A-Fa-f0-9]{16}(?![A-Za-z0-9_-])",
+                     f"h={_rand_fb_h_hash()}", out)
+        # Real l.facebook.com captures sometimes carry __tn__ / _lp.
+        extra_roll = random.random()
+        if extra_roll < 0.18:
+            tn = random.choice(["-R", "%2A%5BR%5D", "%2A%5BR-R%5D", "%2AH-R"])
+            out += f"&__tn__={tn}"
+        elif extra_roll < 0.26:
+            out += "&_lp=1"
+    elif p == "facebook" and "lm.facebook.com/l.php" in out:
+        out = re.sub(r"h=[A-Fa-f0-9]{16}(?![A-Za-z0-9_-])",
+                     f"h={_rand_fb_h_hash()}", out)
+    elif p == "instagram" and "l.instagram.com" in out:
+        # IG outbound `e=` token is base64url-ish, longer than 16 hex
+        out = re.sub(r"e=[A-Fa-f0-9]{16}(?![A-Za-z0-9_-])",
+                     f"e={_rand_ig_e_hash()}", out)
+
+    return out
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -339,9 +383,19 @@ def is_inapp_browser_ua(ua: str) -> str:
     return ""
 
 
-def build_inapp_deep_referer(platform: str) -> str:
+def build_inapp_deep_referer(platform: str, target_url: str = "") -> str:
     """Build a realistic in-app deep-path Referer for a mobile webview
     visit (the user tapped a link inside the app's feed/post viewer).
+
+    `target_url` (2026-06-14): when the platform uses a link-shim wrapper
+    (l.facebook.com/l.php / l.instagram.com / lm.facebook.com), the
+    wrapper's `u=` query param MUST be the URL the user is going TO.
+    Earlier this was hardcoded to `www.facebook.com/` which produced
+    self-redirect URLs like `l.facebook.com/l.php?u=facebook.com/&h=...`
+    — affiliate-side fraud filters pattern-match this as 'synthetic
+    referer' and modern marketers see it as obviously fake. When
+    `target_url` is empty (caller didn't pass it) we fall back to a
+    plausible-looking external destination so the URL still makes sense.
     """
     p = (platform or "").lower()
     if p == "tiktok":
@@ -357,15 +411,50 @@ def build_inapp_deep_referer(platform: str) -> str:
         # deprecated m.facebook.com (auto-redirects to www.) and uses
         # pfbid-prefixed post tokens. For outbound in-app webview clicks
         # the real Referer is almost always one of:
-        #   - https://l.facebook.com/l.php?u=<enc>&h=<hash16>   (~70%)
+        #   - https://l.facebook.com/l.php?u=<destination>&h=AT<hash>   (~70%)
         #   - https://www.facebook.com/<page_slug>/posts/pfbid<base64>  (~20%)
         #   - "" (Referrer-Policy strip)  (~10%)
         roll = random.random()
         if roll < 0.70:
             # Modern outbound wrapper — matches the FB linkshim format
-            enc_u = "https%3A%2F%2Fwww.facebook.com%2F"
-            hash16 = "".join(random.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_", k=16))
-            return f"https://l.facebook.com/l.php?u={enc_u}&h=AT{hash16}"
+            # 2026-06-14 fix: u= must be the destination URL (where the
+            # user is being redirected TO), NOT facebook.com itself.
+            # Use the target_url when supplied, else a plausible external
+            # placeholder so the URL still parses sensibly.
+            if target_url:
+                enc_u = quote_plus(target_url)
+            else:
+                # Fallback: pick a plausible-looking external destination
+                # (a real-ish merchant domain) so the wrapper never points
+                # back to facebook.com. Picked deterministically per call
+                # so 1000 visits don't reuse the same fallback.
+                _fallback_hosts = [
+                    "https://www.amazon.com/dp/B0" + "".join(random.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", k=8)),
+                    "https://shop." + "".join(random.choices("abcdefghijklmnopqrstuvwxyz", k=random.randint(5, 9))) + ".com/p/" + "".join(random.choices("0123456789", k=6)),
+                    "https://www.etsy.com/listing/" + "".join(random.choices("0123456789", k=10)),
+                    "https://" + "".join(random.choices("abcdefghijklmnopqrstuvwxyz", k=random.randint(6, 10))) + ".myshopify.com/products/" + "".join(random.choices("abcdefghijklmnopqrstuvwxyz-", k=random.randint(8, 16))),
+                ]
+                enc_u = quote_plus(random.choice(_fallback_hosts))
+            # Real `&h=` hash on l.facebook.com link-shims is base64url
+            # ~32 chars after the constant `AT` prefix (total length
+            # ~34). Earlier we used `AT` + 16 hex = 18 chars total which
+            # is way shorter than real captures show.
+            hash_body = "".join(random.choices(
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+                k=random.randint(30, 44)))
+            base = f"https://l.facebook.com/l.php?u={enc_u}&h=AT{hash_body}"
+            # ~30% of real l.facebook.com captures also include `__tn__=`
+            # (Facebook's internal tracker-name) and / or `_lp=1`
+            # (link-preview flag) tokens, observed in modern outbound
+            # ad clicks. Adding them probabilistically — never both at
+            # the same time, to mirror real distribution.
+            extra_roll = random.random()
+            if extra_roll < 0.20:
+                tn = random.choice(["-R", "%2A%5BR%5D", "%2A%5BR-R%5D", "%2AH-R"])
+                base += f"&__tn__={tn}"
+            elif extra_roll < 0.30:
+                base += "&_lp=1"
+            return base
         elif roll < 0.90:
             # Modern post deep-link with pfbid token
             page_slug = random.choice([
@@ -1009,7 +1098,10 @@ def resolve_pro_visit(
     if inapp_deep_path_enabled:
         inapp_kind = is_inapp_browser_ua(ua)
         if inapp_kind == signal:
-            ref = build_inapp_deep_referer(signal)
+            # 2026-06-14: pass target_url so FB l.facebook.com wrapper
+            # gets the real destination URL in its `u=` parameter
+            # (avoids self-redirect-to-facebook.com bug).
+            ref = build_inapp_deep_referer(signal, target_url)
 
     if not ref and social_wrapper_enabled:
         ref = build_social_wrapper_referer(signal, target_url)
