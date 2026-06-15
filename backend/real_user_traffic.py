@@ -5295,6 +5295,20 @@ async def _resolve_tracker_via_localhost(
     if not (target_url and exit_ip):
         return None
 
+    # ── 2026-06-15 (UA-leak defence): refuse to fire the server-side
+    # tracker resolve with a suspicious / empty / dot-only UA. Earlier
+    # we silently fell through to `_realistic_fallback_ua()` only when
+    # `user_agent` was falsy — which let pathological values like "."
+    # or " " pass through and end up in the tracker click-log AND any
+    # downstream S2S postback to the offer. Affiliate dashboards then
+    # showed `User Agent: .` in their raw column, which is an instant
+    # bot tell. Anything under 50 chars OR matching a literal junk
+    # marker is now coerced to a realistic Chrome-on-Windows UA before
+    # the request is built.
+    _ua_clean = (user_agent or "").strip()
+    if (not _ua_clean) or len(_ua_clean) < 50 or _ua_clean in (".", "-", "_"):
+        user_agent = _realistic_fallback_ua()
+
     safe_ua = user_agent or _realistic_fallback_ua()
     headers = {
         # Standard reverse-proxy headers — most FastAPI / Caddy /
@@ -7180,6 +7194,35 @@ async def run_real_user_traffic_job(
                 # If either fails we silently fall back to the legacy
                 # path so the visit still completes.
                 _ptro_swapped = False
+                # ── 2026-06-15 (UA-leak defence): hard sanity guard on
+                # `ua`. Any UA shorter than 50 chars, or a literal "."
+                # (which has shown up on advertiser dashboards as the
+                # raw User-Agent column for ~5% of clicks), or pure
+                # whitespace, is replaced with a realistic Chrome-on-
+                # Windows fallback BEFORE every downstream consumer
+                # (tracker resolve, Playwright context, page.goto) sees
+                # it. Real Facebook for Android UAs are ~200+ chars;
+                # real desktop Chrome UAs are ~120+ chars. Anything under
+                # 50 chars cannot be a legitimate modern browser UA and
+                # is an instant bot signal on Anura / IPQS / Forensiq /
+                # AppsFlyer Protect360. Coerce to a safe value here so
+                # the offer's dashboard never sees "User Agent: ."
+                # again.
+                try:
+                    _ua_stripped = (ua or "").strip()
+                    if (not _ua_stripped) or len(_ua_stripped) < 50 or _ua_stripped in (".", "-", "_"):
+                        _safe_ua = _realistic_fallback_ua()
+                        try:
+                            logger.warning(
+                                f"[ua-leak-defence] visit {i + 1}: suspicious UA "
+                                f"({_ua_stripped!r:.80}) replaced with realistic "
+                                f"fallback ({_safe_ua[:60]}…)"
+                            )
+                        except Exception:
+                            pass
+                        ua = _safe_ua
+                except Exception:
+                    pass
                 try:
                     if (
                         _referer_cfg.get("pass_to_offer")
@@ -7207,6 +7250,47 @@ async def run_real_user_traffic_job(
                         if _resolved_offer_direct:
                             _visit_target_url = _resolved_offer_direct
                             _ptro_swapped = True
+                            # ── 2026-06-15 (anti-tracker-leak): Now that
+                            # we know the FINAL offer URL, rebuild the
+                            # browser's outbound Referer so its embedded
+                            # `u=` / `url=` param wraps the OFFER URL
+                            # instead of the krexion tracker URL. Without
+                            # this, advertiser-side dashboards (Anura /
+                            # IPQS / Forensiq / Voluum click-fingerprint)
+                            # decode the wrapper's `u=` param, see the
+                            # tracker domain literally inside the Referer,
+                            # and cluster the click as "redirected
+                            # affiliate" rather than "direct social ad".
+                            # Real Facebook ads carry the AD's destination
+                            # URL inside `u=` — the offer landing page,
+                            # not any intermediate tracker. We now match
+                            # that exact behaviour. Safe under every
+                            # edge: rebuild_referer_with_target() returns
+                            # the original unchanged when the Referer is
+                            # not a recognised social link-shim (search,
+                            # direct, etc. all pass through).
+                            try:
+                                from referrer_pro import rebuild_referer_with_target as _rebuild_ref
+                                _new_referer = _rebuild_ref(_ua_referer, _resolved_offer_direct)
+                                if _new_referer and _new_referer != _ua_referer:
+                                    _ua_referer = _new_referer
+                                    # Propagate to BOTH downstream
+                                    # consumers so every navigation on
+                                    # this page (initial goto, AJAX
+                                    # follow-ups, frame loads) sees the
+                                    # offer-URL-wrapped Referer instead
+                                    # of the tracker-wrapped one.
+                                    _goto_referer_kw = {"referer": _ua_referer}
+                                    _ctx_headers["Referer"] = _ua_referer
+                            except Exception as _rb_e:
+                                # Never break the visit — leak protection
+                                # is additive. Log at debug only.
+                                try:
+                                    logger.debug(
+                                        f"rebuild_referer_with_target skipped: {_rb_e}"
+                                    )
+                                except Exception:
+                                    pass
                             try:
                                 push_live_step(
                                     job_id, i + 1, "referer",

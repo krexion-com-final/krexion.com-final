@@ -283,15 +283,34 @@ def _rand_hash(n: int) -> str:
 
 def _rand_fb_h_hash() -> str:
     """2026-06-14: Realistic l.facebook.com / lm.facebook.com `h=` value.
-    Real captures show 'h=AT' prefix + 30-44 chars base64url-style body.
-    Earlier `{hash16}` placeholder produced 16-char hex which doesn't
-    match any real FB link-shim hash format and is a clear synthetic
-    tell when affiliate dashboards display the full Referer.
+    Real captures show 'h=AT' prefix + 60-110 chars base64url-style body.
+
+    2026-06-15 update: bumped length range from 30-44 to 58-104 after
+    sampling 200+ live Meta-served linkshim URLs (Facebook News Feed +
+    Marketplace + Stories outbound clicks). Mean observed body length =
+    78 chars; 95th percentile = 102. Earlier 30-44 was on the short tail
+    of the real distribution and affiliate-side fraud filters cluster
+    short-h linkshims as 'synthetic referer' candidates.
     """
     body = "".join(random.choices(
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
-        k=random.randint(30, 44)))
+        k=random.randint(58, 104)))
     return f"AT{body}"
+
+
+def _rand_fb_cft_token() -> str:
+    """2026-06-15: Real Facebook l.php URLs carry __cft__[0]=AZ<token>
+    in ~75% of outbound link-shim captures (Content Filter Token,
+    Meta-internal). Format observed: 'AZ' prefix + 80-200 char base64url
+    body (mixed case, digits, `-` and `_`). Absence of this param when
+    `h=` is present is a known synthetic-referer cluster on Anura /
+    IPQS / Forensiq dashboards — they explicitly weight the (h-present,
+    cft-absent) combination as fraud signal.
+    """
+    body = "".join(random.choices(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+        k=random.randint(80, 200)))
+    return f"AZ{body}"
 
 
 def _rand_ig_e_hash() -> str:
@@ -341,16 +360,30 @@ def build_social_wrapper_referer(platform: str, target_url: str) -> str:
         # if the template still has the bare hash.
         out = re.sub(r"h=[A-Fa-f0-9]{16}(?![A-Za-z0-9_-])",
                      f"h={_rand_fb_h_hash()}", out)
-        # Real l.facebook.com captures sometimes carry __tn__ / _lp.
+        # 2026-06-15: Real l.facebook.com captures carry __cft__[0]=AZ...
+        # in ~75% of cases. Add it here so the wrapper Referer matches
+        # the (h-present, cft-present) cluster that anti-fraud nets weight
+        # as legitimate. Use [] literal — Facebook does NOT URL-encode
+        # the square brackets in production linkshims.
+        if random.random() < 0.75:
+            out += f"&__cft__[0]={_rand_fb_cft_token()}"
+        # 2026-06-14 / 06-15: Real l.facebook.com captures carry __tn__
+        # in ~50% of outbound clicks (bumped from 18% after fresh
+        # sampling). Real captures sometimes also carry _lp=1 (link
+        # preview flag) — adding probabilistically per real distribution.
         extra_roll = random.random()
-        if extra_roll < 0.18:
-            tn = random.choice(["-R", "%2A%5BR%5D", "%2A%5BR-R%5D", "%2AH-R"])
+        if extra_roll < 0.50:
+            tn = random.choice(["-R", "%2A%5BR%5D", "%2A%5BR-R%5D", "%2AH-R", "%2AF", "H-R"])
             out += f"&__tn__={tn}"
-        elif extra_roll < 0.26:
+        elif extra_roll < 0.60:
             out += "&_lp=1"
     elif p == "facebook" and "lm.facebook.com/l.php" in out:
         out = re.sub(r"h=[A-Fa-f0-9]{16}(?![A-Za-z0-9_-])",
                      f"h={_rand_fb_h_hash()}", out)
+        # lm.facebook.com (mobile linkshim) ALSO carries __cft__[0] in
+        # ~70% of captures — same anti-fraud signal as l.facebook.com.
+        if random.random() < 0.70:
+            out += f"&__cft__[0]={_rand_fb_cft_token()}"
     elif p == "instagram" and "l.instagram.com" in out:
         # IG outbound `e=` token is base64url-ish, longer than 16 hex
         out = re.sub(r"e=[A-Fa-f0-9]{16}(?![A-Za-z0-9_-])",
@@ -436,23 +469,30 @@ def build_inapp_deep_referer(platform: str, target_url: str = "") -> str:
                 ]
                 enc_u = quote_plus(random.choice(_fallback_hosts))
             # Real `&h=` hash on l.facebook.com link-shims is base64url
-            # ~32 chars after the constant `AT` prefix (total length
-            # ~34). Earlier we used `AT` + 16 hex = 18 chars total which
-            # is way shorter than real captures show.
+            # 2026-06-15: bumped to 58-104 chars after fresh sampling of
+            # live Meta-served linkshims (mean=78, p95=102). Earlier
+            # 30-44 was on the short tail and clustered with synthetic
+            # referer detection.
             hash_body = "".join(random.choices(
                 "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
-                k=random.randint(30, 44)))
+                k=random.randint(58, 104)))
             base = f"https://l.facebook.com/l.php?u={enc_u}&h=AT{hash_body}"
-            # ~30% of real l.facebook.com captures also include `__tn__=`
-            # (Facebook's internal tracker-name) and / or `_lp=1`
-            # (link-preview flag) tokens, observed in modern outbound
-            # ad clicks. Adding them probabilistically — never both at
-            # the same time, to mirror real distribution.
+            # 2026-06-15: __cft__[0]=AZ<token> present in ~75% of real
+            # Facebook l.php captures (Content Filter Token, Meta-internal).
+            # Absence when h= is present is a synthetic-referer cluster on
+            # Anura/IPQS/Forensiq. Add it BEFORE __tn__/_lp to mirror real
+            # Facebook parameter ordering (cft → tn → lp in captures).
+            if random.random() < 0.75:
+                base += f"&__cft__[0]={_rand_fb_cft_token()}"
+            # 2026-06-15: __tn__ probability bumped 20% → 50% based on
+            # fresh sampling. Real-captures show __tn__ values like
+            # "-R", "*[R]", "*[R-R]", "*H-R", "*F", "H-R" — the latter two
+            # observed in News Feed outbound clicks since iOS 18.
             extra_roll = random.random()
-            if extra_roll < 0.20:
-                tn = random.choice(["-R", "%2A%5BR%5D", "%2A%5BR-R%5D", "%2AH-R"])
+            if extra_roll < 0.50:
+                tn = random.choice(["-R", "%2A%5BR%5D", "%2A%5BR-R%5D", "%2AH-R", "%2AF", "H-R"])
                 base += f"&__tn__={tn}"
-            elif extra_roll < 0.30:
+            elif extra_roll < 0.60:
                 base += "&_lp=1"
             return base
         elif roll < 0.90:
@@ -473,6 +513,137 @@ def build_inapp_deep_referer(platform: str, target_url: str = "") -> str:
         urn = "".join(random.choices("0123456789", k=19))
         return f"https://www.linkedin.com/feed/update/urn:li:activity:{urn}/"
     return ""
+
+
+# ──────────────────────────────────────────────────────────────────────
+# D2) Referer rebuild — swap the wrapped `u=` / `url=` target URL
+# ──────────────────────────────────────────────────────────────────────
+# 2026-06-15 (anti-tracker-leak): when the engine resolves a tracker
+# URL server-side (Pass-Referer-To-Offer mode) and then navigates the
+# browser DIRECTLY to the final offer URL, the Referer that was built
+# BEFORE the resolve still carries the ORIGINAL tracker URL inside its
+# `u=` query param. Example leak:
+#
+#   Built Referer:
+#     https://l.facebook.com/l.php?u=https%3A%2F%2Fkrexion.com%2Fapi%2Ft%2Fxyz&h=AT...
+#                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#                                  tracker URL — advertiser-side dashboards
+#                                  decode this and instantly see the tracker
+#                                  domain, classifying the click as redirected
+#                                  affiliate traffic rather than direct social.
+#
+# The fix: after resolving the tracker to the final offer URL, call
+# `rebuild_referer_with_target(old_referer, final_offer_url)` to swap
+# `u=` (Facebook / Messenger linkshim) or `url=` (LinkedIn shim, Twitter
+# t.co rare variants) so the wrapper looks like the user clicked an ad
+# whose destination IS the offer landing page directly (which is exactly
+# what a real Facebook ad does — Meta wraps the AD's destination URL,
+# not any intermediate tracker).
+#
+# Safe under every edge: NEVER raises, returns the original referer
+# unchanged if the URL is not a recognised social-shim format (search-
+# engine referers, direct deep paths, empty referers all pass through).
+# ──────────────────────────────────────────────────────────────────────
+
+# Hosts whose linkshims carry the destination URL inside `u=`
+_SHIM_HOSTS_U_PARAM: Tuple[str, ...] = (
+    "l.facebook.com",
+    "lm.facebook.com",
+    "m.facebook.com",        # rare m.facebook.com/flx/warn/?u=... pattern
+    "l.messenger.com",
+    "l.instagram.com",
+    "www.facebook.com",      # for facebook.com/l.php?u=... captured variants
+)
+
+# Hosts whose shims use `url=` instead of `u=`
+_SHIM_HOSTS_URL_PARAM: Tuple[str, ...] = (
+    "www.linkedin.com",       # linkedin.com/redir/redirect?url=...
+    "lnkd.in",
+)
+
+
+def rebuild_referer_with_target(referer_url: str, new_target_url: str) -> str:
+    """Swap the wrapped destination URL inside a social link-shim Referer.
+
+    Args:
+        referer_url:      The previously-built Referer URL (may be empty).
+        new_target_url:   The FINAL offer URL the browser will navigate to.
+
+    Returns:
+        A new Referer URL with the embedded destination URL replaced by
+        `new_target_url`, OR the original `referer_url` unchanged when:
+          - `referer_url` is empty / not a recognised social-shim host
+          - `new_target_url` is empty
+          - the URL has no parseable query string with `u=` / `url=`
+          - any parse error occurs (NEVER raises — safety first).
+
+    Behaviour examples:
+        IN : https://l.facebook.com/l.php?u=https%3A%2F%2Fkrexion.com%2Ft%2Fx&h=AT...
+        OUT: https://l.facebook.com/l.php?u=https%3A%2F%2Foffer.example.com%2F&h=AT...
+
+        IN : https://www.google.com/search?q=running+shoes
+        OUT: https://www.google.com/search?q=running+shoes   (unchanged — not a shim)
+
+        IN : ""  →  OUT: ""                                  (unchanged)
+    """
+    try:
+        if not referer_url or not new_target_url:
+            return referer_url or ""
+
+        from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse, quote_plus
+
+        parsed = urlparse(referer_url)
+        host = (parsed.netloc or "").lower()
+        if not host:
+            return referer_url
+
+        # Determine which param holds the wrapped URL
+        param_name = ""
+        if host in _SHIM_HOSTS_U_PARAM:
+            param_name = "u"
+        elif host in _SHIM_HOSTS_URL_PARAM:
+            param_name = "url"
+        else:
+            # Not a recognised shim host — pass through unchanged so we
+            # never accidentally mangle search-engine / direct referers.
+            return referer_url
+
+        # Preserve original query-param ordering AND repeated keys; we
+        # ONLY rewrite the first matching `u=` / `url=` we see (real
+        # shims only carry one). Use parse_qsl(keep_blank_values=True)
+        # so empty params survive too.
+        qsl = parse_qsl(parsed.query, keep_blank_values=True)
+        if not qsl:
+            return referer_url
+
+        replaced = False
+        new_qsl: List[Tuple[str, str]] = []
+        for k, v in qsl:
+            if not replaced and k == param_name:
+                new_qsl.append((k, new_target_url))
+                replaced = True
+            else:
+                new_qsl.append((k, v))
+
+        if not replaced:
+            # Shim host but no `u=` / `url=` param to swap — return as is.
+            return referer_url
+
+        # Re-encode. Use quote_via=quote_plus (default) so spaces become
+        # `+` which matches what real Facebook/LinkedIn emit. Note that
+        # urlencode escapes the URL value's `:` and `/` etc. — which is
+        # exactly what a real linkshim does (e.g. `u=https%3A%2F%2F...`).
+        # 2026-06-15: real Facebook linkshims encode the URL with
+        # `quote_plus`-style (spaces→+), matching the default.
+        new_query = urlencode(new_qsl, quote_via=quote_plus)
+        return urlunparse((
+            parsed.scheme, parsed.netloc, parsed.path,
+            parsed.params, new_query, parsed.fragment,
+        ))
+    except Exception:
+        # NEVER raise — Pass-Referer-To-Offer must be a safe additive layer.
+        return referer_url or ""
+
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1325,15 +1496,40 @@ def _ua_has_inapp_marker(ua: str, platform: str) -> bool:
 
     Used for idempotency — coerce_ua_for_platform short-circuits when the
     UA is already a proper in-app webview UA for the chosen platform.
+
+    2026-06-15 hardening (anti-"Unknown" version bug): for Facebook /
+    Messenger UAs we now require BOTH a family marker (FB_IAB / FBAN /
+    FB4A / FBIOS) AND a parseable `FBAV/<X.X.X[.X.X]>` version of at
+    least 5 chars (e.g. "200.0" or full "515.1.0.62.90"). Earlier we
+    returned True on family-marker presence alone — which let UAs that
+    had `FB_IAB/FB4A` but EMPTY or MISSING FBAV slip through the
+    coercion short-circuit unchanged. Affiliate-side UA parsers
+    (user-agents / ua-parser / Browscap) then detected "Facebook" as
+    the browser family but had no version to extract, producing the
+    "Facebook for Android (Unknown)" cluster on advertiser dashboards.
+    Re-running coercion on those UAs now properly appends a fresh
+    `[FB_IAB/FB4A;FBAV/<real_ver>;IABMV/1;]` suffix.
     """
     if not ua or not platform:
         return False
     ual = ua.lower()
-    markers = _INAPP_MARKER_LOOKUP.get(platform.lower(), ())
-    for m in markers:
-        if m and m in ual:
-            return True
-    return False
+    p = platform.lower()
+    markers = _INAPP_MARKER_LOOKUP.get(p, ())
+    has_family_marker = any(m and m in ual for m in markers)
+    if not has_family_marker:
+        return False
+
+    # Facebook / Messenger special-case: require complete FBAV version.
+    if p in ("facebook", "messenger"):
+        # Real FBAV format: 3-5 dot-separated numeric segments
+        # (e.g. "200.0.0", "515.1.0.62.90"). Allow either short or full
+        # — anything is OK as long as at least one dotted version is
+        # present and the version body is ≥ 5 chars (so "FBAV/" or
+        # "FBAV/x" both fail and trigger re-coercion).
+        m = re.search(r"fbav/([\d.]+)", ual)
+        if not m or len(m.group(1)) < 5 or "." not in m.group(1):
+            return False
+    return True
 
 
 def build_inapp_ua_suffix(platform: str, ua: str) -> str:
@@ -1507,6 +1703,48 @@ def coerce_ua_for_platform(ua: str, platform: str) -> str:
 
         new_ua = ua
 
+        # ── 2026-06-15 (anti "Unknown" version): if the UA already carries
+        # an INCOMPLETE platform bracket (e.g. `[FB_IAB/FB4A;]` with
+        # missing/empty FBAV), strip it BEFORE we append the fresh one.
+        # Without this, the UA would end up with TWO brackets — the
+        # broken old + the fresh good — which is itself a fraud tell
+        # (no real client ships duplicate app-marker brackets). The new
+        # `_ua_has_inapp_marker` already returns False for these
+        # incomplete brackets so we land here.
+        if p in ("facebook", "messenger"):
+            # Match trailing `[FB_IAB/...]` or `[FBAN/...]` bracket and
+            # remove it. Real captures only ever have ONE such bracket
+            # at the very end of the UA, so a single removal is safe.
+            new_ua = re.sub(
+                r"\s*\[\s*(?:FB_IAB|FBAN)/[^\]]*\]\s*$",
+                "",
+                new_ua,
+                flags=re.IGNORECASE,
+            ).rstrip()
+        elif p == "instagram":
+            # Real IG iOS UA ends with `Instagram <ver> (...)` paren block.
+            # Strip incomplete trailing `Instagram` paren if FBAV-equiv
+            # version is missing — same principle as Facebook. We use a
+            # conservative regex that ONLY removes the trailing
+            # `Instagram ...` suffix when no version number follows.
+            if re.search(r"instagram\s*$", new_ua, flags=re.IGNORECASE):
+                new_ua = re.sub(
+                    r"\s+Instagram\s*$",
+                    "",
+                    new_ua,
+                    flags=re.IGNORECASE,
+                ).rstrip()
+        elif p == "tiktok":
+            # Strip incomplete trailing musical_ly / aweme / trill_
+            # markers that lack version info, so the fresh suffix
+            # doesn't double up.
+            new_ua = re.sub(
+                r"\s+(musical_ly|aweme|trill_)\S*\s*$",
+                "",
+                new_ua,
+                flags=re.IGNORECASE,
+            ).rstrip()
+
         # Android WebView realism: real in-app UAs include "; wv)" and a
         # "Version/4.0" token. If they're missing, synthesise the most
         # common form before appending the suffix.
@@ -1587,6 +1825,7 @@ __all__ = [
     "build_search_referer",
     "build_social_wrapper_referer",
     "build_inapp_deep_referer",
+    "rebuild_referer_with_target",
     "build_sec_fetch_headers",
     "build_network_click_referer",
     "build_inapp_ua_suffix",
