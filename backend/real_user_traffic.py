@@ -901,10 +901,37 @@ def _resolve_visit_referer(ua: str, cfg: Optional[Dict[str, Any]]) -> Tuple[str,
 
         mode  = (cfg.get("mode") or "auto").strip().lower()
         value = (cfg.get("value") or "")
+        # 2026-06 BUG-D FIX — inapp_deep_path used to ONLY apply inside
+        # the `pro_mode` branch above. Customers who enabled the
+        # "Mobile in-app deep paths" toggle in basic/legacy referrer
+        # modes silently got a bare home URL (e.g. https://www.facebook.com/)
+        # instead of a realistic deep path
+        # (e.g. https://www.facebook.com/<page>/posts/<pfbid…>) — which
+        # is itself a strong "synthetic traffic" tell on advertiser
+        # dashboards (no real user lands from the platform home page).
+        # We now honour the flag in `auto` and `platform_pool` modes too;
+        # explicit `custom`/`random_list`/`google_search` keep the
+        # operator's exact URL untouched.
+        inapp_deep_enabled = bool(cfg.get("inapp_deep_path", True))
+
+        def _maybe_deepen(ref_url: str, plat: str) -> str:
+            """Swap a bare in-app platform home URL with a realistic
+            deep path when the toggle is on. Falls back to `ref_url`
+            silently on any error."""
+            if not inapp_deep_enabled or not ref_url or not plat:
+                return ref_url
+            try:
+                from referrer_pro import build_inapp_deep_referer as _bid
+                deep = _bid(plat, str(cfg.get("target_url") or ""))
+                return deep or ref_url
+            except Exception:
+                return ref_url
 
         if mode == "auto":
             ref = _get_referer_from_ua(ua)
-            return ref, _platform_from_referer_url(ref), "", {}
+            plat = _platform_from_referer_url(ref)
+            ref = _maybe_deepen(ref, plat)
+            return ref, plat, "", {}
 
         if mode in ("direct", "none", ""):
             return "", "", "", {}
@@ -913,16 +940,20 @@ def _resolve_visit_referer(ua: str, cfg: Optional[Dict[str, Any]]) -> Tuple[str,
             ref = value.strip()
             plat = _platform_from_referer_url(ref)
             esp = _esp_from_referer_url(ref) if plat == "email" else ""
+            # Custom URL: operator picked it explicitly — DO NOT deepen.
             return ref, plat, esp, {}
 
         if mode == "random_list":
             lines = [ln.strip() for ln in value.splitlines() if ln.strip()]
             if not lines:
                 ref = _get_referer_from_ua(ua)
-                return ref, _platform_from_referer_url(ref), "", {}
+                plat = _platform_from_referer_url(ref)
+                ref = _maybe_deepen(ref, plat)
+                return ref, plat, "", {}
             ref = random.choice(lines)
             plat = _platform_from_referer_url(ref)
             esp = _esp_from_referer_url(ref) if plat == "email" else ""
+            # random_list: operator-curated pool — DO NOT deepen.
             return ref, plat, esp, {}
 
         if mode == "google_search":
@@ -956,7 +987,9 @@ def _resolve_visit_referer(ua: str, cfg: Optional[Dict[str, Any]]) -> Tuple[str,
                 keys = [k for k in keys if k in _PLATFORM_REFERER_POOL]
                 if not keys:
                     ref = _get_referer_from_ua(ua)
-                    return ref, _platform_from_referer_url(ref), "", {}
+                    plat = _platform_from_referer_url(ref)
+                    ref = _maybe_deepen(ref, plat)
+                    return ref, plat, "", {}
                 chosen = random.choice(keys)
             if chosen == "email":
                 ew = cfg.get("email_weights")
@@ -973,11 +1006,15 @@ def _resolve_visit_referer(ua: str, cfg: Optional[Dict[str, Any]]) -> Tuple[str,
                 ref2, plat2, esp2 = _resolve_email_visit(cfg.get("brand", ""))
                 return ref2, plat2, esp2, {}
             signal = "twitter" if chosen == "x" else chosen
-            return _PLATFORM_REFERER_POOL.get(chosen, ""), signal, "", {}
+            ref = _PLATFORM_REFERER_POOL.get(chosen, "")
+            ref = _maybe_deepen(ref, signal)
+            return ref, signal, "", {}
 
         # Unknown mode → legacy fallback.
         ref = _get_referer_from_ua(ua)
-        return ref, _platform_from_referer_url(ref), "", {}
+        plat = _platform_from_referer_url(ref)
+        ref = _maybe_deepen(ref, plat)
+        return ref, plat, "", {}
     except Exception:
         ref = _get_referer_from_ua(ua)
         return ref, _platform_from_referer_url(ref), "", {}

@@ -3426,7 +3426,64 @@ def detect_device(user_agent_string: str) -> dict:
     browser_display = browser
     if browser_version:
         browser_display = f"{browser} {browser_version}"
-    
+
+    # 2026-06 BUG-B FIX — merge with `_detect_inapp` so in-app UAs that
+    # the `user_agents` library mis-identifies (TikTok musical_ly,
+    # YouTube com.google.ios.youtube, WhatsApp CFNetwork, KakaoTalk,
+    # Line, WeChat MicroMessenger, coerced TwitterIOS/Android etc.) are
+    # surfaced with their REAL app name + version instead of generic
+    # "Mobile Safari UI/WKWebView". Also covers the Facebook iOS case
+    # where the lib detects family="Facebook" but leaves version="" —
+    # we backfill from _detect_inapp's FBAV match.
+    is_inapp = False
+    inapp_app = None
+    inapp_app_name = None
+    inapp_app_version = None
+    try:
+        inapp = _detect_inapp(user_agent_string)
+        if inapp.get("is_inapp"):
+            is_inapp = True
+            inapp_app = inapp.get("app")
+            inapp_app_name = inapp.get("app_name")
+            inapp_app_version = inapp.get("app_version")
+            # Generic engine names the library returns for in-app
+            # webviews — when seen alongside is_inapp=True, prefer the
+            # REAL app name + version we resolved (otherwise advertiser
+            # dashboards see "Chrome 128" for a click that actually came
+            # from a TikTok in-app webview).
+            generic_libs = {
+                "Mobile Safari", "Mobile Safari UI/WKWebView", "Safari",
+                "Chrome Mobile", "Chrome Mobile WebView", "Chrome",
+                "WebKit", "Chromium", "Other", "Unknown", "",
+            }
+            lib_browser_was_generic = (
+                (not browser) or browser in generic_libs
+            )
+            if lib_browser_was_generic or inapp_app_name == browser:
+                # Override name when the library returned a generic
+                # engine string OR already happened to match (idempotent).
+                browser = inapp_app_name or browser
+                # When the name was generic, the library's version is
+                # the engine version (e.g. Chrome's 128.0.0) — NOT the
+                # app version the operator wants to see. Prefer the
+                # real app version we extracted.
+                if lib_browser_was_generic and inapp_app_version:
+                    browser_version = inapp_app_version
+                elif not browser_version and inapp_app_version:
+                    browser_version = inapp_app_version
+            else:
+                # Library detected a non-generic name (e.g. "Facebook"
+                # via its FBAV rule, or "Instagram"). Trust the name but
+                # backfill the version when the lib couldn't extract it
+                # (Facebook iOS case — name = "Facebook", version = "").
+                if not browser_version and inapp_app_version:
+                    browser_version = inapp_app_version
+            # Recompose display string with the resolved name+version.
+            browser_display = f"{browser} {browser_version}".strip()
+    except Exception:
+        # `_detect_inapp` must never break click logging.
+        pass
+
     return {
         "device_type": device_type,
         "device_brand": device_brand,
@@ -3437,7 +3494,14 @@ def detect_device(user_agent_string: str) -> dict:
         "browser": browser,
         "browser_version": browser_version,
         "browser_display": browser_display,
-        "full_string": f"{os_name} {os_version}".strip() if os_version else os_name
+        "full_string": f"{os_name} {os_version}".strip() if os_version else os_name,
+        # 2026-06 BUG-C FIX — surface in-app fields so click_doc can
+        # persist them. Frontends/exports can render an "in-app" badge
+        # and group analytics by app_name.
+        "is_inapp": is_inapp,
+        "inapp_app": inapp_app,
+        "inapp_app_name": inapp_app_name,
+        "inapp_app_version": inapp_app_version,
     }
 
 def check_user_feature(user: dict, feature: str):
@@ -9614,6 +9678,14 @@ async def import_bulk_clicks(
                 "browser": device_info["browser"],
                 "browser_version": device_info.get("browser_version", ""),
                 "browser_display": device_info.get("browser_display", device_info["browser"]),
+                # 2026-06 BUG-C FIX — persist in-app source for bulk
+                # imports too. Without this, imported clicks always
+                # showed `is_inapp=undefined` on the Clicks UI even when
+                # the UA clearly carried an in-app marker.
+                "is_inapp": bool(device_info.get("is_inapp", False)),
+                "inapp_app": device_info.get("inapp_app"),
+                "inapp_app_name": device_info.get("inapp_app_name"),
+                "inapp_app_version": device_info.get("inapp_app_version"),
                 "sub1": click_data.get("sub1"),
                 "sub2": click_data.get("sub2"),
                 "sub3": click_data.get("sub3"),
@@ -11809,11 +11881,20 @@ def _ua_facebook_android(d: dict, app_ver: str, chrome_ver: str, region: Optiona
     )
 
 def _ua_facebook_ios(d: dict, app_ver: str, region: Optional[dict] = None) -> str:
+    # 2026-06 BUGFIX: previously this generator OMITTED the FBAV/<version>
+    # marker entirely. Real Facebook iOS UAs always carry the app version
+    # via FBAV — its absence is THE single biggest "synthetic UA" signal
+    # for affiliate fraud scanners (Anura / IPQS / Forensiq). Without it,
+    # the user_agents library still recognised browser.family="Facebook"
+    # but reported version="" → advertiser dashboards rendered as
+    # "Facebook for iOS (Unknown)" (exactly the customer screenshot).
+    # We now place FBAV right after FBAN/FBIOS to match the real-capture
+    # ordering documented in build_inapp_ua_suffix.
     fbbv = random.randint(500_000_000, 999_999_999)
     fblc = (region or {}).get("posix_locale", "en_US")
     return (
         f"Mozilla/5.0 ({d['brand']}; CPU iPhone OS {d['ios']} like Mac OS X) AppleWebKit/605.1.15 "
-        f"(KHTML, like Gecko) Mobile/15E148 [FBAN/FBIOS;FBDV/{d['model']};FBMD/iPhone;FBSN/iOS;"
+        f"(KHTML, like Gecko) Mobile/15E148 [FBAN/FBIOS;FBAV/{app_ver};FBBV/{fbbv};FBDV/{d['model']};FBMD/iPhone;FBSN/iOS;"
         f"FBSV/{d['ios'].replace('_','.')};FBSS/{int(float(d['scale']))};FBID/phone;FBLC/{fblc};FBOP/5;FBRV/{fbbv};IABMV/1]"
     )
 
@@ -12132,9 +12213,16 @@ def _detect_inapp(ua: str) -> dict:
     import re
     ua_low = ua or ""
     # TikTok  →  musical_ly_XX.X.X   or   trill_XX.X.X
+    # 2026-06 BUGFIX: musical_ly_NNNNN / trill_NNNNNN is a BUILD CODE,
+    # not the human app version. Real TikTok UAs always also carry an
+    # `app_version/<X.X.X>` token (e.g. `app_version/34.5.1`). Prefer that
+    # for display since the build code (e.g. "2034050010") looks like
+    # garbage on the analytics page.
+    m_av = re.search(r"app_version/([\d.]+)", ua_low)
     m = re.search(r"(?:musical_ly|trill)_([\d.]+)", ua_low)
     if m:
-        return {"app": "tiktok", "app_name": "TikTok", "app_version": m.group(1), "is_inapp": True}
+        ver = (m_av.group(1) if m_av else m.group(1))
+        return {"app": "tiktok", "app_name": "TikTok", "app_version": ver, "is_inapp": True}
     # Instagram  →  Instagram 412.0.0.35.87
     m = re.search(r"Instagram\s+([\d.]+)", ua_low)
     if m:
@@ -12171,15 +12259,19 @@ def _detect_inapp(ua: str) -> dict:
     m = re.search(r"CriOS/([\d.]+)", ua_low)
     if m:
         return {"app": "gchrome", "app_name": "Google Chrome (iOS)", "app_version": m.group(1), "is_inapp": True}
-    # Twitter
-    m = re.search(r"TwitterAndroid/([\d.]+)|Twitter for iPhone/([\d.]+)", ua_low)
+    # Twitter  →  TwitterAndroid/<ver|rev>  |  TwitterIOS/<rev>  |  Twitter for iPhone/<ver>
+    # 2026-06 BUGFIX: coerce_ua_for_platform emits `TwitterIOS/<rev>` for
+    # iOS coercions, but the previous regex only matched `Twitter for
+    # iPhone/<ver>` so iOS coerced UAs were missed entirely.
+    m = re.search(r"TwitterAndroid/([\d.]+)|TwitterIOS/([\d.]+)|Twitter for iPhone/([\d.]+)", ua_low)
+    if m:
+        ver = m.group(1) or m.group(2) or m.group(3)
+        return {"app": "twitter", "app_name": "Twitter/X", "app_version": ver, "is_inapp": True}
+    # LinkedIn  →  LinkedInApp/<ver>  or  com.linkedin.android/<ver>
+    m = re.search(r"LinkedInApp/([\d.]+)|com\.linkedin\.android/([\d.]+)", ua_low)
     if m:
         ver = m.group(1) or m.group(2)
-        return {"app": "twitter", "app_name": "Twitter/X", "app_version": ver, "is_inapp": True}
-    # LinkedIn
-    m = re.search(r"LinkedInApp/([\d.]+)", ua_low)
-    if m:
-        return {"app": "linkedin", "app_name": "LinkedIn", "app_version": m.group(1), "is_inapp": True}
+        return {"app": "linkedin", "app_name": "LinkedIn", "app_version": ver, "is_inapp": True}
     return {"app": None, "app_name": "Browser", "app_version": None, "is_inapp": False}
 
 
@@ -16409,6 +16501,15 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         "browser": device_info["browser"],
         "browser_version": device_info.get("browser_version", ""),
         "browser_display": device_info.get("browser_display", device_info["browser"]),
+        # 2026-06 BUG-C FIX — persist in-app fields so the Clicks UI /
+        # analytics can render the real source app (Facebook / Instagram
+        # / TikTok / YouTube / WhatsApp / …) and version instead of a
+        # generic "Mobile Safari" lookup. Always written (False for
+        # plain desktop / mobile browsers).
+        "is_inapp": bool(device_info.get("is_inapp", False)),
+        "inapp_app": device_info.get("inapp_app"),
+        "inapp_app_name": device_info.get("inapp_app_name"),
+        "inapp_app_version": device_info.get("inapp_app_version"),
         "url_params": url_params,  # Store URL params for analysis
         "sub1": sub1 or None,
         "sub2": sub2 or None,
@@ -16526,7 +16627,41 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         destination_url = build_redirect_url(destination_url, platform_params)
     elif custom_params:
         destination_url = build_redirect_url(destination_url, custom_params)
-    
+
+    # ── 2026-06 BUG-E FIX: Offer-URL macro substitution ───────────────
+    # Affiliate networks (Cake / Affise / Tune / HasOffers / etc.) populate
+    # the raw-UA / IP / referrer columns on THEIR dashboard from query
+    # params, not the HTTP headers (they parse Browser / Device from the
+    # header but expose raw values only via tokenized macros). When the
+    # operator's offer URL carries `{user_agent}`, `{ua}`, `{ip}`,
+    # `{country}`, `{city}`, `{region}`, `{referer}`, `{referrer}` or
+    # `{clickid}`, we substitute them with the URL-encoded values from
+    # this visit before issuing the 302. Without this, the advertiser
+    # dashboard rendered "User Agent: -" on every visit — the customer's
+    # screenshot showed exactly that. Idempotent for URLs that don't use
+    # any of the macros — adds zero overhead and zero behaviour change
+    # to legacy offers.
+    try:
+        from urllib.parse import quote as _q
+        if "{" in destination_url and "}" in destination_url:
+            _macros = {
+                "{user_agent}": _q(user_agent or "", safe=""),
+                "{ua}":         _q(user_agent or "", safe=""),
+                "{ip}":         _q(primary_ip_for_storage or client_ip or "", safe=""),
+                "{country}":    _q(country or "", safe=""),
+                "{city}":       _q(city or "", safe=""),
+                "{region}":     _q(region or "", safe=""),
+                "{referer}":    _q(referrer or "", safe=""),
+                "{referrer}":   _q(referrer or "", safe=""),
+                "{clickid}":    _q(click_id or "", safe=""),
+            }
+            for _k, _v in _macros.items():
+                if _k in destination_url:
+                    destination_url = destination_url.replace(_k, _v)
+    except Exception as _macro_err:
+        # Defensive: never break the redirect because of macro logic.
+        logger.warning(f"[/r/{short_code}] offer-URL macro substitution skipped: {_macro_err}")
+
     # Set referrer policy based on referrer_mode
     headers = {}
     if referrer_mode == "no_referrer":

@@ -1441,6 +1441,15 @@ def _is_mobile_ua(ua: str) -> str:
     """Return "android" | "ios" | "" — detects mobile UA family.
 
     "" means desktop / bot / unparseable → caller should NOT coerce.
+
+    2026-06 hardening (Bug F): the Android branch used to require BOTH
+    the `android` keyword AND one of `Mobile` / `; wv)` / `Build/`. That
+    rejected the common "Linux; Android 14) Chrome/128.0 Safari" shape
+    that customers paste from public UA lists — those UAs silently
+    skipped coercion and hit advertiser dashboards as a "Chrome on
+    Android with TikTok referer" mismatch (instant fraud-flag).
+    We now accept the `android` keyword by itself; tablet-only / TV
+    UAs are filtered out by the absence of any phone-shape token.
     """
     if not ua:
         return ""
@@ -1449,9 +1458,57 @@ def _is_mobile_ua(ua: str) -> str:
     # UAs include "android" inside a webview profile name (rare but real).
     if ("iphone" in ual or "ipad" in ual or "ipod" in ual) and "like mac os x" in ual:
         return "ios"
-    if "android" in ual and ("mobile" in ual or "; wv)" in ual or "build/" in ual):
+    if "android" in ual:
+        # Exclude obvious TV / desktop-mode UAs.
+        if "android tv" in ual or "smart-tv" in ual or "googletv" in ual:
+            return ""
+        # Anything else with `android` is treated as Android mobile — we
+        # CAN'T tell phone vs tablet from UA reliably and the in-app
+        # webview suffix is correct for both surfaces.
         return "android"
     return ""
+
+
+def _ensure_android_device_token(ua: str) -> str:
+    """When a coerced Android UA lacks the `; <model> Build/<id>` token
+    (advertiser parsers need it to populate the Device column with a
+    real brand/model — without it dashboards render "Unknown Generic
+    Android"), inject a realistic recent device. Idempotent: returns
+    `ua` unchanged when a Build/ token is already present.
+
+    2026-06 BUG-G FIX (paired with Bug F coercion broadening).
+    """
+    if not ua:
+        return ua or ""
+    if re.search(r"Build/[A-Za-z0-9.\-_]+", ua):
+        return ua
+    # Pool of recent real Android phone tokens captured in 2025–2026.
+    pool = [
+        ("SM-S928U",  "UP1A.231005.007"),  # Galaxy S24 Ultra
+        ("SM-S928B",  "UP1A.231005.007"),
+        ("SM-S921U",  "UP1A.231005.007"),  # Galaxy S24
+        ("SM-A546U",  "UP1A.231005.007"),  # Galaxy A54
+        ("Pixel 8",    "AP2A.240805.005"),
+        ("Pixel 8 Pro","AP2A.240805.005"),
+        ("Pixel 7",    "UD2A.240805.003"),
+        ("CPH2423",    "RKQ1.211119.001"),  # OnePlus Nord
+        ("SM-G991B",   "TP1A.220624.014"),  # Galaxy S21
+        ("SM-A536U",   "TP1A.220624.014"),  # Galaxy A53
+        ("23021RAA2Y", "TP1A.220624.014"),  # Redmi Note 12
+    ]
+    model, build = random.choice(pool)
+    # Match `Linux; Android <ver>)` and inject `; <model> Build/<id>)`
+    # before the closing paren. Falls back unchanged if no match.
+    pattern = r"(Linux;\s*Android\s+[\d.]+)\s*\)"
+    if not re.search(pattern, ua, flags=re.IGNORECASE):
+        return ua
+    return re.sub(
+        pattern,
+        lambda m: f"{m.group(1)}; {model} Build/{build})",
+        ua,
+        count=1,
+        flags=re.IGNORECASE,
+    )
 
 
 def _extract_android_build_token(ua: str) -> str:
@@ -1749,6 +1806,12 @@ def coerce_ua_for_platform(ua: str, platform: str) -> str:
         # "Version/4.0" token. If they're missing, synthesise the most
         # common form before appending the suffix.
         if family == "android":
+            # 2026-06 BUG-G FIX: ensure a "; <model> Build/<id>" token is
+            # present so advertiser parsers populate Device with a real
+            # brand/model instead of "Unknown Generic Android". Without
+            # this, every plain "Linux; Android 14)" UA the customer
+            # pastes ends up labelled as Unknown on the offer dashboard.
+            new_ua = _ensure_android_device_token(new_ua)
             # Insert "; wv" right before the closing ")" of the Linux/Android
             # parenthesised section if not already present.
             if "; wv)" not in new_ua and "wv)" not in new_ua:
