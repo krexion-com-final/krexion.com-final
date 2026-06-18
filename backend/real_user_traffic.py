@@ -619,6 +619,190 @@ RUT_JOBS: Dict[str, Dict[str, Any]] = {}
 
 
 # ──────────────────────────────────────────────────────────────────────
+# 2026-06 — Live Visual Grid: Manual Takeover + Hybrid Streaming registries
+# ──────────────────────────────────────────────────────────────────────
+# Purpose (user ask):
+#   "live visual grid mein sab smoothly live dikhe… or live visual grid mein
+#    manually kam krne ka b option ho jese profile khol kr kam krte hein…
+#    agr stuck ho jay to manuualy wo kaam kr liya jay"
+#
+# Three small in-memory registries — all STRICTLY ADDITIVE (no existing
+# code path reads/writes them unless the new endpoints / new step-loop
+# hook are exercised). Customer flows that never open the new UI behave
+# byte-for-byte identical to before.
+#
+#   _LIVE_PAGES   — {"job_id:visit_idx": playwright.Page}
+#       Set when a visit's browser context is ready, cleared when the
+#       visit ends. Used by the input-forwarding endpoints
+#       (/visits/{idx}/input/*) to drive the page directly via CDP.
+#
+#   _PAUSED_VISITS — {"job_id:visit_idx", ...}
+#       The automation step loop checks this set BEFORE each step. If
+#       the visit is paused, the loop awaits 0.5s and re-checks. Once
+#       the operator resumes, the loop picks up from the next step
+#       (no state is lost). Auto-cancel also lifts the pause.
+#
+#   _STREAM_MODE   — {"job_id:visit_idx": "off"|"grid"|"expanded"}
+#       Drives the per-visit periodic screenshot daemon (`_live_streamer`).
+#       "off"      → no daemon (default; preserves CPU/bandwidth)
+#       "grid"     → ~700 ms cadence, jpeg quality 55 (covers idle waits)
+#       "expanded" → ~150 ms cadence, jpeg quality 60 (single-tile focus)
+#
+# Keys are STRINGS of the form "{job_id}:{visit_idx}" to avoid the
+# perennial "tuple vs (str,int)" footguns when persisting through JSON.
+# ──────────────────────────────────────────────────────────────────────
+_LIVE_PAGES: Dict[str, Any] = {}        # value type is playwright.async_api.Page
+_PAUSED_VISITS: set[str] = set()
+_STREAM_MODE: Dict[str, str] = {}        # "off" | "grid" | "expanded"
+_STREAM_TASKS: Dict[str, Any] = {}       # asyncio.Task per streaming visit
+
+
+def _live_key(job_id: str, visit_idx: int) -> str:
+    return f"{job_id}:{int(visit_idx)}"
+
+
+def register_live_page(job_id: str, visit_idx: int, page: Any) -> None:
+    """Engine hook — called once a visit's Page is ready. Idempotent."""
+    try:
+        _LIVE_PAGES[_live_key(job_id, visit_idx)] = page
+    except Exception:
+        pass
+
+
+def unregister_live_page(job_id: str, visit_idx: int) -> None:
+    """Engine hook — called when a visit finishes (success, fail, cancel)."""
+    key = _live_key(job_id, visit_idx)
+    _LIVE_PAGES.pop(key, None)
+    _PAUSED_VISITS.discard(key)
+    _STREAM_MODE.pop(key, None)
+    # Cancel any orphan stream task
+    t = _STREAM_TASKS.pop(key, None)
+    if t is not None:
+        try:
+            t.cancel()
+        except Exception:
+            pass
+
+
+def get_live_page(job_id: str, visit_idx: int) -> Any:
+    return _LIVE_PAGES.get(_live_key(job_id, visit_idx))
+
+
+def is_visit_paused(job_id: str, visit_idx: int) -> bool:
+    return _live_key(job_id, visit_idx) in _PAUSED_VISITS
+
+
+def set_visit_paused(job_id: str, visit_idx: int, paused: bool) -> None:
+    key = _live_key(job_id, visit_idx)
+    if paused:
+        _PAUSED_VISITS.add(key)
+    else:
+        _PAUSED_VISITS.discard(key)
+
+
+def get_stream_mode(job_id: str, visit_idx: int) -> str:
+    return _STREAM_MODE.get(_live_key(job_id, visit_idx), "off")
+
+
+async def set_stream_mode(job_id: str, visit_idx: int, mode: str) -> None:
+    """Set stream mode + spin up/down the per-visit screenshot daemon."""
+    mode = (mode or "off").lower().strip()
+    if mode not in ("off", "grid", "expanded"):
+        mode = "off"
+    key = _live_key(job_id, visit_idx)
+    _STREAM_MODE[key] = mode
+    # Cancel old task (the next start will pick up the new cadence)
+    old = _STREAM_TASKS.pop(key, None)
+    if old is not None:
+        try:
+            old.cancel()
+        except Exception:
+            pass
+    if mode == "off":
+        return
+    page = _LIVE_PAGES.get(key)
+    if page is None:
+        return
+    # Fire-and-forget daemon — silently exits if page closes
+    _STREAM_TASKS[key] = asyncio.create_task(
+        _live_streamer(job_id, visit_idx, page)
+    )
+
+
+async def _live_streamer(job_id: str, visit_idx: int, page: Any) -> None:
+    """Per-visit screenshot daemon. Reads cadence from _STREAM_MODE so
+    the operator can switch between grid (light) and expanded (smooth)
+    without restarting the daemon. Exits when mode goes back to "off"
+    or when the page closes.
+
+    STRICTLY READ-ONLY against the page object — only captures
+    screenshots. Does NOT interfere with the automation step loop.
+    """
+    key = _live_key(job_id, visit_idx)
+    last_capture = 0.0
+    fail_streak = 0
+    try:
+        while True:
+            mode = _STREAM_MODE.get(key, "off")
+            if mode == "off":
+                return
+            # Cadence by mode
+            if mode == "expanded":
+                interval = 0.15  # ~6-7 fps
+                quality = 60
+            else:
+                interval = 0.70  # ~1.4 fps — fills the gaps between
+                                 # script-emitted screenshots
+                quality = 55
+            now = time.time()
+            wait = max(0.0, interval - (now - last_capture))
+            if wait > 0:
+                await asyncio.sleep(wait)
+            last_capture = time.time()
+            try:
+                if getattr(page, "is_closed", lambda: False)():
+                    return
+                buf = await page.screenshot(
+                    type="jpeg", quality=quality, full_page=False,
+                    timeout=2500
+                )
+                fail_streak = 0
+                import base64 as _b64
+                b64 = "data:image/jpeg;base64," + _b64.b64encode(buf).decode("ascii")
+                # Mirror into RUT_JOBS so the existing /live-visits poll
+                # picks it up without any extra plumbing
+                j = RUT_JOBS.get(job_id)
+                if j is None:
+                    return
+                lv = j.setdefault("live_visits", {})
+                v = lv.get(str(visit_idx))
+                if v is None:
+                    # Visit slot not yet created by the progress callback —
+                    # just wait for next tick
+                    continue
+                v["latest_frame_b64"] = b64
+                try:
+                    v["page_url"] = page.url
+                except Exception:
+                    pass
+                v["frame_source"] = mode
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                fail_streak += 1
+                if fail_streak >= 8:
+                    return
+                await asyncio.sleep(0.5)
+    except Exception:
+        return
+
+
+# ──────────────────────────────────────────────────────────────────────
+# RUT_JOBS — main per-job state registry
+# ──────────────────────────────────────────────────────────────────────
+
+
+# ──────────────────────────────────────────────────────────────────────
 # UA → Referer auto-detection
 # ──────────────────────────────────────────────────────────────────────
 # When a residential visit's user-agent string identifies an in-app
@@ -7455,6 +7639,18 @@ async def run_real_user_traffic_job(
 
                 page = await context.new_page()
 
+                # 2026-06 — Live Visual Grid: register this page so the
+                # operator can drive it directly via the new manual-
+                # takeover endpoints (/visits/{idx}/input/*, /pause,
+                # /resume) and so the per-visit screenshot daemon can
+                # snap smooth frames between recorded steps. This call
+                # is idempotent and has zero side-effects when none of
+                # the new UI features are used.
+                try:
+                    register_live_page(job_id, i + 1, page)
+                except Exception:
+                    pass
+
                 # ── 2026-05 — TRACKER-SIDE duplicate-IP pre-flight check ─
                 # Earlier attempts (ipwho.is via the browser) returned the
                 # exit-IP from a DIFFERENT origin's connection pool — and
@@ -8442,6 +8638,8 @@ async def run_real_user_traffic_job(
                                 on_screenshot=_on_user_capture,
                                 user_id=link_owner_id,   # enable self-healing aliases (2026-01)
                                 on_step_progress=_visit_progress_cb,  # 2026-01: real-time per-visit feed
+                                job_id=job_id,           # 2026-06: manual takeover pause hook
+                                visit_idx=i + 1,         # 2026-06: manual takeover pause hook
                             )
                         )
 
@@ -9192,6 +9390,17 @@ async def run_real_user_traffic_job(
             entry["status"] = "failed"
             entry["error"] = f"{type(e).__name__}: {str(e)[:180]}"
         finally:
+            # 2026-06 — Live Visual Grid cleanup: clear this visit's
+            # entry from the manual-takeover registries so any in-
+            # flight pause flag is dropped (otherwise a "Stop job"
+            # while paused would strand the next-spawned visit), and
+            # so the streaming daemon shuts itself down on its next
+            # tick. Safe to call even if register_live_page was never
+            # invoked for this visit.
+            try:
+                unregister_live_page(job_id, i + 1)
+            except Exception:
+                pass
             # Browser is shared across visits — we only close the per-visit
             # context here. The shared browser is closed by the parent job
             # once ALL workers have finished.
@@ -11252,6 +11461,8 @@ async def _execute_automation_steps(
     collect_timings: bool = False,
     user_id: Optional[str] = None,
     on_step_progress: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    job_id: Optional[str] = None,
+    visit_idx: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Execute a user-provided automation script step-by-step. Returns
     {status, error?, executed_steps, step_results?}.  Each step format:
@@ -11403,6 +11614,47 @@ async def _execute_automation_steps(
         for idx, step in enumerate(steps or []):
             if not isinstance(step, dict):
                 continue
+            # 2026-06 — Manual takeover: pause-and-hold hook for the
+            # Live Visual Grid. Customer ask:
+            #   "agr stuck ho jay to manuualy wo kaam kr liya jay"
+            # When the operator pauses this visit from the UI, the
+            # step loop quietly waits in 0.5-s ticks until the operator
+            # resumes (or until the visit's slot is unregistered by
+            # the parent cleanup, which discards the pause flag — so
+            # the loop is guaranteed to exit even if the UI goes away).
+            # No-op when the new feature isn't used (visit_idx is None
+            # OR the visit was never paused), so the existing hot path
+            # is byte-for-byte identical.
+            if job_id and visit_idx:
+                _paused_idle_since = None
+                while is_visit_paused(job_id, visit_idx):
+                    if _paused_idle_since is None:
+                        _paused_idle_since = _time_mod.perf_counter()
+                        try:
+                            if on_step_progress is not None:
+                                await on_step_progress({
+                                    "idx": idx, "action": "pause", "status": "paused",
+                                    "detail": "Visit paused by operator — awaiting Resume",
+                                })
+                        except Exception:
+                            pass
+                    try:
+                        await asyncio.sleep(0.5)
+                    except asyncio.CancelledError:
+                        raise
+                    # Bail if the visit's page got closed externally
+                    # (cancel / job-stop) so we don't loop forever.
+                    if get_live_page(job_id, visit_idx) is None:
+                        break
+                if _paused_idle_since is not None:
+                    try:
+                        if on_step_progress is not None:
+                            await on_step_progress({
+                                "idx": idx, "action": "pause", "status": "resumed",
+                                "detail": "Operator resumed automation",
+                            })
+                    except Exception:
+                        pass
             action = (step.get("action") or "").strip().lower()
             _t_step_start = _time_mod.perf_counter() if collect_timings else 0.0
             _step_ok = True

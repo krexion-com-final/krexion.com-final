@@ -8678,6 +8678,225 @@ async def rut_cancel_visit(
     return result
 
 
+# ──────────────────────────────────────────────────────────────────────
+# 2026-06 — Live Visual Grid: Manual Takeover + Hybrid Streaming endpoints
+# ──────────────────────────────────────────────────────────────────────
+# Customer ask (Roman Urdu):
+#   "live visual grid mein sab smoothly live dikhe na k screenshot k mood
+#    mein… or live visual grid mein manually kam krne ka b option ho jese
+#    profile khol kr kam krte hien… agr stuck ho jay to manuualy wo kaam
+#    kr liya jay."
+#
+# Six endpoints, all owner-gated against _RUT_JOBS[job_id]["user_id"]:
+#
+#   POST /visits/{idx}/pause   → suspend the automation step loop for THIS
+#                                visit (the rest of the job keeps running).
+#   POST /visits/{idx}/resume  → lift the pause; step loop continues from
+#                                where it was waiting.
+#   POST /visits/{idx}/stream  → switch streaming cadence ("off" | "grid"
+#                                | "expanded") for THIS visit. Drives the
+#                                per-visit screenshot daemon — covers the
+#                                idle gaps between script-emitted frames
+#                                that used to make a working visit look
+#                                "stuck" in the UI.
+#   POST /visits/{idx}/input   → unified input-forwarding endpoint. Body
+#                                `{"kind": "click|type|key|scroll|nav|back",
+#                                  "payload": {...}}`. Pushes the input
+#                                straight to the live Playwright page so
+#                                the operator can finish a stuck visit by
+#                                hand (e.g. click a deal the recorded
+#                                automation missed).
+#
+# Everything is ADDITIVE — no existing endpoint, no existing flow, no
+# existing customer behaviour changes if the new UI is never opened.
+# ──────────────────────────────────────────────────────────────────────
+def _rut_lookup_visit(job_id: str, visit_index: int, user: dict) -> Dict[str, Any]:
+    """Owner-gated lookup. Raises HTTPException on miss."""
+    j = _RUT_JOBS.get(job_id)
+    if j is None:
+        raise HTTPException(status_code=404, detail="Job not found or not running")
+    if j.get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Job not found")
+    lv = j.get("live_visits") or {}
+    v = lv.get(str(visit_index))
+    if v is None:
+        raise HTTPException(status_code=404, detail="Visit not found in this job")
+    return v
+
+
+@api_router.post("/real-user-traffic/jobs/{job_id}/visits/{visit_index}/pause")
+async def rut_visit_pause(
+    job_id: str,
+    visit_index: int,
+    user: dict = Depends(get_current_user),
+):
+    check_user_feature(user, "real_user_traffic")
+    v = _rut_lookup_visit(job_id, visit_index, user)
+    try:
+        from real_user_traffic import set_visit_paused, get_live_page
+        if get_live_page(job_id, visit_index) is None:
+            raise HTTPException(status_code=409, detail="Visit has no live page (already finished)")
+        set_visit_paused(job_id, visit_index, True)
+        # Mirror into the visit snapshot so the UI reflects it immediately
+        v["paused"] = True
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"pause_failed: {e}")
+    return {"ok": True, "paused": True, "visit_idx": visit_index}
+
+
+@api_router.post("/real-user-traffic/jobs/{job_id}/visits/{visit_index}/resume")
+async def rut_visit_resume(
+    job_id: str,
+    visit_index: int,
+    user: dict = Depends(get_current_user),
+):
+    check_user_feature(user, "real_user_traffic")
+    v = _rut_lookup_visit(job_id, visit_index, user)
+    try:
+        from real_user_traffic import set_visit_paused
+        set_visit_paused(job_id, visit_index, False)
+        v["paused"] = False
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"resume_failed: {e}")
+    return {"ok": True, "paused": False, "visit_idx": visit_index}
+
+
+@api_router.post("/real-user-traffic/jobs/{job_id}/visits/{visit_index}/stream")
+async def rut_visit_stream(
+    job_id: str,
+    visit_index: int,
+    request: Request,
+    user: dict = Depends(get_current_user),
+):
+    """Switch the per-visit screenshot daemon between off / grid (low fps,
+    cheap, covers idle gaps) / expanded (high fps, focused single tile).
+    The frontend calls this when the user opens the grid, opens an
+    expanded tile, or closes either — so CPU/bandwidth scales with what
+    the operator is actually watching."""
+    check_user_feature(user, "real_user_traffic")
+    _ = _rut_lookup_visit(job_id, visit_index, user)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    mode = (body.get("mode") or "off").lower().strip()
+    if mode not in ("off", "grid", "expanded"):
+        raise HTTPException(status_code=400, detail="mode must be off|grid|expanded")
+    try:
+        from real_user_traffic import set_stream_mode
+        await set_stream_mode(job_id, visit_index, mode)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"stream_failed: {e}")
+    return {"ok": True, "mode": mode, "visit_idx": visit_index}
+
+
+@api_router.post("/real-user-traffic/jobs/{job_id}/visits/{visit_index}/input")
+async def rut_visit_input(
+    job_id: str,
+    visit_index: int,
+    request: Request,
+    user: dict = Depends(get_current_user),
+):
+    """Forward a single input action to the live Playwright page. Body:
+
+        {"kind": "click",  "payload": {"x": 800, "y": 450,
+                                       "frame_w": 1280, "frame_h": 720}}
+        {"kind": "type",   "payload": {"text": "hello world",
+                                       "delay_ms": 18}}
+        {"kind": "key",    "payload": {"key": "Enter"}}
+        {"kind": "scroll", "payload": {"dx": 0, "dy": 400}}
+        {"kind": "nav",    "payload": {"url": "https://..."}}
+        {"kind": "back",   "payload": {}}
+
+    Coordinates are in the frame the operator clicked on — we scale
+    them to the live page's viewport so a click on a downscaled
+    thumbnail still lands on the correct DOM element.
+
+    Safety: this endpoint REFUSES to send input if the visit is NOT
+    paused (409 Conflict). That avoids the race where the recorded
+    automation is mid-click while the operator's hand is also moving.
+    Operator must call /pause first, perform manual actions, then
+    /resume."""
+    check_user_feature(user, "real_user_traffic")
+    _ = _rut_lookup_visit(job_id, visit_index, user)
+    try:
+        from real_user_traffic import (
+            is_visit_paused, get_live_page,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"engine_unavailable: {e}")
+    if not is_visit_paused(job_id, visit_index):
+        raise HTTPException(
+            status_code=409,
+            detail="Visit must be paused before forwarding manual input"
+        )
+    page = get_live_page(job_id, visit_index)
+    if page is None:
+        raise HTTPException(status_code=410, detail="Visit page has closed")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    kind = (body.get("kind") or "").lower().strip()
+    payload = body.get("payload") or {}
+    try:
+        if kind == "click":
+            # Scale frame coordinates → viewport coordinates so a click on
+            # the downscaled <img> in the UI lands on the right DOM node.
+            try:
+                vp = page.viewport_size or {"width": 1280, "height": 720}
+            except Exception:
+                vp = {"width": 1280, "height": 720}
+            fw = float(payload.get("frame_w") or vp["width"] or 1280)
+            fh = float(payload.get("frame_h") or vp["height"] or 720)
+            sx = float(vp["width"]) / fw if fw else 1.0
+            sy = float(vp["height"]) / fh if fh else 1.0
+            x = float(payload.get("x") or 0) * sx
+            y = float(payload.get("y") or 0) * sy
+            button = (payload.get("button") or "left").lower()
+            await page.mouse.move(x, y)
+            await page.mouse.click(x, y, button=button, delay=int(payload.get("delay_ms") or 35))
+            result = {"x": round(x, 1), "y": round(y, 1)}
+        elif kind == "type":
+            text = str(payload.get("text") or "")
+            if not text:
+                raise HTTPException(status_code=400, detail="type.payload.text required")
+            await page.keyboard.type(text, delay=int(payload.get("delay_ms") or 18))
+            result = {"typed": len(text)}
+        elif kind == "key":
+            key = str(payload.get("key") or "").strip()
+            if not key:
+                raise HTTPException(status_code=400, detail="key.payload.key required")
+            await page.keyboard.press(key)
+            result = {"key": key}
+        elif kind == "scroll":
+            dx = float(payload.get("dx") or 0)
+            dy = float(payload.get("dy") or 0)
+            await page.mouse.wheel(dx, dy)
+            result = {"dx": dx, "dy": dy}
+        elif kind == "nav":
+            url = str(payload.get("url") or "").strip()
+            if not url:
+                raise HTTPException(status_code=400, detail="nav.payload.url required")
+            await page.goto(url, timeout=30000, wait_until="domcontentloaded")
+            result = {"url": page.url}
+        elif kind == "back":
+            try:
+                await page.go_back(timeout=15000, wait_until="domcontentloaded")
+            except Exception:
+                pass
+            result = {"url": page.url}
+        else:
+            raise HTTPException(status_code=400, detail=f"unknown input kind: {kind!r}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"input_failed: {type(e).__name__}: {e}")
+    return {"ok": True, "kind": kind, "result": result, "visit_idx": visit_index}
+
+
 @api_router.get("/real-user-traffic/jobs/{job_id}/screenshot/{filename}")
 async def rut_screenshot(
     job_id: str,

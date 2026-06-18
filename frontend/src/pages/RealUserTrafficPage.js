@@ -33,6 +33,12 @@ import {
   X,
   Zap,
   Loader2,
+  Pause,
+  Play as PlayIcon,
+  MousePointer,
+  Hand,
+  Keyboard,
+  ArrowUpDown,
 } from "lucide-react";
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
@@ -675,6 +681,145 @@ export default function RealUserTrafficPage() {
   const [expandedVisit, setExpandedVisit] = useState(null); // tile id when expanded to fullscreen
   const visualGridTimerRef = useRef(null);
 
+  // ─── 2026-06 — Manual Takeover + Hybrid Streaming state ──────────────
+  // Customer ask (Roman Urdu): "live visual grid mein sab smoothly live
+  // dikhe… or live visual grid mein manually kam krne ka b option ho jese
+  // profile khol kr kam krte hien… agr stuck ho jay to manuualy wo kaam
+  // kr liya jay".
+  //
+  // pausedVisits  — Set of visit_idx strings currently paused. UI flip
+  //                 between "Pause" and "Resume" buttons; sending input
+  //                 only enabled while paused.
+  // controlVisit  — visit_idx ("1","2"…) currently in interactive control
+  //                 mode (NULL = view-only). When non-null the live frame
+  //                 in the expanded modal becomes click-able and the
+  //                 keyboard listener routes key presses to /input/key.
+  // controlText   — buffered text in the manual-type input box.
+  const [pausedVisits, setPausedVisits] = useState({}); // {"1": true, ...}
+  const [controlVisit, setControlVisit] = useState(null);
+  const [controlText, setControlText] = useState("");
+  const [inputInFlight, setInputInFlight] = useState(false);
+  const frameImgRef = useRef(null);
+
+  // Helper: PATCH-style call to one of the new manual-takeover endpoints.
+  // Wraps fetch + error toast so callers stay tight. Always returns the
+  // parsed JSON (or null on failure).
+  const _rutCallVisit = async (jobId, visitIdx, path, body) => {
+    try {
+      const r = await fetch(
+        `${API_URL}/api/real-user-traffic/jobs/${jobId}/visits/${visitIdx}/${path}`,
+        {
+          method: "POST",
+          headers: { ...authH(), "Content-Type": "application/json" },
+          body: body !== undefined ? JSON.stringify(body) : undefined,
+        }
+      );
+      if (!r.ok) {
+        const t = await r.text();
+        let msg = `${path} failed (${r.status})`;
+        try { msg = JSON.parse(t).detail || msg; } catch (_) { /* ignore */ }
+        toast.error(msg);
+        return null;
+      }
+      return await r.json();
+    } catch (e) {
+      toast.error(`${path} failed: ${e.message || e}`);
+      return null;
+    }
+  };
+
+  // Stream-mode switcher. Called whenever the operator opens / closes
+  // the grid, or expands / collapses a tile. The backend daemon adjusts
+  // its screenshot cadence so we get smooth-ish updates without burning
+  // CPU on visits the operator isn't watching.
+  const setVisitStreamMode = async (visitIdx, mode) => {
+    if (!activeJob?.job_id) return;
+    await _rutCallVisit(activeJob.job_id, visitIdx, "stream", { mode });
+  };
+
+  // Pause / Resume the JSON automation for THIS visit.
+  const pauseVisit = async (visitIdx) => {
+    if (!activeJob?.job_id) return;
+    const r = await _rutCallVisit(activeJob.job_id, visitIdx, "pause");
+    if (r && r.ok) {
+      setPausedVisits((p) => ({ ...p, [String(visitIdx)]: true }));
+      toast.success(`Visit #${String(visitIdx).padStart(3, "0")} paused`);
+    }
+  };
+
+  const resumeVisit = async (visitIdx) => {
+    if (!activeJob?.job_id) return;
+    const r = await _rutCallVisit(activeJob.job_id, visitIdx, "resume");
+    if (r && r.ok) {
+      setPausedVisits((p) => {
+        const n = { ...p };
+        delete n[String(visitIdx)];
+        return n;
+      });
+      // Leaving manual-control mode when we resume
+      if (controlVisit === String(visitIdx)) setControlVisit(null);
+      toast.success(`Visit #${String(visitIdx).padStart(3, "0")} resumed`);
+    }
+  };
+
+  // Forward an input action to the live page. `kind` ∈
+  // {"click","type","key","scroll","nav","back"}. Backend rejects with
+  // 409 if visit isn't paused — we surface that as a hint.
+  const sendVisitInput = async (visitIdx, kind, payload) => {
+    if (!activeJob?.job_id) return null;
+    setInputInFlight(true);
+    try {
+      const r = await _rutCallVisit(activeJob.job_id, visitIdx, "input",
+        { kind, payload });
+      return r;
+    } finally {
+      setInputInFlight(false);
+    }
+  };
+
+  // Coordinates from a click on the rendered <img> → frame coords for the
+  // backend (which then scales to viewport). We pass the rendered img
+  // dimensions as frame_w/frame_h so the backend can scale precisely.
+  const handleFrameClick = async (e, visitIdx) => {
+    if (controlVisit !== String(visitIdx)) return;
+    if (!pausedVisits[String(visitIdx)]) {
+      toast.warning("Pause the visit first to take manual control");
+      return;
+    }
+    const img = e.currentTarget;
+    if (!img || !img.getBoundingClientRect) return;
+    const rect = img.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    await sendVisitInput(visitIdx, "click", {
+      x, y,
+      frame_w: rect.width,
+      frame_h: rect.height,
+      button: e.button === 2 ? "right" : "left",
+    });
+  };
+
+  // Keyboard listener — only active while a visit is in control mode.
+  useEffect(() => {
+    if (!controlVisit) return undefined;
+    const handler = async (e) => {
+      // Ignore keystrokes that are typed into our own input fields
+      const tag = (e.target?.tagName || "").toLowerCase();
+      if (tag === "input" || tag === "textarea" || e.target?.isContentEditable) {
+        return;
+      }
+      // Map browser key names to Playwright key names where they differ
+      const k = e.key;
+      // Allow Cmd/Ctrl+C/V/A/Z to behave locally — don't forward those
+      if ((e.metaKey || e.ctrlKey) && k.length === 1) return;
+      e.preventDefault();
+      await sendVisitInput(controlVisit, "key", { key: k });
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controlVisit, pausedVisits]);
+
   // Diagnostics modal — shows macro-leak + stuck-visit events recorded
   // during the run. Powers the "Why didn't this offer convert?" workflow.
   const [diagModalOpen, setDiagModalOpen] = useState(false);
@@ -925,21 +1070,54 @@ export default function RealUserTrafficPage() {
     setVisualGridOpen(true);
     setVisualGridMinimized(false);
     fetchLiveVisits(activeJob.job_id);
-    // Poll every 800ms — slower than visual recorder because of grid load
+    // 2026-06 — Hybrid streaming: faster poll (400 ms) when grid is open
+    // so the backend daemon's ~700 ms grid-mode frames OR ~150 ms expanded
+    // frames both feel fresh. Without this, frontend polling becomes the
+    // bottleneck and the smooth backend updates are invisible.
     if (visualGridTimerRef.current) clearInterval(visualGridTimerRef.current);
     visualGridTimerRef.current = setInterval(
-      () => fetchLiveVisits(activeJob.job_id), 800
+      () => fetchLiveVisits(activeJob.job_id), 400
     );
   };
 
   const closeVisualGrid = () => {
+    // 2026-06 — Turn off ALL streaming daemons for this job before closing
+    // so the backend stops snapping screenshots on visits the operator
+    // can no longer see.
+    if (activeJob?.job_id) {
+      Object.keys(liveVisits).forEach((vid) => {
+        // Fire-and-forget; do NOT await — closing the modal must feel instant
+        _rutCallVisit(activeJob.job_id, vid, "stream", { mode: "off" });
+      });
+    }
     setVisualGridOpen(false);
     setExpandedVisit(null);
+    setControlVisit(null);
+    setPausedVisits({});
     if (visualGridTimerRef.current) {
       clearInterval(visualGridTimerRef.current);
       visualGridTimerRef.current = null;
     }
   };
+
+  // 2026-06 — Hybrid stream-mode driver. Watches the grid + expansion
+  // state and tells the backend to switch each visit between off / grid
+  // (low fps, fills idle gaps) / expanded (high fps, single-tile focus).
+  // Fire-and-forget — failures just leave the visit on its previous
+  // cadence and the next render will re-sync.
+  useEffect(() => {
+    if (!activeJob?.job_id || !visualGridOpen) return;
+    const visitIds = Object.keys(liveVisits);
+    visitIds.forEach((vid) => {
+      const desired = (expandedVisit && String(expandedVisit) === String(vid))
+        ? "expanded"
+        : "grid";
+      const v = liveVisits[vid];
+      if (v && v.frame_source === desired) return;  // already at target cadence
+      setVisitStreamMode(vid, desired);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visualGridOpen, expandedVisit, Object.keys(liveVisits).join(",")]);
 
   // ─── 2026-05: Manually kill ONE in-flight visit (per-tile button) ──
   // User ask (Roman Urdu): "agar kisi profile mein koi issue ai to os
@@ -4998,6 +5176,96 @@ export default function RealUserTrafficPage() {
                                 }
                               </button>
                             )}
+                            {/* 2026-06 — Live Visual Grid: Manual Takeover
+                                controls toolbar. Only renders for the
+                                EXPANDED tile so the regular grid stays
+                                lightweight. Pause/Resume always available
+                                on a running tile; Take Control + Type/Send
+                                only unlock once paused (engine refuses
+                                input on running visits — 409). */}
+                            {isExpanded && isRunningTile && (
+                              <div
+                                className="absolute top-12 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1.5 bg-zinc-900/95 backdrop-blur-md border border-zinc-700 rounded-lg px-2 py-1.5 shadow-lg"
+                                onClick={(e) => e.stopPropagation()}
+                                data-testid={`rut-visual-tile-controls-${vid}`}
+                              >
+                                {!pausedVisits[vid] ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => pauseVisit(vid)}
+                                    className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono bg-amber-900/80 text-amber-100 hover:bg-amber-700 hover:text-white cursor-pointer transition-colors"
+                                    title="Pause this visit's JSON automation"
+                                    data-testid={`rut-visual-tile-pause-${vid}`}
+                                  >
+                                    <Pause size={11} /> pause
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => resumeVisit(vid)}
+                                    className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono bg-emerald-900/80 text-emerald-100 hover:bg-emerald-700 hover:text-white cursor-pointer transition-colors"
+                                    title="Resume the JSON automation"
+                                    data-testid={`rut-visual-tile-resume-${vid}`}
+                                  >
+                                    <PlayIcon size={11} /> resume
+                                  </button>
+                                )}
+                                {pausedVisits[vid] && (
+                                  controlVisit === vid ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => setControlVisit(null)}
+                                      className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono bg-blue-700 text-white hover:bg-blue-600 cursor-pointer ring-1 ring-blue-300/40 transition-colors"
+                                      title="Stop manual control (Pause stays on)"
+                                      data-testid={`rut-visual-tile-stopcontrol-${vid}`}
+                                    >
+                                      <Hand size={11} /> manual ON
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => setControlVisit(vid)}
+                                      className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono bg-blue-900/80 text-blue-100 hover:bg-blue-700 hover:text-white cursor-pointer transition-colors"
+                                      title="Take manual control — click on the frame to interact"
+                                      data-testid={`rut-visual-tile-control-${vid}`}
+                                    >
+                                      <Hand size={11} /> take control
+                                    </button>
+                                  )
+                                )}
+                                {pausedVisits[vid] && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => sendVisitInput(vid, "scroll", { dx: 0, dy: 400 })}
+                                      disabled={inputInFlight}
+                                      className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono bg-zinc-800/80 text-zinc-200 hover:bg-zinc-700 hover:text-white cursor-pointer disabled:opacity-50 transition-colors"
+                                      title="Scroll down"
+                                    >
+                                      <ArrowUpDown size={11} /> ↓
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => sendVisitInput(vid, "scroll", { dx: 0, dy: -400 })}
+                                      disabled={inputInFlight}
+                                      className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono bg-zinc-800/80 text-zinc-200 hover:bg-zinc-700 hover:text-white cursor-pointer disabled:opacity-50 transition-colors"
+                                      title="Scroll up"
+                                    >
+                                      <ArrowUpDown size={11} /> ↑
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => sendVisitInput(vid, "back", {})}
+                                      disabled={inputInFlight}
+                                      className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono bg-zinc-800/80 text-zinc-200 hover:bg-zinc-700 hover:text-white cursor-pointer disabled:opacity-50 transition-colors"
+                                      title="Browser Back"
+                                    >
+                                      ← back
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            )}
                             {/* Live frame */}
                             {v.latest_frame_b64 ? (
                               <div
@@ -5016,11 +5284,34 @@ export default function RealUserTrafficPage() {
                                     fixed while the page scrolls). */}
                                 <div className="relative w-full">
                                   <img
+                                    ref={isExpanded && controlVisit === vid ? frameImgRef : undefined}
                                     src={v.latest_frame_b64}
                                     alt={`Visit ${vid}`}
-                                    className="w-full block"
+                                    className={`w-full block ${isExpanded && controlVisit === vid ? 'cursor-crosshair ring-2 ring-blue-400 ring-inset' : ''}`}
                                     style={{ height: 'auto', display: 'block' }}
+                                    onClick={(e) => {
+                                      if (isExpanded && controlVisit === vid) {
+                                        e.stopPropagation();
+                                        handleFrameClick(e, vid);
+                                      }
+                                    }}
+                                    onContextMenu={(e) => {
+                                      if (isExpanded && controlVisit === vid) {
+                                        e.preventDefault();
+                                        handleFrameClick(e, vid);
+                                      }
+                                    }}
+                                    draggable={false}
                                   />
+                                  {/* Pause / Manual overlay banner */}
+                                  {isExpanded && pausedVisits[vid] && (
+                                    <div className="absolute top-2 left-1/2 -translate-x-1/2 px-3 py-1 rounded-full text-[11px] font-mono bg-amber-500/95 text-amber-950 font-bold shadow-lg flex items-center gap-1.5 pointer-events-none">
+                                      <Pause size={11} />
+                                      {controlVisit === vid
+                                        ? 'PAUSED · MANUAL CONTROL ACTIVE — click on frame to interact'
+                                        : 'PAUSED — click "take control" to interact manually'}
+                                    </div>
+                                  )}
                                   {/* ── 2026-05: Step Markers SVG ──
                                       One coloured dot per recorded step
                                       at the resolved element's full-page
@@ -5133,12 +5424,79 @@ export default function RealUserTrafficPage() {
                             {/* Expanded close button */}
                             {isExpanded && (
                               <button
-                                onClick={(e) => { e.stopPropagation(); setExpandedVisit(null); }}
+                                onClick={(e) => { e.stopPropagation(); setExpandedVisit(null); setControlVisit(null); }}
                                 className="absolute top-2 right-12 px-2 py-1 rounded bg-black/80 text-white text-xs hover:bg-zinc-800 z-20"
                                 data-testid={`rut-visual-tile-collapse-${vid}`}
                               >
                                 <X size={14} className="inline" /> Close
                               </button>
+                            )}
+                            {/* 2026-06 — Manual-type input row. Appears at
+                                the bottom of the expanded tile while the
+                                visit is paused. Lets the operator focus
+                                a form field with a click then type a
+                                value the recorded automation couldn't
+                                figure out. Pressing Enter sends + clears. */}
+                            {isExpanded && pausedVisits[vid] && (
+                              <div
+                                className="absolute bottom-0 left-0 right-0 z-30 flex items-center gap-2 bg-zinc-900/95 backdrop-blur-md border-t border-zinc-700 px-3 py-2"
+                                onClick={(e) => e.stopPropagation()}
+                                data-testid={`rut-visual-tile-type-row-${vid}`}
+                              >
+                                <Keyboard size={14} className="text-blue-400 shrink-0" />
+                                <Input
+                                  value={controlText}
+                                  onChange={(e) => setControlText(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") {
+                                      e.preventDefault();
+                                      if (controlText) {
+                                        sendVisitInput(vid, "type", { text: controlText });
+                                        setControlText("");
+                                      } else {
+                                        sendVisitInput(vid, "key", { key: "Enter" });
+                                      }
+                                    }
+                                  }}
+                                  placeholder="Type text → Enter to send to the focused field (works after a click on the frame)"
+                                  className="flex-1 h-8 bg-zinc-950 border-zinc-700 text-white text-xs"
+                                  data-testid={`rut-visual-tile-type-input-${vid}`}
+                                />
+                                <Button
+                                  size="sm"
+                                  onClick={() => {
+                                    if (controlText) {
+                                      sendVisitInput(vid, "type", { text: controlText });
+                                      setControlText("");
+                                    }
+                                  }}
+                                  disabled={!controlText || inputInFlight}
+                                  className="h-8 px-3 bg-blue-700 hover:bg-blue-600 text-white text-xs"
+                                  data-testid={`rut-visual-tile-type-send-${vid}`}
+                                >
+                                  Send
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => sendVisitInput(vid, "key", { key: "Tab" })}
+                                  disabled={inputInFlight}
+                                  className="h-8 px-2 border-zinc-700 text-zinc-200 hover:bg-zinc-800 text-xs"
+                                  title="Press Tab"
+                                >
+                                  Tab
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => sendVisitInput(vid, "key", { key: "Enter" })}
+                                  disabled={inputInFlight}
+                                  className="h-8 px-2 border-zinc-700 text-zinc-200 hover:bg-zinc-800 text-xs"
+                                  title="Press Enter"
+                                >
+                                  Enter
+                                </Button>
+                              </div>
                             )}
                           </div>
                         );

@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { LayoutDashboard, Link2, MousePointerClick, DollarSign, Server, Menu, LogOut, User, Settings, TrendingUp, Upload, Mail, Phone, Filter, Smartphone, Search, ClipboardCheck, Fingerprint, Package, Apple, Cpu, Briefcase, ChevronDown, ChevronRight, Link as LinkIcon, Activity, Camera, UserPlus, KeyRound, Zap, Globe } from "lucide-react";
+import { LayoutDashboard, Link2, MousePointerClick, DollarSign, Server, Menu, LogOut, User, Settings, TrendingUp, Upload, Mail, Phone, Filter, Smartphone, Search, ClipboardCheck, Fingerprint, Package, Apple, Cpu, Briefcase, ChevronDown, ChevronRight, ChevronLeft, PanelLeftClose, PanelLeftOpen, Link as LinkIcon, Activity, Camera, UserPlus, KeyRound, Zap, Globe } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "./ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "./ui/dropdown-menu";
@@ -158,24 +158,31 @@ export default function DashboardLayout({ children }) {
       >
         <div className="p-6 flex items-center justify-between" style={{ borderBottom: '1px solid rgba(79, 127, 255, 0.2)' }}>
           {sidebarOpen && (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
               {branding.logo_url ? (
                 <img src={branding.logo_url} alt={branding.app_name} className="h-8 object-contain" data-testid="app-logo" />
               ) : (
-                <h1 className="text-xl font-bold bg-gradient-to-r from-white to-[#4F7FFF] bg-clip-text text-transparent" data-testid="app-logo">{branding.app_name || "Krexion"}</h1>
+                <h1 className="text-xl font-bold bg-gradient-to-r from-white to-[#4F7FFF] bg-clip-text text-transparent truncate" data-testid="app-logo">{branding.app_name || "Krexion"}</h1>
               )}
               <InstalledVersionBadge />
             </div>
           )}
+          {/* 2026-06 — Sidebar hide/show button right next to Krexion logo.
+              Customer ask (Roman Urdu): "side bar hide krne k liye krexion
+              logo k sath he hide k button ho ta k hide or show side bar se
+              he kr liya jay". Uses chevron icons + tooltip so the action is
+              obvious. */}
           <Button
             variant="ghost"
             size="icon"
             onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="hover:bg-[#4F7FFF]/10 text-white"
+            className="hover:bg-[#4F7FFF]/15 text-[#4F7FFF] hover:text-white transition-colors shrink-0 ring-1 ring-[#4F7FFF]/25 hover:ring-[#4F7FFF]/60"
             style={{ backgroundColor: 'transparent' }}
             data-testid="sidebar-toggle"
+            title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+            aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
           >
-            <Menu size={20} />
+            {sidebarOpen ? <PanelLeftClose size={20} /> : <PanelLeftOpen size={20} />}
           </Button>
         </div>
 
