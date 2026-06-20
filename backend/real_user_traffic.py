@@ -12082,8 +12082,29 @@ async def _execute_automation_steps(
                     try:
                         _rp_labels = _extract_random_pick_labels(js)
                         if _rp_labels:
-                            import random as _rnd_pick
+                            # 2026-06 — Customer ask: random_pick should
+                            # be TRULY different per visit ("har bar
+                            # random mix"). The previous code used
+                            # `random.choice()` (Mersenne Twister, fine
+                            # but the user reported observing the same
+                            # label across visits). Switching to
+                            # `secrets.choice()` uses the OS CSPRNG so
+                            # every visit pulls fresh entropy from
+                            # /dev/urandom (or Windows CryptGenRandom).
+                            # Also emit a clear log line so the operator
+                            # can VERIFY the distribution by reading the
+                            # Live Activity panel across visits — if
+                            # they still see the same pick it's because
+                            # only ONE candidate label matched on the
+                            # page, not because of a bias bug.
+                            import secrets as _rnd_pick
                             _native_picked = _rnd_pick.choice(_rp_labels)
+                            logger.info(
+                                f"[random-pick] visit picked '{_native_picked}' "
+                                f"from pool of {len(_rp_labels)} "
+                                f"({', '.join(_rp_labels[:8])}"
+                                f"{', …' if len(_rp_labels) > 8 else ''})"
+                            )
                             _ok_n, _frame_url_n, _err_n = await _native_click_by_text(
                                 page, _native_picked, timeout_ms=8000
                             )
@@ -12094,7 +12115,8 @@ async def _execute_automation_steps(
                                 )
                                 _native_handled = True
                                 _step_note = (
-                                    f"native_click random-pick='{_native_picked}'"
+                                    f"🎲 random-pick='{_native_picked}' "
+                                    f"(1 of {len(_rp_labels)})"
                                     + (f" frame='{(_frame_url_n or '')[:80]}'" if _frame_url_n else "")
                                 )
                             else:
@@ -12724,6 +12746,84 @@ async def _execute_automation_steps(
                             })
                         return {"status": "failed", "error": f"Unknown action '{action}' at step {idx+1}", "executed_steps": executed,
                                 **({"step_results": step_results} if collect_timings else {})}
+                # ── 2026-06 NEW TAB DETECTION + AUTO-SWITCH ──────────
+                # Customer report: "jese k landing page kholne k bad
+                # button pr click kia or new tab khol k odar baki
+                # process shoro hoa ese he rut job mein b hona chahye".
+                # Many lead-gen landing pages have a primary CTA with
+                # target="_blank" — clicking it opens the offer flow in
+                # a fresh tab while leaving the landing page open. The
+                # RUT runner used to keep operating on the OLD landing
+                # page (which has no further actionable elements), so
+                # all subsequent steps timed out as optional and the
+                # visit "completed" without any work done.
+                #
+                # We now check after every navigation-capable step
+                # (click, evaluate, press) whether `page.context.pages`
+                # has a NEW tab that opened during this step's lifetime.
+                # If so, the runner switches `page` to that new tab and
+                # waits briefly for its DOM to be ready before moving on
+                # to the next step. The old landing-page tab is left
+                # open (it'll be closed when the context closes at the
+                # end of the visit) — closing it eagerly can interfere
+                # with offer-side analytics that need to ping the
+                # opener.
+                #
+                # Pure additive — when no new tab opens, this is a
+                # ~1 ms no-op (just a len() check + one page state
+                # peek). It does NOT change behaviour for in-place
+                # navigations (location.assign / form.submit / SPA
+                # router updates) because those keep page count == 1.
+                if action in ("click", "evaluate", "press"):
+                    try:
+                        _ctx_for_tabs = page.context
+                        _all_pages = list(_ctx_for_tabs.pages) if _ctx_for_tabs is not None else []
+                        # Find any page that ISN'T our current `page`
+                        # AND is still open AND was opened recently
+                        # (i.e. has a non-blank URL — we use this as a
+                        # cheap "is it usable" check).
+                        _candidates = [p for p in _all_pages if p is not page and not p.is_closed()]
+                        if _candidates:
+                            # Prefer the MOST RECENTLY opened page. The
+                            # Playwright API exposes pages in creation
+                            # order, so the last item is the newest.
+                            _new_page = _candidates[-1]
+                            # Wait briefly for the new tab's DOM to be
+                            # ready so the first step that runs against
+                            # it doesn't trip on "navigating away".
+                            try:
+                                await _new_page.wait_for_load_state(
+                                    "domcontentloaded", timeout=12000
+                                )
+                            except Exception:
+                                pass
+                            try:
+                                await _new_page.bring_to_front()
+                            except Exception:
+                                pass
+                            try:
+                                _new_url = _new_page.url
+                            except Exception:
+                                _new_url = ""
+                            logger.info(
+                                f"[new-tab] step #{idx+1} ({action}) "
+                                f"opened {_new_url[:80]} — switching active page"
+                            )
+                            page = _new_page
+                            # Also update the live-grid reference so the
+                            # operator's "Pause / Take Over" UI controls
+                            # the new tab rather than the abandoned one.
+                            if job_id and visit_idx is not None:
+                                try:
+                                    register_live_page(job_id, visit_idx, page)
+                                except Exception:
+                                    # Helper may not be reachable from
+                                    # this nested closure — non-fatal.
+                                    pass
+                            if collect_timings:
+                                _step_note = (_step_note + " | " if _step_note else "") + f"switched_to_new_tab url='{_new_url[:60]}'"
+                    except Exception as _nt_e:
+                        logger.debug(f"new-tab detection skipped: {_nt_e}")
                 executed += 1
                 if collect_timings:
                     _ok_entry: Dict[str, Any] = {

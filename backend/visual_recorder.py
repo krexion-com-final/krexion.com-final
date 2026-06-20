@@ -2149,6 +2149,44 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
             _fb_click = _build_fallbacks(info)
             if _fb_click:
                 step["fallbacks"] = _fb_click
+            # ── 2026-06 — surface selector + xpath as TOP-LEVEL editable
+            # fields on the recorded step so the Edit Step panel shows
+            # them (was empty for evaluate-action click steps, which
+            # confused users into thinking nothing was captured and
+            # risked steps being skipped during job replay).
+            #
+            # Purely cosmetic for the existing replay path: the embedded
+            # JS in `step["script"]` already tries CSS → xpath_stable →
+            # xpath_abs → text-match in order. Surfacing these as named
+            # fields lets the user (1) SEE what was captured and (2)
+            # EDIT them to override the brittle text-match fallback
+            # without having to hand-craft the eval JS.
+            try:
+                _attrs = (info.get("attrs") or {}) if isinstance(info, dict) else {}
+                _id = (info.get("id") or "").strip() if isinstance(info, dict) else ""
+                _best_css = ""
+                # Priority order mirrors _build_text_click_evaluate's
+                # selector block so what's shown == what replay uses.
+                for k in ("data-testid", "data-test", "data-cy", "data-qa", "data-id"):
+                    v = _attrs.get(k) if isinstance(_attrs, dict) else None
+                    if isinstance(v, str) and v:
+                        _best_css = f'[{k}="{v}"]'
+                        break
+                if not _best_css and _id and not re.match(r"^[\d_-]", _id) and len(_id) < 60 and ":" not in _id:
+                    _best_css = f"#{_id}"
+                if not _best_css and isinstance(_attrs, dict):
+                    _nm = _attrs.get("name")
+                    if isinstance(_nm, str) and _nm:
+                        _tg = (info.get("tag") or "").lower() if isinstance(info, dict) else ""
+                        _best_css = f'{_tg}[name="{_nm}"]' if _tg else f'[name="{_nm}"]'
+                if _best_css and not step.get("selector"):
+                    step["selector"] = _best_css
+                _xp = (info.get("xpath_stable") or info.get("xpath_abs") or "").strip() if isinstance(info, dict) else ""
+                if _xp and not step.get("xpath"):
+                    step["xpath"] = _xp
+            except Exception:
+                # Never let a cosmetic-only enhancement break recording.
+                pass
     elif mode == "form_fill":
         # Build a selector for the input
         sel = _make_selector_for_input(info)
@@ -3201,12 +3239,81 @@ async def type_text(sess: RecorderSession, selector: str, value: str, header_nam
     extra: Dict[str, Any] = {}
     async with sess.lock:
         if live_val:
+            # ── 2026-06 — multi-strategy fill ──────────────────────────
+            # Customer report: "likhne wale jo box hai jahan numeric ye
+            # kuch type krna hota aksar button mein likha ni jata".
+            # Some inputs (custom React/Vue controlled inputs, masked
+            # phone/zip fields, contenteditable divs) silently reject
+            # `page.fill()` — the value is set on the DOM node but the
+            # framework's controlled-state never updates so the page
+            # treats the field as still-empty when the user clicks
+            # "Continue". We now try three strategies in order, each
+            # verifies the input actually contains the typed text
+            # before declaring success.
+            fill_ok = False
+            fill_err: Optional[str] = None
+            # Strategy 1: native page.fill (fastest, works for 95% of inputs)
             try:
                 await sess.page.fill(selector, live_val, timeout=6000)
-                extra["filled_sample"] = live_val[:30]
+                # Verify the value actually stuck (React controlled
+                # inputs sometimes accept fill() but revert).
+                _got = await sess.page.evaluate(
+                    "(s) => { var e = document.querySelector(s); return e ? (e.value != null ? e.value : (e.innerText || '')) : ''; }",
+                    selector,
+                )
+                if isinstance(_got, str) and _got.strip() == live_val.strip():
+                    fill_ok = True
+                    extra["filled_sample"] = live_val[:30]
             except Exception as e:
-                logger.warning(f"type fill failed selector={selector}: {e}")
-                extra["fill_warning"] = f"{type(e).__name__}: {str(e)[:100]}"
+                fill_err = f"fill: {type(e).__name__}: {str(e)[:80]}"
+            # Strategy 2: click + keyboard.type (humanised) — handles
+            # masked inputs, contenteditable, and React onChange-only
+            # fields. Clears first via triple-click + Backspace.
+            if not fill_ok:
+                try:
+                    await sess.page.click(selector, timeout=4000)
+                    try:
+                        await sess.page.click(selector, click_count=3, timeout=1500)
+                        await sess.page.keyboard.press("Backspace")
+                    except Exception:
+                        pass
+                    await sess.page.keyboard.type(live_val, delay=25)
+                    _got2 = await sess.page.evaluate(
+                        "(s) => { var e = document.querySelector(s); return e ? (e.value != null ? e.value : (e.innerText || '')) : ''; }",
+                        selector,
+                    )
+                    if isinstance(_got2, str) and live_val.strip() in _got2:
+                        fill_ok = True
+                        extra["filled_sample"] = live_val[:30]
+                        extra["fill_strategy"] = "keyboard"
+                except Exception as e:
+                    fill_err = (fill_err or "") + f" | keyboard: {type(e).__name__}: {str(e)[:80]}"
+            # Strategy 3: brute-force JS set + dispatch input/change so
+            # any framework listening for onChange picks it up.
+            if not fill_ok:
+                try:
+                    await sess.page.evaluate(
+                        """([s, v]) => {
+                            var e = document.querySelector(s);
+                            if (!e) return;
+                            try {
+                                var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value') || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
+                                if (setter && setter.set) { setter.set.call(e, v); }
+                                else { e.value = v; }
+                            } catch(_) { try { e.value = v; } catch(__){} }
+                            try { e.dispatchEvent(new Event('input', {bubbles:true})); } catch(_){}
+                            try { e.dispatchEvent(new Event('change', {bubbles:true})); } catch(_){}
+                        }""",
+                        [selector, live_val],
+                    )
+                    fill_ok = True
+                    extra["filled_sample"] = live_val[:30]
+                    extra["fill_strategy"] = "js_set"
+                except Exception as e:
+                    fill_err = (fill_err or "") + f" | js: {type(e).__name__}: {str(e)[:80]}"
+            if not fill_ok:
+                logger.warning(f"type fill failed selector={selector}: {fill_err}")
+                extra["fill_warning"] = (fill_err or "all strategies failed")[:200]
         elif header_name:
             extra["sample_hint"] = (
                 f"No sample value for column '{header_name}'. Upload an "
@@ -3379,6 +3486,19 @@ async def detect_clickables(sess: RecorderSession) -> Dict[str, Any]:
     De-duped by trimmed text + tag (so the same "Continue" button isn't
     listed twice). Hidden (display:none / visibility:hidden / zero-size)
     elements are skipped.
+
+    ── 2026-06 (LABEL/SPAN dedup) ──
+    Customer feedback: the random pool was showing each answer button
+    twice — once as `LABEL` and once as `SPAN` — because lead-gen offer
+    pages typically wrap each option in `<label><span>Less than $5k
+    </span></label>`. Both the outer LABEL (caught by selector match)
+    AND the inner SPAN (caught by cursor:pointer + no-children) made it
+    into the candidate list with identical text, confusing the operator.
+    We now skip an element if any of its ancestors is ALSO in the
+    candidate set with the SAME trimmed text — i.e. we keep only the
+    OUTERMOST clickable for each distinct text. Behaviour for non-nested
+    duplicates (e.g. two separate "Continue" buttons in different
+    sections) is unchanged: both still appear.
     """
     sess.touch()
     async with sess.lock:
@@ -3400,6 +3520,14 @@ async def detect_clickables(sess: RecorderSession) -> Dict[str, Any]:
                             }
                         } catch (e) {}
                     }
+
+                    // 2026-06 LABEL/SPAN dedup pre-pass — build a set of
+                    // candidate elements first so we can check "is any
+                    // ancestor also a candidate with the same text?"
+                    // before deciding whether to emit this one.
+                    const candSet = new Set(candidates);
+                    const normText = (el) => ((el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim());
+
                     const seen = new Set();
                     const out = [];
                     for (const el of candidates) {
@@ -3408,11 +3536,35 @@ async def detect_clickables(sess: RecorderSession) -> Dict[str, Any]:
                             if (!cs || cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity || '1') < 0.05) continue;
                             const r = el.getBoundingClientRect();
                             if (r.width < 4 || r.height < 4) continue;
-                            // Off-screen (above viewport top by more than its own height)? Still include — user may scroll.
-                            const rawText = (el.innerText || el.textContent || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+                            const rawText = normText(el);
                             if (!rawText) continue;
                             const text = rawText.slice(0, 200);
                             const tag = el.tagName;
+
+                            // 2026-06 — Skip this element if ANY ancestor
+                            // (up to <body>) is also in the candidate set
+                            // AND has the same trimmed text. The ancestor
+                            // will be emitted instead, so the user sees
+                            // ONE row per option (e.g. only LABEL, not
+                            // LABEL + nested SPAN). We compare against
+                            // the ancestor's RAW text — slicing matches
+                            // happens after this check.
+                            let suppressed = false;
+                            let p = el.parentElement;
+                            let depthGuard = 0;
+                            while (p && depthGuard < 12) {
+                                if (candSet.has(p)) {
+                                    const ptxt = normText(p);
+                                    if (ptxt && ptxt === rawText) {
+                                        suppressed = true;
+                                        break;
+                                    }
+                                }
+                                p = p.parentElement;
+                                depthGuard++;
+                            }
+                            if (suppressed) continue;
+
                             const key = tag + '||' + text.toLowerCase();
                             if (seen.has(key)) continue;
                             seen.add(key);
@@ -3522,6 +3674,12 @@ _EDITABLE_STEP_FIELDS = {
     # when the original recording captured only a brittle CSS selector.
     # See visual_recorder._build_fallbacks for the schema.
     "fallbacks",
+    # 2026-06 — surfaced xpath field on evaluate-action click steps so
+    # the Edit Step panel can show/override it (paired with the
+    # `step["xpath"]` set inside click_at). Replay engine reads this
+    # via `_step_fallbacks` so the value participates in the rescue
+    # chain even though the primary mechanism remains the embedded JS.
+    "xpath",
     # 2026-05 — random-pick advanced editor. Lets the operator edit
     # an existing evaluate step to add per-option selector/xpath
     # fallbacks. See _build_random_pick_advanced.

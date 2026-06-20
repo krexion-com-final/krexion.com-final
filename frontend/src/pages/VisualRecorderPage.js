@@ -229,6 +229,18 @@ export default function VisualRecorderPage() {
   const [shotErrorCount, setShotErrorCount] = useState(0);
   const [viewport, setViewport] = useState({ width: 412, height: 914 });
   const [steps, setSteps] = useState([]);
+  // 2026-06 — Electron-safe prompt/confirm replacement.
+  // Electron Renderer removed `await vrPrompt()` / `window.confirm()` —
+  // any code path that hit them threw "prompt() is and will not be
+  // supported." silently breaking 20+ recorder toolbar actions (Wait
+  // for selector / text / URL, Extract var, Captcha pause, File upload,
+  // OTP wait, Pause for human, Right-click, Set clipboard, Branch
+  // condition, Iframe selector, Zoom, Capture screenshot name, etc.).
+  // We replace the native dialogs with a tiny in-app modal driven by
+  // this state + a resolver-based async helper.
+  //   { kind: "prompt" | "confirm", message, defaultValue,
+  //     resolve: (value: string|null|boolean) => void }
+  const [promptModal, setPromptModal] = useState(null);
   // Edit-step modal state (2026-01) — null when closed; otherwise
   // {index, draft} where `draft` is a mutable copy of the step the
   // user is editing. See `openEditStep` / `saveEditStep` below.
@@ -468,7 +480,7 @@ export default function VisualRecorderPage() {
   // Stop a specific session from the list (without leaving setup stage).
   const stopSessionById = useCallback(async (sid, hostnameLabel) => {
     if (!sid) return;
-    if (!window.confirm(`Stop this recorder session?${hostnameLabel ? `\n\n${hostnameLabel}` : ""}\n\nAny unsaved steps in this session will be lost.`)) return;
+    if (!await vrConfirm(`Stop this recorder session?${hostnameLabel ? `\n\n${hostnameLabel}` : ""}\n\nAny unsaved steps in this session will be lost.`)) return;
     try {
       await fetch(`${API_URL}/api/visual-recorder/${sid}`, {
         method: "DELETE",
@@ -883,6 +895,39 @@ export default function VisualRecorderPage() {
     return `${m}:${s}`;
   };
 
+  // ── 2026-06 — Electron-safe vrPrompt / vrConfirm helpers ─────────
+  // Drop-in async replacements for window.prompt / window.confirm.
+  // Electron Renderer no longer ships prompt(), so calls would throw
+  // "prompt() is and will not be supported." and silently break the
+  // toolbar buttons that depended on them (capture name, wait-for-
+  // selector text, extract var, captcha pause reason, file upload
+  // paths, OTP digits, branch conditions, iframe selector, zoom level,
+  // clipboard text, right-click coords, etc.).
+  //
+  // vrPrompt(message, defaultValue) returns Promise<string|null> —
+  //   null when the user cancels (mirrors native prompt() behaviour).
+  // vrConfirm(message)              returns Promise<boolean>.
+  // Both also work in the regular browser, so the same code path
+  // serves both cloud and Electron deployments without branching.
+  const vrPrompt = (message, defaultValue = "") =>
+    new Promise((resolve) => {
+      setPromptModal({
+        kind: "prompt",
+        message: String(message || ""),
+        defaultValue: defaultValue == null ? "" : String(defaultValue),
+        resolve,
+      });
+    });
+  const vrConfirm = (message) =>
+    new Promise((resolve) => {
+      setPromptModal({
+        kind: "confirm",
+        message: String(message || ""),
+        defaultValue: "",
+        resolve,
+      });
+    });
+
   // Build the direct img src with ?t=<token>&ts=<tick> so the browser handles
   // load + retries natively (no blob URL plumbing — removes a class of races).
   const screenshotSrc = (sessionId && sessionState === "ready")
@@ -953,7 +998,7 @@ export default function VisualRecorderPage() {
     if (tool === "capture") {
       setBusy(true);
       try {
-        const name = window.prompt(
+        const name = await vrPrompt(
           "Name this capture (shown in Live Activity):",
           `Step ${steps.length + 1}`,
         );
@@ -1363,9 +1408,9 @@ export default function VisualRecorderPage() {
 
   // Wait for a CSS selector (recorded as step too)
   const waitForSelectorAction = async () => {
-    const sel = window.prompt("CSS selector to wait for (e.g. 'button.cta' or '#thank-you-msg'):", "");
+    const sel = await vrPrompt("CSS selector to wait for (e.g. 'button.cta' or '#thank-you-msg'):", "");
     if (!sel) return;
-    const t = window.prompt("Max wait time in ms (default 15000):", "15000");
+    const t = await vrPrompt("Max wait time in ms (default 15000):", "15000");
     if (!sessionId) return;
     try {
       const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/wait-for-selector`, {
@@ -1388,9 +1433,9 @@ export default function VisualRecorderPage() {
   // 2026-01: New step types — Wait for Text / Wait for URL / Extract / Dismiss Popups
   const addWaitForText = async () => {
     if (!sessionId) return;
-    const text = window.prompt("Wait until this text appears on the page (e.g. 'Thank you', 'Order confirmed'):", "");
+    const text = await vrPrompt("Wait until this text appears on the page (e.g. 'Thank you', 'Order confirmed'):", "");
     if (!text || !text.trim()) return;
-    const tout = window.prompt("Max wait time in ms (default 15000):", "15000");
+    const tout = await vrPrompt("Max wait time in ms (default 15000):", "15000");
     try {
       const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/add-wait-text`, {
         method: "POST", headers: authH(),
@@ -1410,9 +1455,9 @@ export default function VisualRecorderPage() {
 
   const addWaitForUrl = async () => {
     if (!sessionId) return;
-    const contains = window.prompt("Wait until URL contains (e.g. '/thank-you', '/success'):", "");
+    const contains = await vrPrompt("Wait until URL contains (e.g. '/thank-you', '/success'):", "");
     if (!contains || !contains.trim()) return;
-    const tout = window.prompt("Max wait time in ms (default 15000):", "15000");
+    const tout = await vrPrompt("Max wait time in ms (default 15000):", "15000");
     try {
       const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/add-wait-url`, {
         method: "POST", headers: authH(),
@@ -1431,11 +1476,11 @@ export default function VisualRecorderPage() {
 
   const addExtract = async () => {
     if (!sessionId) return;
-    const sel = window.prompt("CSS selector to extract text from (e.g. '#order-id', '.confirmation .code'):", "");
+    const sel = await vrPrompt("CSS selector to extract text from (e.g. '#order-id', '.confirmation .code'):", "");
     if (!sel || !sel.trim()) return;
-    const key = window.prompt("Variable name to store the value (e.g. 'order_id'). Use later as {{order_id}}:", "");
+    const key = await vrPrompt("Variable name to store the value (e.g. 'order_id'). Use later as {{order_id}}:", "");
     if (!key || !key.trim()) return;
-    const attr = window.prompt("(Optional) attribute name to read instead of text (e.g. 'href', 'data-id'). Leave blank for text:", "");
+    const attr = await vrPrompt("(Optional) attribute name to read instead of text (e.g. 'href', 'data-id'). Leave blank for text:", "");
     try {
       const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/add-extract`, {
         method: "POST", headers: authH(),
@@ -1509,12 +1554,12 @@ export default function VisualRecorderPage() {
 
   const addFileUpload = async () => {
     if (!sessionId) return;
-    const selector = window.prompt(
+    const selector = await vrPrompt(
       "CSS selector of the file input element\n(e.g. input[name=id_doc] or #upload-photo)",
       "input[type=file]",
     );
     if (!selector) return;
-    const filePath = window.prompt(
+    const filePath = await vrPrompt(
       "File path OR {{column_name}} template\n• Local: ~/Pictures/id.jpg\n• Per-row: {{id_photo_path}}",
       "{{file_path}}",
     );
@@ -1533,17 +1578,17 @@ export default function VisualRecorderPage() {
 
   const addOtpWait = async () => {
     if (!sessionId) return;
-    const targetSelector = window.prompt(
+    const targetSelector = await vrPrompt(
       "CSS selector of the OTP input where the code will be filled\n(e.g. input[name=otp] or #verification-code)",
       "input[name=otp]",
     );
     if (!targetSelector) return;
-    const sourceRaw = window.prompt(
+    const sourceRaw = await vrPrompt(
       "Where does the code arrive? (url / page_text / clipboard / selector)",
       "page_text",
     );
     const source = (sourceRaw || "page_text").trim().toLowerCase();
-    const digitsRaw = window.prompt("How many digits? (default 6)", "6");
+    const digitsRaw = await vrPrompt("How many digits? (default 6)", "6");
     const digits = parseInt(digitsRaw, 10) || 6;
     try {
       const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/add-otp-wait`, {
@@ -1564,7 +1609,7 @@ export default function VisualRecorderPage() {
 
   const addHumanPause = async () => {
     if (!sessionId) return;
-    const reason = window.prompt(
+    const reason = await vrPrompt(
       "Why pause? (label shown in Electron app popup during job replay)",
       "wallet_connect",
     );
@@ -1603,66 +1648,66 @@ export default function VisualRecorderPage() {
   const addBrowserForward = () => callVRPost("browser-forward", null, "→ Forward step added");
 
   const addRightClick = async () => {
-    const sel = window.prompt("CSS selector of element to right-click (blank = use coords)", "");
+    const sel = await vrPrompt("CSS selector of element to right-click (blank = use coords)", "");
     let x = 0, y = 0;
     if (!sel) {
-      x = parseInt(window.prompt("X coordinate", "100"), 10) || 0;
-      y = parseInt(window.prompt("Y coordinate", "100"), 10) || 0;
+      x = parseInt(await vrPrompt("X coordinate", "100"), 10) || 0;
+      y = parseInt(await vrPrompt("Y coordinate", "100"), 10) || 0;
     }
     return callVRPost("right-click", { selector: sel, x, y }, "Right-click step added");
   };
 
   const addClipboardWrite = async () => {
-    const text = window.prompt("Text to write to clipboard (supports {{templates}})", "{{counter}}");
+    const text = await vrPrompt("Text to write to clipboard (supports {{templates}})", "{{counter}}");
     if (text === null) return;
     return callVRPost("clipboard-write", { text }, "Clipboard write step added");
   };
 
   const addClipboardRead = async () => {
-    const v = window.prompt("Variable name to store clipboard contents", "clipboard_value");
+    const v = await vrPrompt("Variable name to store clipboard contents", "clipboard_value");
     if (!v) return;
     return callVRPost("clipboard-read", { var_name: v }, `Clipboard read → {{${v}}}`);
   };
 
   const addCondSkip = async () => {
-    const typeRaw = window.prompt("Condition type: visible / not_visible / text", "visible");
+    const typeRaw = await vrPrompt("Condition type: visible / not_visible / text", "visible");
     const if_type = (typeRaw || "visible").toLowerCase().trim();
     let selector = "", text = "";
     if (if_type === "text") {
-      text = window.prompt("Text to check on page", "");
+      text = await vrPrompt("Text to check on page", "");
       if (!text) return;
     } else {
-      selector = window.prompt("CSS selector to check", ".captcha-frame");
+      selector = await vrPrompt("CSS selector to check", ".captcha-frame");
       if (!selector) return;
     }
-    const skipRaw = window.prompt("How many subsequent steps to skip?", "1");
+    const skipRaw = await vrPrompt("How many subsequent steps to skip?", "1");
     const skip_count = parseInt(skipRaw, 10) || 1;
     return callVRPost("conditional-skip", { if_type, selector, text, skip_count },
       `If ${if_type} → skip ${skip_count} steps`);
   };
 
   const addSaveStorage = async () => {
-    const v = window.prompt("Variable name for cookies+localStorage snapshot", "session_state");
+    const v = await vrPrompt("Variable name for cookies+localStorage snapshot", "session_state");
     if (!v) return;
     return callVRPost("add-save-storage", { var_name: v }, "Save storage step added");
   };
 
   const addRestoreStorage = async () => {
-    const v = window.prompt("Variable name to restore cookies+localStorage from", "session_state");
+    const v = await vrPrompt("Variable name to restore cookies+localStorage from", "session_state");
     if (!v) return;
     return callVRPost("add-restore-storage", { var_name: v }, "Restore storage step added");
   };
 
   const setBrowserZoom = async () => {
-    const raw = window.prompt("Zoom level (1.0 = 100%, 1.25 = 125%, 1.5 = 150%)", "1.0");
+    const raw = await vrPrompt("Zoom level (1.0 = 100%, 1.25 = 125%, 1.5 = 150%)", "1.0");
     const level = parseFloat(raw) || 1.0;
     return callVRPost("set-zoom", { level }, `Zoom = ${Math.round(level * 100)}%`);
   };
 
   const addIframeClick = async () => {
-    const fs = window.prompt("CSS selector of the iframe element", "iframe");
+    const fs = await vrPrompt("CSS selector of the iframe element", "iframe");
     if (!fs) return;
-    const inner = window.prompt("Inner selector OR inner text\n(prefix with text: for text match)", "button.submit");
+    const inner = await vrPrompt("Inner selector OR inner text\n(prefix with text: for text match)", "button.submit");
     if (!inner) return;
     let inner_selector = inner, inner_text = "";
     if (inner.startsWith("text:")) {
@@ -1675,7 +1720,7 @@ export default function VisualRecorderPage() {
   };
 
   const addShadowClick = async () => {
-    const raw = window.prompt(
+    const raw = await vrPrompt(
       "Shadow DOM selector chain — comma-separated\n" +
       "Each step is a selector; we pierce shadowRoot at each level.\n" +
       "Example: my-card, checkout-btn, button.primary",
@@ -1691,23 +1736,23 @@ export default function VisualRecorderPage() {
   };
 
   const addDragDrop = async () => {
-    const src = window.prompt("Source CSS selector (e.g. .slider-handle) — blank for coords", "");
+    const src = await vrPrompt("Source CSS selector (e.g. .slider-handle) — blank for coords", "");
     if (src === null) return;
     let body = { steps: 25 };
     if (src) {
       body.source_selector = src;
-      const tgt = window.prompt("Target selector (blank → use delta)", "");
+      const tgt = await vrPrompt("Target selector (blank → use delta)", "");
       if (tgt) {
         body.target_selector = tgt;
       } else {
-        body.delta_x = parseInt(window.prompt("Drag delta X (pixels right)", "200"), 10) || 0;
-        body.delta_y = parseInt(window.prompt("Drag delta Y (pixels down)", "0"), 10) || 0;
+        body.delta_x = parseInt(await vrPrompt("Drag delta X (pixels right)", "200"), 10) || 0;
+        body.delta_y = parseInt(await vrPrompt("Drag delta Y (pixels down)", "0"), 10) || 0;
       }
     } else {
-      body.source_x = parseInt(window.prompt("Source X", "100"), 10) || 0;
-      body.source_y = parseInt(window.prompt("Source Y", "200"), 10) || 0;
-      body.target_x = parseInt(window.prompt("Target X", "300"), 10) || 0;
-      body.target_y = parseInt(window.prompt("Target Y", "200"), 10) || 0;
+      body.source_x = parseInt(await vrPrompt("Source X", "100"), 10) || 0;
+      body.source_y = parseInt(await vrPrompt("Source Y", "200"), 10) || 0;
+      body.target_x = parseInt(await vrPrompt("Target X", "300"), 10) || 0;
+      body.target_y = parseInt(await vrPrompt("Target Y", "200"), 10) || 0;
     }
     return callVRPost("drag-drop", body, "Drag-and-drop step added");
   };
@@ -1782,7 +1827,7 @@ export default function VisualRecorderPage() {
   // Prompts the user to pick action type, then opens the existing modal.
   const insertStepAt = async (position) => {
     if (!sessionId) return;
-    const action = window.prompt(
+    const action = await vrPrompt(
       "Step action to insert? Options: click, fill, type, select, check, uncheck, wait, wait_for_selector, wait_for_text, wait_for_url, press, scroll, screenshot, hover, dismiss_popups, extract, branch",
       "wait"
     );
@@ -1797,19 +1842,19 @@ export default function VisualRecorderPage() {
       // wire up real selectors / nested steps. This keeps the prompt
       // flow short (5 window.prompts is already a lot) while still
       // giving a working template.
-      const label = (window.prompt(
+      const label = (await vrPrompt(
         "Branch step name (e.g. 'After email submit page picker'):",
         "Page picker"
       ) || "Page picker").trim();
       const tmoMs = Math.max(
         1000,
-        Number(window.prompt("Overall race timeout in milliseconds (how long to wait for ANY branch's page to appear):", "12000")) || 12000
+        Number(await vrPrompt("Overall race timeout in milliseconds (how long to wait for ANY branch's page to appear):", "12000")) || 12000
       );
-      const condA = (window.prompt(
+      const condA = (await vrPrompt(
         "BRANCH A — CSS selector that ONLY appears when path A loads (e.g. 'input[name=phone]'):",
         "input[name=phone]"
       ) || "").trim();
-      const condB = (window.prompt(
+      const condB = (await vrPrompt(
         "BRANCH B — CSS selector that ONLY appears when path B loads (e.g. 'input[name=birthday]'):",
         "input[name=birthday]"
       ) || "").trim();
@@ -1848,38 +1893,38 @@ export default function VisualRecorderPage() {
         default_steps: [],
       };
     } else if (["click", "fill", "type", "select", "check", "uncheck", "hover", "wait_for_selector"].includes(cleanAction)) {
-      const sel = window.prompt("CSS selector (or XPath e.g. //input[@name='x']):", "");
+      const sel = await vrPrompt("CSS selector (or XPath e.g. //input[@name='x']):", "");
       if (!sel || !sel.trim()) return;
       stepDraft.selector = sel.trim();
       if (["fill", "type", "select"].includes(cleanAction)) {
-        const val = window.prompt("Value to fill/type/select (use {{var}} for row data):", "");
+        const val = await vrPrompt("Value to fill/type/select (use {{var}} for row data):", "");
         if (val !== null) stepDraft.value = val;
       }
     } else if (cleanAction === "wait") {
-      const ms = window.prompt("Wait time in milliseconds:", "1000");
+      const ms = await vrPrompt("Wait time in milliseconds:", "1000");
       stepDraft.ms = Math.max(0, Number(ms) || 1000);
     } else if (cleanAction === "wait_for_text") {
-      const text = window.prompt("Text to wait for (e.g. 'Thank you'):", "");
+      const text = await vrPrompt("Text to wait for (e.g. 'Thank you'):", "");
       if (!text || !text.trim()) return;
       stepDraft.text = text.trim();
       stepDraft.timeout = 15000;
     } else if (cleanAction === "wait_for_url") {
-      const contains = window.prompt("URL must contain:", "");
+      const contains = await vrPrompt("URL must contain:", "");
       if (!contains || !contains.trim()) return;
       stepDraft.contains = contains.trim();
       stepDraft.timeout = 15000;
     } else if (cleanAction === "press") {
-      const key = window.prompt("Key to press (e.g. Enter, Tab, Escape):", "Enter");
+      const key = await vrPrompt("Key to press (e.g. Enter, Tab, Escape):", "Enter");
       stepDraft.key = key || "Enter";
     } else if (cleanAction === "scroll") {
-      stepDraft.value = window.prompt("Scroll amount (px, e.g. 500 or 'bottom'):", "500") || "500";
+      stepDraft.value = await vrPrompt("Scroll amount (px, e.g. 500 or 'bottom'):", "500") || "500";
     } else if (cleanAction === "screenshot") {
-      stepDraft.name = window.prompt("Screenshot label (e.g. 'After Submit'):", "Capture") || "Capture";
+      stepDraft.name = await vrPrompt("Screenshot label (e.g. 'After Submit'):", "Capture") || "Capture";
     } else if (cleanAction === "extract") {
-      const sel = window.prompt("CSS selector to extract from:", "");
+      const sel = await vrPrompt("CSS selector to extract from:", "");
       if (!sel) return;
       stepDraft.selector = sel.trim();
-      const key = window.prompt("Variable name to store value as (use later via {{var}}):", "");
+      const key = await vrPrompt("Variable name to store value as (use later via {{var}}):", "");
       if (!key) return;
       stepDraft.store_key = key.trim();
     }
@@ -2424,8 +2469,8 @@ export default function VisualRecorderPage() {
     toast.success("Recent recording loaded — review and Start");
   };
 
-  const clearRecent = () => {
-    if (!window.confirm("Clear all recent recordings?")) return;
+  const clearRecent = async () => {
+    if (!await vrConfirm("Clear all recent recordings?")) return;
     setRecentRecordings([]);
     try { localStorage.removeItem(LS_RECENT_KEY); } catch {}
   };
@@ -2449,6 +2494,19 @@ export default function VisualRecorderPage() {
     // current state (post-previous-failure page).
     const startIndex = Math.max(0, Number(opts.startIndex || 0));
     const freshPage = startIndex > 0 ? false : true;
+    // 2026-06 — Make "Run Live Test from Start" visibly behave like a
+    // brand-new RUT job: clear ALL prior live-frame / progress state,
+    // show a clear "starting fresh from step 1" toast so the operator
+    // knows the test is identical to what an actual job visit will do
+    // (fresh page, no leftover cookies, full step list from index 0).
+    // This addresses the customer ask "jab live run test krte hein to
+    // start se show ho jese aik new job chalate hein".
+    if (startIndex === 0) {
+      toast(`▶ Starting fresh live run — ${steps.length} step${steps.length === 1 ? "" : "s"} from #1 (job-style replay)`, {
+        icon: "🚀",
+        duration: 3500,
+      });
+    }
     setLiveTesting(true);
     setLiveTestResult(null);
     // 2026-01: real-time progress feed — clear & start polling
@@ -2642,7 +2700,7 @@ export default function VisualRecorderPage() {
     // already references this template keeps working) and updates the
     // step_count badge automatically.
     if (editUploadId && editTemplate) {
-      if (!window.confirm(
+      if (!await vrConfirm(
         `Update existing template "${editTemplate.name}" with the edited recording?\n\n` +
         `Step count will go from ${editTemplate.item_count || 0} → ${finalBundle.step_count}. ` +
         `Every saved RUT campaign that references this template will use the new version on its next run.`,
@@ -2675,7 +2733,7 @@ export default function VisualRecorderPage() {
       return;
     }
     const defaultName = `Recording-${new Date().toISOString().slice(0, 16).replace("T", " ")}`;
-    const name = window.prompt("Save as template — name?", defaultName);
+    const name = await vrPrompt("Save as template — name?", defaultName);
     if (!name) return;
     setSaving(true);
     try {
@@ -2865,7 +2923,7 @@ export default function VisualRecorderPage() {
 
   const stopAndDiscard = async () => {
     if (!sessionId) return;
-    if (!window.confirm("Discard recording and stop session?")) return;
+    if (!await vrConfirm("Discard recording and stop session?")) return;
     try {
       await fetch(`${API_URL}/api/visual-recorder/${sessionId}`, {
         method: "DELETE",
@@ -4660,14 +4718,28 @@ export default function VisualRecorderPage() {
                   })()}
 
                   {/* 2026-01: LIVE BROWSER SCREENSHOT — see the page state at the latest completed step */}
+                  {/* 2026-06 — scrollable container so tall full-page
+                      captures stay at NATURAL size (operator scrolls
+                      inside the panel to inspect any part). Earlier
+                      version used `objectFit: contain` with a 320px
+                      max-height which squeezed multi-screen offer
+                      pages into an unreadable thin strip. The new
+                      layout keeps the image at full intrinsic width
+                      and lets the wrapper scroll vertically. */}
                   {liveFrame && (
                     <div className="mb-1.5 relative rounded overflow-hidden border border-zinc-800" data-testid="vr-live-frame">
-                      <img
-                        src={liveFrame}
-                        alt="Live browser view"
-                        className="w-full h-auto block"
-                        style={{ maxHeight: 320, objectFit: "contain", background: "#000" }}
-                      />
+                      <div
+                        className="overflow-y-auto bg-black"
+                        style={{ maxHeight: 360 }}
+                        data-testid="vr-live-frame-scroll"
+                      >
+                        <img
+                          src={liveFrame}
+                          alt="Live browser view"
+                          className="w-full block"
+                          style={{ height: "auto", display: "block" }}
+                        />
+                      </div>
                       {liveFrameMeta && (
                         <div className="absolute top-1 left-1 right-1 flex items-center justify-between gap-1 pointer-events-none">
                           <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${
@@ -4686,10 +4758,16 @@ export default function VisualRecorderPage() {
                         </div>
                       )}
                       {liveTesting && (
-                        <div className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-rose-700/90 text-[10px] text-white font-medium animate-pulse">
+                        <div className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-rose-700/90 text-[10px] text-white font-medium animate-pulse pointer-events-none">
                           ● LIVE
                         </div>
                       )}
+                      {/* Scroll hint pill — fades out after operator's
+                          first scroll inside the panel. Pure CSS hover
+                          so it doesn't cost a re-render per frame. */}
+                      <div className="absolute bottom-1 left-1 px-1.5 py-0.5 rounded bg-zinc-900/80 text-[9px] text-zinc-300 font-mono pointer-events-none border border-zinc-700/60">
+                        ↕ scroll inside to see full page
+                      </div>
                     </div>
                   )}
                   {!liveFrame && liveTesting && (
@@ -5574,6 +5652,82 @@ export default function VisualRecorderPage() {
                 data-testid="vr-branch-save"
               >
                 {busy ? "Inserting…" : "Insert branch step"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 2026-06 — Electron-safe prompt/confirm modal.
+          Drives `vrPrompt()` / `vrConfirm()`. See state definition for
+          context. Z-index 60 sits above the edit-step drawer (z-50)
+          so a prompt opened FROM the edit drawer (e.g. "Find similar"
+          fallback path) still shows on top. */}
+      {promptModal && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          data-testid="vr-prompt-modal-backdrop"
+        >
+          <div
+            className="bg-zinc-950 border border-zinc-700 rounded-lg shadow-2xl w-full max-w-md mx-4 p-5"
+            onClick={(e) => e.stopPropagation()}
+            data-testid="vr-prompt-modal"
+          >
+            <div className="text-sm text-zinc-100 whitespace-pre-wrap mb-4 leading-relaxed">
+              {promptModal.message}
+            </div>
+            {promptModal.kind === "prompt" && (
+              <input
+                type="text"
+                autoFocus
+                defaultValue={promptModal.defaultValue}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    const v = e.currentTarget.value;
+                    const r = promptModal.resolve;
+                    setPromptModal(null);
+                    r(v);
+                  } else if (e.key === "Escape") {
+                    const r = promptModal.resolve;
+                    setPromptModal(null);
+                    r(null);
+                  }
+                }}
+                className="w-full px-3 py-2 mb-4 rounded bg-zinc-900 border border-zinc-700 focus:border-emerald-500 text-zinc-100 text-sm outline-none font-mono"
+                data-testid="vr-prompt-input"
+                id="vr-prompt-input-field"
+              />
+            )}
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => {
+                  const r = promptModal.resolve;
+                  setPromptModal(null);
+                  r(promptModal.kind === "confirm" ? false : null);
+                }}
+                className="px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs border border-zinc-700"
+                data-testid="vr-prompt-cancel"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  if (promptModal.kind === "confirm") {
+                    const r = promptModal.resolve;
+                    setPromptModal(null);
+                    r(true);
+                  } else {
+                    const input = document.getElementById("vr-prompt-input-field");
+                    const v = input ? input.value : promptModal.defaultValue;
+                    const r = promptModal.resolve;
+                    setPromptModal(null);
+                    r(v);
+                  }
+                }}
+                className="px-3 py-1.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white text-xs border border-emerald-500/40"
+                data-testid="vr-prompt-ok"
+              >
+                OK
               </button>
             </div>
           </div>
