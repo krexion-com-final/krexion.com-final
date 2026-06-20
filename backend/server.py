@@ -18519,6 +18519,66 @@ async def vr_reload(session_id: str, user: dict = Depends(get_current_user)):
     return await vr.reload_page(sess)
 
 
+# ── 2026-01 (multi-tab support) ────────────────────────────────────────
+# Endpoints so the Visual Recorder UI can render a tabs bar AND let the
+# user switch between / close tabs that the offer page spawned via
+# target="_blank" / window.open. Without these, clicks that open a new
+# tab silently navigate the (invisible) new page while the user keeps
+# staring at the old one — making it impossible to record steps on the
+# offer's destination page. See visual_recorder._attach_page_listeners.
+@api_router.get("/visual-recorder/{session_id}/tabs")
+async def vr_list_tabs(session_id: str, user: dict = Depends(get_current_user)):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if sess.state != "ready":
+        return {"tabs": [], "active_index": 0, "state": sess.state}
+    tabs = await vr.list_tabs(sess)
+    return {
+        "tabs": tabs,
+        "active_index": sess.active_page_index,
+        "total": len(tabs),
+        "state": sess.state,
+    }
+
+
+@api_router.post("/visual-recorder/{session_id}/tabs/{index}/activate")
+async def vr_switch_tab(
+    session_id: str,
+    index: int,
+    user: dict = Depends(get_current_user),
+):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.switch_tab(sess, index)
+
+
+@api_router.post("/visual-recorder/{session_id}/tabs/{index}/close")
+async def vr_close_tab(
+    session_id: str,
+    index: int,
+    user: dict = Depends(get_current_user),
+):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.close_tab(sess, index)
+
+
+
+
 @api_router.get("/visual-recorder/{session_id}/state")
 async def vr_state(session_id: str, user: dict = Depends(get_current_user)):
     if vr is None:

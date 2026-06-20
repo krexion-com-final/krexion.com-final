@@ -330,6 +330,15 @@ export default function VisualRecorderPage() {
   const imgRef = useRef(null);
   const sessionStartedAt = useRef(null);
   const [recordingElapsed, setRecordingElapsed] = useState(0);
+  // ── 2026-01 (multi-tab support) ─────────────────────────────────
+  // Live list of all open Chromium tabs in this recorder session and
+  // which one is currently active. Polled every 1.5s while
+  // sessionState === "ready". When the offer page opens a new tab
+  // (target="_blank" / window.open) the backend auto-promotes it,
+  // so the user instantly sees the new page AND the tabs bar
+  // updates to show the previous one is still available.
+  const [tabs, setTabs] = useState([]);
+  const [activeTabIndex, setActiveTabIndex] = useState(0);
 
   // ── Recent recordings (localStorage) ───────────────────────────────
   useEffect(() => {
@@ -720,6 +729,75 @@ export default function VisualRecorderPage() {
     const t = setInterval(() => setShotTick((x) => x + 1), 1000);
     return () => clearInterval(t);
   }, [setupStage, sessionId, sessionState]);
+
+  // ── 2026-01 (multi-tab) — Poll the tabs list every 1.5s ─────────
+  // Picks up newly opened popups / target="_blank" tabs the offer
+  // page spawns. The user sees the tabs strip update + the live
+  // preview auto-switches to the new tab (backend promotes it).
+  useEffect(() => {
+    if (setupStage !== "recording" || !sessionId || sessionState !== "ready") return;
+    let cancelled = false;
+    const pollTabs = async () => {
+      try {
+        const r = await fetch(
+          `${API_URL}/api/visual-recorder/${sessionId}/tabs`,
+          { headers: authH() },
+        );
+        if (!r.ok) return;
+        const d = await r.json();
+        if (cancelled) return;
+        if (Array.isArray(d.tabs)) setTabs(d.tabs);
+        if (typeof d.active_index === "number") setActiveTabIndex(d.active_index);
+      } catch {}
+    };
+    pollTabs();
+    const t = setInterval(pollTabs, 1500);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [setupStage, sessionId, sessionState]);
+
+  // ── 2026-01 (multi-tab) — switch / close tab actions ────────────
+  const switchTab = useCallback(async (index) => {
+    if (!sessionId || index === activeTabIndex) return;
+    try {
+      const r = await fetch(
+        `${API_URL}/api/visual-recorder/${sessionId}/tabs/${index}/activate`,
+        { method: "POST", headers: authH() },
+      );
+      const d = await r.json();
+      if (!r.ok || !d.ok) {
+        toast.error(`Switch tab failed: ${d.error || d.detail || "unknown"}`);
+        return;
+      }
+      setActiveTabIndex(index);
+      // Force screenshot refresh on next tick
+      setShotTick((x) => x + 1);
+    } catch (err) {
+      toast.error(`Switch tab failed: ${err.message || err}`);
+    }
+  }, [sessionId, activeTabIndex]);
+
+  const closeTab = useCallback(async (index, e) => {
+    if (e) { e.stopPropagation(); e.preventDefault(); }
+    if (!sessionId) return;
+    if (tabs.length <= 1) {
+      toast.error("Cannot close the last tab");
+      return;
+    }
+    try {
+      const r = await fetch(
+        `${API_URL}/api/visual-recorder/${sessionId}/tabs/${index}/close`,
+        { method: "POST", headers: authH() },
+      );
+      const d = await r.json();
+      if (!r.ok || !d.ok) {
+        toast.error(`Close tab failed: ${d.error || d.detail || "unknown"}`);
+        return;
+      }
+      setShotTick((x) => x + 1);
+    } catch (err) {
+      toast.error(`Close tab failed: ${err.message || err}`);
+    }
+  }, [sessionId, tabs.length]);
 
   // ── Keyboard shortcuts ─────────────────────────────────────────────
   // 1-8  → switch tool
@@ -3047,6 +3125,59 @@ export default function VisualRecorderPage() {
                   <RefreshCw className="w-3.5 h-3.5" />
                 </button>
               </div>
+
+              {/* ── 2026-01 (multi-tab) — Browser-style tabs strip ──
+                  Renders one chip per open Chromium tab in the recorder
+                  session. The active tab is highlighted; clicking any
+                  other tab switches the live preview to it (subsequent
+                  /click / /type act on that tab). When the offer page
+                  opens a new tab (target="_blank", window.open) it
+                  appears here automatically AND is auto-promoted to
+                  active so the user instantly sees the destination
+                  page. Hidden when there's only one tab (the original)
+                  to keep the UI clean for simple single-page offers. */}
+              {tabs.length > 1 && sessionState === "ready" && (
+                <div
+                  className="flex items-center gap-1 mb-2 px-1 overflow-x-auto pb-1"
+                  data-testid="vr-tabs-strip"
+                >
+                  {tabs.map((t) => {
+                    const isActive = t.is_active || t.index === activeTabIndex;
+                    let domain = "";
+                    try { domain = t.url ? new URL(t.url).hostname.replace(/^www\./, "") : ""; } catch {}
+                    const label = (t.title && t.title !== t.url ? t.title : domain) || `Tab ${t.index + 1}`;
+                    return (
+                      <button
+                        key={t.index}
+                        onClick={() => switchTab(t.index)}
+                        title={t.url || label}
+                        data-testid={`vr-tab-${t.index}`}
+                        className={`group flex items-center gap-1.5 px-2.5 py-1 rounded-t-md text-[11px] font-medium whitespace-nowrap border-b-2 transition-colors ${
+                          isActive
+                            ? "bg-zinc-800 text-emerald-300 border-emerald-400"
+                            : "bg-zinc-900/70 text-zinc-400 border-transparent hover:text-zinc-200 hover:bg-zinc-800/70"
+                        }`}
+                      >
+                        <Globe className="w-3 h-3 shrink-0 opacity-70" />
+                        <span className="max-w-[140px] truncate">{label}</span>
+                        {tabs.length > 1 && (
+                          <span
+                            onClick={(e) => closeTab(t.index, e)}
+                            data-testid={`vr-tab-close-${t.index}`}
+                            className="ml-0.5 w-3.5 h-3.5 inline-flex items-center justify-center rounded-sm opacity-0 group-hover:opacity-100 hover:bg-rose-500/40 hover:text-rose-200 text-zinc-500 transition-all cursor-pointer"
+                            title="Close tab"
+                          >
+                            <X className="w-2.5 h-2.5" />
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                  <div className="ml-1 text-[10px] text-zinc-500 self-center px-1">
+                    {tabs.length} tabs
+                  </div>
+                </div>
+              )}
 
               {/* Live image */}
               <div className="relative bg-zinc-950 rounded-lg overflow-hidden flex justify-center">
