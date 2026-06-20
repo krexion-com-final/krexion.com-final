@@ -18749,6 +18749,172 @@ async def vr_add_human_pause(
 
 
 
+# ══════════════════════════════════════════════════════════════════════
+# ── 2026-01 Phase 2: full "any-offer" coverage endpoints ────────────
+# ══════════════════════════════════════════════════════════════════════
+
+def _vr_resolve(session_id: str, user: dict):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return sess
+
+
+class _VRIframeClickReq(BaseModel):
+    frame_selector: str
+    inner_selector: Optional[str] = ""
+    inner_text: Optional[str] = ""
+    timeout_ms: int = 10000
+
+
+@api_router.post("/visual-recorder/{session_id}/iframe-click")
+async def vr_iframe_click(session_id: str, req: _VRIframeClickReq, user: dict = Depends(get_current_user)):
+    return await vr.iframe_click(_vr_resolve(session_id, user), req.frame_selector,
+                                 req.inner_selector or "", req.inner_text or "", req.timeout_ms)
+
+
+class _VRIframeFillReq(BaseModel):
+    frame_selector: str
+    inner_selector: str
+    value: str
+    timeout_ms: int = 10000
+
+
+@api_router.post("/visual-recorder/{session_id}/iframe-fill")
+async def vr_iframe_fill(session_id: str, req: _VRIframeFillReq, user: dict = Depends(get_current_user)):
+    return await vr.iframe_fill(_vr_resolve(session_id, user), req.frame_selector,
+                                req.inner_selector, req.value, req.timeout_ms)
+
+
+class _VRShadowClickReq(BaseModel):
+    chain: List[str]
+
+
+@api_router.post("/visual-recorder/{session_id}/shadow-click")
+async def vr_shadow_click(session_id: str, req: _VRShadowClickReq, user: dict = Depends(get_current_user)):
+    return await vr.shadow_click(_vr_resolve(session_id, user), req.chain)
+
+
+class _VRDragReq(BaseModel):
+    source_selector: Optional[str] = ""
+    source_x: Optional[int] = 0
+    source_y: Optional[int] = 0
+    target_selector: Optional[str] = ""
+    target_x: Optional[int] = 0
+    target_y: Optional[int] = 0
+    delta_x: Optional[int] = 0
+    delta_y: Optional[int] = 0
+    steps: Optional[int] = 25
+
+
+@api_router.post("/visual-recorder/{session_id}/drag-drop")
+async def vr_drag_drop(session_id: str, req: _VRDragReq, user: dict = Depends(get_current_user)):
+    return await vr.drag_drop(
+        _vr_resolve(session_id, user),
+        source_selector=req.source_selector or "",
+        source_x=req.source_x or 0, source_y=req.source_y or 0,
+        target_selector=req.target_selector or "",
+        target_x=req.target_x or 0, target_y=req.target_y or 0,
+        delta_x=req.delta_x or 0, delta_y=req.delta_y or 0,
+        steps=req.steps or 25,
+    )
+
+
+@api_router.post("/visual-recorder/{session_id}/browser-back")
+async def vr_browser_back(session_id: str, user: dict = Depends(get_current_user)):
+    return await vr.browser_back(_vr_resolve(session_id, user))
+
+
+@api_router.post("/visual-recorder/{session_id}/browser-forward")
+async def vr_browser_forward(session_id: str, user: dict = Depends(get_current_user)):
+    return await vr.browser_forward(_vr_resolve(session_id, user))
+
+
+class _VRRightClickReq(BaseModel):
+    x: Optional[int] = 0
+    y: Optional[int] = 0
+    selector: Optional[str] = ""
+
+
+@api_router.post("/visual-recorder/{session_id}/right-click")
+async def vr_right_click(session_id: str, req: _VRRightClickReq, user: dict = Depends(get_current_user)):
+    return await vr.right_click(_vr_resolve(session_id, user), req.x or 0, req.y or 0, req.selector or "")
+
+
+class _VRClipboardWriteReq(BaseModel):
+    text: str
+
+
+@api_router.post("/visual-recorder/{session_id}/clipboard-write")
+async def vr_clipboard_write(session_id: str, req: _VRClipboardWriteReq, user: dict = Depends(get_current_user)):
+    return await vr.clipboard_write(_vr_resolve(session_id, user), req.text)
+
+
+class _VRClipboardReadReq(BaseModel):
+    var_name: Optional[str] = "clipboard"
+
+
+@api_router.post("/visual-recorder/{session_id}/clipboard-read")
+async def vr_clipboard_read(session_id: str, req: _VRClipboardReadReq, user: dict = Depends(get_current_user)):
+    return await vr.clipboard_read_into_var(_vr_resolve(session_id, user), req.var_name or "clipboard")
+
+
+class _VRCondSkipReq(BaseModel):
+    if_type: str
+    selector: Optional[str] = ""
+    text: Optional[str] = ""
+    skip_count: Optional[int] = 1
+    label: Optional[str] = ""
+
+
+@api_router.post("/visual-recorder/{session_id}/conditional-skip")
+async def vr_conditional_skip(session_id: str, req: _VRCondSkipReq, user: dict = Depends(get_current_user)):
+    return await vr.add_conditional_skip(
+        _vr_resolve(session_id, user),
+        if_type=req.if_type, selector=req.selector or "",
+        text=req.text or "", skip_count=req.skip_count or 1, label=req.label or "",
+    )
+
+
+@api_router.get("/visual-recorder/{session_id}/storage-state")
+async def vr_storage_state(session_id: str, user: dict = Depends(get_current_user)):
+    return await vr.export_storage_state(_vr_resolve(session_id, user))
+
+
+class _VRStorageStepReq(BaseModel):
+    var_name: Optional[str] = "session_state"
+
+
+@api_router.post("/visual-recorder/{session_id}/add-save-storage")
+async def vr_add_save_storage(session_id: str, req: _VRStorageStepReq, user: dict = Depends(get_current_user)):
+    return await vr.add_save_storage_step(_vr_resolve(session_id, user), req.var_name or "session_state")
+
+
+@api_router.post("/visual-recorder/{session_id}/add-restore-storage")
+async def vr_add_restore_storage(session_id: str, req: _VRStorageStepReq, user: dict = Depends(get_current_user)):
+    return await vr.add_restore_storage_step(_vr_resolve(session_id, user), req.var_name or "session_state")
+
+
+class _VRZoomReq(BaseModel):
+    level: float = 1.0
+
+
+@api_router.post("/visual-recorder/{session_id}/set-zoom")
+async def vr_set_zoom(session_id: str, req: _VRZoomReq, user: dict = Depends(get_current_user)):
+    return await vr.set_zoom(_vr_resolve(session_id, user), req.level)
+
+
+@api_router.get("/visual-recorder/{session_id}/headless-probe")
+async def vr_headless_probe(session_id: str, user: dict = Depends(get_current_user)):
+    return await vr.headless_probe(_vr_resolve(session_id, user))
+
+
+
+
 
 
 

@@ -4548,3 +4548,440 @@ async def add_human_pause(
     sess.steps.append(step)
     return {"recorded": True, "step": step}
 
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ── 2026-01 (Phase 2 features — full "any-offer" coverage) ───────────
+# ══════════════════════════════════════════════════════════════════════
+
+async def iframe_click(
+    sess: RecorderSession,
+    frame_selector: str,
+    inner_selector: str = "",
+    inner_text: str = "",
+    timeout_ms: int = 10000,
+) -> Dict[str, Any]:
+    """Click an element inside a (possibly cross-origin) iframe.
+    Uses Playwright frame_locator which traverses cross-origin frames."""
+    sess.touch()
+    if not frame_selector:
+        return {"recorded": False, "error": "frame_selector_required"}
+    if not inner_selector and not inner_text:
+        return {"recorded": False, "error": "inner_selector_or_text_required"}
+    async with sess.lock:
+        try:
+            fl = sess.page.frame_locator(frame_selector)
+            if inner_selector:
+                await fl.locator(inner_selector).first.click(timeout=int(timeout_ms))
+            else:
+                await fl.get_by_text(inner_text).first.click(timeout=int(timeout_ms))
+        except Exception as e:
+            return {"recorded": False, "error": f"iframe_click_failed: {e}"}
+    step = {
+        "action": "iframe_click",
+        "frame_selector": frame_selector,
+        "selector": inner_selector or None,
+        "text": inner_text or None,
+        "timeout": int(timeout_ms),
+        "name": f"iframe click → {(inner_selector or inner_text or '')[:40]}",
+    }
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+async def iframe_fill(
+    sess: RecorderSession,
+    frame_selector: str,
+    inner_selector: str,
+    value: str,
+    timeout_ms: int = 10000,
+) -> Dict[str, Any]:
+    """Fill an input inside an iframe. Templates resolved at recording."""
+    sess.touch()
+    if not frame_selector or not inner_selector:
+        return {"recorded": False, "error": "selectors_required"}
+    live_value = resolve_templates_in_text(sess, value or "")
+    async with sess.lock:
+        try:
+            fl = sess.page.frame_locator(frame_selector)
+            await fl.locator(inner_selector).first.fill(live_value, timeout=int(timeout_ms))
+        except Exception as e:
+            return {"recorded": False, "error": f"iframe_fill_failed: {e}"}
+    step = {
+        "action": "iframe_fill",
+        "frame_selector": frame_selector,
+        "selector": inner_selector,
+        "value": value,
+        "timeout": int(timeout_ms),
+        "name": f"iframe fill → {inner_selector[:40]}",
+    }
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+async def shadow_click(
+    sess: RecorderSession,
+    chain: List[str],
+) -> Dict[str, Any]:
+    """Click an element nested behind shadow roots.
+    chain = ['my-card', 'checkout-button', 'button.primary']
+    Pierces each shadow root in order. Works for Stripe Elements,
+    Shopify modern checkout, Salesforce Lightning, etc.
+    """
+    sess.touch()
+    if not chain or not isinstance(chain, list):
+        return {"recorded": False, "error": "chain_required"}
+    js_chain = "[" + ",".join("'" + str(c).replace("'", "\\'") + "'" for c in chain) + "]"
+    script = (
+        "(function(){"
+        f"var chain={js_chain};"
+        "var root=document;"
+        "for(var i=0;i<chain.length-1;i++){"
+        "var el=root.querySelector(chain[i]);"
+        "if(!el)return;"
+        "if(el.shadowRoot)root=el.shadowRoot;else root=el;"
+        "}"
+        "var target=root.querySelector(chain[chain.length-1]);"
+        "if(!target)return;"
+        "target.scrollIntoView({block:'center'});target.click();"
+        "})();"
+    )
+    async with sess.lock:
+        try:
+            await sess.page.evaluate(script)
+        except Exception as e:
+            return {"recorded": False, "error": f"shadow_click_failed: {e}"}
+    step = {
+        "action": "evaluate",
+        "script": script,
+        "name": f"shadow-DOM click → {' >> '.join(chain[-2:])}",
+        "shadow_chain": chain,
+    }
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+async def drag_drop(
+    sess: RecorderSession,
+    *,
+    source_selector: str = "",
+    source_x: int = 0, source_y: int = 0,
+    target_selector: str = "",
+    target_x: int = 0, target_y: int = 0,
+    delta_x: int = 0, delta_y: int = 0,
+    steps: int = 25,
+) -> Dict[str, Any]:
+    """Drag-and-drop with smooth interpolated movement.
+    Modes:
+       1. source_selector + target_selector  (CSS)
+       2. source x/y + target x/y            (coords)
+       3. source_selector + delta x/y        (slider — relative drag)
+    Critical for slider/puzzle CAPTCHAs (AWS WAF, GeeTest)."""
+    sess.touch()
+    async with sess.lock:
+        try:
+            if source_selector and (target_selector or delta_x or delta_y):
+                src = await sess.page.query_selector(source_selector)
+                if not src:
+                    return {"recorded": False, "error": "source_not_found"}
+                box = await src.bounding_box()
+                if not box:
+                    return {"recorded": False, "error": "source_no_bbox"}
+                sx, sy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+                if target_selector:
+                    tgt = await sess.page.query_selector(target_selector)
+                    if not tgt:
+                        return {"recorded": False, "error": "target_not_found"}
+                    tbox = await tgt.bounding_box()
+                    tx, ty = tbox["x"] + tbox["width"] / 2, tbox["y"] + tbox["height"] / 2
+                else:
+                    tx, ty = sx + int(delta_x), sy + int(delta_y)
+            else:
+                sx, sy = int(source_x), int(source_y)
+                tx, ty = int(target_x), int(target_y)
+            await sess.page.mouse.move(sx, sy)
+            await sess.page.mouse.down()
+            await sess.page.mouse.move(tx, ty, steps=int(steps))
+            await sess.page.mouse.up()
+        except Exception as e:
+            return {"recorded": False, "error": f"drag_failed: {e}"}
+    step = {
+        "action": "drag_drop",
+        "source_selector": source_selector or None,
+        "source_x": int(source_x) if not source_selector else None,
+        "source_y": int(source_y) if not source_selector else None,
+        "target_selector": target_selector or None,
+        "target_x": int(target_x) or None,
+        "target_y": int(target_y) or None,
+        "delta_x": int(delta_x) or None,
+        "delta_y": int(delta_y) or None,
+        "steps": int(steps),
+        "name": f"drag {source_selector or '(x,y)'} → {target_selector or 'destination'}",
+    }
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+async def browser_back(sess: RecorderSession) -> Dict[str, Any]:
+    sess.touch()
+    async with sess.lock:
+        try:
+            await sess.page.go_back(wait_until="domcontentloaded", timeout=15000)
+        except Exception:
+            pass
+    step = {"action": "go_back", "name": "← Browser back"}
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+async def browser_forward(sess: RecorderSession) -> Dict[str, Any]:
+    sess.touch()
+    async with sess.lock:
+        try:
+            await sess.page.go_forward(wait_until="domcontentloaded", timeout=15000)
+        except Exception:
+            pass
+    step = {"action": "go_forward", "name": "→ Browser forward"}
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+async def right_click(
+    sess: RecorderSession,
+    x: int = 0, y: int = 0,
+    selector: str = "",
+) -> Dict[str, Any]:
+    sess.touch()
+    async with sess.lock:
+        try:
+            if selector:
+                el = await sess.page.query_selector(selector)
+                if el:
+                    await el.click(button="right")
+            else:
+                await sess.page.mouse.click(int(x), int(y), button="right")
+        except Exception as e:
+            return {"recorded": False, "error": f"right_click_failed: {e}"}
+    step = {
+        "action": "right_click",
+        "selector": selector or None,
+        "x": int(x) if not selector else None,
+        "y": int(y) if not selector else None,
+        "name": f"Right-click → {selector or f'({x},{y})'}",
+    }
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+async def clipboard_write(
+    sess: RecorderSession,
+    text: str,
+) -> Dict[str, Any]:
+    """Write text to clipboard. Templates resolved at recording time;
+    the recorded step keeps {{literal}} for per-row substitution."""
+    sess.touch()
+    live = resolve_templates_in_text(sess, text or "")
+    async with sess.lock:
+        try:
+            await sess.page.evaluate(
+                "(t) => navigator.clipboard && navigator.clipboard.writeText(t)",
+                live,
+            )
+        except Exception:
+            pass
+    step = {
+        "action": "clipboard_write",
+        "text": text,
+        "name": f"Clipboard ← {live[:30]}",
+    }
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+async def clipboard_read_into_var(
+    sess: RecorderSession,
+    var_name: str = "clipboard",
+) -> Dict[str, Any]:
+    sess.touch()
+    if not var_name or not var_name.strip():
+        return {"recorded": False, "error": "var_name_required"}
+    var = var_name.strip()
+    step = {
+        "action": "clipboard_read",
+        "var": var,
+        "name": f"Read clipboard → {{{{{var}}}}}",
+    }
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+async def add_conditional_skip(
+    sess: RecorderSession,
+    *,
+    if_type: str,
+    selector: str = "",
+    text: str = "",
+    skip_count: int = 1,
+    label: str = "",
+) -> Dict[str, Any]:
+    """Insert a step that at replay time SKIPS the next N steps if
+    condition matches. Perfect for offers that SOMETIMES show CAPTCHA
+    or popups — e.g. if .captcha-frame is visible, skip the next 2
+    steps that would otherwise fail."""
+    sess.touch()
+    typ = (if_type or "visible").lower()
+    if typ not in ("visible", "not_visible", "text"):
+        return {"recorded": False, "error": "invalid_if_type"}
+    if typ in ("visible", "not_visible") and not selector:
+        return {"recorded": False, "error": "selector_required_for_visible"}
+    if typ == "text" and not text:
+        return {"recorded": False, "error": "text_required_for_text"}
+    step = {
+        "action": "conditional_skip",
+        "if_type": typ,
+        "selector": selector or None,
+        "text": text or None,
+        "skip_count": max(1, int(skip_count)),
+        "optional": True,
+        "name": label or f"⏭ If {typ}: {selector or text[:30]} — skip next {skip_count}",
+    }
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+async def export_storage_state(sess: RecorderSession) -> Dict[str, Any]:
+    """Pull all cookies + localStorage from the current context.
+    Returned dict can be re-applied later to resume a logged-in state."""
+    sess.touch()
+    if sess.state != "ready" or sess.context is None:
+        return {"ok": False, "error": "not_ready"}
+    async with sess.lock:
+        try:
+            state = await sess.context.storage_state()
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+    return {"ok": True, "state": state}
+
+
+async def add_save_storage_step(
+    sess: RecorderSession,
+    var_name: str = "session_state",
+) -> Dict[str, Any]:
+    sess.touch()
+    v = (var_name or "session_state").strip() or "session_state"
+    step = {
+        "action": "save_storage",
+        "var": v,
+        "name": f"💾 Save cookies+storage → {{{{{v}}}}}",
+    }
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+async def add_restore_storage_step(
+    sess: RecorderSession,
+    var_name: str = "session_state",
+) -> Dict[str, Any]:
+    sess.touch()
+    v = (var_name or "session_state").strip() or "session_state"
+    step = {
+        "action": "restore_storage",
+        "var": v,
+        "name": f"📂 Restore cookies+storage from {{{{{v}}}}}",
+    }
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+async def set_zoom(
+    sess: RecorderSession,
+    level: float = 1.0,
+) -> Dict[str, Any]:
+    """Set browser zoom (1.0 = 100%, 1.25 = 125%, etc.)."""
+    sess.touch()
+    lvl = max(0.25, min(float(level or 1.0), 3.0))
+    async with sess.lock:
+        try:
+            await sess.page.evaluate(f"() => document.body.style.zoom = '{lvl}'")
+        except Exception:
+            pass
+    step = {
+        "action": "set_zoom",
+        "level": lvl,
+        "name": f"🔍 Zoom = {int(lvl * 100)}%",
+    }
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+async def headless_probe(sess: RecorderSession) -> Dict[str, Any]:
+    """Run the same detection probes big anti-bot vendors run
+    (Akamai, DataDome, F5 Shape, PerimeterX). Returns a 0-100 score
+    plus list of failed checks so the customer knows WHY their
+    recorder browser might be flagged."""
+    sess.touch()
+    if sess.state != "ready" or sess.page is None:
+        return {"score": 0, "error": "not_ready"}
+    probes_js = """
+    (function(){
+      var r = {};
+      r.webdriver = !!navigator.webdriver;
+      var ua = navigator.userAgent.toLowerCase();
+      var uaMobile = /mobile|android|iphone|ipad/.test(ua);
+      r.uaDataMismatch = navigator.userAgentData ? (navigator.userAgentData.mobile !== uaMobile) : null;
+      r.touchMismatch = uaMobile && navigator.maxTouchPoints === 0;
+      r.langsEmpty = !navigator.languages || navigator.languages.length === 0;
+      r.chromeRuntimeMissing = (typeof chrome === 'undefined' || !chrome.runtime);
+      r.pluginsEmpty = !navigator.plugins || navigator.plugins.length === 0;
+      r.hairlineHack = (function(){
+        var d = document.createElement('div');
+        d.style.width = '0.5px'; document.body.appendChild(d);
+        var w = d.getBoundingClientRect().width;
+        document.body.removeChild(d);
+        return w === 0;
+      })();
+      try {
+        var canvas = document.createElement('canvas');
+        var gl = canvas.getContext('webgl');
+        var debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+        var renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
+        r.webglRenderer = renderer;
+        if (uaMobile && /nvidia|amd|intel\\(r\\)/i.test(renderer)) r.webglDesktopOnMobile = true;
+      } catch(e) {}
+      r.tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      r.notificationDenied = (typeof Notification !== 'undefined' && Notification.permission === 'denied');
+      r.screenW = screen.width;
+      r.screenH = screen.height;
+      r.maxTouchPoints = navigator.maxTouchPoints;
+      r.languages = navigator.languages;
+      return r;
+    })();
+    """
+    try:
+        async with sess.lock:
+            r = await sess.page.evaluate(probes_js)
+    except Exception as e:
+        return {"score": 0, "error": str(e)}
+    score = 100
+    fails: List[str] = []
+    if r.get("webdriver"):              score -= 25; fails.append("navigator.webdriver leaks true")
+    if r.get("uaDataMismatch"):         score -= 15; fails.append("navigator.userAgentData.mobile mismatch with UA")
+    if r.get("touchMismatch"):          score -= 15; fails.append("maxTouchPoints=0 on mobile UA")
+    if r.get("langsEmpty"):              score -= 8; fails.append("navigator.languages empty")
+    if r.get("chromeRuntimeMissing"):    score -= 5; fails.append("chrome.runtime missing")
+    if r.get("pluginsEmpty"):            score -= 5; fails.append("navigator.plugins empty")
+    if r.get("hairlineHack"):           score -= 10; fails.append("Hairline-width CDP marker (0.5px → 0)")
+    if r.get("webglDesktopOnMobile"):   score -= 10; fails.append("WebGL renderer is desktop GPU but UA is mobile")
+    if r.get("notificationDenied"):      score -= 2; fails.append("Notification.permission=denied (headless default)")
+    return {
+        "score": max(0, score),
+        "raw": r,
+        "fails": fails,
+        "verdict": (
+            "EXCELLENT — looks like a real browser" if score >= 85 else
+            "GOOD — minor leaks, still mostly real" if score >= 70 else
+            "RISKY — multiple anti-bot vendors will flag this" if score >= 50 else
+            "HIGH RISK — basic detection will fire"
+        ),
+    }
+

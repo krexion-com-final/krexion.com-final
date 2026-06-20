@@ -1581,6 +1581,154 @@ export default function VisualRecorderPage() {
     } catch (e) { toast.error(e.message || "Failed"); }
   };
 
+  // ── 2026-01 Phase 2: full any-offer coverage handlers ────────────
+  // Drop these into the "More" dropdown to keep the toolbar uncluttered
+
+  const callVRPost = async (path, body, successMsg) => {
+    if (!sessionId) return;
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/${path}`, {
+        method: "POST", headers: authH(),
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const d = await r.json();
+      if (!r.ok || (d.recorded === false)) { toast.error(d.error || d.detail || "Failed"); return; }
+      toast.success(successMsg || "Step added");
+      refreshState();
+      return d;
+    } catch (e) { toast.error(e.message || "Failed"); }
+  };
+
+  const addBrowserBack = () => callVRPost("browser-back", null, "← Back step added");
+  const addBrowserForward = () => callVRPost("browser-forward", null, "→ Forward step added");
+
+  const addRightClick = async () => {
+    const sel = window.prompt("CSS selector of element to right-click (blank = use coords)", "");
+    let x = 0, y = 0;
+    if (!sel) {
+      x = parseInt(window.prompt("X coordinate", "100"), 10) || 0;
+      y = parseInt(window.prompt("Y coordinate", "100"), 10) || 0;
+    }
+    return callVRPost("right-click", { selector: sel, x, y }, "Right-click step added");
+  };
+
+  const addClipboardWrite = async () => {
+    const text = window.prompt("Text to write to clipboard (supports {{templates}})", "{{counter}}");
+    if (text === null) return;
+    return callVRPost("clipboard-write", { text }, "Clipboard write step added");
+  };
+
+  const addClipboardRead = async () => {
+    const v = window.prompt("Variable name to store clipboard contents", "clipboard_value");
+    if (!v) return;
+    return callVRPost("clipboard-read", { var_name: v }, `Clipboard read → {{${v}}}`);
+  };
+
+  const addCondSkip = async () => {
+    const typeRaw = window.prompt("Condition type: visible / not_visible / text", "visible");
+    const if_type = (typeRaw || "visible").toLowerCase().trim();
+    let selector = "", text = "";
+    if (if_type === "text") {
+      text = window.prompt("Text to check on page", "");
+      if (!text) return;
+    } else {
+      selector = window.prompt("CSS selector to check", ".captcha-frame");
+      if (!selector) return;
+    }
+    const skipRaw = window.prompt("How many subsequent steps to skip?", "1");
+    const skip_count = parseInt(skipRaw, 10) || 1;
+    return callVRPost("conditional-skip", { if_type, selector, text, skip_count },
+      `If ${if_type} → skip ${skip_count} steps`);
+  };
+
+  const addSaveStorage = async () => {
+    const v = window.prompt("Variable name for cookies+localStorage snapshot", "session_state");
+    if (!v) return;
+    return callVRPost("add-save-storage", { var_name: v }, "Save storage step added");
+  };
+
+  const addRestoreStorage = async () => {
+    const v = window.prompt("Variable name to restore cookies+localStorage from", "session_state");
+    if (!v) return;
+    return callVRPost("add-restore-storage", { var_name: v }, "Restore storage step added");
+  };
+
+  const setBrowserZoom = async () => {
+    const raw = window.prompt("Zoom level (1.0 = 100%, 1.25 = 125%, 1.5 = 150%)", "1.0");
+    const level = parseFloat(raw) || 1.0;
+    return callVRPost("set-zoom", { level }, `Zoom = ${Math.round(level * 100)}%`);
+  };
+
+  const addIframeClick = async () => {
+    const fs = window.prompt("CSS selector of the iframe element", "iframe");
+    if (!fs) return;
+    const inner = window.prompt("Inner selector OR inner text\n(prefix with text: for text match)", "button.submit");
+    if (!inner) return;
+    let inner_selector = inner, inner_text = "";
+    if (inner.startsWith("text:")) {
+      inner_text = inner.slice(5).trim();
+      inner_selector = "";
+    }
+    return callVRPost("iframe-click", {
+      frame_selector: fs, inner_selector, inner_text, timeout_ms: 10000,
+    }, "iframe click added");
+  };
+
+  const addShadowClick = async () => {
+    const raw = window.prompt(
+      "Shadow DOM selector chain — comma-separated\n" +
+      "Each step is a selector; we pierce shadowRoot at each level.\n" +
+      "Example: my-card, checkout-btn, button.primary",
+      "host-element, button",
+    );
+    if (!raw) return;
+    const chain = raw.split(",").map(s => s.trim()).filter(Boolean);
+    if (chain.length < 2) {
+      toast.error("Need at least 2 selectors (host + final target)");
+      return;
+    }
+    return callVRPost("shadow-click", { chain }, `Shadow DOM click → ${chain[chain.length - 1]}`);
+  };
+
+  const addDragDrop = async () => {
+    const src = window.prompt("Source CSS selector (e.g. .slider-handle) — blank for coords", "");
+    if (src === null) return;
+    let body = { steps: 25 };
+    if (src) {
+      body.source_selector = src;
+      const tgt = window.prompt("Target selector (blank → use delta)", "");
+      if (tgt) {
+        body.target_selector = tgt;
+      } else {
+        body.delta_x = parseInt(window.prompt("Drag delta X (pixels right)", "200"), 10) || 0;
+        body.delta_y = parseInt(window.prompt("Drag delta Y (pixels down)", "0"), 10) || 0;
+      }
+    } else {
+      body.source_x = parseInt(window.prompt("Source X", "100"), 10) || 0;
+      body.source_y = parseInt(window.prompt("Source Y", "200"), 10) || 0;
+      body.target_x = parseInt(window.prompt("Target X", "300"), 10) || 0;
+      body.target_y = parseInt(window.prompt("Target Y", "200"), 10) || 0;
+    }
+    return callVRPost("drag-drop", body, "Drag-and-drop step added");
+  };
+
+  const runHeadlessProbe = async () => {
+    if (!sessionId) return;
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/headless-probe`, { headers: authH() });
+      const d = await r.json();
+      if (!r.ok) { toast.error(d.detail || "Probe failed"); return; }
+      const score = d.score || 0;
+      const verdict = d.verdict || "";
+      const fails = (d.fails || []).join("\n• ");
+      const msg = `Anti-bot score: ${score}/100\n${verdict}` + (fails ? `\n\nLeaks:\n• ${fails}` : "");
+      const toastFn = score >= 85 ? toast.success : score >= 70 ? toast.info : toast.error;
+      toastFn(msg, { duration: 12000 });
+    } catch (e) { toast.error(e.message || "Probe failed"); }
+  };
+
+  const [showMoreMenu, setShowMoreMenu] = useState(false);
+
   // Pre-flight lint
   const [lintResult, setLintResult] = useState(null);
   const [showLintPanel, setShowLintPanel] = useState(false);
@@ -4032,6 +4180,92 @@ export default function VisualRecorderPage() {
                   >
                     ⏸ Pause human
                   </button>
+                  {/* ── 2026-01 Phase 2: "More" dropdown for advanced step types ── */}
+                  <div className="relative inline-block">
+                    <button
+                      onClick={() => setShowMoreMenu((v) => !v)}
+                      disabled={sessionState !== "ready"}
+                      title="Advanced step types: iframe, shadow DOM, drag-drop, conditional skip, cookies/storage, zoom, browser back/forward, right-click, clipboard, headless probe"
+                      className="px-2 py-1 rounded bg-zinc-800 hover:bg-teal-700/40 border border-zinc-700 hover:border-teal-500/40 text-zinc-300 text-[10px] disabled:opacity-40"
+                      data-testid="vr-more-steps-btn"
+                    >
+                      ⋯ More ▾
+                    </button>
+                    {showMoreMenu && (
+                      <div
+                        className="absolute right-0 mt-1 z-50 w-64 max-h-[420px] overflow-y-auto bg-zinc-950 border border-zinc-700 rounded-lg shadow-2xl p-1.5 text-[11px]"
+                        onMouseLeave={() => setShowMoreMenu(false)}
+                        data-testid="vr-more-menu"
+                      >
+                        <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-zinc-500 font-semibold">Embedded Content</div>
+                        <button onClick={() => { setShowMoreMenu(false); addIframeClick(); }}
+                          className="w-full text-left px-2 py-1.5 rounded hover:bg-teal-700/30 text-zinc-200">
+                          🖼️ iframe click
+                        </button>
+                        <button onClick={() => { setShowMoreMenu(false); addShadowClick(); }}
+                          className="w-full text-left px-2 py-1.5 rounded hover:bg-teal-700/30 text-zinc-200">
+                          🌐 Shadow DOM click
+                        </button>
+
+                        <div className="px-2 py-1 mt-1 text-[9px] uppercase tracking-wider text-zinc-500 font-semibold">Interactions</div>
+                        <button onClick={() => { setShowMoreMenu(false); addDragDrop(); }}
+                          className="w-full text-left px-2 py-1.5 rounded hover:bg-teal-700/30 text-zinc-200">
+                          🎚️ Drag-and-drop (slider CAPTCHA)
+                        </button>
+                        <button onClick={() => { setShowMoreMenu(false); addRightClick(); }}
+                          className="w-full text-left px-2 py-1.5 rounded hover:bg-teal-700/30 text-zinc-200">
+                          🖱️ Right-click
+                        </button>
+                        <button onClick={() => { setShowMoreMenu(false); setBrowserZoom(); }}
+                          className="w-full text-left px-2 py-1.5 rounded hover:bg-teal-700/30 text-zinc-200">
+                          🔍 Browser zoom
+                        </button>
+
+                        <div className="px-2 py-1 mt-1 text-[9px] uppercase tracking-wider text-zinc-500 font-semibold">Navigation</div>
+                        <button onClick={() => { setShowMoreMenu(false); addBrowserBack(); }}
+                          className="w-full text-left px-2 py-1.5 rounded hover:bg-teal-700/30 text-zinc-200">
+                          ← Browser back
+                        </button>
+                        <button onClick={() => { setShowMoreMenu(false); addBrowserForward(); }}
+                          className="w-full text-left px-2 py-1.5 rounded hover:bg-teal-700/30 text-zinc-200">
+                          → Browser forward
+                        </button>
+
+                        <div className="px-2 py-1 mt-1 text-[9px] uppercase tracking-wider text-zinc-500 font-semibold">Clipboard</div>
+                        <button onClick={() => { setShowMoreMenu(false); addClipboardWrite(); }}
+                          className="w-full text-left px-2 py-1.5 rounded hover:bg-teal-700/30 text-zinc-200">
+                          📋 Write to clipboard
+                        </button>
+                        <button onClick={() => { setShowMoreMenu(false); addClipboardRead(); }}
+                          className="w-full text-left px-2 py-1.5 rounded hover:bg-teal-700/30 text-zinc-200">
+                          📋 Read clipboard → variable
+                        </button>
+
+                        <div className="px-2 py-1 mt-1 text-[9px] uppercase tracking-wider text-zinc-500 font-semibold">Flow Control</div>
+                        <button onClick={() => { setShowMoreMenu(false); addCondSkip(); }}
+                          className="w-full text-left px-2 py-1.5 rounded hover:bg-teal-700/30 text-zinc-200">
+                          ⏭ Conditional skip
+                        </button>
+
+                        <div className="px-2 py-1 mt-1 text-[9px] uppercase tracking-wider text-zinc-500 font-semibold">Session</div>
+                        <button onClick={() => { setShowMoreMenu(false); addSaveStorage(); }}
+                          className="w-full text-left px-2 py-1.5 rounded hover:bg-teal-700/30 text-zinc-200">
+                          💾 Save cookies + storage
+                        </button>
+                        <button onClick={() => { setShowMoreMenu(false); addRestoreStorage(); }}
+                          className="w-full text-left px-2 py-1.5 rounded hover:bg-teal-700/30 text-zinc-200">
+                          📂 Restore cookies + storage
+                        </button>
+
+                        <div className="px-2 py-1 mt-1 text-[9px] uppercase tracking-wider text-zinc-500 font-semibold">Diagnostics</div>
+                        <button onClick={() => { setShowMoreMenu(false); runHeadlessProbe(); }}
+                          className="w-full text-left px-2 py-1.5 rounded hover:bg-emerald-700/40 text-emerald-200 font-medium"
+                          data-testid="vr-headless-probe-btn">
+                          🛡️ Anti-bot probe (0-100 score)
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
