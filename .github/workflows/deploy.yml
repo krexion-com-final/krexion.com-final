@@ -232,6 +232,24 @@ jobs:
               echo "   No stale backend containers found — clean state."
             fi
 
+            # v1.0.21 (rev 4) — belt-and-suspenders fix for deploy
+            # run 27869748552 which failed with:
+            #   "Conflict. The container name '/krexion-backend' is
+            #    already in use by container fd2624e289991..."
+            # The filter-based cleanup above only matched ONE backend
+            # container (6cfea41fd361), but ANOTHER orphan container
+            # holding the same docker NAME slipped through (likely a
+            # leftover from a previous COMPOSE_PROJECT_NAME or a
+            # half-removed compose run). Filter matching by name is
+            # SUBSTRING-based, so technically should have caught both,
+            # but in practice it missed it — perhaps a race with the
+            # docker daemon's removal flag. Force-remove BY EXACT NAME
+            # here as the very last step before `compose up`. This is
+            # idempotent: succeeds whether or not the container exists.
+            echo ">> Final defensive removal by exact name..."
+            docker rm -fv krexion-backend 2>/dev/null || true
+            docker rm -fv krexion-frontend 2>/dev/null || true
+
             # Bring everything up
             echo ">> Starting containers..."
             docker compose up -d frontend backend

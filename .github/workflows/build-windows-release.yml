@@ -220,6 +220,13 @@ jobs:
         with:
           path: frontend/build
           key: krexion-frontend-${{ github.sha }}-${{ github.run_id }}
+          # v1.0.21 — must be true so this Linux-built cache can be
+          # restored by the Windows installer job. Without it the
+          # restore step in build-installer reports "Cache not found"
+          # and the build falls through to artifact download, which
+          # silently fails when GitHub Actions artifact storage quota
+          # is exhausted → installer "Verify build outputs" hard-fails.
+          enableCrossOsArchive: true
 
   build-installer:
     name: Build Krexion-Setup.exe
@@ -262,6 +269,11 @@ jobs:
         with:
           path: frontend/build
           key: krexion-frontend-${{ github.sha }}-${{ github.run_id }}
+          # v1.0.21 — paired with the matching flag on the save step
+          # in build-frontend (which runs on ubuntu-latest). Windows
+          # installer job MUST use this flag too or it will refuse to
+          # restore a Linux-saved cache, masking the upstream success.
+          enableCrossOsArchive: true
 
       - name: Download frontend artifact (fallback if cache miss)
         if: steps.frontend-cache.outputs.cache-hit != 'true'
@@ -274,7 +286,12 @@ jobs:
       - name: Verify build outputs available
         shell: powershell
         run: |
-          $backendOk = Test-Path "build/dist/krexion-backend.dist/krexion-backend.exe"
+          # v1.0.21 — the real native entry-point produced by
+          # build/build-backend.py is `krexion-core.exe` (renamed
+          # python.exe — see build-backend.py:494). Previous version
+          # of this check looked for `krexion-backend.exe` which never
+          # existed in the output, so this gate failed on every run.
+          $backendOk = Test-Path "build/dist/krexion-backend.dist/krexion-core.exe"
           $frontendOk = (Test-Path "build/frontend-build/index.html") -or (Test-Path "frontend/build/index.html")
           # Frontend cache restored to frontend/build (cache's original path)
           # but artifact download went to build/frontend-build. Normalize.

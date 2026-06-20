@@ -241,12 +241,57 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: ${{ needs.build.result == 'success' }}
+    # v2.1.56 — gh release download needs read access to releases.
+    permissions:
+      contents: read
     steps:
+      # v2.1.56 — Try artifact first (fast path, no network round-trip
+      # to GitHub Releases), then fall back to downloading from the
+      # GitHub Release that the build job just published. The artifact
+      # path can fail when the repo has exhausted its 500 MB Actions
+      # artifact storage quota (run 27869748562 hit this exact failure:
+      # build succeeded, artifact upload silently dropped with
+      # `continue-on-error: true`, mirror then crashed with
+      # "Artifact not found for name: Krexion-Desktop-Setup-2.1.55").
+      # GitHub Releases do NOT count against the artifact quota, so
+      # the release-fallback always works as long as the GH Release
+      # step in the build job ran (it does on every push + tag dispatch).
       - name: Download installer artifact from build job
+        id: dl-artifact
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: Krexion-Desktop-Setup-${{ needs.build.outputs.version }}
           path: dist
+
+      - name: Fallback — download installer from GitHub Release
+        if: steps.dl-artifact.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VER: ${{ needs.build.outputs.version }}
+        run: |
+          set -e
+          mkdir -p dist
+          # Mirror the tag-naming convention from the build job:
+          #   inputs.release_tag (manual) OR `desktop-v<version>` (push)
+          # For push events the build job uses `desktop-v<VER>`.
+          TAG="${{ inputs.release_tag != '' && inputs.release_tag || format('desktop-v{0}', needs.build.outputs.version) }}"
+          echo "Trying GH Release tag: $TAG"
+          # Wait up to 60s for the just-created release to propagate.
+          for i in 1 2 3 4 5 6; do
+            if gh release view "$TAG" -R "${{ github.repository }}" >/dev/null 2>&1; then
+              echo "  release found on attempt $i"
+              break
+            fi
+            echo "  attempt $i: release not visible yet, sleeping 10s..."
+            sleep 10
+          done
+          gh release download "$TAG" \
+            -R "${{ github.repository }}" \
+            -D dist \
+            --pattern 'Krexion-Desktop-Setup-*.exe' \
+            --pattern 'Krexion-Desktop-Setup-*.exe.blockmap' \
+            --pattern 'latest.yml'
 
       - name: List downloaded artifacts (debug)
         run: ls -lah dist/
