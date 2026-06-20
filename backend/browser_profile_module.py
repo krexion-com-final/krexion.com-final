@@ -69,17 +69,27 @@ _DB: Any = None
 _BRIDGE_QUEUE: Any = None
 _GET_USER: Any = None
 _UA_GEN: Any = None
+_PROXYJET_GEN: Any = None
 
 router = APIRouter(prefix="/api/browser-profiles", tags=["browser-profiles"])
 
 
-def _bind(*, db, get_current_user, bridge_enqueue=None, ua_generate_func=None):
-    """Called once by server.py at import time."""
-    global _DB, _BRIDGE_QUEUE, _GET_USER, _UA_GEN
+def _bind(*, db, get_current_user, bridge_enqueue=None, ua_generate_func=None,
+          proxyjet_generate_func=None):
+    """Called once by server.py at import time.
+
+    `proxyjet_generate_func` (2026-01) is the bound coroutine that
+    backs the `/api/proxyjet/generate-batch` endpoint. We use it for
+    the new advanced-create flow: when a user enables ProxyJet mode
+    we call it to allocate N unique exit-IPs so every profile gets a
+    truly-distinct outbound proxy.
+    """
+    global _DB, _BRIDGE_QUEUE, _GET_USER, _UA_GEN, _PROXYJET_GEN
     _DB = db
     _GET_USER = get_current_user
     _BRIDGE_QUEUE = bridge_enqueue
     _UA_GEN = ua_generate_func
+    _PROXYJET_GEN = proxyjet_generate_func
 
 
 # Wrapper used as FastAPI Depends — resolves to the bound real dep at
@@ -177,7 +187,11 @@ class ReferrerProConfig(BaseModel):
 
 
 class ProfileBody(BaseModel):
-    name: str = Field(..., min_length=1, max_length=120)
+    # 2026-01: `name` is now OPTIONAL. Empty/whitespace → a unique
+    # short auto-name is generated server-side so the customer can
+    # bulk-create profiles without thinking up names. Existing API
+    # callers that send a name keep working unchanged.
+    name: str = Field(default="", max_length=120)
     notes: str = Field(default="", max_length=2000)
     country: str = Field(default="us", max_length=8)
     language: str = Field(default="en-US", max_length=24)
@@ -207,11 +221,96 @@ class BulkCreateBody(BaseModel):
     auto_unique_proxy: bool = True
 
 
+# ── 2026-01: Advanced create — full UA + ProxyJet integration ─────────
+# Powers the new "New Browser Profile" form which exposes the SAME
+# controls as `/ua-generator` and the ProxyJet "Generate proxies on-
+# demand" panel. Single endpoint handles both single-profile and
+# bulk-create (count >= 1).
+class AdvUACfg(BaseModel):
+    """Subset of /api/user-agents/generate options surfaced in the
+    Browser Profile form. Fully optional — unset → random."""
+    app: str = "browser"                       # instagram, facebook, tiktok, ... browser
+    platform: str = "any"                      # any, android, ios, desktop
+    brand: Optional[str] = None
+    device_id: Optional[str] = None
+    app_version: Optional[str] = None
+    os_version: Optional[str] = None
+    region: Optional[str] = None
+    resolution: Optional[str] = None
+    # Mix-mode pools (UA generator picks one at random per profile)
+    apps: Optional[List[str]] = None
+    platforms: Optional[List[str]] = None
+    device_ids: Optional[List[str]] = None
+    app_versions: Optional[List[str]] = None
+    os_versions: Optional[List[str]] = None
+    regions: Optional[List[str]] = None
+    resolutions: Optional[List[str]] = None
+
+
+class AdvProxyCfg(BaseModel):
+    """How to attach proxies to the new profile(s).
+
+    `mode`:
+        "none"     → no proxy attached
+        "manual"   → use the literal `server`/`username`/`password`
+                     (same proxy applied to every profile)
+        "proxyjet" → call ProxyJet generator and assign each profile a
+                     UNIQUE exit-IP from the result. Count = number of
+                     profiles being created.
+    """
+    mode: str = "none"
+    # Manual proxy
+    server: str = ""
+    username: str = ""
+    password: str = ""
+    # ProxyJet on-demand
+    country: Optional[str] = None
+    state: Optional[str] = None
+    countries: Optional[List[str]] = None
+    states: Optional[List[str]] = None
+    # 0 / None = rotating (fresh per request); 1..120 = sticky N min
+    sticky_minutes: Optional[int] = None
+
+
+class AdvancedCreateBody(BaseModel):
+    """Single or bulk profile create with full UA + Proxy generator
+    integration. Frontend's "New Browser Profile" form posts here."""
+    count: int = Field(default=1, ge=1, le=200)
+    name_prefix: str = Field(default="", max_length=64)
+    # Basic identity (applied to every created profile)
+    country: str = "us"
+    device_type: str = "desktop"
+    start_url: str = "https://www.google.com/"
+    notes: str = ""
+    viewport_width: int = 0   # 0 → device-default
+    viewport_height: int = 0  # 0 → device-default
+    anti_detect_on: bool = True
+    # Sub-configs
+    ua: AdvUACfg = Field(default_factory=AdvUACfg)
+    proxy: AdvProxyCfg = Field(default_factory=AdvProxyCfg)
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# ── 2026-01: Unique auto-name generator ────────────────────────────────
+# Customers asked: "naam likhna zrori na ho — har profile unique name
+# se khud ban jay". We mint a short readable + collision-resistant
+# label using device-type + country + date + 4 random alnum chars.
+# Examples:
+#   Krexion-Desktop-US-0620-A7K3
+#   Krexion-Mobile-PK-0620-X92R
+def _auto_name(country: str = "us", device_type: str = "desktop") -> str:
+    """Generate a unique, human-readable profile name. Cheap + lock-free."""
+    cc = (country or "us").upper()[:3]
+    dt = "Mobile" if (device_type or "").lower() == "mobile" else "Desktop"
+    ts = datetime.now().strftime("%m%d")
+    suffix = "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(4))
+    return f"Krexion-{dt}-{cc}-{ts}-{suffix}"
 
 
 def _profile_doc(user_id: str, body: ProfileBody) -> Dict[str, Any]:
@@ -221,10 +320,12 @@ def _profile_doc(user_id: str, body: ProfileBody) -> Dict[str, Any]:
     ua = body.user_agent.strip() or _gen_random_ua(is_mobile)
     viewport = body.viewport if body.viewport.get("width") else _gen_random_viewport(is_mobile)
     pid = str(uuid.uuid4())
+    # 2026-01 — auto-generate unique name if blank
+    name = (body.name or "").strip() or _auto_name(body.country, body.device_type)
     return {
         "id": pid,
         "user_id": user_id,
-        "name": body.name.strip(),
+        "name": name,
         "notes": body.notes,
         "country": body.country.lower(),
         "language": body.language,
@@ -621,6 +722,218 @@ async def quick_generate(request: Request, body: Dict[str, Any] = Body(default_f
     doc = _profile_doc(uid, pb)
     await _DB.browser_profiles.insert_one(doc)
     return {"profile": _public_view(doc), "id": doc["id"]}
+
+
+# ── 2026-01: Advanced create — UA generator + ProxyJet integration ───
+# One endpoint that powers the new "New Browser Profile" form. Takes
+# the same options as the standalone UA Generator + Proxy Generator
+# pages and produces N profiles (count=1..200), each with:
+#   • A UNIQUE realistic UA (generated through the live UA generator)
+#   • A UNIQUE proxy (when proxy.mode=="proxyjet")
+#   • An auto-generated unique name (when name_prefix blank)
+#   • Anti-Detect master toggle on by default
+# This is what customers actually use day-to-day — replaces hand-
+# crafting each profile with name + UA + proxy.
+@router.post("/advanced-create")
+async def advanced_create(request: Request, body: AdvancedCreateBody):
+    user = await _resolve_user(request)
+    uid = _resolve_user_or_401(user)
+
+    count = max(1, min(int(body.count or 1), 200))
+    device_type = (body.device_type or "desktop").lower()
+    is_mobile = device_type == "mobile"
+    country = (body.country or "us").lower()
+
+    # ── 1. Generate UAs ────────────────────────────────────────────
+    # Call the live UA generator (same one /ua-generator uses) so the
+    # UAs are realistic 2026 strings — never the small 4-7 fallback
+    # pool baked in this module. Falls back to the local random
+    # generator if the binding isn't wired (degraded mode, e.g. unit
+    # tests).
+    uas: List[str] = []
+    if _UA_GEN is not None:
+        try:
+            # Build a UAGenerateRequest-compatible payload. We import
+            # the model lazily so this module doesn't hard-depend on
+            # server.py at import time.
+            from server import UAGenerateRequest  # type: ignore
+            ua_payload = UAGenerateRequest(
+                app=body.ua.app or "browser",
+                platform=body.ua.platform or ("ios" if is_mobile else "desktop"),
+                brand=body.ua.brand,
+                device_id=body.ua.device_id,
+                app_version=body.ua.app_version,
+                os_version=body.ua.os_version,
+                region=body.ua.region or country.upper(),
+                resolution=body.ua.resolution,
+                apps=body.ua.apps,
+                platforms=body.ua.platforms,
+                device_ids=body.ua.device_ids,
+                app_versions=body.ua.app_versions,
+                os_versions=body.ua.os_versions,
+                regions=body.ua.regions,
+                resolutions=body.ua.resolutions,
+                count=count,
+                format="json",
+            )
+            ua_resp = await _UA_GEN(ua_payload, user)
+            # Server returns {"count": N, "results": [{"user_agent": ..., ...}, ...]}
+            # (older payloads may use "user_agents")
+            raw = (
+                ua_resp.get("results")
+                or ua_resp.get("user_agents")
+                or []
+            )
+            for item in raw:
+                if isinstance(item, dict):
+                    u = item.get("user_agent") or item.get("ua") or ""
+                else:
+                    u = str(item)
+                if u:
+                    uas.append(u)
+        except Exception as e:
+            logger.warning(f"advanced_create: UA generator call failed ({e}); using fallback pool")
+
+    while len(uas) < count:
+        uas.append(_gen_random_ua(is_mobile))
+    uas = uas[:count]
+
+    # ── 2. Generate proxies (if requested) ─────────────────────────
+    proxy_lines: List[str] = []
+    proxy_mode = (body.proxy.mode or "none").lower()
+    if proxy_mode == "proxyjet":
+        if _PROXYJET_GEN is None:
+            raise HTTPException(
+                status_code=503,
+                detail="ProxyJet generator not bound — install ProxyJet credentials first",
+            )
+        try:
+            from server import ProxyJetGenerateIn  # type: ignore
+            pj_payload = ProxyJetGenerateIn(
+                count=count,
+                country=(body.proxy.country or "").strip().upper() or None,
+                state=(body.proxy.state or "").strip().upper() or None,
+                countries=body.proxy.countries,
+                states=body.proxy.states,
+                sticky_minutes=body.proxy.sticky_minutes,
+            )
+            pj_resp = await _PROXYJET_GEN(pj_payload, user)
+            proxy_lines = pj_resp.get("proxies") or []
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("advanced_create: ProxyJet generate failed")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Proxy generation failed: {str(e)[:200]}",
+            )
+        if len(proxy_lines) < count:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"ProxyJet returned only {len(proxy_lines)} of {count} "
+                    f"proxies. Try a different country/state or smaller batch."
+                ),
+            )
+
+    # ── 3. Build profile docs ──────────────────────────────────────
+    pad = max(2, len(str(count)))
+    docs: List[Dict[str, Any]] = []
+    for i in range(count):
+        # Name: prefix + index, or auto-unique when prefix is blank
+        if (body.name_prefix or "").strip():
+            name = f"{body.name_prefix.strip()} {str(i + 1).zfill(pad)}"
+        else:
+            name = _auto_name(country, device_type)
+
+        # Proxy attachment for this profile
+        proxy_cfg = ProxyConfig()
+        if proxy_mode == "manual" and body.proxy.server:
+            proxy_cfg = ProxyConfig(
+                enabled=True,
+                server=body.proxy.server.strip(),
+                username=body.proxy.username or "",
+                password=body.proxy.password or "",
+            )
+        elif proxy_mode == "proxyjet" and i < len(proxy_lines):
+            line = proxy_lines[i].strip()
+            # Lines come back from ProxyJet as
+            # "host:port:user:password" OR full URL. We store the
+            # canonical user:pass@host:port URL plus extract creds.
+            server = ""
+            username = ""
+            password = ""
+            if "://" in line:
+                # Already in URL form
+                try:
+                    # Best-effort split — keep raw if parse weird
+                    proto, rest = line.split("://", 1)
+                    if "@" in rest:
+                        creds, hostpart = rest.split("@", 1)
+                        username, _, password = creds.partition(":")
+                        server = f"{proto}://{hostpart}"
+                    else:
+                        server = line
+                except Exception:
+                    server = line
+            else:
+                # Assume "host:port:user:password"
+                parts = line.split(":")
+                if len(parts) >= 4:
+                    host, port, username = parts[0], parts[1], parts[2]
+                    password = ":".join(parts[3:])
+                    server = f"http://{host}:{port}"
+                elif len(parts) >= 2:
+                    server = f"http://{parts[0]}:{parts[1]}"
+            proxy_cfg = ProxyConfig(
+                enabled=True,
+                server=server,
+                username=username,
+                password=password,
+                use_proxyjet=True,
+                proxyjet_country=(body.proxy.country or "").upper() or "US",
+                proxyjet_state=(body.proxy.state or "").upper(),
+            )
+
+        # Viewport: use override if provided, else device default
+        viewport = {"width": body.viewport_width or 0,
+                    "height": body.viewport_height or 0}
+        if not viewport["width"] or not viewport["height"]:
+            viewport = _gen_random_viewport(is_mobile)
+
+        pb = ProfileBody(
+            name=name,
+            country=country,
+            device_type=device_type,
+            is_mobile=is_mobile,
+            has_touch=is_mobile,
+            device_scale_factor=3.0 if is_mobile else 1.0,
+            user_agent=uas[i],
+            viewport=viewport,
+            os="ios" if is_mobile else "windows",
+            start_url=body.start_url or "https://www.google.com/",
+            notes=body.notes or "",
+            proxy=proxy_cfg,
+            anti_detect=AntiDetectConfig(
+                master=bool(body.anti_detect_on),
+                tls_prewarm=bool(body.anti_detect_on),
+                behavioral_bio=bool(body.anti_detect_on),
+                browser_variant="rotate" if body.anti_detect_on else "auto",
+                identity_persist=bool(body.anti_detect_on),
+            ),
+        )
+        docs.append(_profile_doc(uid, pb))
+
+    if docs:
+        await _DB.browser_profiles.insert_many(docs)
+    return {
+        "created": len(docs),
+        "profiles": [_public_view(d) for d in docs],
+        "ua_source": "live_generator" if _UA_GEN else "fallback_pool",
+        "proxy_mode": proxy_mode,
+        "proxies_allocated": len(proxy_lines) if proxy_mode == "proxyjet" else 0,
+    }
+
 
 
 @router.post("/_bridge/session-update")

@@ -85,6 +85,31 @@ export default function BrowserProfilesPage() {
   const [editingId, setEditingId] = useState(null);
   const [statusMap, setStatusMap] = useState({}); // id → status info
 
+  // ── 2026-01 (advanced create) — UA + Proxy generator integration ──
+  // Drives the new "New Browser Profile" modal. The form mirrors the
+  // /ua-generator + /proxies pages so customers don't have to switch
+  // tabs to build a powerful profile. Bulk count + auto-name make it
+  // viable to spin up 50 unique profiles in one click.
+  const [advCount, setAdvCount] = useState(1);
+  const [advNamePrefix, setAdvNamePrefix] = useState("");
+  const [advUA, setAdvUA] = useState({
+    app: "browser",      // browser | instagram | facebook | tiktok | ...
+    platform: "desktop", // any | android | ios | desktop
+    brand: "",           // optional
+    region: "US",
+  });
+  const [advProxy, setAdvProxy] = useState({
+    mode: "none",        // none | manual | proxyjet
+    country: "US",
+    state: "",
+    sticky_minutes: 0,   // 0 = rotating
+    server: "",
+    username: "",
+    password: "",
+  });
+  const [advAntiDetect, setAdvAntiDetect] = useState(true);
+  const [advCreating, setAdvCreating] = useState(false);
+
   const authHeaders = useMemo(() => {
     const t = localStorage.getItem("token");
     return { Authorization: `Bearer ${t}`, "Content-Type": "application/json" };
@@ -122,6 +147,95 @@ export default function BrowserProfilesPage() {
   };
 
   const handleCreate = async () => {
+    // 2026-01: When NOT editing an existing profile, route through the
+    // new advanced-create endpoint so the form fully exploits the UA
+    // generator + ProxyJet integration (no need for the customer to
+    // pre-fill `user_agent` or proxy creds manually). The Edit flow
+    // keeps using the old `/` PUT — that just replaces existing config
+    // verbatim.
+    if (!editingId) {
+      return handleAdvancedCreate();
+    }
+    try {
+      const r = await fetch(`${API}/${editingId}`, {
+        method: "PUT", headers: authHeaders, body: JSON.stringify(form),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      toast.success("Profile updated");
+      setShowCreate(false); setEditingId(null); setForm(DEFAULT_NEW);
+      fetchProfiles();
+    } catch (e) { toast.error(`Save failed: ${e.message}`); }
+  };
+
+  const handleAdvancedCreate = async () => {
+    if (advCreating) return;
+    const count = Math.max(1, Math.min(parseInt(advCount) || 1, 200));
+    setAdvCreating(true);
+    try {
+      const payload = {
+        count,
+        name_prefix: (advNamePrefix || "").trim(),
+        country: (form.country || "us").toLowerCase(),
+        device_type: form.device_type || "desktop",
+        start_url: form.start_url || "https://www.google.com/",
+        notes: form.notes || "",
+        viewport_width: form.viewport?.width || 0,
+        viewport_height: form.viewport?.height || 0,
+        anti_detect_on: !!advAntiDetect,
+        ua: {
+          app: advUA.app || "browser",
+          platform: advUA.platform || "any",
+          brand: advUA.brand || null,
+          region: advUA.region || (form.country || "US").toUpperCase(),
+        },
+        proxy: (() => {
+          if (advProxy.mode === "proxyjet") {
+            return {
+              mode: "proxyjet",
+              country: (advProxy.country || "US").toUpperCase(),
+              state: (advProxy.state || "").toUpperCase(),
+              sticky_minutes: Number(advProxy.sticky_minutes) || null,
+            };
+          }
+          if (advProxy.mode === "manual") {
+            return {
+              mode: "manual",
+              server: advProxy.server || "",
+              username: advProxy.username || "",
+              password: advProxy.password || "",
+            };
+          }
+          return { mode: "none" };
+        })(),
+      };
+      const r = await fetch(`${API}/advanced-create`, {
+        method: "POST", headers: authHeaders, body: JSON.stringify(payload),
+      });
+      if (!r.ok) {
+        const t = await r.text();
+        let msg = t;
+        try { msg = JSON.parse(t).detail || t; } catch {}
+        throw new Error(msg);
+      }
+      const d = await r.json();
+      const n = d.created || 0;
+      toast.success(
+        n === 1
+          ? `Profile "${d.profiles?.[0]?.name || ""}" created`
+          : `${n} unique profiles created (UA: ${d.ua_source}, proxies: ${d.proxies_allocated || 0})`,
+      );
+      setShowCreate(false); setEditingId(null); setForm(DEFAULT_NEW);
+      // Reset advanced fields to defaults for next open
+      setAdvCount(1); setAdvNamePrefix("");
+      fetchProfiles();
+    } catch (e) {
+      toast.error(`Create failed: ${e.message}`);
+    } finally {
+      setAdvCreating(false);
+    }
+  };
+
+  const handleCreateLegacy = async () => {
     if (!form.name.trim()) { toast.error("Name is required"); return; }
     try {
       const url = editingId ? `${API}/${editingId}` : `${API}/`;
@@ -341,14 +455,42 @@ export default function BrowserProfilesPage() {
             <div className="bg-zinc-950 border border-zinc-800 rounded-xl max-w-3xl w-full max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
               <div className="p-5 border-b border-zinc-800 sticky top-0 bg-zinc-950 z-10">
                 <h2 className="text-xl font-semibold text-zinc-100">{editingId ? "Edit Profile" : "New Browser Profile"}</h2>
+                {!editingId && (
+                  <p className="text-[11px] text-zinc-500 mt-1">
+                    Each profile gets a UNIQUE user-agent (live generator) + UNIQUE proxy (ProxyJet) — anti-detect ready. Leave name blank for auto-naming.
+                  </p>
+                )}
               </div>
               <div className="p-5 space-y-4">
                 {/* Basic */}
                 <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <Label className="text-zinc-300 text-xs">Name</Label>
-                    <Input data-testid="bp-form-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}
-                      className="bg-zinc-900 border-zinc-700 text-zinc-100" placeholder="Marketing Account US #1" />
+                  <div className="col-span-2 grid grid-cols-3 gap-3">
+                    <div className="col-span-2">
+                      <Label className="text-zinc-300 text-xs">
+                        {editingId ? "Name" : "Name Prefix"}{" "}
+                        {!editingId && <span className="text-zinc-500">(blank = auto-unique name per profile)</span>}
+                      </Label>
+                      {editingId ? (
+                        <Input data-testid="bp-form-name" value={form.name}
+                          onChange={(e) => setForm({ ...form, name: e.target.value })}
+                          className="bg-zinc-900 border-zinc-700 text-zinc-100"
+                          placeholder="Marketing Account US #1" />
+                      ) : (
+                        <Input data-testid="bp-form-name-prefix" value={advNamePrefix}
+                          onChange={(e) => setAdvNamePrefix(e.target.value)}
+                          className="bg-zinc-900 border-zinc-700 text-zinc-100"
+                          placeholder="Auto-generate (Krexion-Desktop-US-…)" />
+                      )}
+                    </div>
+                    {!editingId && (
+                      <div>
+                        <Label className="text-zinc-300 text-xs">Count <span className="text-zinc-500">(1–200)</span></Label>
+                        <Input data-testid="bp-form-count" type="number" min={1} max={200}
+                          value={advCount}
+                          onChange={(e) => setAdvCount(Math.max(1, Math.min(200, parseInt(e.target.value) || 1)))}
+                          className="bg-zinc-900 border-zinc-700 text-zinc-100" />
+                      </div>
+                    )}
                   </div>
                   <div>
                     <Label className="text-zinc-300 text-xs">Country</Label>
@@ -363,32 +505,38 @@ export default function BrowserProfilesPage() {
                       onChange={(e) => {
                         const mob = e.target.value === "mobile";
                         setForm({ ...form, device_type: e.target.value, is_mobile: mob, has_touch: mob, device_scale_factor: mob ? 3 : 1, os: mob ? "ios" : "windows" });
+                        // Sync UA platform to match device by default
+                        if (!editingId) {
+                          setAdvUA((u) => ({ ...u, platform: mob ? "android" : "desktop" }));
+                        }
                       }}
                       className="w-full mt-1 bg-zinc-900 border border-zinc-700 text-zinc-100 rounded px-2 py-1.5 text-sm">
                       <option value="desktop">Desktop</option>
                       <option value="mobile">Mobile</option>
                     </select>
                   </div>
-                  <div>
+                  <div className="col-span-2">
                     <Label className="text-zinc-300 text-xs">Start URL</Label>
                     <Input data-testid="bp-form-starturl" value={form.start_url} onChange={(e) => setForm({ ...form, start_url: e.target.value })}
                       className="bg-zinc-900 border-zinc-700 text-zinc-100" />
                   </div>
-                  <div className="col-span-2">
-                    <Label className="text-zinc-300 text-xs">User Agent <span className="text-zinc-500">(leave blank = auto-generate)</span></Label>
-                    <Input data-testid="bp-form-ua" value={form.user_agent} onChange={(e) => setForm({ ...form, user_agent: e.target.value })}
-                      className="bg-zinc-900 border-zinc-700 text-zinc-100 font-mono text-xs" placeholder="Auto" />
-                  </div>
+                  {editingId && (
+                    <div className="col-span-2">
+                      <Label className="text-zinc-300 text-xs">User Agent <span className="text-zinc-500">(leave blank = auto-generate)</span></Label>
+                      <Input data-testid="bp-form-ua" value={form.user_agent} onChange={(e) => setForm({ ...form, user_agent: e.target.value })}
+                        className="bg-zinc-900 border-zinc-700 text-zinc-100 font-mono text-xs" placeholder="Auto" />
+                    </div>
+                  )}
                   <div>
-                    <Label className="text-zinc-300 text-xs">Viewport Width</Label>
+                    <Label className="text-zinc-300 text-xs">Viewport Width <span className="text-zinc-500">(0 = device default)</span></Label>
                     <Input type="number" value={form.viewport.width}
-                      onChange={(e) => setForm({ ...form, viewport: { ...form.viewport, width: parseInt(e.target.value) || 1920 } })}
+                      onChange={(e) => setForm({ ...form, viewport: { ...form.viewport, width: parseInt(e.target.value) || 0 } })}
                       className="bg-zinc-900 border-zinc-700 text-zinc-100" />
                   </div>
                   <div>
-                    <Label className="text-zinc-300 text-xs">Viewport Height</Label>
+                    <Label className="text-zinc-300 text-xs">Viewport Height <span className="text-zinc-500">(0 = device default)</span></Label>
                     <Input type="number" value={form.viewport.height}
-                      onChange={(e) => setForm({ ...form, viewport: { ...form.viewport, height: parseInt(e.target.value) || 1080 } })}
+                      onChange={(e) => setForm({ ...form, viewport: { ...form.viewport, height: parseInt(e.target.value) || 0 } })}
                       className="bg-zinc-900 border-zinc-700 text-zinc-100" />
                   </div>
                   <div className="col-span-2">
@@ -398,67 +546,231 @@ export default function BrowserProfilesPage() {
                   </div>
                 </div>
 
+                {/* ── 2026-01: UA Generator section (create mode only) ── */}
+                {!editingId && (
+                  <div className="p-3 rounded-lg border border-blue-500/30 bg-blue-950/10 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-blue-300 text-sm font-semibold">📱 User-Agent Generator</span>
+                      <span className="text-[10px] text-zinc-500">Same engine as /ua-generator — one UA per profile, all unique</span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-3">
+                      <div>
+                        <Label className="text-zinc-300 text-xs">App</Label>
+                        <select data-testid="bp-ua-app" value={advUA.app}
+                          onChange={(e) => setAdvUA({ ...advUA, app: e.target.value })}
+                          className="w-full mt-1 bg-zinc-900 border border-zinc-700 text-zinc-100 rounded px-2 py-1.5 text-sm">
+                          <option value="browser">Browser (Chrome/Safari)</option>
+                          <option value="instagram">Instagram</option>
+                          <option value="facebook">Facebook</option>
+                          <option value="tiktok">TikTok</option>
+                          <option value="youtube">YouTube</option>
+                          <option value="whatsapp">WhatsApp</option>
+                          <option value="gsearch">Google Search</option>
+                          <option value="gchrome">Google Native (Chrome)</option>
+                          <option value="pinterest">Pinterest</option>
+                          <option value="snapchat">Snapchat</option>
+                        </select>
+                      </div>
+                      <div>
+                        <Label className="text-zinc-300 text-xs">Operating System</Label>
+                        <select data-testid="bp-ua-platform" value={advUA.platform}
+                          onChange={(e) => setAdvUA({ ...advUA, platform: e.target.value })}
+                          className="w-full mt-1 bg-zinc-900 border border-zinc-700 text-zinc-100 rounded px-2 py-1.5 text-sm">
+                          <option value="any">Any</option>
+                          <option value="android">Android</option>
+                          <option value="ios">iOS</option>
+                          <option value="desktop">Desktop</option>
+                        </select>
+                      </div>
+                      <div>
+                        <Label className="text-zinc-300 text-xs">Region / Country</Label>
+                        <select data-testid="bp-ua-region" value={advUA.region}
+                          onChange={(e) => setAdvUA({ ...advUA, region: e.target.value })}
+                          className="w-full mt-1 bg-zinc-900 border border-zinc-700 text-zinc-100 rounded px-2 py-1.5 text-sm">
+                          {COUNTRY_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                    <div>
+                      <Label className="text-zinc-300 text-xs">Brand <span className="text-zinc-500">(optional — leave blank for random)</span></Label>
+                      <select data-testid="bp-ua-brand" value={advUA.brand || ""}
+                        onChange={(e) => setAdvUA({ ...advUA, brand: e.target.value })}
+                        className="w-full mt-1 bg-zinc-900 border border-zinc-700 text-zinc-100 rounded px-2 py-1.5 text-sm">
+                        <option value="">Random</option>
+                        <option value="samsung">Samsung</option>
+                        <option value="google">Google Pixel</option>
+                        <option value="motorola">Motorola</option>
+                        <option value="xiaomi">Xiaomi</option>
+                        <option value="oneplus">OnePlus</option>
+                        <option value="realme">Realme</option>
+                        <option value="oppo">Oppo</option>
+                        <option value="vivo">Vivo</option>
+                        <option value="iphone">iPhone</option>
+                        <option value="ipad">iPad</option>
+                        <option value="windows">Windows</option>
+                        <option value="mac">Mac</option>
+                        <option value="linux">Linux</option>
+                      </select>
+                    </div>
+                  </div>
+                )}
+
                 {/* Anti-Detect */}
                 <div className="p-3 rounded-lg border border-fuchsia-500/30 bg-fuchsia-950/10">
                   <label className="flex items-center justify-between cursor-pointer">
                     <div>
                       <span className="text-fuchsia-300 text-sm font-semibold">🛡️ Anti-Detect</span>
-                      <p className="text-[11px] text-zinc-400 mt-0.5">One toggle — auto-tunes all internal protection layers.</p>
+                      <p className="text-[11px] text-zinc-400 mt-0.5">One toggle — auto-tunes all internal protection layers (TLS prewarm, behavioral bio, identity persist, browser rotation).</p>
                     </div>
-                    <input data-testid="bp-form-antidetect"
-                      type="checkbox"
-                      checked={form.anti_detect.master}
-                      onChange={(e) => setForm({ ...form, anti_detect: {
-                        ...form.anti_detect, master: e.target.checked,
-                        tls_prewarm: e.target.checked,
-                        behavioral_bio: e.target.checked,
-                        browser_variant: e.target.checked ? "rotate" : "auto",
-                        identity_persist: e.target.checked,
-                      }})}
-                      className="w-5 h-5 rounded accent-fuchsia-500" />
+                    {editingId ? (
+                      <input data-testid="bp-form-antidetect"
+                        type="checkbox"
+                        checked={form.anti_detect.master}
+                        onChange={(e) => setForm({ ...form, anti_detect: {
+                          ...form.anti_detect, master: e.target.checked,
+                          tls_prewarm: e.target.checked,
+                          behavioral_bio: e.target.checked,
+                          browser_variant: e.target.checked ? "rotate" : "auto",
+                          identity_persist: e.target.checked,
+                        }})}
+                        className="w-5 h-5 rounded accent-fuchsia-500" />
+                    ) : (
+                      <input data-testid="bp-form-antidetect"
+                        type="checkbox"
+                        checked={advAntiDetect}
+                        onChange={(e) => setAdvAntiDetect(e.target.checked)}
+                        className="w-5 h-5 rounded accent-fuchsia-500" />
+                    )}
                   </label>
                 </div>
 
-                {/* Proxy */}
-                <div className="p-3 rounded-lg border border-cyan-500/30 bg-cyan-950/10">
-                  <label className="flex items-center justify-between cursor-pointer mb-2">
-                    <span className="text-cyan-300 text-sm font-semibold">🌍 Proxy</span>
-                    <input data-testid="bp-form-proxy-enable"
-                      type="checkbox"
-                      checked={form.proxy.enabled}
-                      onChange={(e) => setForm({ ...form, proxy: { ...form.proxy, enabled: e.target.checked } })}
-                      className="w-4 h-4 rounded accent-cyan-500" />
-                  </label>
-                  {form.proxy.enabled && (
-                    <div className="space-y-2">
-                      <label className="flex items-center gap-2 text-xs text-zinc-300">
-                        <input type="checkbox" checked={form.proxy.use_proxyjet}
-                          onChange={(e) => setForm({ ...form, proxy: { ...form.proxy, use_proxyjet: e.target.checked } })}
-                          className="w-4 h-4 rounded accent-cyan-500" />
-                        Use ProxyJet Auto (unique sticky session per profile)
+                {/* Proxy — create vs edit modes use different controls */}
+                {!editingId ? (
+                  <div className="p-3 rounded-lg border border-cyan-500/30 bg-cyan-950/10 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-cyan-300 text-sm font-semibold">🌍 Proxy</span>
+                      <span className="text-[10px] text-zinc-500">Same engine as /proxies — every profile gets a unique exit-IP</span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      <label className={`cursor-pointer p-2 rounded border text-center text-xs ${advProxy.mode === "none" ? "border-cyan-400 bg-cyan-500/15 text-cyan-200" : "border-zinc-700 text-zinc-400 hover:bg-zinc-900"}`}>
+                        <input type="radio" name="proxy_mode" value="none" className="sr-only"
+                          checked={advProxy.mode === "none"}
+                          onChange={() => setAdvProxy({ ...advProxy, mode: "none" })} />
+                        <div className="font-semibold">No Proxy</div>
+                        <div className="text-[10px] mt-0.5 opacity-70">Direct connection</div>
                       </label>
-                      {!form.proxy.use_proxyjet && (
-                        <div className="grid grid-cols-2 gap-2">
-                          <Input placeholder="http://host:port" value={form.proxy.server}
-                            onChange={(e) => setForm({ ...form, proxy: { ...form.proxy, server: e.target.value } })}
-                            className="bg-zinc-900 border-zinc-700 text-zinc-100 text-xs" />
-                          <div />
-                          <Input placeholder="username" value={form.proxy.username}
-                            onChange={(e) => setForm({ ...form, proxy: { ...form.proxy, username: e.target.value } })}
-                            className="bg-zinc-900 border-zinc-700 text-zinc-100 text-xs" />
-                          <Input placeholder="password" type="password" value={form.proxy.password}
-                            onChange={(e) => setForm({ ...form, proxy: { ...form.proxy, password: e.target.value } })}
+                      <label data-testid="bp-proxy-mode-proxyjet" className={`cursor-pointer p-2 rounded border text-center text-xs ${advProxy.mode === "proxyjet" ? "border-amber-400 bg-amber-500/15 text-amber-200" : "border-zinc-700 text-zinc-400 hover:bg-zinc-900"}`}>
+                        <input type="radio" name="proxy_mode" value="proxyjet" className="sr-only"
+                          checked={advProxy.mode === "proxyjet"}
+                          onChange={() => setAdvProxy({ ...advProxy, mode: "proxyjet" })} />
+                        <div className="font-semibold">⚡ Generate (ProxyJet)</div>
+                        <div className="text-[10px] mt-0.5 opacity-70">Unique IP per profile</div>
+                      </label>
+                      <label className={`cursor-pointer p-2 rounded border text-center text-xs ${advProxy.mode === "manual" ? "border-cyan-400 bg-cyan-500/15 text-cyan-200" : "border-zinc-700 text-zinc-400 hover:bg-zinc-900"}`}>
+                        <input type="radio" name="proxy_mode" value="manual" className="sr-only"
+                          checked={advProxy.mode === "manual"}
+                          onChange={() => setAdvProxy({ ...advProxy, mode: "manual" })} />
+                        <div className="font-semibold">Manual</div>
+                        <div className="text-[10px] mt-0.5 opacity-70">Paste host/port</div>
+                      </label>
+                    </div>
+
+                    {advProxy.mode === "proxyjet" && (
+                      <div className="grid grid-cols-3 gap-2">
+                        <div>
+                          <Label className="text-zinc-300 text-[11px]">Country</Label>
+                          <select data-testid="bp-pj-country" value={advProxy.country}
+                            onChange={(e) => setAdvProxy({ ...advProxy, country: e.target.value })}
+                            className="w-full mt-1 bg-zinc-900 border border-zinc-700 text-zinc-100 rounded px-2 py-1.5 text-xs">
+                            {COUNTRY_OPTIONS.map((c) => <option key={c} value={c}>{c}</option>)}
+                          </select>
+                        </div>
+                        <div>
+                          <Label className="text-zinc-300 text-[11px]">State <span className="text-zinc-500">(US only)</span></Label>
+                          <Input value={advProxy.state}
+                            onChange={(e) => setAdvProxy({ ...advProxy, state: e.target.value.toUpperCase() })}
+                            placeholder="e.g. CA, TX"
+                            maxLength={2}
                             className="bg-zinc-900 border-zinc-700 text-zinc-100 text-xs" />
                         </div>
-                      )}
-                    </div>
-                  )}
-                </div>
+                        <div>
+                          <Label className="text-zinc-300 text-[11px]">Session</Label>
+                          <select value={advProxy.sticky_minutes || 0}
+                            onChange={(e) => setAdvProxy({ ...advProxy, sticky_minutes: parseInt(e.target.value) || 0 })}
+                            className="w-full mt-1 bg-zinc-900 border border-zinc-700 text-zinc-100 rounded px-2 py-1.5 text-xs">
+                            <option value={0}>Rotating (fresh IP)</option>
+                            <option value={5}>Sticky 5 min</option>
+                            <option value={15}>Sticky 15 min</option>
+                            <option value={30}>Sticky 30 min</option>
+                            <option value={60}>Sticky 60 min</option>
+                            <option value={120}>Sticky 120 min</option>
+                          </select>
+                        </div>
+                      </div>
+                    )}
+
+                    {advProxy.mode === "manual" && (
+                      <div className="grid grid-cols-2 gap-2">
+                        <Input placeholder="http://host:port" value={advProxy.server}
+                          onChange={(e) => setAdvProxy({ ...advProxy, server: e.target.value })}
+                          className="bg-zinc-900 border-zinc-700 text-zinc-100 text-xs col-span-2" />
+                        <Input placeholder="username (optional)" value={advProxy.username}
+                          onChange={(e) => setAdvProxy({ ...advProxy, username: e.target.value })}
+                          className="bg-zinc-900 border-zinc-700 text-zinc-100 text-xs" />
+                        <Input placeholder="password (optional)" type="password" value={advProxy.password}
+                          onChange={(e) => setAdvProxy({ ...advProxy, password: e.target.value })}
+                          className="bg-zinc-900 border-zinc-700 text-zinc-100 text-xs" />
+                        <p className="col-span-2 text-[10px] text-zinc-500">Same proxy applied to every profile in this batch.</p>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  /* Edit-mode keeps the legacy compact proxy section */
+                  <div className="p-3 rounded-lg border border-cyan-500/30 bg-cyan-950/10">
+                    <label className="flex items-center justify-between cursor-pointer mb-2">
+                      <span className="text-cyan-300 text-sm font-semibold">🌍 Proxy</span>
+                      <input data-testid="bp-form-proxy-enable"
+                        type="checkbox"
+                        checked={form.proxy.enabled}
+                        onChange={(e) => setForm({ ...form, proxy: { ...form.proxy, enabled: e.target.checked } })}
+                        className="w-4 h-4 rounded accent-cyan-500" />
+                    </label>
+                    {form.proxy.enabled && (
+                      <div className="space-y-2">
+                        <label className="flex items-center gap-2 text-xs text-zinc-300">
+                          <input type="checkbox" checked={form.proxy.use_proxyjet}
+                            onChange={(e) => setForm({ ...form, proxy: { ...form.proxy, use_proxyjet: e.target.checked } })}
+                            className="w-4 h-4 rounded accent-cyan-500" />
+                          Use ProxyJet Auto (unique sticky session per profile)
+                        </label>
+                        {!form.proxy.use_proxyjet && (
+                          <div className="grid grid-cols-2 gap-2">
+                            <Input placeholder="http://host:port" value={form.proxy.server}
+                              onChange={(e) => setForm({ ...form, proxy: { ...form.proxy, server: e.target.value } })}
+                              className="bg-zinc-900 border-zinc-700 text-zinc-100 text-xs" />
+                            <div />
+                            <Input placeholder="username" value={form.proxy.username}
+                              onChange={(e) => setForm({ ...form, proxy: { ...form.proxy, username: e.target.value } })}
+                              className="bg-zinc-900 border-zinc-700 text-zinc-100 text-xs" />
+                            <Input placeholder="password" type="password" value={form.proxy.password}
+                              onChange={(e) => setForm({ ...form, proxy: { ...form.proxy, password: e.target.value } })}
+                              className="bg-zinc-900 border-zinc-700 text-zinc-100 text-xs" />
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="p-4 border-t border-zinc-800 flex justify-end gap-2 sticky bottom-0 bg-zinc-950">
                 <Button onClick={() => { setShowCreate(false); setEditingId(null); }} variant="outline" className="border-zinc-700 text-zinc-300">Cancel</Button>
-                <Button data-testid="bp-form-save" onClick={handleCreate} className="bg-fuchsia-600 hover:bg-fuchsia-700 text-white">
-                  {editingId ? "Save Changes" : "Create Profile"}
+                <Button data-testid="bp-form-save" onClick={handleCreate} disabled={advCreating}
+                  className="bg-fuchsia-600 hover:bg-fuchsia-700 text-white disabled:opacity-60">
+                  {editingId
+                    ? "Save Changes"
+                    : (advCreating
+                        ? "Creating…"
+                        : (advCount > 1 ? `Create ${advCount} Profiles` : "Create Profile"))}
                 </Button>
               </div>
             </div>

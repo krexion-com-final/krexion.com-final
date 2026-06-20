@@ -19551,7 +19551,8 @@ try:
         db=db,
         get_current_user=get_current_user,
         bridge_enqueue=_bp_bridge_enqueue,
-        ua_generate_func=None,
+        ua_generate_func=generate_user_agents,
+        proxyjet_generate_func=proxyjet_generate_batch,
     )
     app.include_router(_bp_router)
     logger.info("Browser Profiles module loaded — /api/browser-profiles/*")
