@@ -27,6 +27,44 @@ const COUNTRY_OPTIONS = [
   "US","GB","CA","AU","DE","FR","ES","IT","NL","BR","MX","IN","PK","BD","ID","PH","JP","KR","TR","AE","SA","ZA","NG","KE","RU","UA","PL","PT","SE","NO","DK","FI",
 ];
 
+// 2026-06 — Full list of US states/territories for the Proxy State
+// dropdown. Customer ask: "proxy state select krne k liye drop down
+// select krne ka option ho likhna na pare". Two-letter USPS codes
+// (lowercase storage, uppercased on render) match what ProxyJet
+// expects. Includes DC + PR + GU + VI so callers who use territories
+// for geo-targeting can still pick them. "Any" (empty string) lets
+// the proxy provider pick any state in the chosen country.
+const US_STATE_OPTIONS = [
+  { code: "", name: "Any state" },
+  { code: "AL", name: "Alabama" },     { code: "AK", name: "Alaska" },
+  { code: "AZ", name: "Arizona" },     { code: "AR", name: "Arkansas" },
+  { code: "CA", name: "California" },  { code: "CO", name: "Colorado" },
+  { code: "CT", name: "Connecticut" }, { code: "DE", name: "Delaware" },
+  { code: "DC", name: "District of Columbia" },
+  { code: "FL", name: "Florida" },     { code: "GA", name: "Georgia" },
+  { code: "HI", name: "Hawaii" },      { code: "ID", name: "Idaho" },
+  { code: "IL", name: "Illinois" },    { code: "IN", name: "Indiana" },
+  { code: "IA", name: "Iowa" },        { code: "KS", name: "Kansas" },
+  { code: "KY", name: "Kentucky" },    { code: "LA", name: "Louisiana" },
+  { code: "ME", name: "Maine" },       { code: "MD", name: "Maryland" },
+  { code: "MA", name: "Massachusetts" }, { code: "MI", name: "Michigan" },
+  { code: "MN", name: "Minnesota" },   { code: "MS", name: "Mississippi" },
+  { code: "MO", name: "Missouri" },    { code: "MT", name: "Montana" },
+  { code: "NE", name: "Nebraska" },    { code: "NV", name: "Nevada" },
+  { code: "NH", name: "New Hampshire" }, { code: "NJ", name: "New Jersey" },
+  { code: "NM", name: "New Mexico" },  { code: "NY", name: "New York" },
+  { code: "NC", name: "North Carolina" }, { code: "ND", name: "North Dakota" },
+  { code: "OH", name: "Ohio" },        { code: "OK", name: "Oklahoma" },
+  { code: "OR", name: "Oregon" },      { code: "PA", name: "Pennsylvania" },
+  { code: "PR", name: "Puerto Rico" }, { code: "RI", name: "Rhode Island" },
+  { code: "SC", name: "South Carolina" }, { code: "SD", name: "South Dakota" },
+  { code: "TN", name: "Tennessee" },   { code: "TX", name: "Texas" },
+  { code: "UT", name: "Utah" },        { code: "VT", name: "Vermont" },
+  { code: "VA", name: "Virginia" },    { code: "WA", name: "Washington" },
+  { code: "WV", name: "West Virginia" }, { code: "WI", name: "Wisconsin" },
+  { code: "WY", name: "Wyoming" },
+];
+
 const DEFAULT_NEW = {
   name: "",
   notes: "",
@@ -504,7 +542,29 @@ export default function BrowserProfilesPage() {
                     <select data-testid="bp-form-device" value={form.device_type}
                       onChange={(e) => {
                         const mob = e.target.value === "mobile";
-                        setForm({ ...form, device_type: e.target.value, is_mobile: mob, has_touch: mob, device_scale_factor: mob ? 3 : 1, os: mob ? "ios" : "windows" });
+                        // 2026-06 — Customer ask: viewport should
+                        // AUTO-MATCH the device type. Previously
+                        // switching to mobile left viewport at the
+                        // desktop 1920×1080 default, which made the
+                        // headed browser render mobile sites in
+                        // desktop layout (broken anti-detect signal —
+                        // a Samsung UA with a 1920px window is a dead
+                        // giveaway to any fingerprint script). We now
+                        // set sensible per-device defaults the user
+                        // can still override below if they need
+                        // something specific.
+                        const newViewport = mob
+                          ? { width: 412, height: 914 }   // Pixel 5 / iPhone 14 Pro Max bucket
+                          : { width: 1920, height: 1080 }; // common desktop
+                        setForm({
+                          ...form,
+                          device_type: e.target.value,
+                          is_mobile: mob,
+                          has_touch: mob,
+                          device_scale_factor: mob ? 3 : 1,
+                          os: mob ? "ios" : "windows",
+                          viewport: newViewport,
+                        });
                         // Sync UA platform to match device by default
                         if (!editingId) {
                           setAdvUA((u) => ({ ...u, platform: mob ? "android" : "desktop" }));
@@ -687,11 +747,24 @@ export default function BrowserProfilesPage() {
                         </div>
                         <div>
                           <Label className="text-zinc-300 text-[11px]">State <span className="text-zinc-500">(US only)</span></Label>
-                          <Input value={advProxy.state}
-                            onChange={(e) => setAdvProxy({ ...advProxy, state: e.target.value.toUpperCase() })}
-                            placeholder="e.g. CA, TX"
-                            maxLength={2}
-                            className="bg-zinc-900 border-zinc-700 text-zinc-100 text-xs" />
+                          {/* 2026-06 — Customer ask: state should be a
+                              dropdown, no typing. The dropdown is only
+                              meaningful when country=US, but we keep
+                              it visible (disabled+greyed) for non-US
+                              picks so the form layout stays stable. */}
+                          <select
+                            value={advProxy.state || ""}
+                            onChange={(e) => setAdvProxy({ ...advProxy, state: e.target.value })}
+                            disabled={(advProxy.country || "US").toUpperCase() !== "US"}
+                            data-testid="bp-pj-state"
+                            className="w-full mt-1 bg-zinc-900 border border-zinc-700 text-zinc-100 rounded px-2 py-1.5 text-xs disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            {US_STATE_OPTIONS.map((s) => (
+                              <option key={s.code || "any"} value={s.code}>
+                                {s.code ? `${s.code} — ${s.name}` : s.name}
+                              </option>
+                            ))}
+                          </select>
                         </div>
                         <div>
                           <Label className="text-zinc-300 text-[11px]">Session</Label>

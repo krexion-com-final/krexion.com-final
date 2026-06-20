@@ -90,12 +90,28 @@ async def launch_profile_session(
 
     proxy_cfg = profile_config.get("proxy") or {}
     proxy_arg = None
+    proxy_diag: Dict[str, Any] = {"requested": False, "server": "", "ok": None, "error": ""}
     if proxy_cfg.get("enabled") and proxy_cfg.get("server"):
-        proxy_arg = {"server": proxy_cfg["server"]}
+        # ── 2026-06 — Normalize the proxy server URL ──────────────
+        # Customer report: launching a profile errored with
+        # ERR_TIMED_OUT on google.com. Root cause: ProxyJet returned
+        # lines parsed correctly but the stored `server` value can
+        # arrive WITHOUT an `http://` scheme (e.g. just "host:port")
+        # which Chromium silently ignores when handed via the
+        # `proxy` launch option. Then the browser falls through to
+        # the OS direct connection — which on a locked-down Windows
+        # host has no route to google.com and times out.
+        # We now normalize to a Chromium-acceptable URL form.
+        raw_server = str(proxy_cfg["server"]).strip()
+        if raw_server and "://" not in raw_server:
+            raw_server = f"http://{raw_server}"
+        proxy_arg = {"server": raw_server}
         if proxy_cfg.get("username"):
-            proxy_arg["username"] = proxy_cfg["username"]
+            proxy_arg["username"] = str(proxy_cfg["username"])
         if proxy_cfg.get("password"):
-            proxy_arg["password"] = proxy_cfg["password"]
+            proxy_arg["password"] = str(proxy_cfg["password"])
+        proxy_diag["requested"] = True
+        proxy_diag["server"] = raw_server
 
     anti = profile_config.get("anti_detect") or {}
     master = bool(anti.get("master", True))
@@ -173,10 +189,107 @@ async def launch_profile_session(
                 )
 
         page = await context.new_page()
-        try:
-            await page.goto(start_url or "https://www.google.com/", timeout=30000)
-        except Exception as e:
-            logger.warning(f"start URL goto failed: {e}")
+        # ── 2026-06 — Proxy health pre-check + clear error diagnostic ──
+        # Customer report: profile launch errored with "ERR_TIMED_OUT"
+        # on google.com with no clue WHY. Most common root cause is
+        # the proxy itself (ProxyJet credentials lapsed, IP allocated
+        # to a region that's blocked, port unreachable from the
+        # customer's local network, etc.). Rather than silently fail
+        # the goto, we probe the proxy with a tiny timeout-bounded
+        # HEAD-equivalent (`api.ipify.org`, served by Cloudflare) and
+        # surface a meaningful diagnostic page if it fails. The user
+        # then sees WHY the browser can't reach the target site and
+        # can pick a different proxy / disable it / contact support.
+        if proxy_arg is not None:
+            try:
+                import urllib.parse as _urlparse
+                _parsed = _urlparse.urlparse(proxy_arg.get("server") or "")
+                # Use Playwright's APIRequestContext (it honours the
+                # browser context's proxy automatically). 10-second
+                # ceiling — real proxies respond in <2s; anything
+                # longer means it's effectively dead for interactive
+                # browsing.
+                _probe = await context.request.get(
+                    "https://api.ipify.org?format=text",
+                    timeout=10000,
+                )
+                _exit_ip = (await _probe.text()).strip()
+                if _exit_ip and 7 <= len(_exit_ip) <= 45:
+                    proxy_diag["ok"] = True
+                    proxy_diag["exit_ip"] = _exit_ip
+                    logger.info(
+                        f"[profile-launch] proxy OK — exit IP {_exit_ip} "
+                        f"via {_parsed.hostname or proxy_arg['server']}"
+                    )
+                else:
+                    proxy_diag["ok"] = False
+                    proxy_diag["error"] = f"proxy probe returned non-IP body: {_exit_ip[:80]}"
+            except Exception as _pe:
+                proxy_diag["ok"] = False
+                proxy_diag["error"] = f"{type(_pe).__name__}: {str(_pe)[:200]}"
+                logger.warning(
+                    f"[profile-launch] proxy health probe failed: {proxy_diag['error']}"
+                )
+
+        # If proxy was REQUESTED but FAILED the probe, show a
+        # diagnostic landing page INSTEAD of trying to load the real
+        # start_url (which would just give ERR_TIMED_OUT). The
+        # operator gets:
+        #   • clear message about the proxy issue
+        #   • the configured server + username (no password)
+        #   • a "Continue without proxy" button via JS that just
+        #     navigates to the start_url anyway (proxy-less)
+        if proxy_diag["requested"] and proxy_diag["ok"] is False:
+            try:
+                _safe_server = str(proxy_diag.get("server") or "").replace("<", "&lt;").replace(">", "&gt;")
+                _safe_err = str(proxy_diag.get("error") or "").replace("<", "&lt;").replace(">", "&gt;")
+                _safe_start = str(start_url or "https://www.google.com/").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+                _diag_html = (
+                    "<!doctype html><html><head><meta charset='utf-8'>"
+                    "<title>Krexion — Proxy unreachable</title>"
+                    "<style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;"
+                    "background:#0b0b10;color:#e4e4e7;margin:0;padding:48px;"
+                    "min-height:100vh;box-sizing:border-box}"
+                    ".card{max-width:720px;margin:0 auto;background:#18181b;"
+                    "border:1px solid #3f3f46;border-radius:12px;padding:32px}"
+                    "h1{margin:0 0 8px;font-size:22px;color:#fb7185}"
+                    "h2{margin:24px 0 8px;font-size:14px;color:#a1a1aa;font-weight:600;"
+                    "text-transform:uppercase;letter-spacing:0.05em}"
+                    "code{background:#0a0a0f;border:1px solid #27272a;padding:2px 6px;"
+                    "border-radius:4px;font-size:13px;color:#fbbf24;word-break:break-all}"
+                    ".btn{display:inline-block;margin-top:24px;padding:10px 20px;"
+                    "background:#7c3aed;color:white;border:none;border-radius:6px;"
+                    "font-size:14px;cursor:pointer;text-decoration:none}"
+                    ".btn:hover{background:#6d28d9}"
+                    ".muted{color:#71717a;font-size:13px;line-height:1.6}"
+                    "</style></head><body><div class='card'>"
+                    "<h1>⚠ Proxy could not be reached</h1>"
+                    "<p class='muted'>Krexion tried to route this browser profile through the configured proxy, "
+                    "but the connection failed within 10 seconds. The site would otherwise show ERR_TIMED_OUT with no explanation.</p>"
+                    "<h2>Proxy server</h2><code>"+_safe_server+"</code>"
+                    "<h2>Reason</h2><code>"+_safe_err+"</code>"
+                    "<h2>What to try</h2><ul class='muted'>"
+                    "<li>Verify your ProxyJet credentials are still active (Settings → ProxyJet)</li>"
+                    "<li>Try a different country / state in the profile's proxy section</li>"
+                    "<li>Switch to <code>No Proxy</code> if you only need a clean UA / viewport</li>"
+                    "<li>Check that the desktop machine's firewall allows outbound HTTPS</li>"
+                    "</ul>"
+                    "<a class='btn' href='"+_safe_start+"'>Continue without proxy →</a>"
+                    "</div></body></html>"
+                )
+                await page.set_content(_diag_html, timeout=5000)
+            except Exception as _de:
+                logger.warning(f"[profile-launch] diagnostic page render failed: {_de}")
+        else:
+            try:
+                # Bumped 30s → 45s. With anti-detect JS injected (~35
+                # patches) the first paint takes 5-10s longer than a
+                # bare browser; many residential proxies also add a
+                # 2-3s connect handshake. 45s is generous but still
+                # bails out if the host is truly dead.
+                await page.goto(start_url or "https://www.google.com/", timeout=45000)
+            except Exception as e:
+                logger.warning(f"start URL goto failed: {e}")
 
         # Tell cloud the session is now RUNNING
         if on_session_update:
