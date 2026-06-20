@@ -4464,18 +4464,23 @@ export default function VisualRecorderPage() {
                   const isDragOver = dragOver === i;
                   return (
                   <React.Fragment key={i}>
-                    {/* 2026-01: Insert-here button (appears between steps on hover) */}
+                    {/* 2026-06 — Insert-between-steps button now
+                        ALWAYS visible (was opacity-0 until hover, so
+                        most operators never discovered it). Customer
+                        ask: "kis b step k bad wo step add krne ki
+                        option ho". Visible as a thin separator with a
+                        centered + icon — solid colour on hover. */}
                     <div
-                      className="relative h-1 group/insert"
+                      className="relative h-3 group/insert"
                       data-testid={`vr-step-insert-zone-${i}`}
                     >
                       <button
                         onClick={() => insertStepAt(i)}
                         title={`Insert a new step BEFORE step #${i + 1}`}
-                        className="absolute left-1/2 -translate-x-1/2 -top-1.5 px-1.5 py-0.5 rounded-full bg-emerald-600 hover:bg-emerald-500 text-white text-[9px] font-bold opacity-0 group-hover/insert:opacity-100 transition-opacity z-10 leading-none"
+                        className="absolute left-1/2 -translate-x-1/2 top-0 px-2 py-0.5 rounded-full bg-zinc-800 border border-emerald-700/50 hover:bg-emerald-600 hover:border-emerald-400 text-emerald-400 hover:text-white text-[9px] font-bold transition-colors z-10 leading-none shadow"
                         data-testid={`vr-step-insert-before-${i}`}
                       >
-                        + insert here
+                        + insert step here
                       </button>
                     </div>
                   <div
@@ -4623,16 +4628,16 @@ export default function VisualRecorderPage() {
                   </React.Fragment>
                   );
                 })}
-                {/* 2026-01: Final "insert at end" button (always visible) */}
+                {/* 2026-06 — Final "insert at end" button (ALWAYS visible — same UX as in-between insert) */}
                 {steps.length > 0 && (
-                  <div className="relative h-1 group/insert" data-testid="vr-step-insert-zone-end">
+                  <div className="relative h-4 mt-1 group/insert" data-testid="vr-step-insert-zone-end">
                     <button
                       onClick={() => insertStepAt(steps.length)}
                       title="Insert a new step at the END"
-                      className="absolute left-1/2 -translate-x-1/2 -top-1.5 px-1.5 py-0.5 rounded-full bg-emerald-600 hover:bg-emerald-500 text-white text-[9px] font-bold opacity-0 group-hover/insert:opacity-100 transition-opacity z-10 leading-none"
+                      className="absolute left-1/2 -translate-x-1/2 top-0 px-2.5 py-1 rounded-full bg-zinc-800 border border-emerald-700/50 hover:bg-emerald-600 hover:border-emerald-400 text-emerald-400 hover:text-white text-[10px] font-bold transition-colors z-10 leading-none shadow"
                       data-testid="vr-step-insert-end"
                     >
-                      + insert step
+                      + insert step at end
                     </button>
                   </div>
                 )}

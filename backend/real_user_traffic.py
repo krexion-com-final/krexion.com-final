@@ -8897,6 +8897,17 @@ async def run_real_user_traffic_job(
                                 entry["pre_submit_screenshots"] = _pre_submit_shots
 
                     entry["status"] = step_res["status"]
+                    # 2026-06 — surface raw automation result fields so
+                    # the conversion-gate at line ~9192 can decide
+                    # whether to honour or suppress thank_you_reached
+                    # based on whether ALL required steps actually
+                    # ran. Without these the gate defaults to allowing
+                    # the conversion, which is the OLD (buggy) behaviour
+                    # the customer reported ("unknown page pr converstion
+                    # show ho").
+                    entry["automation_status"] = step_res.get("status") or ""
+                    entry["automation_executed_steps"] = int(step_res.get("executed_steps") or 0)
+                    entry["_required_steps_total"] = len(automation_steps or [])
                     if step_res.get("error"):
                         entry["error"] = step_res["error"]
                     # ── 2026-05: best-effort `screenshot` steps on failure ──
@@ -9168,6 +9179,48 @@ async def run_real_user_traffic_job(
                     )
                 except Exception:
                     entry["thank_you_reached"] = False
+
+                # ── 2026-06 — Customer ask: "jidar converstion show
+                # krna ho waha capture taran ka aik button lag jay
+                # jab converstion step tak ay tab he bas convertion
+                # show ho ta k unknow page pr converstion show na kre".
+                # Previously a visit that bailed mid-funnel could
+                # still be flagged as a conversion if the abandoned
+                # page's URL/text happened to fuzzy-match the thank-
+                # you heuristic (e.g. an offer's interstitial that
+                # shares words with the success page). Now we ALSO
+                # require:
+                #   1. the visit's automation status is "ok" (no
+                #      required step failed — strict-mode default
+                #      from this same release), OR
+                #   2. status is "stuck" AND we reached the recorded
+                #      final URL EXACTLY (the conversion-page-reached
+                #      story below handles that explicitly via
+                #      `_upgraded_from_stuck`)
+                # Any other status (failed, error, captcha, etc.) is
+                # NOT a conversion — even if the page text vaguely
+                # looks like a thank-you page.
+                _auto_st = (entry.get("automation_status") or entry.get("status") or "").lower()
+                _required_steps_total = int(entry.get("_required_steps_total") or 0)
+                _executed_steps = int(entry.get("automation_executed_steps") or 0)
+                _all_steps_done = (
+                    _required_steps_total == 0
+                    or _executed_steps >= _required_steps_total
+                )
+                if entry.get("thank_you_reached"):
+                    if not (_auto_st in ("ok", "stuck") and _all_steps_done):
+                        # Roll back the heuristic match — strict mode
+                        # prevents premature conversion attribution.
+                        logger.info(
+                            f"[conversion-gate] suppressed thank_you_reached "
+                            f"because automation_status={_auto_st!r} or "
+                            f"executed={_executed_steps}/{_required_steps_total}"
+                        )
+                        entry["thank_you_reached"] = False
+                        entry["_conversion_suppressed_reason"] = (
+                            f"strict_gate: status={_auto_st} "
+                            f"executed={_executed_steps}/{_required_steps_total}"
+                        )
 
                 # ── 2026-01 status upgrade ─────────────────────────────
                 # If the visit reached the thank-you / conversion page
@@ -11681,6 +11734,36 @@ async def _execute_automation_steps(
             # this larger ceiling only kicks in on slow pages.
             timeout = _capped_timeout(action, int(step.get("timeout") or 25000))
             optional = bool(step.get("optional") or False)
+            # ── 2026-06 STRICT MODE — customer ask: "jab tak aik step
+            # complete ho k agla step ni mil jata tab tak agle step pr
+            # na jay … agr kahin koi step na chale yan skip krne ki
+            # koshish kre to os profile pr red ho jay yan error likha
+            # a jay".
+            # The Visual Recorder historically marks almost every
+            # action step (click, fill, type, select, evaluate, press)
+            # with optional=True, which caused failures to be silently
+            # swallowed and subsequent steps to run on a page they
+            # couldn't possibly interact with — exactly the cascade
+            # the customer reported. We now PROMOTE optional=True →
+            # optional=False for action-type steps so a failure
+            # immediately aborts the visit with status=failed (which
+            # the UI already paints red). Pure wait/screenshot/
+            # housekeeping steps stay optional because losing a
+            # screenshot or a wait-for-text doesn't invalidate the
+            # rest of the funnel — only the actions that change page
+            # state must succeed strictly in order.
+            #
+            # This is the permanent default per the customer's spec.
+            # Operators who deliberately want a soft step can still
+            # set optional=true AND step["never_strict"]=true in the
+            # Edit Step modal to opt that single step back out.
+            _STRICT_ACTIONS = {
+                "click", "fill", "type", "select", "check", "uncheck",
+                "evaluate", "press", "hover", "right_click", "drag",
+                "drag_drop", "scroll", "go_back", "go_forward",
+            }
+            if optional and action in _STRICT_ACTIONS and not bool(step.get("never_strict")):
+                optional = False
             wait_nav = bool(step.get("wait_nav") or False)
 
             # 2026-01 (additive): real-time step progress callback. When
@@ -13100,6 +13183,19 @@ async def _execute_automation_steps(
                     })
                 _hint = _ext_friendly_error(str(e)) if _EXT_LOADED else ""
                 _err_msg = f"Step {idx+1} ({action}) failed: {str(e)[:200]}"
+                # 2026-06 — Customer ask: "agr kahin koi step na chale
+                # yan skip krne ki koshish kre to os profile pr red ho
+                # jay yan error likha a jay". Make it crystal clear in
+                # the error string that the visit aborted because a
+                # REQUIRED step could not be completed — so the live
+                # grid / RUT history / health-check pane all say the
+                # same thing instead of vague "Step N failed".
+                if not optional:
+                    _err_msg = (
+                        f"❌ REQUIRED step {idx+1} of {len(steps or [])} "
+                        f"({action}) did not complete — visit aborted. "
+                        f"Reason: {str(e)[:180]}"
+                    )
                 if _hint:
                     _err_msg = f"{_err_msg} | Hint: {_hint}"
                 # 2026-01: emit "failed" progress event + final screenshot

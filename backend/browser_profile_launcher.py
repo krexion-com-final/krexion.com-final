@@ -281,15 +281,86 @@ async def launch_profile_session(
             except Exception as _de:
                 logger.warning(f"[profile-launch] diagnostic page render failed: {_de}")
         else:
-            try:
-                # Bumped 30s → 45s. With anti-detect JS injected (~35
-                # patches) the first paint takes 5-10s longer than a
-                # bare browser; many residential proxies also add a
-                # 2-3s connect handshake. 45s is generous but still
-                # bails out if the host is truly dead.
-                await page.goto(start_url or "https://www.google.com/", timeout=45000)
-            except Exception as e:
-                logger.warning(f"start URL goto failed: {e}")
+            # ── 2026-06 — Robust goto with retry + clear failure UI ──
+            # Customer report: "profile launch kr te hein to error
+            # ata hai profile proper os ip k hisab se chalti ni hai".
+            # Two failure modes seen:
+            #   1. The proxy probe passes (api.ipify is fast + Cloudflare
+            #      always reachable) but the actual start_url goto times
+            #      out — often because residential proxies blacklist
+            #      Google's automation patterns OR the user's local DNS
+            #      resolver can't see the target host.
+            #   2. The probe is run too early; some ProxyJet sticky
+            #      sessions take ~2-5s extra to fully provision a fresh
+            #      exit IP, so the probe lands on a partially-warm
+            #      tunnel that succeeds but the next request stalls.
+            # We now do TWO goto attempts with progressively longer
+            # timeouts, and if both fail we set a diagnostic page with
+            # the actual error + the configured proxy so the operator
+            # can SEE what went wrong instead of staring at the generic
+            # Chrome "This site can't be reached" screen.
+            _goto_err: Optional[str] = None
+            _target_url = start_url or "https://www.google.com/"
+            for attempt in (1, 2):
+                try:
+                    _t_goto = 45000 if attempt == 1 else 75000
+                    await page.goto(_target_url, timeout=_t_goto, wait_until="domcontentloaded")
+                    _goto_err = None
+                    break
+                except Exception as e:
+                    _goto_err = f"attempt {attempt}/2 ({_t_goto/1000:.0f}s): {type(e).__name__}: {str(e)[:160]}"
+                    logger.warning(f"start URL goto failed — {_goto_err}")
+                    if attempt == 2:
+                        break
+                    # Brief sleep before retry — gives slow proxies a
+                    # chance to settle their tunnel.
+                    await asyncio.sleep(2.0)
+
+            if _goto_err is not None:
+                # Both attempts failed — show a clear diagnostic page
+                # so the user understands what's happening.
+                try:
+                    _safe_url = str(_target_url).replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+                    _safe_err = str(_goto_err).replace("<", "&lt;").replace(">", "&gt;")
+                    _safe_proxy = str((proxy_arg or {}).get("server") or "(none configured)").replace("<", "&lt;").replace(">", "&gt;")
+                    _exit_ip_html = ""
+                    if proxy_diag.get("exit_ip"):
+                        _exit_ip_html = f"<h2>Last known proxy exit IP</h2><code>{proxy_diag['exit_ip']}</code>"
+                    _diag_html = (
+                        "<!doctype html><html><head><meta charset='utf-8'>"
+                        "<title>Krexion — Page could not load</title>"
+                        "<style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;"
+                        "background:#0b0b10;color:#e4e4e7;margin:0;padding:48px;"
+                        "min-height:100vh;box-sizing:border-box}"
+                        ".card{max-width:760px;margin:0 auto;background:#18181b;"
+                        "border:1px solid #3f3f46;border-radius:12px;padding:32px}"
+                        "h1{margin:0 0 8px;font-size:22px;color:#fbbf24}"
+                        "h2{margin:24px 0 8px;font-size:13px;color:#a1a1aa;font-weight:600;"
+                        "text-transform:uppercase;letter-spacing:0.05em}"
+                        "code{background:#0a0a0f;border:1px solid #27272a;padding:2px 6px;"
+                        "border-radius:4px;font-size:13px;color:#fbbf24;word-break:break-all;display:inline-block}"
+                        ".muted{color:#71717a;font-size:13px;line-height:1.6}"
+                        ".pill{display:inline-block;padding:3px 8px;background:#7c3aed;color:white;"
+                        "border-radius:9999px;font-size:11px;margin-left:6px}"
+                        "</style></head><body><div class='card'>"
+                        "<h1>⚠ Could not load the start page<span class='pill'>profile is live — you can still type a URL above</span></h1>"
+                        "<p class='muted'>The browser launched successfully but the first navigation timed out. "
+                        "This usually means the proxy tunnel is alive enough to pass our quick probe but the destination host "
+                        "isn't reachable through it (geo-blocked, captcha wall, or proxy DNS issue).</p>"
+                        "<h2>Target URL</h2><code>"+_safe_url+"</code>"
+                        "<h2>Configured proxy</h2><code>"+_safe_proxy+"</code>"
+                        +_exit_ip_html+
+                        "<h2>Error</h2><code>"+_safe_err+"</code>"
+                        "<h2>Next steps</h2><ul class='muted'>"
+                        "<li>You can still TYPE a different URL in the address bar above — the proxy stays active</li>"
+                        "<li>If even known-good sites (e.g. <code>example.com</code>) fail, the proxy is broken — pick a different country/state in the profile and relaunch</li>"
+                        "<li>If only the target site fails, that host is blocking your proxy's exit IP — try a residential pool</li>"
+                        "<li>To browse without the proxy, close this profile and relaunch with proxy disabled</li>"
+                        "</ul></div></body></html>"
+                    )
+                    await page.set_content(_diag_html, timeout=5000)
+                except Exception as _de:
+                    logger.warning(f"[profile-launch] post-goto diagnostic page render failed: {_de}")
 
         # Tell cloud the session is now RUNNING
         if on_session_update:
