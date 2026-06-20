@@ -160,11 +160,11 @@ jobs:
             Write-Host "No build/dist directory was produced."
           }
 
-      - name: Upload backend artifact
+      - name: Upload backend artifact (cache mirror)
         if: always()
         # 2026-01: continue-on-error so quota-hit doesn't kill the
         # whole workflow. Build still succeeds; downstream installer
-        # job will fail gracefully if artifact missing.
+        # job will use the cache below (artifact is optional mirror).
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
@@ -172,6 +172,18 @@ jobs:
           path: build/dist/krexion-backend.dist/**
           retention-days: 3
           if-no-files-found: warn
+
+      # ── 2026-01 (artifact-quota workaround) ──
+      # Save the backend build to the actions/cache store too. Cache
+      # has a SEPARATE 10 GB quota from artifacts, so even if artifact
+      # upload fails the installer job can still pull it from cache.
+      # Key includes the commit SHA so each push gets a fresh cache.
+      - name: Cache backend build for installer job
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: build/dist/krexion-backend.dist
+          key: krexion-backend-${{ github.sha }}-${{ github.run_id }}
 
   build-frontend:
     name: Build React frontend
@@ -192,14 +204,22 @@ jobs:
           echo "REACT_APP_BACKEND_URL=http://127.0.0.1:8001" > .env.production
           yarn build
 
-      - name: Upload frontend artifact
-        # 2026-01: continue-on-error → quota-hit non-fatal
+      - name: Upload frontend artifact (cache mirror)
+        # 2026-01: continue-on-error → quota-hit non-fatal. Installer
+        # job uses cache below as primary, artifact is just a mirror.
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: krexion-frontend-build
           path: frontend/build
           retention-days: 3
+
+      # Cache for installer job (10 GB cache quota, separate from artifacts)
+      - name: Cache frontend build for installer job
+        uses: actions/cache/save@v4
+        with:
+          path: frontend/build
+          key: krexion-frontend-${{ github.sha }}-${{ github.run_id }}
 
   build-installer:
     name: Build Krexion-Setup.exe
@@ -217,17 +237,55 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download backend artifact
+      # ── 2026-01: Restore from CACHE first (10GB quota, isolated
+      #     from artifact 500MB quota). Fallback to artifact download
+      #     if cache miss — this dual-path ensures the installer job
+      #     can never be blocked by GitHub's artifact quota meter. ──
+      - name: Restore backend build from cache
+        id: backend-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/dist/krexion-backend.dist
+          key: krexion-backend-${{ github.sha }}-${{ github.run_id }}
+
+      - name: Download backend artifact (fallback if cache miss)
+        if: steps.backend-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: krexion-backend-bundle
           path: build/dist/krexion-backend.dist/
 
-      - name: Download frontend artifact
+      - name: Restore frontend build from cache
+        id: frontend-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: frontend/build
+          key: krexion-frontend-${{ github.sha }}-${{ github.run_id }}
+
+      - name: Download frontend artifact (fallback if cache miss)
+        if: steps.frontend-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: krexion-frontend-build
           path: build/frontend-build/
+
+      - name: Verify build outputs available
+        shell: powershell
+        run: |
+          $backendOk = Test-Path "build/dist/krexion-backend.dist/krexion-backend.exe"
+          $frontendOk = (Test-Path "build/frontend-build/index.html") -or (Test-Path "frontend/build/index.html")
+          # Frontend cache restored to frontend/build (cache's original path)
+          # but artifact download went to build/frontend-build. Normalize.
+          if (-not (Test-Path "build/frontend-build/index.html") -and (Test-Path "frontend/build/index.html")) {
+            New-Item -ItemType Directory -Force -Path "build/frontend-build" | Out-Null
+            Copy-Item -Recurse -Force frontend/build/* build/frontend-build/
+          }
+          Write-Host "backend OK: $backendOk"
+          Write-Host "frontend OK: $frontendOk"
+          if (-not $backendOk) { throw "Backend build artifact missing from BOTH cache and artifact." }
+          if (-not $frontendOk) { throw "Frontend build artifact missing from BOTH cache and artifact." }
 
       - name: Download MongoDB Portable
         shell: powershell
