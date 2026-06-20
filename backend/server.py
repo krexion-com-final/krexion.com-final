@@ -18381,6 +18381,19 @@ class VRStartReq(BaseModel):
     # forms and continue recording on the POST-submit page). At RUT
     # replay time the real lead's row substitutes via {{column}}.
     sample_row: Optional[Dict[str, Any]] = None
+    # ── 2026-01 (mobile fingerprint coherence) ──
+    # Frontend now also sends the device + geo selection so the
+    # recorder browser presents EXACTLY the same fingerprint that
+    # the eventual RUT job will use. Without these we'd hardcode
+    # mobile + en-US + NY and leak obvious mismatches.
+    device_type: Optional[str] = "auto"     # auto | desktop | mobile | tablet
+    country: Optional[str] = ""             # 2-letter cc → drives locale + tz + geo
+    locale: Optional[str] = ""              # explicit override
+    timezone: Optional[str] = ""            # explicit override (timezone_id)
+    accept_language: Optional[str] = ""     # explicit override
+    viewport_w: Optional[int] = 0
+    viewport_h: Optional[int] = 0
+    device_scale_factor: Optional[float] = 0.0
 
 
 @api_router.post("/visual-recorder/start")
@@ -18400,6 +18413,14 @@ async def vr_start(
             user_agent=req.user_agent,
             headers=req.headers or [],
             sample_row=req.sample_row or None,
+            device_type=(req.device_type or "auto"),
+            country=(req.country or ""),
+            locale=(req.locale or ""),
+            timezone_id=(req.timezone or ""),
+            accept_language=(req.accept_language or ""),
+            viewport_w=int(req.viewport_w or 0),
+            viewport_h=int(req.viewport_h or 0),
+            device_scale_factor=float(req.device_scale_factor or 0.0),
         )
     except RuntimeError as e:
         raise HTTPException(status_code=429, detail=str(e))
@@ -18575,6 +18596,158 @@ async def vr_close_tab(
         raise HTTPException(status_code=404, detail="Session not found")
     _vr_require_ready(sess)
     return await vr.close_tab(sess, index)
+
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ── 2026-01 Phase 1: "any-offer" coverage endpoints ─────────────────
+# ══════════════════════════════════════════════════════════════════════
+# These complement the existing visual-recorder endpoints to handle
+# the patterns we previously couldn't record:
+#   • SPA pages needing network-idle (React/Vue/Next offers)
+#   • File upload inputs (KYC, crypto signup)
+#   • OTP / verification code flows (email/SMS verify)
+#   • CAPTCHA detection + pause-for-human checkpoint
+#   • Generic human-pause checkpoints (wallet connect, 2FA push)
+
+class _VRWaitNetIdleReq(BaseModel):
+    timeout_ms: int = 30000
+
+
+@api_router.post("/visual-recorder/{session_id}/add-wait-network-idle")
+async def vr_add_wait_network_idle(
+    session_id: str,
+    req: _VRWaitNetIdleReq,
+    user: dict = Depends(get_current_user),
+):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.add_wait_network_idle(sess, req.timeout_ms)
+
+
+class _VRFileUploadReq(BaseModel):
+    selector: str
+    file_path: str            # local path OR {{column}} template
+    label: Optional[str] = ""
+
+
+@api_router.post("/visual-recorder/{session_id}/add-file-upload")
+async def vr_add_file_upload(
+    session_id: str,
+    req: _VRFileUploadReq,
+    user: dict = Depends(get_current_user),
+):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.add_file_upload(sess, req.selector, req.file_path, req.label or "")
+
+
+class _VROTPReq(BaseModel):
+    source: str = "url"       # url | clipboard | page_text | selector
+    selector: Optional[str] = ""
+    url_regex: Optional[str] = ""
+    text_regex: Optional[str] = ""
+    target_selector: str       # input where the code should be filled
+    timeout_ms: int = 120000
+    digits: int = 6
+    label: Optional[str] = ""
+
+
+@api_router.post("/visual-recorder/{session_id}/add-otp-wait")
+async def vr_add_otp_wait(
+    session_id: str,
+    req: _VROTPReq,
+    user: dict = Depends(get_current_user),
+):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.add_otp_wait(
+        sess,
+        source=req.source,
+        selector=req.selector or "",
+        url_regex=req.url_regex or "",
+        text_regex=req.text_regex or "",
+        target_selector=req.target_selector,
+        timeout_ms=req.timeout_ms,
+        digits=req.digits,
+        label=req.label or "",
+    )
+
+
+@api_router.get("/visual-recorder/{session_id}/detect-captcha")
+async def vr_detect_captcha(session_id: str, user: dict = Depends(get_current_user)):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.detect_captcha(sess)
+
+
+class _VRCaptchaPauseReq(BaseModel):
+    label: Optional[str] = ""
+
+
+@api_router.post("/visual-recorder/{session_id}/add-captcha-pause")
+async def vr_add_captcha_pause(
+    session_id: str,
+    req: _VRCaptchaPauseReq,
+    user: dict = Depends(get_current_user),
+):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.add_captcha_pause(sess, req.label or "")
+
+
+class _VRHumanPauseReq(BaseModel):
+    reason: Optional[str] = "manual_step"
+    timeout_ms: int = 300000
+    label: Optional[str] = ""
+
+
+@api_router.post("/visual-recorder/{session_id}/add-human-pause")
+async def vr_add_human_pause(
+    session_id: str,
+    req: _VRHumanPauseReq,
+    user: dict = Depends(get_current_user),
+):
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.add_human_pause(
+        sess,
+        reason=req.reason or "manual_step",
+        timeout_ms=req.timeout_ms,
+        label=req.label or "",
+    )
+
+
 
 
 

@@ -23,8 +23,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import secrets
+import string
 import time
 import uuid
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -750,6 +753,266 @@ def _build_scroll(y: int) -> Dict[str, Any]:
     return {"action": "scroll", "y": int(y)}
 
 
+# ── 2026-01: Device / Geo / Template helpers ──────────────────────────
+# These give the Visual Recorder the SAME fingerprint coherence that
+# RUT and the browser-profile launcher already enjoy. Previously the
+# recorder hardcoded mobile+en-US+NY which leaked obvious
+# UA/Platform/timezone mismatches → advertisers blacklisted.
+
+# ── Country → (locale, timezone, accept_lang, lat, lon) ──
+# Best-effort common mapping. Frontend may override any of these via
+# explicit fields on /start. Defaults to en-US/NY when unknown.
+_COUNTRY_GEO: Dict[str, Tuple[str, str, str, float, float]] = {
+    "us": ("en-US",  "America/New_York",      "en-US,en;q=0.9",                 40.7128,  -74.0060),
+    "ca": ("en-CA",  "America/Toronto",       "en-CA,en;q=0.9",                 43.6532,  -79.3832),
+    "gb": ("en-GB",  "Europe/London",         "en-GB,en;q=0.9",                 51.5074,   -0.1278),
+    "uk": ("en-GB",  "Europe/London",         "en-GB,en;q=0.9",                 51.5074,   -0.1278),
+    "au": ("en-AU",  "Australia/Sydney",      "en-AU,en;q=0.9",                -33.8688,  151.2093),
+    "de": ("de-DE",  "Europe/Berlin",         "de-DE,de;q=0.9,en;q=0.8",        52.5200,   13.4050),
+    "fr": ("fr-FR",  "Europe/Paris",          "fr-FR,fr;q=0.9,en;q=0.8",        48.8566,    2.3522),
+    "es": ("es-ES",  "Europe/Madrid",         "es-ES,es;q=0.9,en;q=0.8",        40.4168,   -3.7038),
+    "it": ("it-IT",  "Europe/Rome",           "it-IT,it;q=0.9,en;q=0.8",        41.9028,   12.4964),
+    "nl": ("nl-NL",  "Europe/Amsterdam",      "nl-NL,nl;q=0.9,en;q=0.8",        52.3676,    4.9041),
+    "br": ("pt-BR",  "America/Sao_Paulo",     "pt-BR,pt;q=0.9,en;q=0.8",       -23.5505,  -46.6333),
+    "mx": ("es-MX",  "America/Mexico_City",   "es-MX,es;q=0.9,en;q=0.8",        19.4326,  -99.1332),
+    "ar": ("es-AR",  "America/Argentina/Buenos_Aires", "es-AR,es;q=0.9,en;q=0.8",-34.6037, -58.3816),
+    "in": ("en-IN",  "Asia/Kolkata",          "en-IN,en;q=0.9,hi;q=0.8",        28.6139,   77.2090),
+    "pk": ("en-PK",  "Asia/Karachi",          "en-PK,en;q=0.9,ur;q=0.8",        24.8607,   67.0011),
+    "bd": ("bn-BD",  "Asia/Dhaka",            "bn-BD,bn;q=0.9,en;q=0.8",        23.8103,   90.4125),
+    "id": ("id-ID",  "Asia/Jakarta",          "id-ID,id;q=0.9,en;q=0.8",        -6.2088,  106.8456),
+    "ph": ("en-PH",  "Asia/Manila",           "en-PH,en;q=0.9,fil;q=0.8",       14.5995,  120.9842),
+    "th": ("th-TH",  "Asia/Bangkok",          "th-TH,th;q=0.9,en;q=0.8",        13.7563,  100.5018),
+    "vn": ("vi-VN",  "Asia/Ho_Chi_Minh",      "vi-VN,vi;q=0.9,en;q=0.8",        10.8231,  106.6297),
+    "my": ("en-MY",  "Asia/Kuala_Lumpur",     "en-MY,en;q=0.9,ms;q=0.8",         3.1390,  101.6869),
+    "sg": ("en-SG",  "Asia/Singapore",        "en-SG,en;q=0.9,zh;q=0.8",         1.3521,  103.8198),
+    "jp": ("ja-JP",  "Asia/Tokyo",            "ja-JP,ja;q=0.9,en;q=0.8",        35.6762,  139.6503),
+    "kr": ("ko-KR",  "Asia/Seoul",            "ko-KR,ko;q=0.9,en;q=0.8",        37.5665,  126.9780),
+    "cn": ("zh-CN",  "Asia/Shanghai",         "zh-CN,zh;q=0.9,en;q=0.8",        31.2304,  121.4737),
+    "tw": ("zh-TW",  "Asia/Taipei",           "zh-TW,zh;q=0.9,en;q=0.8",        25.0330,  121.5654),
+    "hk": ("zh-HK",  "Asia/Hong_Kong",        "zh-HK,zh;q=0.9,en;q=0.8",        22.3193,  114.1694),
+    "ae": ("en-AE",  "Asia/Dubai",            "en-AE,en;q=0.9,ar;q=0.8",        25.2048,   55.2708),
+    "sa": ("ar-SA",  "Asia/Riyadh",           "ar-SA,ar;q=0.9,en;q=0.8",        24.7136,   46.6753),
+    "tr": ("tr-TR",  "Europe/Istanbul",       "tr-TR,tr;q=0.9,en;q=0.8",        41.0082,   28.9784),
+    "il": ("he-IL",  "Asia/Jerusalem",        "he-IL,he;q=0.9,en;q=0.8",        31.7683,   35.2137),
+    "eg": ("ar-EG",  "Africa/Cairo",          "ar-EG,ar;q=0.9,en;q=0.8",        30.0444,   31.2357),
+    "ng": ("en-NG",  "Africa/Lagos",          "en-NG,en;q=0.9",                  6.5244,    3.3792),
+    "za": ("en-ZA",  "Africa/Johannesburg",   "en-ZA,en;q=0.9",                -26.2041,   28.0473),
+    "ke": ("en-KE",  "Africa/Nairobi",        "en-KE,en;q=0.9,sw;q=0.8",        -1.2921,   36.8219),
+    "ru": ("ru-RU",  "Europe/Moscow",         "ru-RU,ru;q=0.9,en;q=0.8",        55.7558,   37.6173),
+    "ua": ("uk-UA",  "Europe/Kyiv",           "uk-UA,uk;q=0.9,en;q=0.8",        50.4501,   30.5234),
+    "pl": ("pl-PL",  "Europe/Warsaw",         "pl-PL,pl;q=0.9,en;q=0.8",        52.2297,   21.0122),
+    "se": ("sv-SE",  "Europe/Stockholm",      "sv-SE,sv;q=0.9,en;q=0.8",        59.3293,   18.0686),
+    "no": ("no-NO",  "Europe/Oslo",           "no-NO,no;q=0.9,en;q=0.8",        59.9139,   10.7522),
+    "fi": ("fi-FI",  "Europe/Helsinki",       "fi-FI,fi;q=0.9,en;q=0.8",        60.1699,   24.9384),
+    "dk": ("da-DK",  "Europe/Copenhagen",     "da-DK,da;q=0.9,en;q=0.8",        55.6761,   12.5683),
+    "be": ("nl-BE",  "Europe/Brussels",       "nl-BE,nl;q=0.9,fr;q=0.8,en;q=0.7",50.8503, 4.3517),
+    "ch": ("de-CH",  "Europe/Zurich",         "de-CH,de;q=0.9,en;q=0.8",        47.3769,    8.5417),
+    "at": ("de-AT",  "Europe/Vienna",         "de-AT,de;q=0.9,en;q=0.8",        48.2082,   16.3738),
+    "ie": ("en-IE",  "Europe/Dublin",         "en-IE,en;q=0.9",                 53.3498,   -6.2603),
+    "pt": ("pt-PT",  "Europe/Lisbon",         "pt-PT,pt;q=0.9,en;q=0.8",        38.7223,   -9.1393),
+    "nz": ("en-NZ",  "Pacific/Auckland",      "en-NZ,en;q=0.9",                -36.8485,  174.7633),
+}
+
+
+def _resolve_country_geo(country: str) -> Tuple[str, str, str, float, float]:
+    """Return (locale, timezone_id, accept_lang, lat, lon) for a 2-letter
+    country code. Falls back to US defaults for unknown codes so the
+    recorder still works for niche markets — caller can override any
+    field explicitly on /start.
+    """
+    cc = (country or "").strip().lower()[:2]
+    return _COUNTRY_GEO.get(cc, _COUNTRY_GEO["us"])
+
+
+def _detect_mobile_from_ua(ua: str) -> Tuple[bool, str]:
+    """Sniff the UA string to figure out if we should run the recorder
+    in mobile mode. Returns (is_mobile, os_kind).
+
+    `os_kind` ∈ {android, ios, ipados, windows, macos, linux}.
+    """
+    u = (ua or "").lower()
+    if "iphone" in u or "ios " in u or " ios)" in u:
+        return True, "ios"
+    if "ipad" in u:
+        # iPadOS 13+ UA looks like macOS — but Playwright treats it as
+        # tablet either way. Mark as mobile to enable touch.
+        return True, "ipados"
+    if "android" in u:
+        return True, "android"
+    if "mobile" in u and "windows" not in u:
+        return True, "android"  # generic mobile fallback
+    if "windows" in u:
+        return False, "windows"
+    if "mac os" in u or "macintosh" in u:
+        return False, "macos"
+    if "linux" in u:
+        return False, "linux"
+    return False, "windows"
+
+
+def _resolve_device_viewport(
+    explicit_viewport: Optional[Tuple[int, int]],
+    is_mobile: bool,
+    os_kind: str,
+) -> Tuple[Tuple[int, int], float]:
+    """Pick a realistic (viewport, device_scale_factor) for the device.
+
+    If the caller passed a non-default viewport we keep it (customer
+    may want a specific dimension). Otherwise we map os_kind →
+    common device size.
+    """
+    if explicit_viewport and explicit_viewport != DEFAULT_VIEWPORT:
+        # Customer pinned a specific size — respect it but pick a
+        # sensible DSF.
+        if is_mobile:
+            return explicit_viewport, 3.0
+        return explicit_viewport, 1.0
+
+    if is_mobile:
+        if os_kind == "ios":
+            # iPhone 14/15 Pro logical size
+            return (393, 852), 3.0
+        if os_kind == "ipados":
+            # iPad Pro 11" landscape — treat as tablet
+            return (1024, 1366), 2.0
+        # Android default → Pixel 8 / Galaxy S24 mid-size
+        return (412, 915), 2.625
+    # Desktop default — Full HD; will work for most monitors
+    return (1920, 1080), 1.0
+
+
+def _resolve_template_value(
+    sess: "RecorderSession",
+    template: str,
+) -> str:
+    """Resolve a `{{name}}` template using:
+       1. Built-in dynamic generators (random_email, today, uuid, etc.)
+       2. sess.sample_row (Excel column lookup, case-insensitive)
+       3. Fallback: return the literal template unchanged
+
+    Designed so multiple templates can appear in one string, e.g.
+    `"user_{{counter}}_{{random_alnum:6}}@example.com"`.
+
+    Supported built-ins:
+      {{random_email}}             → uniq lowercase email at example.com
+      {{random_email:gmail.com}}   → at a custom domain
+      {{random_alnum:N}}           → N-char lowercase alnum
+      {{random_digits:N}}          → N digits (good for OTP-style)
+      {{random_phone}}             → 10-digit US-style "5552223333"
+      {{random_phone:UK}}          → country-aware (UK/US/IN/PK/DE)
+      {{uuid}}                     → full uuid4
+      {{uuid_short}}               → first 8 hex chars
+      {{counter}}                  → per-session incrementing int (1,2,…)
+      {{today}}                    → YYYY-MM-DD
+      {{today:DD/MM/YYYY}}         → custom strftime fmt
+      {{now}}                      → ISO timestamp
+      {{epoch}}                    → unix seconds
+      {{first_name}}, {{last_name}}, {{full_name}} → from name pool
+    """
+    raw = (template or "").strip()
+    if not raw:
+        return ""
+    # Strip wrapping braces if caller passed e.g. "{{random_email}}"
+    if raw.startswith("{{") and raw.endswith("}}"):
+        raw = raw[2:-2].strip()
+    name, _, arg = raw.partition(":")
+    name = name.strip().lower()
+    arg = arg.strip()
+
+    if name in ("random_email", "rand_email", "email_random"):
+        domain = arg or "example.com"
+        local = "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(10))
+        return f"u{local}@{domain}"
+    if name in ("random_alnum", "rand_alnum"):
+        n = max(1, min(int(arg or "8"), 64))
+        return "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(n))
+    if name in ("random_digits", "rand_digits"):
+        n = max(1, min(int(arg or "6"), 32))
+        return "".join(secrets.choice(string.digits) for _ in range(n))
+    if name in ("random_phone", "rand_phone", "phone"):
+        cc = (arg or "us").lower()
+        def d(n: int) -> str:
+            return "".join(secrets.choice(string.digits) for _ in range(n))
+        if cc == "uk":
+            return "07" + d(9)
+        if cc == "in":
+            return "9" + d(9)
+        if cc == "pk":
+            return "03" + d(9)
+        if cc == "de":
+            return "01" + d(9)
+        # US default: never start area-code with 0/1, never 555-01xx (reserved)
+        area = secrets.choice([str(x) for x in range(200, 999)])
+        exch = secrets.choice([str(x) for x in range(200, 999)])
+        sub = d(4)
+        return f"{area}{exch}{sub}"
+    if name in ("uuid",):
+        return str(uuid.uuid4())
+    if name in ("uuid_short", "shortid"):
+        return uuid.uuid4().hex[:8]
+    if name in ("counter", "n"):
+        sess.template_counter = (sess.template_counter or 0) + 1
+        return str(sess.template_counter)
+    if name in ("today", "date"):
+        fmt = arg or "%Y-%m-%d"
+        # Common human shorthand → strftime conversion
+        fmt = (fmt.replace("YYYY", "%Y").replace("YY", "%y")
+                  .replace("MM", "%m").replace("DD", "%d")
+                  .replace("HH", "%H").replace("mm", "%M").replace("SS", "%S"))
+        return datetime.now().strftime(fmt)
+    if name in ("now", "iso"):
+        return datetime.now(timezone.utc).isoformat()
+    if name in ("epoch", "ts"):
+        return str(int(time.time()))
+    if name in ("first_name", "firstname"):
+        return secrets.choice(_FIRST_NAMES)
+    if name in ("last_name", "lastname"):
+        return secrets.choice(_LAST_NAMES)
+    if name in ("full_name", "fullname", "name"):
+        return f"{secrets.choice(_FIRST_NAMES)} {secrets.choice(_LAST_NAMES)}"
+
+    # Not a built-in → try sample_row (Excel column) lookup
+    if sess.sample_row:
+        v = sess.sample_row.get(name)
+        if v is not None and str(v).strip():
+            return str(v)
+    # Last resort: return the original wrapped form so the recorded
+    # JSON keeps `{{name}}` for runtime RUT substitution (it knows
+    # how to resolve from the real lead row).
+    return "{{" + name + "}}"
+
+
+_FIRST_NAMES = [
+    "James", "Mary", "John", "Patricia", "Robert", "Jennifer", "Michael",
+    "Linda", "William", "Elizabeth", "David", "Barbara", "Richard",
+    "Susan", "Joseph", "Jessica", "Thomas", "Sarah", "Charles", "Karen",
+    "Daniel", "Emily", "Matthew", "Anna", "Christopher", "Olivia",
+    "Andrew", "Sophia", "Joshua", "Mia",
+]
+_LAST_NAMES = [
+    "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller",
+    "Davis", "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez",
+    "Wilson", "Anderson", "Thomas", "Taylor", "Moore", "Jackson", "Martin",
+    "Lee", "Perez", "Thompson", "White", "Harris", "Sanchez", "Clark",
+    "Ramirez", "Lewis", "Robinson",
+]
+
+
+def resolve_templates_in_text(sess: "RecorderSession", text: str) -> str:
+    """Replace ALL `{{...}}` occurrences in `text` with resolved
+    values. Multi-template strings work — e.g.
+    `"user_{{counter}}_{{random_alnum:6}}@x.com"`.
+    """
+    if not text or "{{" not in text:
+        return text
+    import re as _re
+    return _re.sub(
+        r"\{\{\s*([^{}]+?)\s*\}\}",
+        lambda m: _resolve_template_value(sess, m.group(1)),
+        text,
+    )
+
+
 # ── Session state ───────────────────────────────────────────────────────
 @dataclass
 class RecorderSession:
@@ -766,6 +1029,26 @@ class RecorderSession:
     # replay time the RUT engine substitutes the actual lead row.
     sample_row: Dict[str, Any] = field(default_factory=dict)
     viewport: Tuple[int, int] = DEFAULT_VIEWPORT
+    # ── 2026-01 (mobile fingerprint coherence) ───────────────────────
+    # Device emulation knobs — were previously HARDCODED at
+    # `is_mobile=True, has_touch=True, dsf=2, locale=en-US,
+    # timezone=America/New_York`. Now driven by what the frontend
+    # passes on /start so the recorder browser presents to the
+    # advertiser the SAME fingerprint the eventual RUT job will
+    # present. Without this, advertisers detect the mismatch
+    # (e.g. UA says Windows but maxTouchPoints=5) and either fail
+    # the offer or redirect to "Not available in your region".
+    is_mobile: bool = True
+    has_touch: bool = True
+    device_scale_factor: float = 2.0
+    locale: str = "en-US"
+    timezone_id: str = "America/New_York"
+    accept_language: str = "en-US,en;q=0.9"
+    os_kind: str = "android"     # android | ios | windows | macos | linux
+    geo_lat: float = 40.7128
+    geo_lon: float = -74.0060
+    # Counter that {{counter}} dynamic template increments per use.
+    template_counter: int = 0
     steps: List[Dict[str, Any]] = field(default_factory=list)
     last_activity: float = field(default_factory=time.time)
     created_at: float = field(default_factory=time.time)
@@ -832,6 +1115,19 @@ async def start_session(
     user_agent: Optional[str] = None,
     headers: Optional[List[str]] = None,
     sample_row: Optional[Dict[str, Any]] = None,
+    # ── 2026-01 (mobile fingerprint coherence) ──
+    # Optional device hints from frontend. If not provided we sniff
+    # the UA. This is what fixes the "advertiser sees mismatched
+    # mobile/desktop fingerprint" problem — the recorder browser
+    # now presents EXACTLY the device a real customer would.
+    device_type: str = "auto",     # auto | desktop | mobile | tablet
+    country: str = "",             # 2-letter lowercase → drives locale + tz + geo
+    locale: str = "",              # explicit override
+    timezone_id: str = "",         # explicit override
+    accept_language: str = "",     # explicit override
+    viewport_w: int = 0,
+    viewport_h: int = 0,
+    device_scale_factor: float = 0.0,
 ) -> RecorderSession:
     """Create a session and kick off browser launch in the background.
 
@@ -862,17 +1158,60 @@ async def start_session(
             if k is None:
                 continue
             norm_sample[str(k).strip().lower()] = v
+
+    # ── 2026-01: Resolve device + geo BEFORE creating the session ──
+    final_ua = user_agent or (
+        "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+    )
+    # Device choice — explicit overrides UA sniffing
+    dt = (device_type or "auto").strip().lower()
+    if dt in ("mobile", "phone"):
+        is_mobile = True
+        _, sniffed_os = _detect_mobile_from_ua(final_ua)
+        os_kind = sniffed_os if sniffed_os in ("ios", "ipados", "android") else "android"
+    elif dt in ("desktop", "pc"):
+        is_mobile = False
+        _, sniffed_os = _detect_mobile_from_ua(final_ua)
+        os_kind = sniffed_os if sniffed_os in ("windows", "macos", "linux") else "windows"
+    elif dt == "tablet":
+        is_mobile = True
+        os_kind = "ipados"
+    else:
+        # Auto: sniff UA
+        is_mobile, os_kind = _detect_mobile_from_ua(final_ua)
+
+    # Geo: explicit fields override country-derived defaults
+    (geo_locale, geo_tz, geo_accept, geo_lat, geo_lon) = _resolve_country_geo(country)
+    final_locale = locale or geo_locale
+    final_tz = timezone_id or geo_tz
+    final_accept = accept_language or geo_accept
+
+    # Viewport + DSF
+    explicit_vp: Optional[Tuple[int, int]] = None
+    if viewport_w > 0 and viewport_h > 0:
+        explicit_vp = (int(viewport_w), int(viewport_h))
+    (final_vp, default_dsf) = _resolve_device_viewport(explicit_vp, is_mobile, os_kind)
+    final_dsf = device_scale_factor if device_scale_factor > 0 else default_dsf
+
     sess = RecorderSession(
         session_id=sid,
         user_id=user_id,
         url=url,
         proxy=proxy,
-        user_agent=user_agent or (
-            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
-        ),
+        user_agent=final_ua,
         headers=headers or [],
         sample_row=norm_sample,
+        viewport=final_vp,
+        is_mobile=is_mobile,
+        has_touch=is_mobile,
+        device_scale_factor=final_dsf,
+        locale=final_locale,
+        timezone_id=final_tz,
+        accept_language=final_accept,
+        os_kind=os_kind,
+        geo_lat=geo_lat,
+        geo_lon=geo_lon,
     )
     sess.lock = asyncio.Lock()
     sess.state = "starting"
@@ -883,7 +1222,11 @@ async def start_session(
     # Fire-and-forget background init. Wrapped with overall timeout so a
     # dead proxy can never hang us forever.
     sess.startup_task = asyncio.create_task(_init_browser_bg(sess))
-    logger.info(f"Visual recorder session created (starting): {sid} (url={url[:60]})")
+    logger.info(
+        f"Visual recorder session created (starting): {sid} "
+        f"(url={url[:60]}, mobile={is_mobile}, os={os_kind}, "
+        f"vp={final_vp}, locale={final_locale}, tz={final_tz})"
+    )
     return sess
 
 
@@ -1142,15 +1485,88 @@ async def _init_browser_inner(sess: RecorderSession) -> None:
             )
 
     sess.browser = await pw.chromium.launch(**launch_opts)
+    # ── 2026-01: Dynamic device + geo + stealth ──
+    # Was previously hardcoded to mobile+en-US+NY which leaked
+    # obvious UA/Platform/timezone mismatches → advertisers detected
+    # the recorder. Now driven by what frontend passed on /start so
+    # the recorder browser presents EXACTLY the fingerprint the
+    # eventual RUT job will use.
     sess.context = await sess.browser.new_context(
         viewport={"width": sess.viewport[0], "height": sess.viewport[1]},
         user_agent=sess.user_agent,
-        device_scale_factor=2,
-        is_mobile=True,
-        has_touch=True,
-        locale="en-US",
-        timezone_id="America/New_York",
+        device_scale_factor=sess.device_scale_factor,
+        is_mobile=sess.is_mobile,
+        has_touch=sess.has_touch,
+        locale=sess.locale,
+        timezone_id=sess.timezone_id,
+        extra_http_headers={
+            "Accept-Language": sess.accept_language,
+            # Client Hints — most modern offers check these. Without
+            # them a "mobile" UA browser leaks `Sec-CH-UA-Mobile: ?0`
+            # which is an instant tell.
+            "Sec-CH-UA-Mobile": "?1" if sess.is_mobile else "?0",
+            "Sec-CH-UA-Platform": (
+                '"iOS"' if sess.os_kind == "ios" else
+                '"Android"' if sess.os_kind == "android" else
+                '"Windows"' if sess.os_kind == "windows" else
+                '"macOS"' if sess.os_kind == "macos" else
+                '"Linux"'
+            ),
+        },
     )
+
+    # ── Inject full stealth/anti-detect script (~35 patches) ──
+    # Pulls in the SAME `_build_stealth_script` that RUT and the
+    # browser-profile launcher use, so every layer aligns:
+    #   • navigator.userAgentData with correct mobile + platform
+    #   • navigator.maxTouchPoints (5 mobile, 0 desktop)
+    #   • navigator.platform leak fixed (iPhone / Linux armv8l)
+    #   • screen.orientation portrait-primary on mobile
+    #   • window.orientation = 0 on mobile
+    #   • Canvas / WebGL / Audio fingerprint noise
+    #   • webdriver flag hidden
+    #   • chrome.runtime exposed (real Chrome)
+    #   • plugins[] / mimeTypes[] realistic
+    # Without this the recorder Chromium leaked all the obvious
+    # automation tells even though the UA looked perfect.
+    try:
+        from real_user_traffic import _build_stealth_script, _fingerprint_from_ua
+        # Build the full fingerprint dict from the UA (handles platform,
+        # webgl_vendor, webgl_renderer, hardware_concurrency, etc.)
+        fp = _fingerprint_from_ua(sess.user_agent)
+        # Override viewport / DSF / mobile flags with session values
+        # (frontend may have overridden defaults).
+        fp["viewport"] = {"width": sess.viewport[0], "height": sess.viewport[1]}
+        fp["device_scale_factor"] = sess.device_scale_factor
+        fp["is_mobile"] = sess.is_mobile
+        fp["has_touch"] = sess.has_touch
+        fp["os"] = sess.os_kind if sess.os_kind in ("android", "ios", "windows", "macos", "linux") else fp.get("os", "windows")
+        geo = {
+            "locale": sess.locale,
+            "timezone": sess.timezone_id,
+            "accept_language": sess.accept_language,
+            "lat": sess.geo_lat,
+            "lon": sess.geo_lon,
+        }
+        stealth_js = _build_stealth_script(fp, geo)
+        await sess.context.add_init_script(stealth_js)
+        # Best-effort: also spoof geolocation if the offer requests it.
+        try:
+            await sess.context.set_geolocation(
+                {"latitude": sess.geo_lat, "longitude": sess.geo_lon, "accuracy": 50}
+            )
+            await sess.context.grant_permissions(["geolocation"])
+        except Exception:
+            pass
+    except Exception as e:
+        logger.warning(
+            f"[vr {sess.session_id}] stealth-script injection failed ({e}) "
+            "— falling back to minimal webdriver hide"
+        )
+        await sess.context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+        )
+
     sess.page = await sess.context.new_page()
     sess.pages = [sess.page]
     sess.active_page_index = 0
@@ -3854,3 +4270,281 @@ async def finalize(sess: RecorderSession) -> Dict[str, Any]:
         logger.warning(f"finalize persist failed: {e}")
     await stop_session(sess.session_id)
     return out
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ── 2026-01 (Phase 1 features for "any-offer" coverage) ──────────────
+# ══════════════════════════════════════════════════════════════════════
+# These functions add steps that the runtime engine already understands
+# (wait_for_load, wait_for_selector, fill, etc.) but with smarter
+# variants that handle the most common offer-page edge cases that
+# previously required manual JSON editing.
+
+# ── A. Network-idle wait ─────────────────────────────────────────────
+async def add_wait_network_idle(sess: RecorderSession, timeout_ms: int = 30000) -> Dict[str, Any]:
+    """Append a 'wait for network idle' step. Critical for SPAs (React,
+    Vue, Next.js, Nuxt offer pages) where the visible CTA renders only
+    AFTER an XHR/fetch finishes — `wait_for_selector` alone often races
+    the JS engine and timeouts. The runtime maps this to Playwright's
+    `wait_for_load_state("networkidle")`.
+    """
+    sess.touch()
+    try:
+        await sess.page.wait_for_load_state("networkidle", timeout=int(timeout_ms))
+    except Exception:
+        pass  # Recording continues even if live wait timed out
+    step = {
+        "action": "wait_for_load",
+        "state": "networkidle",
+        "timeout": int(timeout_ms),
+        "name": f"Wait for network idle ({timeout_ms}ms)",
+    }
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+# ── B. Iframe-aware click / fill helpers ─────────────────────────────
+def _build_iframe_click_step(
+    text: str,
+    info: Dict[str, Any],
+    frame_selector: str,
+) -> Dict[str, Any]:
+    """Step that targets an element INSIDE an iframe. Replay engine
+    needs `frame_selector` (CSS for the iframe element) + an inner
+    `selector` or `text` to click.
+
+    Same selector-priority fallback chain as `_build_text_click_evaluate`
+    is encoded in the JS — but scoped to the iframe's contentWindow.
+    """
+    safe_text = (text or "").replace("\\", "\\\\").replace("'", "\\'")
+    safe_fs = frame_selector.replace("\\", "\\\\").replace("'", "\\'")
+    fb = _build_fallbacks(info)
+    # Build CSS selector candidates the same way as _build_text_click
+    cands: List[str] = []
+    attrs = (info or {}).get("attrs") or {}
+    for k in ("data-testid", "data-test", "data-cy", "data-qa", "data-id"):
+        v = attrs.get(k)
+        if isinstance(v, str) and v:
+            cands.append(f'[{k}="{v}"]')
+    _id = ((info or {}).get("id") or "").strip()
+    if _id and ":" not in _id:
+        cands.append(f"#{_id}")
+    css_arr = "[" + ",".join("'" + c.replace("'", "\\'") + "'" for c in cands) + "]"
+    xpath_stable = ((info or {}).get("xpath_stable") or "").strip()
+    xs_js = "'" + xpath_stable.replace("'", "\\'") + "'" if xpath_stable else "''"
+    script = (
+        "(function(){"
+        + f"var fr=document.querySelector('{safe_fs}');"
+        "if(!fr||!fr.contentDocument){console.warn('[krx] iframe missing');return;}"
+        "var doc=fr.contentDocument;"
+        "var _doClick=function(el){if(!el)return false;el.scrollIntoView({block:'center'});"
+        "if(el.tagName==='A'&&el.href&&!el.target){el.click();return true;}el.click();return true;};"
+        f"var _css={css_arr};"
+        "for(var i=0;i<_css.length;i++){try{var _e=doc.querySelector(_css[i]);if(_e&&_doClick(_e))return;}catch(e){}}"
+        f"var _xs={xs_js};"
+        "if(_xs){try{var _r=doc.evaluate(_xs,doc,null,XPathResult.FIRST_ORDERED_NODE_TYPE,null);if(_r&&_r.singleNodeValue&&_doClick(_r.singleNodeValue))return;}catch(e){}}"
+        f"var t='{safe_text}'.replace(/\\s+/g,' ').trim().toLowerCase();"
+        "if(!t)return;"
+        "var els=Array.from(doc.querySelectorAll('a,button,div,span,label,input,[role=button]')).filter(function(e){"
+        "var x=((e.innerText||e.textContent||e.value||'')+'').replace(/\\s+/g,' ').trim().toLowerCase();"
+        "return x===t||(t.length>=8&&x.indexOf(t)!==-1);});"
+        "if(els.length)_doClick(els[0]);"
+        "})();"
+    )
+    step = {
+        "action": "evaluate",
+        "script": script,
+        "frame_selector": frame_selector,
+        "name": f"iframe click: {(text or 'element')[:40]}",
+    }
+    if fb:
+        step["fallbacks"] = fb
+    return step
+
+
+# ── C. File upload step ──────────────────────────────────────────────
+async def add_file_upload(
+    sess: RecorderSession,
+    selector: str,
+    template_path: str,
+    label: str = "",
+) -> Dict[str, Any]:
+    """Append a 'set_input_files' step. `template_path` can be a local
+    file path that the customer's Electron app will resolve (e.g.
+    `~/Pictures/sample_id.jpg`), or a `{{column_name}}` template that
+    resolves per-row at RUT replay time.
+
+    Common use cases:
+      • KYC / ID verification offers
+      • Profile picture during signup
+      • Crypto exchange document upload
+    """
+    sess.touch()
+    if not selector or not selector.strip():
+        return {"recorded": False, "error": "selector_required"}
+    if not template_path or not template_path.strip():
+        return {"recorded": False, "error": "file_path_required"}
+    step = {
+        "action": "set_input_files",
+        "selector": selector.strip(),
+        "files": template_path.strip(),
+        "timeout": 15000,
+        "name": label or f"Upload file → {selector[:40]}",
+    }
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+# ── D. OTP / verification-code wait + extract ────────────────────────
+async def add_otp_wait(
+    sess: RecorderSession,
+    *,
+    source: str = "url",  # url | clipboard | page_text | selector
+    selector: str = "",
+    url_regex: str = "",
+    text_regex: str = "",
+    target_selector: str = "",
+    timeout_ms: int = 120000,
+    digits: int = 6,
+    label: str = "",
+) -> Dict[str, Any]:
+    """Append a step that waits for an N-digit code to appear, extracts
+    it, and fills it into the target input.
+
+    For email-verify offers the typical flow is:
+      1. Submit form → API sends code to a temp inbox
+      2. Customer's email-pulling worker (or webhook) updates the
+         lead row with the code
+      3. The job poll-reads the code → fills the verify input
+
+    For URL-based code delivery (some sweepstakes) the code arrives
+    via the redirect URL — we extract it with `url_regex`.
+
+    The recorded step type `wait_for_otp` is interpreted at replay
+    time by RUT — for now the recorder just emits the step config.
+    """
+    sess.touch()
+    n = max(3, min(int(digits or 6), 10))
+    step = {
+        "action": "wait_for_otp",
+        "source": source,
+        "selector": selector or None,
+        "url_regex": url_regex or fr"\b(\d{{{n}}})\b",
+        "text_regex": text_regex or fr"\b(\d{{{n}}})\b",
+        "target_selector": target_selector,
+        "timeout": int(timeout_ms),
+        "digits": n,
+        "name": label or f"Wait & fill OTP ({n} digits)",
+    }
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+# ── E. CAPTCHA detection probe ───────────────────────────────────────
+async def detect_captcha(sess: RecorderSession) -> Dict[str, Any]:
+    """Scan the live page for known CAPTCHA widgets so the recorder
+    can WARN the user (and optionally insert a `pause_for_human` step
+    that the customer's Electron client surfaces as a popup during
+    job replay so a human solves it).
+    """
+    sess.touch()
+    if sess.state != "ready" or sess.page is None:
+        return {"detected": False, "reason": "not_ready"}
+    js = """
+    (function(){
+      var hits = [];
+      // reCAPTCHA v2/v3
+      if (document.querySelector('iframe[src*="recaptcha"], .g-recaptcha, [data-sitekey][class*="recaptcha"]')) {
+        hits.push({type:'recaptcha', version: document.querySelector('iframe[src*="recaptcha"][src*="invisible"]') ? 'v3' : 'v2'});
+      }
+      // hCaptcha
+      if (document.querySelector('iframe[src*="hcaptcha"], .h-captcha, [data-sitekey][class*="hcaptcha"]')) {
+        hits.push({type:'hcaptcha'});
+      }
+      // Cloudflare Turnstile
+      if (document.querySelector('iframe[src*="challenges.cloudflare"], .cf-turnstile, [data-sitekey][class*="cf-"]')) {
+        hits.push({type:'turnstile'});
+      }
+      // Cloudflare JS challenge page
+      if (document.title.toLowerCase().indexOf('just a moment') !== -1 ||
+          document.body.innerText.toLowerCase().indexOf('checking your browser') !== -1) {
+        hits.push({type:'cloudflare_jschallenge'});
+      }
+      // FunCaptcha / Arkose
+      if (document.querySelector('iframe[src*="arkoselabs"], .funcaptcha, #funcaptcha')) {
+        hits.push({type:'funcaptcha'});
+      }
+      // GeeTest
+      if (document.querySelector('iframe[src*="geetest"], .geetest_panel, .geetest_btn')) {
+        hits.push({type:'geetest'});
+      }
+      return hits;
+    })();
+    """
+    try:
+        async with sess.lock:
+            hits = await sess.page.evaluate(js)
+    except Exception as e:
+        return {"detected": False, "error": str(e)}
+    return {
+        "detected": bool(hits),
+        "providers": hits or [],
+        "recommendation": (
+            "Insert a 'pause_for_human' step here so during job replay "
+            "the customer's Electron client opens a popup window for "
+            "manual CAPTCHA solving, then resumes automation."
+        ) if hits else None,
+    }
+
+
+async def add_captcha_pause(sess: RecorderSession, label: str = "") -> Dict[str, Any]:
+    """Insert a pause step that the runtime treats as 'wait for human
+    confirmation' — pops up a modal in the customer's Electron app
+    during job replay. The customer solves CAPTCHA manually, clicks
+    Continue, and automation resumes.
+    """
+    sess.touch()
+    step = {
+        "action": "pause_for_human",
+        "reason": "captcha",
+        "timeout": 300000,  # 5 min — generous for human solve
+        "name": label or "⏸ Pause for human (CAPTCHA)",
+    }
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+# ── F. Resolve dynamic templates at recording time ───────────────────
+# This is what makes {{random_email}}, {{today}}, {{counter}}, etc.
+# work DURING recording — the recorder fills the form with the actual
+# resolved value so the customer can see the offer respond correctly,
+# while the recorded step keeps the {{template}} text for runtime
+# resolution per lead row.
+def resolve_template(sess: RecorderSession, value: str) -> str:
+    """Public alias for `resolve_templates_in_text` (Phase 1 PRD)."""
+    return resolve_templates_in_text(sess, value)
+
+
+# ── G. Generic pause-for-human step ──────────────────────────────────
+async def add_human_pause(
+    sess: RecorderSession,
+    reason: str = "manual_step",
+    timeout_ms: int = 300000,
+    label: str = "",
+) -> Dict[str, Any]:
+    """General-purpose pause that lets the recorder customer surface
+    ANY popup during job replay — not just CAPTCHA. Examples:
+      • 'Connect wallet now' for crypto offers
+      • 'Approve from your phone' for 2FA push notifications
+      • 'Wait for SMS code'
+    """
+    sess.touch()
+    step = {
+        "action": "pause_for_human",
+        "reason": reason or "manual_step",
+        "timeout": int(timeout_ms),
+        "name": label or f"⏸ Pause for human ({reason})",
+    }
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+

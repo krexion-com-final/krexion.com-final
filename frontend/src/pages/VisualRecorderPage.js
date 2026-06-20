@@ -276,6 +276,12 @@ export default function VisualRecorderPage() {
   const [activeSessions, setActiveSessions] = useState([]);
   const [activeSessionStats, setActiveSessionStats] = useState({ user_session_count: 0, total_running: 0, max_concurrent: 5 });
   const [devicePreset, setDevicePreset] = useState("mobile");
+  // ── 2026-01 (mobile fingerprint coherence) ──
+  // Country drives locale, timezone, accept-language and geolocation
+  // of the recorder browser context. Passed to /start so the recorder
+  // presents the SAME fingerprint as the eventual RUT job.
+  // Defaults to US — user picks via the country dropdown in setup.
+  const [country, setCountry] = useState("US");
   const [pjAvailable, setPjAvailable] = useState(false);
   const [pjCountry, setPjCountry] = useState("US");
   const [saving, setSaving] = useState(false);
@@ -618,6 +624,15 @@ export default function VisualRecorderPage() {
           // during recording (lets the user submit forms and continue
           // recording on the post-submit page)
           sample_row: Object.keys(sampleRow || {}).length ? sampleRow : null,
+          // ── 2026-01 (mobile fingerprint coherence) ──
+          // Pass the device + country choices so the recorder browser
+          // presents the SAME fingerprint that the eventual RUT job
+          // will use. Without these the recorder hardcoded
+          // mobile+en-US+NY → advertiser detected mismatch with the UA.
+          device_type: (devicePreset === "mobile" || devicePreset === "tablet")
+            ? devicePreset
+            : (devicePreset === "desktop" ? "desktop" : "auto"),
+          country: (country || "").toLowerCase(),
         }),
       });
       const d = await r.json();
@@ -1448,6 +1463,120 @@ export default function VisualRecorderPage() {
       const d = await r.json();
       if (!r.ok || !d.recorded) { toast.error(d.error || d.detail || "Failed"); return; }
       toast.success("Dismiss popups step added");
+      refreshState();
+    } catch (e) { toast.error(e.message || "Failed"); }
+  };
+
+  // ── 2026-01 Phase 1: "any-offer" step helpers ───────────────────
+  // Each fires the corresponding /api/visual-recorder/:id/add-*
+  // endpoint and refreshes state so the new step appears in the
+  // Recorded Steps panel.
+
+  const addWaitNetworkIdle = async () => {
+    if (!sessionId) return;
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/add-wait-network-idle`, {
+        method: "POST", headers: authH(),
+        body: JSON.stringify({ timeout_ms: 30000 }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.recorded) { toast.error(d.error || d.detail || "Failed"); return; }
+      toast.success("Wait for network idle added — good for SPAs (React/Vue/Next offers)");
+      refreshState();
+    } catch (e) { toast.error(e.message || "Failed"); }
+  };
+
+  const addCaptchaPause = async () => {
+    if (!sessionId) return;
+    try {
+      // Probe first so the user knows whether a captcha was actually detected
+      const probe = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/detect-captcha`, { headers: authH() });
+      const pd = await probe.json().catch(() => ({}));
+      if (pd.detected) {
+        const types = (pd.providers || []).map(p => p.type).join(", ");
+        toast.info(`CAPTCHA detected: ${types} — adding pause-for-human step`);
+      }
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/add-captcha-pause`, {
+        method: "POST", headers: authH(),
+        body: JSON.stringify({ label: "" }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.recorded) { toast.error(d.error || d.detail || "Failed"); return; }
+      toast.success("Captcha pause added — during job replay your Electron app will pop up for manual solve");
+      refreshState();
+    } catch (e) { toast.error(e.message || "Failed"); }
+  };
+
+  const addFileUpload = async () => {
+    if (!sessionId) return;
+    const selector = window.prompt(
+      "CSS selector of the file input element\n(e.g. input[name=id_doc] or #upload-photo)",
+      "input[type=file]",
+    );
+    if (!selector) return;
+    const filePath = window.prompt(
+      "File path OR {{column_name}} template\n• Local: ~/Pictures/id.jpg\n• Per-row: {{id_photo_path}}",
+      "{{file_path}}",
+    );
+    if (!filePath) return;
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/add-file-upload`, {
+        method: "POST", headers: authH(),
+        body: JSON.stringify({ selector, file_path: filePath }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.recorded) { toast.error(d.error || d.detail || "Failed"); return; }
+      toast.success("File upload step added");
+      refreshState();
+    } catch (e) { toast.error(e.message || "Failed"); }
+  };
+
+  const addOtpWait = async () => {
+    if (!sessionId) return;
+    const targetSelector = window.prompt(
+      "CSS selector of the OTP input where the code will be filled\n(e.g. input[name=otp] or #verification-code)",
+      "input[name=otp]",
+    );
+    if (!targetSelector) return;
+    const sourceRaw = window.prompt(
+      "Where does the code arrive? (url / page_text / clipboard / selector)",
+      "page_text",
+    );
+    const source = (sourceRaw || "page_text").trim().toLowerCase();
+    const digitsRaw = window.prompt("How many digits? (default 6)", "6");
+    const digits = parseInt(digitsRaw, 10) || 6;
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/add-otp-wait`, {
+        method: "POST", headers: authH(),
+        body: JSON.stringify({
+          source,
+          target_selector: targetSelector,
+          digits,
+          timeout_ms: 120000,
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.recorded) { toast.error(d.error || d.detail || "Failed"); return; }
+      toast.success(`OTP wait step added (${digits} digits from ${source})`);
+      refreshState();
+    } catch (e) { toast.error(e.message || "Failed"); }
+  };
+
+  const addHumanPause = async () => {
+    if (!sessionId) return;
+    const reason = window.prompt(
+      "Why pause? (label shown in Electron app popup during job replay)",
+      "wallet_connect",
+    );
+    if (!reason) return;
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/add-human-pause`, {
+        method: "POST", headers: authH(),
+        body: JSON.stringify({ reason, timeout_ms: 300000 }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.recorded) { toast.error(d.error || d.detail || "Failed"); return; }
+      toast.success("Human pause added — replay will halt for manual action");
       refreshState();
     } catch (e) { toast.error(e.message || "Failed"); }
   };
@@ -2985,6 +3114,54 @@ export default function VisualRecorderPage() {
                   })}
                 </div>
 
+                {/* ── 2026-01 (mobile fingerprint coherence) ──
+                    Country picks locale + timezone + geolocation for the
+                    recorder browser. Critical for offers that geo-fence
+                    via JS clock / Intl API (e.g. PK offer in NY timezone
+                    is an instant tell). */}
+                <label className="block text-sm font-medium text-zinc-300 mb-1 mt-3" data-testid="vr-country-label">
+                  Country <span className="text-zinc-500 font-normal text-xs">(locale + timezone + geo)</span>
+                </label>
+                <select
+                  value={country}
+                  onChange={(e) => setCountry(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 text-zinc-100 focus:border-emerald-500 focus:outline-none transition-colors"
+                  data-testid="vr-country-select"
+                >
+                  <option value="US">United States (en-US, America/New_York)</option>
+                  <option value="GB">United Kingdom (en-GB, Europe/London)</option>
+                  <option value="CA">Canada (en-CA, America/Toronto)</option>
+                  <option value="AU">Australia (en-AU, Australia/Sydney)</option>
+                  <option value="DE">Germany (de-DE, Europe/Berlin)</option>
+                  <option value="FR">France (fr-FR, Europe/Paris)</option>
+                  <option value="ES">Spain (es-ES, Europe/Madrid)</option>
+                  <option value="IT">Italy (it-IT, Europe/Rome)</option>
+                  <option value="NL">Netherlands (nl-NL, Europe/Amsterdam)</option>
+                  <option value="BR">Brazil (pt-BR, America/Sao_Paulo)</option>
+                  <option value="MX">Mexico (es-MX, America/Mexico_City)</option>
+                  <option value="IN">India (en-IN, Asia/Kolkata)</option>
+                  <option value="PK">Pakistan (en-PK, Asia/Karachi)</option>
+                  <option value="BD">Bangladesh (bn-BD, Asia/Dhaka)</option>
+                  <option value="ID">Indonesia (id-ID, Asia/Jakarta)</option>
+                  <option value="PH">Philippines (en-PH, Asia/Manila)</option>
+                  <option value="TH">Thailand (th-TH, Asia/Bangkok)</option>
+                  <option value="MY">Malaysia (en-MY, Asia/Kuala_Lumpur)</option>
+                  <option value="SG">Singapore (en-SG, Asia/Singapore)</option>
+                  <option value="JP">Japan (ja-JP, Asia/Tokyo)</option>
+                  <option value="KR">South Korea (ko-KR, Asia/Seoul)</option>
+                  <option value="AE">UAE (en-AE, Asia/Dubai)</option>
+                  <option value="SA">Saudi Arabia (ar-SA, Asia/Riyadh)</option>
+                  <option value="TR">Turkey (tr-TR, Europe/Istanbul)</option>
+                  <option value="IL">Israel (he-IL, Asia/Jerusalem)</option>
+                  <option value="EG">Egypt (ar-EG, Africa/Cairo)</option>
+                  <option value="ZA">South Africa (en-ZA, Africa/Johannesburg)</option>
+                  <option value="NG">Nigeria (en-NG, Africa/Lagos)</option>
+                  <option value="RU">Russia (ru-RU, Europe/Moscow)</option>
+                  <option value="PL">Poland (pl-PL, Europe/Warsaw)</option>
+                  <option value="SE">Sweden (sv-SE, Europe/Stockholm)</option>
+                  <option value="NZ">New Zealand (en-NZ, Pacific/Auckland)</option>
+                </select>
+
                 <div className="mt-3 flex items-center justify-between">
                   <label className="block text-sm font-medium text-zinc-300 mb-1">
                     Proxy <span className="text-zinc-500 font-normal">(optional)</span>
@@ -3808,6 +3985,52 @@ export default function VisualRecorderPage() {
                     data-testid="vr-dismiss-popups-btn"
                   >
                     🍪 Dismiss popups
+                  </button>
+                  {/* ── 2026-01 Phase 1: any-offer coverage buttons ── */}
+                  <button
+                    onClick={addWaitNetworkIdle}
+                    disabled={sessionState !== "ready"}
+                    title="Wait until all XHRs/fetches finish — essential for React/Vue/Next offer pages"
+                    className="px-2 py-1 rounded bg-zinc-800 hover:bg-sky-700/40 border border-zinc-700 hover:border-sky-500/40 text-zinc-300 text-[10px] disabled:opacity-40"
+                    data-testid="vr-wait-netidle-btn"
+                  >
+                    🌐 Wait net-idle
+                  </button>
+                  <button
+                    onClick={addCaptchaPause}
+                    disabled={sessionState !== "ready"}
+                    title="Detect CAPTCHA + insert pause-for-human (Electron app pops up for manual solve at replay time)"
+                    className="px-2 py-1 rounded bg-zinc-800 hover:bg-rose-700/40 border border-zinc-700 hover:border-rose-500/40 text-zinc-300 text-[10px] disabled:opacity-40"
+                    data-testid="vr-captcha-pause-btn"
+                  >
+                    🛡️ Captcha pause
+                  </button>
+                  <button
+                    onClick={addFileUpload}
+                    disabled={sessionState !== "ready"}
+                    title="Upload a file at job run time (KYC docs, profile pic, crypto exchange ID)"
+                    className="px-2 py-1 rounded bg-zinc-800 hover:bg-indigo-700/40 border border-zinc-700 hover:border-indigo-500/40 text-zinc-300 text-[10px] disabled:opacity-40"
+                    data-testid="vr-file-upload-btn"
+                  >
+                    📎 File upload
+                  </button>
+                  <button
+                    onClick={addOtpWait}
+                    disabled={sessionState !== "ready"}
+                    title="Wait for OTP / verification code (URL or page text), then auto-fill"
+                    className="px-2 py-1 rounded bg-zinc-800 hover:bg-fuchsia-700/40 border border-zinc-700 hover:border-fuchsia-500/40 text-zinc-300 text-[10px] disabled:opacity-40"
+                    data-testid="vr-otp-wait-btn"
+                  >
+                    🔢 OTP wait
+                  </button>
+                  <button
+                    onClick={addHumanPause}
+                    disabled={sessionState !== "ready"}
+                    title="Pause for human action (wallet connect, push-2FA, video watch checkpoint)"
+                    className="px-2 py-1 rounded bg-zinc-800 hover:bg-orange-700/40 border border-zinc-700 hover:border-orange-500/40 text-zinc-300 text-[10px] disabled:opacity-40"
+                    data-testid="vr-human-pause-btn"
+                  >
+                    ⏸ Pause human
                   </button>
                 </div>
               </div>
