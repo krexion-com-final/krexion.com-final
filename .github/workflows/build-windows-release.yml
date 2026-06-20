@@ -162,11 +162,15 @@ jobs:
 
       - name: Upload backend artifact
         if: always()
+        # 2026-01: continue-on-error so quota-hit doesn't kill the
+        # whole workflow. Build still succeeds; downstream installer
+        # job will fail gracefully if artifact missing.
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: krexion-backend-bundle
           path: build/dist/krexion-backend.dist/**
-          retention-days: 14
+          retention-days: 3
           if-no-files-found: warn
 
   build-frontend:
@@ -189,11 +193,13 @@ jobs:
           yarn build
 
       - name: Upload frontend artifact
+        # 2026-01: continue-on-error → quota-hit non-fatal
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: krexion-frontend-build
           path: frontend/build
-          retention-days: 14
+          retention-days: 3
 
   build-installer:
     name: Build Krexion-Setup.exe
@@ -455,11 +461,14 @@ jobs:
 
       - name: Upload installer artifact
         if: always()
+        # 2026-01: continue-on-error → GitHub Release step still runs.
+        # Releases bypass the artifact quota entirely.
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: krexion-installer
           path: installer/Output/Krexion-Setup-*.exe
-          retention-days: 30
+          retention-days: 3
           if-no-files-found: warn
 
       - name: Create GitHub Release

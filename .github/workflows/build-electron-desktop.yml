@@ -170,6 +170,12 @@ jobs:
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
+        # 2026-01: GitHub free-tier accounts hit the 500 MB artifact
+        # quota fast. We mark this upload as continue-on-error so the
+        # subsequent "Create GitHub Release" step still runs — GitHub
+        # Releases do NOT count against the artifact quota and that's
+        # what electron-updater actually polls for customer auto-update.
+        continue-on-error: true
         with:
           name: Krexion-Desktop-Setup-${{ steps.version.outputs.version }}
           # Upload BOTH the installer .exe AND the latest.yml manifest.
@@ -180,7 +186,7 @@ jobs:
             electron-desktop/dist/Krexion-Desktop-Setup-*.exe.blockmap
             electron-desktop/dist/latest.yml
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
       - name: Create GitHub Release (when release_tag provided OR on VERSION push)
         # 2026-02 v2.1.32: also publish a release on push-triggered builds
