@@ -314,19 +314,33 @@ export default function HomePage() {
             <EditableText section="hero" field="cta_label" value={content.hero.cta_label} as="span" />
             <ArrowRight size={16} className="group-hover:translate-x-1 transition-transform" />
           </Link>
-          {/* 2026-02 — Direct-download CTA pointing to the stable VPS CDN
-              URL. The .exe is self-hosted at krexion.com, so the link
-              never goes stale: every new release ships to the same path
-              (Krexion-Desktop-Setup-latest.exe). Customers click → .exe
-              downloads instantly → no license gate, no GitHub redirect. */}
+          {/* 2026-06 — Two-platform direct-download CTA pointing to the
+              stable VPS CDN URLs. Windows users get the NATIVE
+              installer (recommended for heavy jobs — leaves ~400 MB
+              more RAM free for Playwright Chromium vs Electron's
+              embedded UI runtime). Mac/Linux users get the ELECTRON
+              build because it's the only cross-platform option AND
+              has built-in auto-update via electron-updater. Both URLs
+              are stable forever — every release overwrites
+              "*-latest.exe" on the VPS mirror. */}
           <a
-            href="https://krexion.com/downloads/desktop/Krexion-Desktop-Setup-latest.exe"
+            href="https://krexion.com/downloads/windows/Krexion-Setup-latest.exe"
             className="group bg-white/95 text-zinc-900 font-semibold px-7 py-3.5 rounded-lg hover:bg-white transition inline-flex items-center gap-2 shadow-xl"
-            data-testid="hero-cta-direct-download"
+            data-testid="hero-cta-download-windows"
             download
           >
             <Download size={16} />
             Download for Windows
+          </a>
+          <a
+            href="https://krexion.com/downloads/desktop/Krexion-Desktop-Setup-latest.exe"
+            className="group border border-white/20 bg-white/5 text-white font-medium px-6 py-3.5 rounded-lg hover:bg-white/10 transition inline-flex items-center gap-2 text-sm"
+            data-testid="hero-cta-download-mac-linux"
+            download
+            title="Cross-platform Electron build · auto-update built in"
+          >
+            <Download size={14} />
+            For Mac / Linux
           </a>
           <a
             href="#features"

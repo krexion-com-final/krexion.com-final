@@ -202,25 +202,68 @@ export default function DownloadPage() {
           This installer is only needed if you want to run heavy local features like Real User Traffic, Form Filler, or CPI Worker on your own PC.
         </p>
 
-        {/* 2026-02 — Direct (no license) download CTA. The .exe is
-            self-hosted at krexion.com/downloads/desktop/ so this link
-            is stable forever — every new release overwrites the
-            "latest" copy on the VPS. Customers who haven't bought yet
-            can grab the trial-mode installer right here without a key. */}
-        <a
-          href="https://krexion.com/downloads/desktop/Krexion-Desktop-Setup-latest.exe"
-          download
-          data-testid="direct-download-btn"
-          className="inline-flex items-center gap-2 bg-[#3B82F6] hover:bg-[#60A5FA] text-black font-semibold px-7 py-3.5 rounded-lg transition shadow-xl shadow-[#3B82F6]/30 mb-12"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          Download Krexion Desktop (.exe)
-          <span className="ml-2 text-xs font-normal bg-black/20 px-2 py-0.5 rounded">~414 MB</span>
-        </a>
-        <p className="text-xs text-[#71717A] -mt-8 mb-10">
-          No login required — first launch activates trial mode.
-          Already have a license? Use the form below to embed your key
-          into the installer.
+        {/* 2026-06 — Two-button download CTA (Windows Native vs Mac/Linux Electron).
+            Customer-driven copy: heavy operators (RUT / Form Filler /
+            150+ concurrent jobs) belong on the NATIVE installer because
+            it leaves ~400 MB more RAM available for Playwright Chromium
+            workers vs Electron (which spends that RAM on its own UI
+            runtime). Electron is offered as the cross-platform path
+            for Mac/Linux customers — it has built-in auto-update which
+            the Native installer doesn't (Native needs a manual
+            reinstall when a new version ships, but we mirror
+            Krexion-Setup-latest.exe so the URL stays stable forever).
+            Both installers fully embed mongo + backend + frontend; the
+            only difference is the UI runtime.
+            */}
+        <div className="flex flex-col sm:flex-row items-stretch justify-center gap-4 mb-4">
+          {/* WINDOWS — Native (recommended for heavy users) */}
+          <a
+            href="https://krexion.com/downloads/windows/Krexion-Setup-latest.exe"
+            download
+            data-testid="download-windows-native-btn"
+            className="group flex-1 max-w-sm bg-[#3B82F6] hover:bg-[#60A5FA] text-black font-semibold px-6 py-4 rounded-xl transition shadow-xl shadow-[#3B82F6]/30 text-left"
+          >
+            <div className="flex items-center gap-3">
+              {/* Windows logo (4-square tiles) */}
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                <path d="M3 5.5L10.5 4.5V11.5H3V5.5ZM3 12.5H10.5V19.5L3 18.5V12.5ZM11.5 4.4L21 3V11.5H11.5V4.4ZM11.5 12.5H21V21L11.5 19.6V12.5Z"/>
+              </svg>
+              <div className="flex-1">
+                <div className="text-[10px] uppercase tracking-wider opacity-70 font-bold mb-0.5">Recommended for heavy jobs</div>
+                <div className="text-base font-bold leading-tight">Download for Windows</div>
+                <div className="text-[11px] opacity-80 mt-0.5 font-normal">Native installer · ~571 MB · 64-bit</div>
+              </div>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="group-hover:translate-y-0.5 transition-transform"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            </div>
+          </a>
+
+          {/* MAC / LINUX — Electron */}
+          <a
+            href="https://krexion.com/downloads/desktop/Krexion-Desktop-Setup-latest.exe"
+            download
+            data-testid="download-mac-linux-electron-btn"
+            className="group flex-1 max-w-sm bg-white/[0.04] hover:bg-white/[0.08] border border-white/15 text-white font-semibold px-6 py-4 rounded-xl transition text-left"
+          >
+            <div className="flex items-center gap-3">
+              {/* Apple + Linux Tux generic platform icon */}
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                <path d="M17.05 13.34c-.02-2.11 1.72-3.13 1.8-3.18-.98-1.44-2.51-1.64-3.06-1.66-1.3-.13-2.55.77-3.21.77-.66 0-1.69-.75-2.78-.73-1.43.02-2.75.83-3.49 2.11-1.49 2.58-.38 6.4 1.07 8.5.71 1.03 1.55 2.18 2.65 2.14 1.07-.04 1.47-.69 2.76-.69s1.65.69 2.78.67c1.15-.02 1.87-1.04 2.57-2.07.81-1.19 1.14-2.34 1.16-2.4-.03-.01-2.22-.85-2.25-3.36zM14.94 7.27c.58-.71 1-1.69.88-2.67-.85.04-1.89.57-2.49 1.27-.54.62-1.01 1.63-.88 2.59.95.07 1.91-.48 2.49-1.19z"/>
+              </svg>
+              <div className="flex-1">
+                <div className="text-[10px] uppercase tracking-wider opacity-70 font-bold mb-0.5 text-[#A1A1AA]">Cross-platform · Auto-update</div>
+                <div className="text-base font-bold leading-tight">Download for Mac / Linux</div>
+                <div className="text-[11px] opacity-70 mt-0.5 font-normal">Electron build · ~579 MB · auto-updates silently</div>
+              </div>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="group-hover:translate-y-0.5 transition-transform"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            </div>
+          </a>
+        </div>
+        <p className="text-xs text-[#71717A] max-w-2xl mx-auto mb-10">
+          <strong className="text-[#A1A1AA]">Not sure which?</strong> If you're on Windows and plan to run heavy
+          jobs (Real User Traffic, Form Filler, 50+ concurrent visits), pick the <span className="text-white">Native</span> installer
+          on the left — it leaves more RAM free for the browser workers and stays stable under load.
+          The <span className="text-white">Mac / Linux</span> build also runs on Windows if you prefer
+          built-in auto-update over the small RAM premium.
         </p>
 
         {/* License-gated download card */}

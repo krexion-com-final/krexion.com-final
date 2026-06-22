@@ -574,3 +574,99 @@ jobs:
           # write` declaration is honoured). Either path -> release
           # publishes successfully, no 403.
           token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+  # ─────────────────────────────────────────────────────────────────
+  # 2026-06 — SELF-HOSTED MIRROR for the Native (Inno-Setup) installer.
+  #
+  # Customer ask: "window wale button pr native latest release ka button
+  # laga do" — the public DownloadPage on krexion.com needs a SINGLE
+  # stable URL for the Windows installer (e.g. .../downloads/windows/
+  # Krexion-Setup-latest.exe) so we can rebuild every release without
+  # touching the marketing page. GitHub Releases versions the filename
+  # (Krexion-Setup-v2.1.57.exe) so a stable redirect isn't possible
+  # there alone — mirroring to the VPS gives us the version-less alias.
+  #
+  # Same pattern as build-electron-desktop.yml's mirror-to-vps job:
+  # build runs on Windows, this job runs on Ubuntu (appleboy/scp-action
+  # is a Linux-only Docker action), downloads from the just-published
+  # GitHub Release, SCPs to /opt/krexion/downloads/windows/ on the VPS,
+  # then SSHs in to copy → Krexion-Setup-latest.exe.
+  #
+  # Required secrets (already configured for deploy.yml + electron mirror):
+  #   VPS_HOST, VPS_USER, VPS_PORT (optional), VPS_SSH_KEY
+  # ─────────────────────────────────────────────────────────────────
+  mirror-windows-to-vps:
+    name: Mirror Windows installer to krexion.com VPS
+    needs: [build-backend, build-installer]
+    runs-on: ubuntu-latest
+    # Only mirror when an actual release was created (mirrors the Create
+    # GitHub Release gate at line ~557). Skipping otherwise means a
+    # dispatch without a release_tag won't try to mirror a non-existent
+    # build.
+    if: ${{ needs.build-installer.result == 'success' && startsWith(needs.build-backend.outputs.version, 'v') }}
+    permissions:
+      contents: read
+    steps:
+      - name: Download installer from GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          VER: ${{ needs.build-backend.outputs.version }}
+        run: |
+          set -e
+          mkdir -p dist
+          echo "Downloading Krexion-Setup-${VER}.exe from release ${VER}..."
+          # Retry up to 6 times — release propagation lag from
+          # softprops/action-gh-release@v2 is occasionally up to ~45s.
+          for i in 1 2 3 4 5 6; do
+            if gh release view "${VER}" -R "${{ github.repository }}" >/dev/null 2>&1; then
+              echo "  release visible on attempt $i"
+              break
+            fi
+            echo "  attempt $i: release not visible yet, sleeping 10s..."
+            sleep 10
+          done
+          gh release download "${VER}" \
+            -R "${{ github.repository }}" \
+            -D dist \
+            --pattern 'Krexion-Setup-*.exe'
+          ls -lah dist/
+
+      - name: SCP installer to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          source: "dist/Krexion-Setup-*.exe"
+          target: "/opt/krexion/downloads/windows/"
+          strip_components: 1
+          overwrite: true
+
+      - name: Update "latest" copy + permissions on VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          timeout: 5m
+          script: |
+            set -e
+            mkdir -p /opt/krexion/downloads/windows
+            cd /opt/krexion/downloads/windows
+            V="${{ needs.build-backend.outputs.version }}"
+            # Hard-copy (not symlink) so the nginx docker volume mount
+            # serves the file identically to versioned ones — matches
+            # the desktop mirror's behaviour.
+            if [ -f "Krexion-Setup-${V}.exe" ]; then
+              cp -f "Krexion-Setup-${V}.exe" "Krexion-Setup-latest.exe"
+            else
+              echo "::warning::Expected Krexion-Setup-${V}.exe but not found — picking newest .exe instead"
+              NEWEST=$(ls -t Krexion-Setup-*.exe 2>/dev/null | grep -v latest | head -1)
+              [ -n "$NEWEST" ] && cp -f "$NEWEST" "Krexion-Setup-latest.exe" || true
+            fi
+            ls -la
+            chmod -R a+r .
+            echo "Self-hosted CDN updated:"
+            echo "  https://krexion.com/downloads/windows/Krexion-Setup-latest.exe"
