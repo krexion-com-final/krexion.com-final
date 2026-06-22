@@ -329,7 +329,74 @@ def _build_fallbacks(info: Dict[str, Any]) -> Dict[str, Any]:
     return fb
 
 
-# ── Step builders ───────────────────────────────────────────────────────
+def _attach_selector_and_xpath(step: Dict[str, Any], info: Optional[Dict[str, Any]]) -> None:
+    """2026-06 — Ensure EVERY recorded step that targets a DOM element
+    has BOTH a `selector` AND an `xpath` field at the top level.
+
+    Customer ask: "step mein automatic os button yan field ka selector,
+    xpath dono save hone chahye ta k kisi b waja se koi step stuck na ho."
+
+    Why this exists separate from `fallbacks` :
+        - The `fallbacks` dict is consumed by the RUT replay engine
+          and was never user-visible.  Operators editing a step in
+          the recorder UI couldn't SEE the xpath that was captured,
+          which led to confusion ("did the recorder save the xpath?")
+          and to manual fixes that overwrote the wrong field.
+        - Surfacing `selector` + `xpath` as top-level editable fields
+          makes both strategies visible to the operator AND visible
+          to the RUT engine (which already reads top-level
+          `step["xpath"]` as an additional alt — see
+          `real_user_traffic._step_xpath_alt`).
+
+    Behaviour:
+        - NEVER overwrites an already-populated field (preserves any
+          hand-curated value).
+        - Picks `xpath_stable` first (survives renames) and falls back
+          to `xpath_abs` (full root path).
+        - Picks the most specific CSS available: data-testid → id →
+          name → class.
+        - Mutates `step` in place.  Safe to call with `info=None`
+          (no-op).
+    """
+    if not isinstance(step, dict) or not isinstance(info, dict):
+        return
+    # XPath top-level
+    if not step.get("xpath"):
+        xs = (info.get("xpath_stable") or "").strip()
+        xa = (info.get("xpath_abs") or "").strip()
+        chosen = xs or xa
+        if chosen:
+            step["xpath"] = chosen
+        # Keep the secondary xpath separately so the operator can
+        # see BOTH in advanced view.
+        if xs and xa and xs != xa and not step.get("xpath_abs"):
+            step["xpath_abs"] = xa
+    # CSS selector top-level — only fill if missing (most step
+    # builders already set this, but check is cheap + idempotent).
+    if not step.get("selector"):
+        attrs = info.get("attrs") if isinstance(info.get("attrs"), dict) else {}
+        best = ""
+        for k in ("data-testid", "data-test", "data-cy", "data-qa", "data-id"):
+            v = attrs.get(k) if attrs else None
+            if isinstance(v, str) and v:
+                v_esc = v.replace('"', '\\"')
+                best = f'[{k}="{v_esc}"]'
+                break
+        if not best:
+            _id = (info.get("id") or "").strip()
+            if _id and not re.match(r"^[\d_-]", _id) and ":" not in _id and len(_id) < 60:
+                best = f"#{_id}"
+        if not best and attrs:
+            nm = attrs.get("name")
+            if isinstance(nm, str) and nm:
+                tag_l = (info.get("tag") or "").lower()
+                nm_esc = nm.replace('"', '\\"')
+                best = f'{tag_l}[name="{nm_esc}"]' if tag_l else f'[name="{nm_esc}"]'
+        if best:
+            step["selector"] = best
+
+
+
 def _build_text_click_evaluate(text: str, info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """JS that finds an element by visible text and clicks it.
 
@@ -1394,12 +1461,24 @@ async def list_tabs(sess: "RecorderSession") -> List[Dict[str, Any]]:
 async def switch_tab(sess: "RecorderSession", index: int) -> Dict[str, Any]:
     """Make `sess.pages[index]` the active tab — all subsequent
     /screenshot, /click, /type, etc. calls operate on it.
+
+    2026-06 — When called during active recording (state=="ready" and
+    `record_step=True`), this ALSO appends a `switch_tab` step to the
+    recipe so the RUT replay can faithfully reproduce the operator's
+    "go back to the previous tab to start the next deal" navigation.
+    Without this, the auto-recorded recipe would auto-follow new tabs
+    on each click (RUT's new-tab detection) but never return to a
+    prior tab, breaking multi-deal workflows on the same landing page.
+
+    Pure additive — the API endpoint passes `record_step=True` by
+    default. Set False (e.g. in tests) to switch without recording.
     """
     sess.touch()
     if not sess.pages:
         return {"ok": False, "error": "no_tabs"}
     if index < 0 or index >= len(sess.pages):
         return {"ok": False, "error": "index_out_of_range", "total": len(sess.pages)}
+    prev_index = int(getattr(sess, "active_page_index", 0) or 0)
     async with sess.lock:
         sess.active_page_index = index
         sess.page = sess.pages[index]
@@ -1414,6 +1493,39 @@ async def switch_tab(sess: "RecorderSession", index: int) -> Dict[str, Any]:
         url = sess.page.url or ""
     except Exception:
         pass
+
+    # 2026-06 — Record the manual tab switch as a step so RUT can
+    # faithfully replay "back to previous tab". Only record when:
+    #   • The session is in "ready" state (i.e. live recording is on)
+    #   • The target index is different from the previous one (no-op
+    #     switches don't need a step)
+    #   • The last step isn't already a switch_tab to the same index
+    #     (defensive de-dup; the UI polls /tabs every 1.5s and clicks
+    #     can briefly stack)
+    try:
+        is_recording = (getattr(sess, "state", "") == "ready")
+        if is_recording and index != prev_index:
+            last = sess.steps[-1] if sess.steps else None
+            if not (isinstance(last, dict)
+                    and last.get("action") == "switch_tab"
+                    and int(last.get("index") or -1) == int(index)):
+                sess.steps.append({
+                    "action": "switch_tab",
+                    "index": int(index),
+                    # URL kept for human-readable diagnostics + a safer
+                    # fallback during replay (see real_user_traffic
+                    # handler).
+                    "url": url[:200] if url else "",
+                    "source": "manual",
+                })
+    except Exception as _rec_e:
+        # NEVER let recording-side bookkeeping break the actual tab
+        # switch — the switch already succeeded above; this is purely
+        # informational.
+        logger.warning(
+            f"[vr {sess.session_id}] switch_tab step append failed: {_rec_e}"
+        )
+
     logger.info(
         f"[vr {sess.session_id}] switched to tab #{index} (url={url[:80]})"
     )
@@ -2343,6 +2455,16 @@ async def click_at(sess: RecorderSession, x: int, y: int, mode: str = "default",
         step = _build_text_click_evaluate(text) if text else None
 
     if step is not None:
+        # 2026-06 — Ensure every recorded step has BOTH selector + xpath
+        # at the TOP LEVEL (so RUT replay always has a backup selector
+        # path, and the operator can SEE both in the Edit Step UI).
+        # No-op when the step already has both (rare, but happens for
+        # default click which sets them earlier).
+        try:
+            _attach_selector_and_xpath(step, info)
+        except Exception:
+            # Never let selector enrichment break recording.
+            pass
         sess.steps.append(step)
         # 2026-01 — auto waits removed per user request. Earlier this added
         # wait(1500) + wait_for_load(60000) + wait(2000) after every click,
@@ -2988,6 +3110,13 @@ async def bind_dropdown(
             _fb_sel = _fb_map.get(selector)
             if _fb_sel:
                 step["fallbacks"] = _fb_sel
+                # 2026-06 — also surface xpath as a top-level editable
+                # field so the operator can SEE both selector AND xpath
+                # in the Edit Step UI, and RUT replay has both rescue
+                # paths at the top level.
+                _xs = (_fb_sel.get("xpath") or _fb_sel.get("xpath_abs") or "").strip()
+                if _xs and not step.get("xpath"):
+                    step["xpath"] = _xs
             # one-shot — drop entry so the next dropdown starts clean
             _fb_map.pop(selector, None)
     except Exception:
@@ -3855,6 +3984,12 @@ _MANUAL_STEP_ACTIONS = {
     "auto_continue", "auto_continue_survey",
     # 2026-02 additive — conditional branching (if/else-if/else)
     "branch",
+    # 2026-06 additive — multi-tab control. `switch_tab` lets RUT
+    # return to a prior tab (e.g. after finishing one deal on a new
+    # tab, switch back to the listing tab to start the next deal).
+    # `close_tab` is the safe-close counterpart so a recipe can clean
+    # up the per-deal popup before moving on.
+    "switch_tab", "close_tab",
 }
 
 
@@ -3884,14 +4019,18 @@ def add_manual_step(sess: RecorderSession, step: Dict[str, Any], position: Optio
     for k in ("selector", "value", "key", "state", "match_by", "name",
               # 2026-01 additive — new step type fields
               "text", "contains", "equals", "pattern",
-              "store_key", "var", "attribute", "regex"):
+              "store_key", "var", "attribute", "regex",
+              # 2026-06 additive — switch_tab/close_tab diagnostic URL
+              "url"):
         v = step.get(k)
         if v is not None and str(v).strip() != "":
             clean[k] = str(v).strip()
     for k in ("timeout", "ms", "delay",
               # 2026-01 additive — retry config + per-iteration tunables
               "retry", "retry_delay", "if_exists_timeout",
-              "max_iterations", "iteration_wait_ms"):
+              "max_iterations", "iteration_wait_ms",
+              # 2026-06 additive — switch_tab/close_tab tab index
+              "index"):
         v = step.get(k)
         if v is not None:
             try:

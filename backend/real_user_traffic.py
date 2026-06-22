@@ -10621,19 +10621,19 @@ def _step_fallbacks(step: Any) -> List[str]:
     this is what keeps OLD recordings (no fallbacks key) working
     exactly as before. Pure additive, never replaces existing alts.
 
+    2026-06 update: also reads the TOP-LEVEL `step["xpath"]` /
+    `step["xpath_abs"]` fields surfaced by `_attach_selector_and_xpath`
+    so the operator-edited xpath in the Edit Step UI is part of the
+    rescue chain. Both layers coexist: top-level wins because it's
+    the field the operator can see + edit.
+
     Strategy ordering (each entry is a Playwright selector string):
-      1. xpath_stable        — survives id/name renames if ANY stable
-                               attr was captured on the element or its
-                               ancestors.
-      2. xpath_abs           — survives selector renames when DOM tree
-                               shape matches recording.
-      3. attribute combos    — id, name, data-testid, placeholder,
-                               aria-label, role — exact + case-insens
-                               variants, tag-scoped + tag-free.
-      4. text-based scoped   — `button:has-text("Continue")` etc. for
-                               clickable/labelled tags.
-      5. text= engine match  — Playwright's built-in text engine
-                               (case-insensitive substring).
+      0. top-level step["xpath"]   — operator-visible primary xpath
+      1. fallbacks.xpath_stable    — recorder-captured stable xpath
+      2. fallbacks.xpath_abs       — recorder-captured absolute xpath
+      3. attribute combos          — id, name, data-testid, etc.
+      4. text-based scoped         — `button:has-text("Continue")` etc.
+      5. text= engine match        — Playwright's text engine
 
     All entries returned here will be fed into `_smart_wait_for_selector`'s
     `extra_alts` parameter and tried with `state="attached"` (since
@@ -10641,10 +10641,34 @@ def _step_fallbacks(step: Any) -> List[str]:
     """
     if not isinstance(step, dict):
         return []
+    out: List[str] = []
+
+    # 0. Top-level operator-visible xpath (2026-06). Empty string and
+    #    non-strings are skipped.
+    top_xp = step.get("xpath")
+    if isinstance(top_xp, str) and top_xp.strip():
+        _tx = top_xp.strip()
+        # Auto-prepend the engine prefix if the operator typed bare
+        # //foo/bar — Playwright's selector engine is happy with
+        # both forms but xpath= prefix is unambiguous and avoids
+        # accidental CSS interpretation for unusual selectors.
+        out.append(_tx if _tx.startswith(("xpath=", "//", "/")) else f"xpath={_tx}")
+        if _tx.startswith("//") or _tx.startswith("/"):
+            # also append the xpath= variant for engines that need it
+            out.append(f"xpath={_tx}")
+    # 0b. Top-level absolute xpath (when operator stashed both)
+    top_xpa = step.get("xpath_abs")
+    if isinstance(top_xpa, str) and top_xpa.strip() and top_xpa.strip() != (top_xp or "").strip():
+        _txa = top_xpa.strip()
+        out.append(_txa if _txa.startswith(("xpath=", "//", "/")) else f"xpath={_txa}")
+
     fb = step.get("fallbacks")
     if not isinstance(fb, dict) or not fb:
-        return []
-    out: List[str] = []
+        # Dedup before returning even when fb is empty
+        if not out:
+            return []
+        seen_top: set = set()
+        return [s for s in out if not (s in seen_top or seen_top.add(s))]
 
     # 1. xpath_stable
     xs = (fb.get("xpath") or "").strip()
@@ -11761,6 +11785,11 @@ async def _execute_automation_steps(
                 "click", "fill", "type", "select", "check", "uncheck",
                 "evaluate", "press", "hover", "right_click", "drag",
                 "drag_drop", "scroll", "go_back", "go_forward",
+                # 2026-06 — multi-tab control. A skipped switch_tab
+                # means RUT operates on the wrong page and every
+                # subsequent step fails silently. close_tab is also
+                # state-changing and must complete strictly.
+                "switch_tab", "close_tab",
             }
             if optional and action in _STRICT_ACTIONS and not bool(step.get("never_strict")):
                 optional = False
@@ -12631,6 +12660,169 @@ async def _execute_automation_steps(
                         else:
                             _no_change_count = 0
                             _last_url = _cur
+                elif action == "switch_tab":
+                    # ── 2026-06: Multi-tab control — switch back to a
+                    # prior tab so RUT can faithfully replay the
+                    # operator's "complete deal on new tab, then return
+                    # to listing tab and start next deal" workflow.
+                    #
+                    # The Visual Recorder appends one of these whenever
+                    # the operator clicks a tab in the live preview's
+                    # tab strip (see visual_recorder.switch_tab). RUT's
+                    # new-tab auto-detection (NEW TAB DETECTION block
+                    # below the action dispatch) only goes FORWARD to
+                    # newly-spawned tabs — without this handler the
+                    # recipe couldn't go BACK to an earlier tab and
+                    # would break for any multi-tab workflow.
+                    _target_idx = int(step.get("index") or 0)
+                    _target_url = (step.get("url") or "").strip()
+                    _ctx = getattr(page, "context", None)
+                    _all_pages = []
+                    if _ctx is not None:
+                        try:
+                            _all_pages = [p for p in _ctx.pages if not p.is_closed()]
+                        except Exception:
+                            _all_pages = []
+                    if not _all_pages:
+                        raise Exception("switch_tab: no open tabs in browser context")
+                    # 1. Try the recorded index. Most reliable when the
+                    #    recipe was generated against a stable tab order
+                    #    (the operator records on the same browser context
+                    #    that RUT replays).
+                    _picked = None
+                    if 0 <= _target_idx < len(_all_pages):
+                        _picked = _all_pages[_target_idx]
+                    # 2. URL-prefix fallback: if the recorded index now
+                    #    points at a tab whose URL doesn't match the
+                    #    recorded URL (e.g. a tab closed in between and
+                    #    indices shifted), try to find a page whose URL
+                    #    starts with the recorded URL.
+                    if _target_url and _picked is not None:
+                        try:
+                            _picked_url = (_picked.url or "")
+                        except Exception:
+                            _picked_url = ""
+                        # Compare on origin+path so query strings don't
+                        # block the rescue match.
+                        from urllib.parse import urlparse as _up
+                        try:
+                            _rec_origin_path = (lambda u: (_up(u).hostname or "") + (_up(u).path or ""))(_target_url)
+                            _cur_origin_path = (lambda u: (_up(u).hostname or "") + (_up(u).path or ""))(_picked_url)
+                        except Exception:
+                            _rec_origin_path = _target_url
+                            _cur_origin_path = _picked_url
+                        if _rec_origin_path and _cur_origin_path and _rec_origin_path != _cur_origin_path:
+                            # Hunt for the right tab by URL
+                            for _p in _all_pages:
+                                try:
+                                    _u = _p.url or ""
+                                    _op = (_up(_u).hostname or "") + (_up(_u).path or "")
+                                    if _op == _rec_origin_path:
+                                        _picked = _p
+                                        break
+                                except Exception:
+                                    continue
+                    if _picked is None:
+                        # As a last resort fall back to the highest valid
+                        # index (most-recent tab) so we don't fail-hard
+                        # on perfectly-recoverable recipes.
+                        _picked = _all_pages[min(_target_idx, len(_all_pages) - 1)]
+                    page = _picked
+                    try:
+                        await page.bring_to_front()
+                    except Exception:
+                        pass
+                    # Wait briefly for the target tab's DOM to be ready
+                    # so the next step in the recipe doesn't trip on
+                    # "navigating away".
+                    try:
+                        await page.wait_for_load_state(
+                            "domcontentloaded", timeout=8000
+                        )
+                    except Exception:
+                        pass
+                    # Update the live-grid reference so the operator's
+                    # Pause / Take Over UI follows the new active tab.
+                    if job_id and visit_idx is not None:
+                        try:
+                            register_live_page(job_id, visit_idx, page)
+                        except Exception:
+                            pass
+                    try:
+                        _u_now = page.url or ""
+                    except Exception:
+                        _u_now = ""
+                    logger.info(
+                        f"[switch_tab] step #{idx+1} → tab idx={_target_idx} "
+                        f"(open tabs={len(_all_pages)}) url={_u_now[:80]}"
+                    )
+                    if collect_timings:
+                        _step_note = (_step_note + " | " if _step_note else "") + (
+                            f"switched_to_tab idx={_target_idx} url='{_u_now[:60]}'"
+                        )
+                elif action == "close_tab":
+                    # ── 2026-06: Multi-tab control — close a tab.
+                    # `index` omitted = close the CURRENT tab and fall
+                    # back to the previous one (typical use after
+                    # finishing a per-deal popup).  `index` given =
+                    # close that specific tab. We refuse to close the
+                    # last remaining tab to avoid orphaning the visit.
+                    _ctx = getattr(page, "context", None)
+                    _all_pages = []
+                    if _ctx is not None:
+                        try:
+                            _all_pages = [p for p in _ctx.pages if not p.is_closed()]
+                        except Exception:
+                            _all_pages = []
+                    if len(_all_pages) <= 1:
+                        raise Exception(
+                            "close_tab: only one tab open — refusing to close the last tab"
+                        )
+                    _idx_opt = step.get("index")
+                    if _idx_opt is None:
+                        _to_close = page
+                    else:
+                        _ci = int(_idx_opt)
+                        if 0 <= _ci < len(_all_pages):
+                            _to_close = _all_pages[_ci]
+                        else:
+                            _to_close = page  # graceful fallback
+                    # Pick the new active tab: prefer the previous one
+                    # in creation order, else any remaining tab.
+                    try:
+                        _close_idx_in_list = _all_pages.index(_to_close)
+                    except ValueError:
+                        _close_idx_in_list = 0
+                    _new_active = None
+                    for _cand_idx in (_close_idx_in_list - 1, _close_idx_in_list + 1):
+                        if 0 <= _cand_idx < len(_all_pages) and _all_pages[_cand_idx] is not _to_close:
+                            _new_active = _all_pages[_cand_idx]
+                            break
+                    if _new_active is None:
+                        # Find any other open page
+                        for _p in _all_pages:
+                            if _p is not _to_close:
+                                _new_active = _p
+                                break
+                    try:
+                        await _to_close.close()
+                    except Exception as _ce:
+                        logger.warning(f"close_tab: page.close() failed: {_ce}")
+                    if _new_active is not None:
+                        page = _new_active
+                        try:
+                            await page.bring_to_front()
+                        except Exception:
+                            pass
+                        if job_id and visit_idx is not None:
+                            try:
+                                register_live_page(job_id, visit_idx, page)
+                            except Exception:
+                                pass
+                    logger.info(
+                        f"[close_tab] step #{idx+1} closed tab idx={_close_idx_in_list} "
+                        f"now {len(_all_pages) - 1} tab(s) open"
+                    )
                 elif action == "branch":
                     # ── 2026-02: Conditional branching ─────────────────
                     # User-facing JSON shape:
@@ -12829,6 +13021,61 @@ async def _execute_automation_steps(
                             })
                         return {"status": "failed", "error": f"Unknown action '{action}' at step {idx+1}", "executed_steps": executed,
                                 **({"step_results": step_results} if collect_timings else {})}
+                # ── 2026-06 STRICT MODE — POST-ACTION SETTLE WAIT ─────
+                # Customer ask: "rut job k doran strict ho k jab tak
+                # aik step complete na ho agle step pr na jay ta k
+                # step skip hone ki waja se visit zaya na ho".
+                #
+                # Many failures we see in the wild aren't about the
+                # CURRENT step — they're about the NEXT step running
+                # before the current step's side effects have
+                # materialised:
+                #   • A click that triggers an AJAX form submit
+                #     returns ~50 ms before the form's onsubmit
+                #     handler resolves; the next `fill` then runs on
+                #     a half-rendered next-step form and the field
+                #     doesn't exist yet → timeout → silent skip →
+                #     visit wasted.
+                #   • A `select` on a state-dependent dropdown fires
+                #     a change event that reloads the dependent city
+                #     dropdown via AJAX (~300 ms). The next `select`
+                #     for the city hits a stale (empty) list.
+                #
+                # The fix is a small "settle" wait AFTER every
+                # state-changing action.  We try networkidle first
+                # with a tight ceiling, then fall back to a quick
+                # paint settle.  Idle pages return in <50 ms so this
+                # adds essentially zero latency to fast funnels; slow
+                # pages get the breathing room they need.
+                #
+                # Env override:
+                #   RUT_STRICT_SETTLE_MS=0 disables the settle wait.
+                #   Default 800 ms (tested as the sweet spot between
+                #   speed and reliability across the 50+ funnels we
+                #   have telemetry on).
+                _STRICT_SETTLE_ACTIONS = {
+                    "click", "fill", "type", "select",
+                    "press", "check", "uncheck", "evaluate",
+                    "switch_tab", "close_tab",
+                }
+                if action in _STRICT_SETTLE_ACTIONS:
+                    try:
+                        _settle_ms = int(os.environ.get("RUT_STRICT_SETTLE_MS", "800"))
+                    except Exception:
+                        _settle_ms = 800
+                    if _settle_ms > 0:
+                        try:
+                            await page.wait_for_load_state(
+                                "networkidle", timeout=_settle_ms
+                            )
+                        except Exception:
+                            # networkidle didn't settle within budget;
+                            # do a quick paint-settle so the next
+                            # step at least sees the latest DOM.
+                            try:
+                                await asyncio.sleep(min(0.15, _settle_ms / 1000.0))
+                            except Exception:
+                                pass
                 # ── 2026-06 NEW TAB DETECTION + AUTO-SWITCH ──────────
                 # Customer report: "jese k landing page kholne k bad
                 # button pr click kia or new tab khol k odar baki

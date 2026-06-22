@@ -857,34 +857,52 @@ async def advanced_create(request: Request, body: AdvancedCreateBody):
             )
         elif proxy_mode == "proxyjet" and i < len(proxy_lines):
             line = proxy_lines[i].strip()
-            # Lines come back from ProxyJet as
-            # "host:port:user:password" OR full URL. We store the
-            # canonical user:pass@host:port URL plus extract creds.
+            # 2026-06 — Robust proxy-line parser. ProxyJet (and
+            # `build_proxy_string` in proxyjet_module.py) returns lines
+            # in the `user:pass@host:port` shape — NOT
+            # `host:port:user:password`. The old parser called
+            # `line.split(":")` which produced 3 parts for the @-form
+            # (user, pass@host, port) and matched the
+            # `len(parts) >= 2` branch — dropping the real port and
+            # baking the creds into the server URL. Chromium then
+            # silently defaulted to port 80, ProxyJet doesn't listen
+            # there, and every profile launch errored with
+            # "Proxy could not be reached" within 10 seconds.
+            #
+            # We now handle ALL four shapes the codebase has ever
+            # emitted, with `@` detection taking precedence over
+            # colon-counting so the canonical ProxyJet line parses
+            # correctly. The port is ALWAYS preserved.
             server = ""
             username = ""
             password = ""
-            if "://" in line:
-                # Already in URL form
-                try:
-                    # Best-effort split — keep raw if parse weird
+            try:
+                if "://" in line:
+                    # Already a URL — keep proto, strip embedded creds.
                     proto, rest = line.split("://", 1)
                     if "@" in rest:
-                        creds, hostpart = rest.split("@", 1)
+                        creds, hostpart = rest.rsplit("@", 1)
                         username, _, password = creds.partition(":")
                         server = f"{proto}://{hostpart}"
                     else:
                         server = line
-                except Exception:
-                    server = line
-            else:
-                # Assume "host:port:user:password"
-                parts = line.split(":")
-                if len(parts) >= 4:
-                    host, port, username = parts[0], parts[1], parts[2]
-                    password = ":".join(parts[3:])
-                    server = f"http://{host}:{port}"
-                elif len(parts) >= 2:
-                    server = f"http://{parts[0]}:{parts[1]}"
+                elif "@" in line:
+                    # ProxyJet canonical form: user:pass@host:port
+                    creds, hostport = line.rsplit("@", 1)
+                    username, _, password = creds.partition(":")
+                    server = f"http://{hostport}"
+                else:
+                    # Legacy colon-separated form: host:port:user:password
+                    parts = line.split(":")
+                    if len(parts) >= 4:
+                        host, port, username = parts[0], parts[1], parts[2]
+                        password = ":".join(parts[3:])
+                        server = f"http://{host}:{port}"
+                    elif len(parts) >= 2:
+                        server = f"http://{parts[0]}:{parts[1]}"
+            except Exception as _pe:
+                logger.warning(f"advanced_create: proxy line parse failed for line[0:20]={line[:20]!r}: {_pe}")
+                server = line  # last-resort: store raw, launcher will normalize again
             proxy_cfg = ProxyConfig(
                 enabled=True,
                 server=server,

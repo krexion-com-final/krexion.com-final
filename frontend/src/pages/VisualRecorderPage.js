@@ -45,6 +45,7 @@ import {
   FastForward,
   GitBranch,
   X,
+  ArrowLeftRight,
 } from "lucide-react";
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
@@ -142,6 +143,15 @@ function getStepDisplayName(s) {
     case "close":
     case "close_browser":
       return "✖ Close Browser";
+    case "switch_tab": {
+      const i = typeof s.index === "number" ? s.index : "?";
+      const u = _val(s.url, 22);
+      return u ? `↔ Switch to tab #${i} (${u})` : `↔ Switch to tab #${i}`;
+    }
+    case "close_tab": {
+      const i = typeof s.index === "number" ? `#${s.index}` : "(current)";
+      return `✕ Close tab ${i}`;
+    }
     default:
       return s.action || "step";
   }
@@ -357,6 +367,11 @@ export default function VisualRecorderPage() {
   // updates to show the previous one is still available.
   const [tabs, setTabs] = useState([]);
   const [activeTabIndex, setActiveTabIndex] = useState(0);
+  // 2026-06 — "Switch to Tab" picker modal. Open via the dedicated
+  // button above the live preview (always visible, even when there's
+  // only 1 tab) so the operator can confidently switch tabs without
+  // confusion. Lists every open tab with title + URL.
+  const [showTabPicker, setShowTabPicker] = useState(false);
 
   // ── Recent recordings (localStorage) ───────────────────────────────
   useEffect(() => {
@@ -2311,6 +2326,16 @@ export default function VisualRecorderPage() {
       if (d.selector) step.selector = d.selector.trim();
     } else if (["click", "hover", "check", "uncheck"].includes(action)) {
       step.timeout = d.timeout === "" ? 8000 : Number(d.timeout);
+    } else if (["switch_tab", "close_tab"].includes(action)) {
+      // 2026-06 — Multi-tab control. switch_tab REQUIRES an index;
+      // close_tab accepts a blank index (means "close current tab").
+      if (action === "switch_tab" && (d.index === "" || d.index == null || isNaN(Number(d.index)))) {
+        toast.error("Tab index is required for switch_tab (0 = first tab)");
+        return;
+      }
+      if (d.index !== "" && d.index != null && !isNaN(Number(d.index))) {
+        step.index = Math.max(0, Number(d.index));
+      }
     }
 
     const body = { step };
@@ -3517,14 +3542,37 @@ export default function VisualRecorderPage() {
                   opens a new tab (target="_blank", window.open) it
                   appears here automatically AND is auto-promoted to
                   active so the user instantly sees the destination
-                  page. Hidden when there's only one tab (the original)
-                  to keep the UI clean for simple single-page offers. */}
-              {tabs.length > 1 && sessionState === "ready" && (
+                  page.
+                  
+                  2026-06 — A dedicated "Switch to Tab" button is now
+                  ALWAYS visible (even when there's only 1 tab) so the
+                  operator can confidently switch tabs without searching
+                  the UI. Clicking it opens a modal listing every open
+                  tab with title + URL. */}
+              {sessionState === "ready" && (
                 <div
                   className="flex items-center gap-1 mb-2 px-1 overflow-x-auto pb-1"
                   data-testid="vr-tabs-strip"
                 >
-                  {tabs.map((t) => {
+                  {/* Always-visible "Switch to Tab" button — opens the
+                      tab-picker modal with the full list of open tabs
+                      so the operator can pick one without confusion. */}
+                  <button
+                    type="button"
+                    onClick={() => setShowTabPicker(true)}
+                    title={`Switch to tab… (${tabs.length} open)`}
+                    data-testid="vr-switch-tab-btn"
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold whitespace-nowrap bg-blue-600/20 hover:bg-blue-600/40 text-blue-200 border border-blue-500/40 hover:border-blue-400 transition-colors"
+                  >
+                    <ArrowLeftRight className="w-3.5 h-3.5" />
+                    <span>Switch to Tab</span>
+                    <span className="ml-0.5 px-1.5 py-0 rounded-full bg-blue-500/30 text-blue-100 text-[10px]">
+                      {tabs.length}
+                    </span>
+                  </button>
+
+                  {/* Existing inline tab strip (kept for quick clicks). */}
+                  {tabs.length > 1 && tabs.map((t) => {
                     const isActive = t.is_active || t.index === activeTabIndex;
                     let domain = "";
                     try { domain = t.url ? new URL(t.url).hostname.replace(/^www\./, "") : ""; } catch {}
@@ -3556,9 +3604,11 @@ export default function VisualRecorderPage() {
                       </button>
                     );
                   })}
-                  <div className="ml-1 text-[10px] text-zinc-500 self-center px-1">
-                    {tabs.length} tabs
-                  </div>
+                  {tabs.length > 1 && (
+                    <div className="ml-1 text-[10px] text-zinc-500 self-center px-1">
+                      {tabs.length} tabs
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -4458,6 +4508,8 @@ export default function VisualRecorderPage() {
                     auto_continue: { icon: "🔄", color: "text-violet-400", bg: "bg-violet-700/30 border-violet-500/30" },
                     auto_continue_survey: { icon: "🔄", color: "text-violet-400", bg: "bg-violet-700/30 border-violet-500/30" },
                     branch: { icon: "🔀", color: "text-fuchsia-400", bg: "bg-fuchsia-700/30 border-fuchsia-500/30" },
+                    switch_tab: { icon: "↔", color: "text-blue-400", bg: "bg-blue-700/30 border-blue-500/30" },
+                    close_tab: { icon: "✕", color: "text-rose-400", bg: "bg-rose-700/30 border-rose-500/30" },
                   };
                   const sm = stepIconMap[s.action] || { icon: "•", color: "text-zinc-400", bg: "bg-zinc-700/30 border-zinc-500/30" };
                   const isDragSrc = dragSrc === i;
@@ -6345,6 +6397,124 @@ export default function VisualRecorderPage() {
         </div>
       )}
 
+      {/* ── 2026-06 — Switch-to-Tab Picker Modal ───────────────────────
+          Opened by the "Switch to Tab" button above the live preview.
+          Shows EVERY open Chromium tab with title + URL so the operator
+          can confidently pick one without confusion. Clicking a row
+          calls switchTab(index) which also RECORDS the switch_tab step
+          server-side (visual_recorder.switch_tab does the bookkeeping)
+          so RUT replay can faithfully reproduce the manual navigation.
+          ─────────────────────────────────────────────────────────── */}
+      {showTabPicker && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+          onClick={() => setShowTabPicker(false)}
+          data-testid="vr-tab-picker-backdrop"
+        >
+          <div
+            className="w-full max-w-xl bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+            data-testid="vr-tab-picker-modal"
+          >
+            <div className="flex items-center justify-between p-4 border-b border-zinc-800">
+              <div className="flex items-center gap-2">
+                <ArrowLeftRight className="w-4 h-4 text-blue-400" />
+                <h3 className="text-sm font-semibold text-zinc-100">
+                  Switch to Tab
+                </h3>
+                <span className="text-[11px] text-zinc-500">
+                  ({tabs.length} open)
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowTabPicker(false)}
+                className="p-1 text-zinc-500 hover:text-zinc-200 transition-colors"
+                data-testid="vr-tab-picker-close"
+              >
+                <XCircle className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3 max-h-[60vh] overflow-y-auto space-y-1.5">
+              {tabs.length === 0 ? (
+                <div className="text-center text-zinc-500 text-xs py-8">
+                  No tabs open yet. Start a recording to see the live tab list here.
+                </div>
+              ) : (
+                tabs.map((t) => {
+                  const isActive = t.is_active || t.index === activeTabIndex;
+                  let domain = "";
+                  try {
+                    domain = t.url ? new URL(t.url).hostname.replace(/^www\./, "") : "";
+                  } catch {
+                    /* ignore */
+                  }
+                  const label = (t.title && t.title !== t.url ? t.title : domain) || `Tab ${t.index + 1}`;
+                  return (
+                    <button
+                      key={t.index}
+                      type="button"
+                      onClick={() => {
+                        switchTab(t.index);
+                        setShowTabPicker(false);
+                      }}
+                      data-testid={`vr-tab-picker-item-${t.index}`}
+                      className={`w-full text-left p-2.5 rounded-lg border transition-colors flex items-start gap-2.5 ${
+                        isActive
+                          ? "bg-emerald-600/15 border-emerald-500/50 hover:bg-emerald-600/25"
+                          : "bg-zinc-900 border-zinc-800 hover:bg-zinc-800 hover:border-zinc-700"
+                      }`}
+                    >
+                      <div
+                        className={`mt-0.5 w-6 h-6 rounded-md flex items-center justify-center text-[11px] font-bold shrink-0 ${
+                          isActive ? "bg-emerald-500 text-zinc-950" : "bg-zinc-700 text-zinc-300"
+                        }`}
+                      >
+                        {t.index}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <Globe className="w-3 h-3 shrink-0 opacity-60 text-zinc-400" />
+                          <span
+                            className={`text-xs font-medium truncate ${
+                              isActive ? "text-emerald-200" : "text-zinc-200"
+                            }`}
+                          >
+                            {label}
+                          </span>
+                          {isActive && (
+                            <span className="ml-1 px-1.5 py-0 rounded-full bg-emerald-500/30 text-emerald-100 text-[9px] uppercase tracking-wide font-semibold">
+                              Active
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[10px] text-zinc-500 mt-0.5 truncate">
+                          {t.url || "(no url)"}
+                        </div>
+                      </div>
+                      {!isActive && (
+                        <span className="self-center text-[10px] text-blue-400 shrink-0">
+                          Switch →
+                        </span>
+                      )}
+                    </button>
+                  );
+                })
+              )}
+            </div>
+
+            <div className="px-4 py-3 border-t border-zinc-800 text-[11px] text-zinc-500 leading-relaxed">
+              💡 Picking a tab records a <code className="text-blue-300">switch_tab</code> step in the recipe —
+              RUT will switch back to the same tab during replay, so multi-deal workflows
+              (complete a deal on a popup, return to the listing tab, start the next deal)
+              run end-to-end without manual intervention.
+            </div>
+          </div>
+        </div>
+      )}
+
+
       {/* ── Manual Add Step Modal (2026-01) ───────────────────────────
           Opened by the "+ Add Step" button. Lets the user inject a
           step the auto-recorder didn't capture — supports BOTH CSS
@@ -6406,8 +6576,41 @@ export default function VisualRecorderPage() {
                   <option value="check">check — tick a checkbox/radio</option>
                   <option value="uncheck">uncheck — untick a checkbox</option>
                   <option value="screenshot">screenshot — capture page state</option>
+                  <option value="switch_tab">switch_tab — go back to a prior tab (e.g. start next deal on listing tab)</option>
+                  <option value="close_tab">close_tab — close the current tab and fall back to the previous one</option>
                 </select>
               </div>
+
+              {/* 2026-06 — Tab-index input (switch_tab / close_tab) */}
+              {["switch_tab", "close_tab"].includes(manualStepDraft.action) && (
+                <div>
+                  <label className="block text-[11px] text-zinc-400 mb-1">
+                    Tab index{" "}
+                    <span className="text-zinc-600">
+                      (0 = first tab, 1 = second, etc.{" "}
+                      {manualStepDraft.action === "close_tab" && "leave blank to close current tab"})
+                    </span>
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={manualStepDraft.index ?? ""}
+                    onChange={(e) =>
+                      setManualStepDraft({
+                        ...manualStepDraft,
+                        index: e.target.value === "" ? "" : Number(e.target.value),
+                      })
+                    }
+                    placeholder={manualStepDraft.action === "switch_tab" ? "0" : "(current)"}
+                    className="w-full px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-700 focus:border-sky-500 text-zinc-200 text-xs outline-none"
+                    data-testid="vr-manual-tab-index"
+                  />
+                  <div className="text-[10px] text-zinc-500 mt-1">
+                    💡 The tab strip above the live preview shows current tabs and their order.
+                    Click a tab to record a switch_tab step automatically.
+                  </div>
+                </div>
+              )}
 
               {/* Step name (optional label) */}
               <div>
@@ -6427,7 +6630,7 @@ export default function VisualRecorderPage() {
               </div>
 
               {/* Selector — for most actions */}
-              {!["wait"].includes(manualStepDraft.action) && (
+              {!["wait", "switch_tab", "close_tab"].includes(manualStepDraft.action) && (
                 <div>
                   <label className="block text-[11px] text-zinc-400 mb-1">
                     Selector{" "}

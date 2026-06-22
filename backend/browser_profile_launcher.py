@@ -103,13 +103,67 @@ async def launch_profile_session(
         # host has no route to google.com and times out.
         # We now normalize to a Chromium-acceptable URL form.
         raw_server = str(proxy_cfg["server"]).strip()
-        if raw_server and "://" not in raw_server:
-            raw_server = f"http://{raw_server}"
+        username = str(proxy_cfg.get("username") or "")
+        password = str(proxy_cfg.get("password") or "")
+
+        # 2026-06 (follow-up) — Defensive normalization for LEGACY
+        # profiles created before the parser fix in
+        # browser_profile_module.py.  Some stored proxies still have
+        # the format `http://user:pass@host` (port stripped, creds
+        # baked into URL) which Chromium silently defaults to port 80
+        # for — causing the customer's "Proxy could not be reached"
+        # within 10s on EVERY profile launch.  We rebuild the proxy
+        # tuple from whatever shape was saved so old and new
+        # profiles BOTH work.
+        try:
+            from urllib.parse import urlparse, urlunparse
+            # 1. Ensure a scheme so urlparse can work.
+            if "://" not in raw_server:
+                # If creds are embedded without scheme (rare): user:pass@host[:port]
+                raw_server = f"http://{raw_server}"
+            parsed = urlparse(raw_server)
+            host = parsed.hostname or ""
+            port = parsed.port  # None when not specified
+            # 2. Pull creds out of the URL if Chromium would otherwise
+            #    see them inline (it ignores them when the separate
+            #    `username`/`password` launch fields are also set, and
+            #    sometimes mangles auth when both forms collide).
+            if parsed.username and not username:
+                username = parsed.username
+            if parsed.password and not password:
+                password = parsed.password
+            # 3. Default port heuristics — the #1 root cause of the
+            #    Proxy-could-not-be-reached error.  ProxyJet's gateways
+            #    listen on port 1010; everything else gets the
+            #    HTTP-proxy default of 8080 only when truly missing.
+            if not port:
+                lower_host = host.lower()
+                if "proxy-jet.io" in lower_host:
+                    port = 1010
+                elif lower_host.endswith("smartproxy.com") or "smartproxy" in lower_host:
+                    port = 7000
+                elif "brightdata" in lower_host or "luminati" in lower_host:
+                    port = 22225
+                else:
+                    # Leave port unset — Chromium uses 80 for http://
+                    # and 443 for https://.  We can't guess better.
+                    pass
+            # 4. Rebuild the canonical scheme://host[:port] (no creds in URL).
+            scheme = parsed.scheme or "http"
+            if scheme not in ("http", "https", "socks5", "socks5h", "socks4"):
+                scheme = "http"
+            netloc = host if not port else f"{host}:{port}"
+            raw_server = urlunparse((scheme, netloc, "", "", "", "")) if host else raw_server
+        except Exception as _ne:
+            logger.warning(f"[profile-launch] proxy URL normalize failed (using raw): {_ne}")
+            if "://" not in raw_server:
+                raw_server = f"http://{raw_server}"
+
         proxy_arg = {"server": raw_server}
-        if proxy_cfg.get("username"):
-            proxy_arg["username"] = str(proxy_cfg["username"])
-        if proxy_cfg.get("password"):
-            proxy_arg["password"] = str(proxy_cfg["password"])
+        if username:
+            proxy_arg["username"] = username
+        if password:
+            proxy_arg["password"] = password
         proxy_diag["requested"] = True
         proxy_diag["server"] = raw_server
 
