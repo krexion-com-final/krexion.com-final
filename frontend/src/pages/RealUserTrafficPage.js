@@ -508,6 +508,10 @@ export default function RealUserTrafficPage() {
   // visit with dirty data can absorb up to 50 bad rows before giving up
   // (proxy/UA aren't wasted). Default 10.
   const [invalidDataRetryLimit, setInvalidDataRetryLimit] = useState(10);
+  // 2026-06 — Step-wait multiplier. 1.0 = default per-step ceilings
+  // (30-45s). Higher = wait longer per step before timeout (better
+  // for slow offers / proxies). Range 0.5-5.0.
+  const [stepTimeoutMultiplier, setStepTimeoutMultiplier] = useState(1);
   const [skipCaptcha, setSkipCaptcha] = useState(true);
   const [postSubmitWait, setPostSubmitWait] = useState(6);
   const [automationJson, setAutomationJson] = useState("");
@@ -1698,6 +1702,7 @@ export default function RealUserTrafficPage() {
         }
         fd.append("invalid_detection_enabled", String(invalidDetectionEnabled));
         fd.append("invalid_data_retry_limit", String(invalidDataRetryLimit));
+        fd.append("step_timeout_multiplier", String(stepTimeoutMultiplier));
         fd.append("skip_captcha", String(skipCaptcha));
         fd.append("post_submit_wait", String(postSubmitWait));
         if (useCustomJson) {
@@ -4155,6 +4160,32 @@ export default function RealUserTrafficPage() {
                   data-testid="rut-post-submit-wait"
                 />
                 <span className="text-xs text-zinc-500">Range: 3-15s. Default: 6s.</span>
+              </div>
+            </div>
+
+            {/* 2026-06 — Slow-step wait multiplier */}
+            <div className="pt-3 border-t border-emerald-900/30">
+              <Label className="text-zinc-300 text-sm">
+                Step-wait multiplier — stretch per-step timeouts when offer / proxy is slow
+              </Label>
+              <div className="flex items-center gap-3 mt-1 flex-wrap">
+                <Input
+                  type="number"
+                  min={0.5}
+                  max={5}
+                  step={0.5}
+                  value={stepTimeoutMultiplier}
+                  onChange={(e) =>
+                    setStepTimeoutMultiplier(
+                      Math.max(0.5, Math.min(5, Number(e.target.value) || 1))
+                    )
+                  }
+                  className="bg-zinc-800 border-zinc-700 text-zinc-100 max-w-[120px]"
+                  data-testid="rut-step-timeout-multiplier"
+                />
+                <span className="text-xs text-zinc-500">
+                  Range: 0.5×–5×. Default: 1× (30-45s per step). E.g. 2× = wait 60-90s before moving on so a slow page can finish before the next step fires. Visit nahi waste hoti.
+                </span>
               </div>
             </div>
 

@@ -7444,6 +7444,7 @@ async def _rut_prepare_and_run(
             max_attempts=int(params.get("max_attempts") or 0),
             invalid_detection_enabled=bool(params.get("invalid_detection_enabled")),
             invalid_data_retry_limit=int(params.get("invalid_data_retry_limit") or 10),
+            step_timeout_multiplier=float(params.get("step_timeout_multiplier") or 1.0),
             db=db,
             link_id=link.get("id") if link else None,
             link_owner_id=(link or {}).get("user_id") or user["id"],
@@ -7709,6 +7710,11 @@ async def rut_create_job(
     # operators with dirty data can ask the engine to absorb a longer
     # tail of bad rows without losing the visit/proxy/UA. 1..50 range.
     invalid_data_retry_limit: int = Form(10),
+    # 2026-06 — Per-step timeout multiplier for slow offers / proxies.
+    # Stretches every entry in `_STEP_TIMEOUT_CEILINGS_MS` so a slow
+    # visit's current step finishes before the engine moves on.
+    # 1.0 = no change (default). 0.5..5.0 (clamped server-side).
+    step_timeout_multiplier: float = Form(1.0),
     skip_captcha: bool = Form(True),
     post_submit_wait: int = Form(6),                  # seconds 3..600
     automation_json: Optional[str] = Form(None),      # custom step-list JSON
@@ -8048,6 +8054,7 @@ async def rut_create_job(
         "post_submit_wait": post_submit_wait,
         "invalid_detection_enabled": invalid_detection_enabled,
         "invalid_data_retry_limit": max(1, min(50, int(invalid_data_retry_limit or 10))),
+        "step_timeout_multiplier": max(0.5, min(5.0, float(step_timeout_multiplier or 1.0))),
         "target_screenshot_threshold": target_screenshot_threshold,
         "target_screenshot_upload_id": target_screenshot_upload_id,
         "target_screenshot_bytes": target_screenshot_bytes,
@@ -8181,6 +8188,7 @@ async def rut_create_job(
             "skip_captcha": skip_captcha,
             "invalid_detection_enabled": invalid_detection_enabled,
             "invalid_data_retry_limit": max(1, min(50, int(invalid_data_retry_limit or 10))),
+            "step_timeout_multiplier": max(0.5, min(5.0, float(step_timeout_multiplier or 1.0))),
             "force_tracker_url": force_tracker_url,
             "use_proxyjet_auto": bool(use_proxyjet_auto),
             "proxyjet_country": (proxyjet_country or "US").strip().upper() or "US",

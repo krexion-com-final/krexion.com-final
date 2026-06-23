@@ -5731,6 +5731,13 @@ async def run_real_user_traffic_job(
     # rows. Default bumped to 10 so a typical visit can absorb a long
     # tail of bad-state / bad-email rows without losing the proxy + UA.
     invalid_data_retry_limit: int = 10,
+    # 2026-06 — Per-step timeout multiplier for slow offers / proxies.
+    # Multiplies every entry in `_STEP_TIMEOUT_CEILINGS_MS` so the
+    # operator can stretch the per-step ceiling without rewriting the
+    # JSON's `timeout_ms` on every step. Default 1.0 = no change.
+    # Range 0.5..5.0 (clamped). User explicitly asked: "agr step slow
+    # chal raha hai to wait kre, visit waste na ho."
+    step_timeout_multiplier: float = 1.0,
     db=None,
     link_id: Optional[str] = None,
     link_owner_id: Optional[str] = None,
@@ -8698,6 +8705,7 @@ async def run_real_user_traffic_job(
                                 on_step_progress=_visit_progress_cb,  # 2026-01: real-time per-visit feed
                                 job_id=job_id,           # 2026-06: manual takeover pause hook
                                 visit_idx=i + 1,         # 2026-06: manual takeover pause hook
+                                step_timeout_multiplier=step_timeout_multiplier,  # 2026-06: user-configurable slow-step wait
                             )
                         )
 
@@ -9860,16 +9868,61 @@ async def run_real_user_traffic_job(
         # however many burnt IPs ProxyJet returns under the hood.
         _silent_mode = bool(RUT_JOBS[job_id].get("silent_skip_burnt_ip"))
         if not _silent_mode:
-            # Legacy fixed-size gather — unchanged behaviour for jobs
-            # that don't use ProxyJet Auto (uploaded-proxy mode etc.).
-            tasks = [asyncio.create_task(worker(i, shared_browser)) for i in range(total)]
-            # 2026-05 — manual-kill registry (legacy fixed-size gather path)
-            for _i, _t in enumerate(tasks):
-                _register_visit_task(_i, _t)
+            # ── 2026-06: Budget-based dispatcher for legacy clicks-mode ──
+            # Old behaviour spawned ALL `total` tasks at once via
+            #   tasks = [create_task(worker(i)) for i in range(total)]
+            # While the semaphore inside `worker` ensured only `conc` were
+            # ACTIVELY running, it still queued `total` coroutines in
+            # memory — and the live UI sometimes flashed every spawned
+            # tile briefly even though only `conc` had progress.
+            #
+            # User request: "5 concurrency means EXACTLY 5 visits at a
+            # time — next one starts ONLY when one completes." This
+            # while-loop spawns visits one-at-a-time as slots free up,
+            # matching the silent_mode + conversions-mode dispatchers.
+            # Pacing target_offset still uses the spawn index so the
+            # delay-between-visits behaviour is preserved.
+            in_flight: set = set()
+            attempt_counter = 0
             try:
-                await asyncio.gather(*tasks, return_exceptions=True)
+                while True:
+                    if cancel_event.is_set() or target_drain_event.is_set():
+                        break
+                    if attempt_counter >= total:
+                        # All visits dispatched — fall through to gather
+                        break
+                    # Fill the pool up to `conc` in-flight visits
+                    while (
+                        len(in_flight) < conc
+                        and attempt_counter < total
+                        and not cancel_event.is_set()
+                        and not target_drain_event.is_set()
+                    ):
+                        t = asyncio.create_task(worker(attempt_counter, shared_browser))
+                        in_flight.add(t)
+                        t.add_done_callback(in_flight.discard)
+                        _register_visit_task(attempt_counter, t)
+                        attempt_counter += 1
+                    if not in_flight:
+                        await asyncio.sleep(0.2)
+                        continue
+                    # Wait for ANY visit to finish before re-evaluating —
+                    # this is what makes "next starts only when one
+                    # completes" strict. Timeout=1.5s so cancel/drain
+                    # events stay responsive even mid-visit.
+                    await asyncio.wait(
+                        in_flight,
+                        return_when=asyncio.FIRST_COMPLETED,
+                        timeout=1.5,
+                    )
             except Exception as e:
-                logger.warning(f"RUT gather error: {e}")
+                logger.warning(f"RUT clicks-mode budget dispatcher error: {e}")
+            # Graceful drain — let in-flight visits finish naturally.
+            if in_flight:
+                try:
+                    await asyncio.gather(*in_flight, return_exceptions=True)
+                except Exception as e:
+                    logger.warning(f"RUT gather error: {e}")
         else:
             # Budget-based dispatcher: keep spawning until VISIBLE
             # `processed` >= `total` (or HARD_CAP / cancel hit).
@@ -11709,6 +11762,7 @@ async def _execute_automation_steps(
     on_step_progress: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     job_id: Optional[str] = None,
     visit_idx: Optional[int] = None,
+    step_timeout_multiplier: float = 1.0,  # 2026-06 — stretch per-step ceilings
 ) -> Dict[str, Any]:
     """Execute a user-provided automation script step-by-step. Returns
     {status, error?, executed_steps, step_results?}.  Each step format:
@@ -11811,6 +11865,18 @@ async def _execute_automation_steps(
         # /type/press/hover/scroll_into_view) share the default 45s cap.
         "_default": 45_000,
     }
+    # 2026-06 — User-configurable stretch for slow offers / proxies.
+    # Clamped to 0.5..5.0 so a misconfigured 100x can't make a stuck
+    # step hold the slot for an hour. Default 1.0 = no change.
+    try:
+        _step_mult = float(step_timeout_multiplier or 1.0)
+    except Exception:
+        _step_mult = 1.0
+    _step_mult = max(0.5, min(5.0, _step_mult))
+    if _step_mult != 1.0:
+        _STEP_TIMEOUT_CEILINGS_MS = {
+            k: int(v * _step_mult) for k, v in _STEP_TIMEOUT_CEILINGS_MS.items()
+        }
 
     def _capped_timeout(_action: str, requested_ms: int) -> int:
         cap = _STEP_TIMEOUT_CEILINGS_MS.get(_action, _STEP_TIMEOUT_CEILINGS_MS["_default"])
