@@ -977,15 +977,28 @@ async def bridge_session_update(request: Request, body: Dict[str, Any] = Body(..
             update["last_session_duration_sec"] = float(body["duration_sec"])
         except Exception:
             pass
+    # v2.1.59: persist error_message so the card chip / detail line can
+    # surface WHY a launch failed instead of leaving the operator
+    # guessing. Cleared on the next successful "running" update.
+    err_msg = body.get("error_message")
+    if status == "error" and err_msg:
+        update["last_error"] = str(err_msg)[:512]
+    elif status == "running":
+        update["last_error"] = ""
 
     await _DB.browser_profiles.update_one(
         {"id": pid, "user_id": uid}, {"$set": update}
     )
+    sess_update: Dict[str, Any] = {
+        "status": status,
+        "ended_at": _now_iso() if status in ("closed", "stopped", "error") else "",
+        "duration_sec": float(body.get("duration_sec") or 0),
+    }
+    if status == "error" and err_msg:
+        sess_update["error_message"] = str(err_msg)[:512]
     await _DB.browser_profile_sessions.update_one(
         {"id": sid, "user_id": uid},
-        {"$set": {"status": status,
-                  "ended_at": _now_iso() if status in ("closed", "stopped", "error") else "",
-                  "duration_sec": float(body.get("duration_sec") or 0)}},
+        {"$set": sess_update},
     )
     return {"ok": True}
 

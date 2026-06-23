@@ -237,6 +237,25 @@ html, body {
   border-radius: 8px;
 }
 
+/* ── Dependencies grid (v2.1.59) ───────────────────────────────── */
+.deps-list { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.dep-item {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 10px 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.dep-item .dot { flex: 0 0 auto; margin-top: 5px; }
+.dep-body { flex: 1; min-width: 0; }
+.dep-label { color: var(--text-1); font-size: 12px; }
+.dep-body .job-item-meta {
+  margin-top: 2px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
 /* ── Footer ────────────────────────────────────────────────────── */
 .footer {
   display: flex; justify-content: space-between;

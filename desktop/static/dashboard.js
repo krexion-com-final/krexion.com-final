@@ -89,6 +89,9 @@ async function pollLocal() {
     // ── Recent ──────────────────────────
     renderJobs($("recent-list"), d.jobs?.recent || [], "No recent activity yet.");
 
+    // ── Dependencies (v2.1.59) ──────────
+    renderDeps(d.dependencies || {});
+
     setText("version-pill", "v" + (d.backend_version || "—"));
   } catch (e) {
     setPill("connection-pill", "Backend starting…", "warn");
@@ -112,6 +115,69 @@ function renderJobs(container, jobs, emptyMsg) {
       <div class="job-item-meta">${escapeHtml(j.started_ago || "")}</div>
     </div>
   `).join("");
+}
+
+/* ── Dependencies grid (v2.1.59) ──────────────────────────────────
+ * Surfaces the install state of every external binary a Krexion
+ * feature needs (Playwright Chromium for RUT/VR/Browser-Profiles,
+ * adb for CPI, the Playwright package itself, …) so the customer
+ * sees at a glance which features are usable RIGHT NOW vs still
+ * installing. Previously this only got surfaced once they CLICKED
+ * Launch and the launch failed, leading to "kuch kaam ni krta" reports.
+ */
+const DEP_LABELS = {
+  playwright: "Playwright (engine)",
+  chromium:   "Chromium browser",
+  adb:        "ADB (Android CPI)",
+};
+function renderDeps(deps) {
+  const container = document.getElementById("deps-list");
+  const summary = document.getElementById("deps-summary");
+  if (!container) return;
+  const keys = Object.keys(deps || {});
+  if (keys.length === 0) {
+    container.innerHTML = `<div class="jobs-empty">No dependency info available.</div>`;
+    if (summary) summary.textContent = "—";
+    return;
+  }
+  // Summary count
+  let okCount = 0;
+  let warnCount = 0;
+  let failCount = 0;
+  keys.forEach((k) => {
+    const s = (deps[k]?.status || "error").toLowerCase();
+    if (s === "ok") okCount++;
+    else if (s === "installing") warnCount++;
+    else failCount++;
+  });
+  if (summary) {
+    summary.textContent = `${okCount}/${keys.length} ready` +
+      (warnCount ? ` · ${warnCount} installing` : "") +
+      (failCount ? ` · ${failCount} missing` : "");
+  }
+  container.innerHTML = keys.map((k) => {
+    const d = deps[k] || {};
+    const s = (d.status || "error").toLowerCase();
+    const label = DEP_LABELS[k] || k;
+    const dotClass = (s === "ok") ? "dot-ok"
+                   : (s === "installing") ? "dot-warn"
+                   : (s === "missing") ? "dot-danger"
+                   : "dot-unknown";
+    const stateText = (s === "ok") ? "ready"
+                    : (s === "installing") ? "installing…"
+                    : (s === "missing") ? "missing"
+                    : "error";
+    const msg = escapeHtml(d.message || "");
+    return `
+      <div class="dep-item">
+        <span class="dot ${dotClass}"></span>
+        <div class="dep-body">
+          <div class="dep-label">${escapeHtml(label)} · <span class="job-status-${(s === 'ok') ? 'completed' : (s === 'missing' || s === 'error') ? 'failed' : 'running'}">${stateText}</span></div>
+          ${msg ? `<div class="job-item-meta">${msg}</div>` : ""}
+        </div>
+      </div>
+    `;
+  }).join("");
 }
 
 function escapeHtml(s) {

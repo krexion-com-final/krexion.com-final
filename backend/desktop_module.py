@@ -176,9 +176,109 @@ async def _cloud_link_status() -> dict:
     return {"connected": False, "last_sync_age": None}
 
 
+def _feature_to_label(feature: str) -> str:
+    """Turn a bridge job's `feature` (e.g. 'visual-recorder/start',
+    'real-user-traffic/jobs', 'form-filler/jobs', 'adspower/create')
+    into a friendly label suitable for the Native dashboard's
+    'Active Heavy Jobs' / 'Recent Activity' rows. We don't want raw
+    REST-style identifiers on a customer-facing UI."""
+    if not feature:
+        return "job"
+    f = str(feature).strip().lower()
+    # Strip leading /api/ in case the cloud auto-route stored the full path
+    if f.startswith("/api/"):
+        f = f[5:]
+    f = f.strip("/")
+    # Pretty-print known prefixes — fallback to the prefix itself
+    mapping = {
+        "visual-recorder": "Visual Recorder",
+        "real-user-traffic": "Real User Traffic",
+        "rut": "Real User Traffic",
+        "form-filler": "Form Filler",
+        "proxies": "Proxy Check",
+        "adspower": "AdsPower",
+        "browser-profile": "Browser Profile",
+        "cpi": "CPI",
+        "system": "System",
+        "sync": "Sync",
+        "proxyjet": "ProxyJet",
+    }
+    head = f.split("/", 1)[0]
+    base = mapping.get(head, head.replace("-", " ").title() or "Job")
+    # Append sub-action when present (e.g. "Visual Recorder · start")
+    tail = f.split("/", 1)[1] if "/" in f else ""
+    if tail:
+        # Drop any UUID-looking trailing path segments
+        parts = [p for p in tail.split("/") if p and not _looks_like_id(p)]
+        if parts:
+            return f"{base} · {parts[0].replace('-', ' ')}"
+    return base
+
+
+def _looks_like_id(s: str) -> bool:
+    """Lightweight UUID/hex/int detector so we don't pollute job labels
+    with random ids like '7f3a...'. """
+    if not s:
+        return False
+    if "-" in s and len(s) >= 16:
+        return True
+    if len(s) >= 8 and all(c in "0123456789abcdefABCDEF" for c in s):
+        return True
+    if s.isdigit():
+        return True
+    return False
+
+
+def _bridge_detail(doc: dict) -> str:
+    """Extract a one-line human-readable detail from a bridge_jobs doc.
+    Order of preference:
+      1. payload.body.url           (RUT / VR / FF target page)
+      2. payload.path               (heavy-feature replay path)
+      3. error                       (when status=failed)
+      4. result.body.session_id     (VR session id, useful on Recent)
+    """
+    try:
+        payload = doc.get("payload") or {}
+        body = payload.get("body") if isinstance(payload, dict) else None
+        if isinstance(body, dict):
+            url = body.get("url") or body.get("offer_url") or body.get("target_url")
+            if url:
+                return str(url)[:80]
+            name = body.get("name") or body.get("label")
+            if name:
+                return str(name)[:80]
+        err = doc.get("error")
+        if err:
+            return f"⚠ {str(err)[:78]}"
+        path = (payload.get("path") if isinstance(payload, dict) else "") or ""
+        if path:
+            return str(path)[:80]
+        result = doc.get("result") or {}
+        if isinstance(result, dict):
+            rb = result.get("body") or {}
+            if isinstance(rb, dict):
+                sid = rb.get("session_id") or rb.get("job_id")
+                if sid:
+                    return f"id={str(sid)[:12]}"
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
 async def _active_and_recent_jobs() -> dict:
     """Pulls active + recent heavy jobs from the bridge_jobs collection
-    (which is what sync_client.py pulls from)."""
+    (which is what sync_client.py pulls from).
+
+    v2.1.59 fix: previously the queries used WRONG field names that
+    do not exist on bridge_jobs documents at all:
+        - projected `kind`     → actual field is `feature`
+        - projected `detail`   → no such field; derive from payload
+        - filtered `finished_at` and sorted on it → actual is `completed_at`
+        - filtered status `completed`/`error` → actual is `done`/`failed`
+    Net effect: Recent Activity panel ALWAYS showed "No recent activity"
+    even when many jobs were running/completing, and Active Heavy Jobs
+    only ever showed bare "job" rows with no description. This restored
+    the live activity feed the customer reported missing."""
     out = {"active": [], "recent": [], "throughput": {"jobs_per_hour": 0, "success_rate_pct": 0}}
     if _db is None:
         return out
@@ -186,7 +286,16 @@ async def _active_and_recent_jobs() -> dict:
         # 1. Active jobs (running or queued on this PC)
         cursor = _db.bridge_jobs.find(
             {"status": {"$in": ["pending", "running"]}},
-            projection={"_id": 0, "kind": 1, "status": 1, "started_at": 1, "created_at": 1, "detail": 1},
+            projection={
+                "_id": 0,
+                "feature": 1,
+                "status": 1,
+                "started_at": 1,
+                "created_at": 1,
+                "payload": 1,
+                "error": 1,
+                "result": 1,
+            },
             sort=[("created_at", -1)],
             limit=10,
         )
@@ -195,25 +304,36 @@ async def _active_and_recent_jobs() -> dict:
             start_iso = doc.get("started_at") or doc.get("created_at")
             ago = _humanise_age(start_iso, now)
             out["active"].append({
-                "kind": doc.get("kind") or "job",
+                "kind": _feature_to_label(doc.get("feature") or ""),
                 "status": doc.get("status") or "running",
-                "detail": (doc.get("detail") or "")[:80],
+                "detail": _bridge_detail(doc)[:80],
                 "started_ago": ago,
             })
 
-        # 2. Recent completed (last 8)
+        # 2. Recent completed/failed (last 8)
         cursor = _db.bridge_jobs.find(
-            {"status": {"$in": ["completed", "failed", "error"]}},
-            projection={"_id": 0, "kind": 1, "status": 1, "finished_at": 1, "detail": 1},
-            sort=[("finished_at", -1)],
+            {"status": {"$in": ["done", "failed"]}},
+            projection={
+                "_id": 0,
+                "feature": 1,
+                "status": 1,
+                "completed_at": 1,
+                "payload": 1,
+                "error": 1,
+                "result": 1,
+            },
+            sort=[("completed_at", -1)],
             limit=8,
         )
         async for doc in cursor:
-            finished = doc.get("finished_at")
+            finished = doc.get("completed_at")
+            # Map internal "done" → user-facing "completed" so the green
+            # badge css class (.job-status-completed) lights up.
+            disp_status = "completed" if doc.get("status") == "done" else (doc.get("status") or "completed")
             out["recent"].append({
-                "kind": doc.get("kind") or "job",
-                "status": doc.get("status") or "completed",
-                "detail": (doc.get("detail") or "")[:80],
+                "kind": _feature_to_label(doc.get("feature") or ""),
+                "status": disp_status,
+                "detail": _bridge_detail(doc)[:80],
                 "started_ago": _humanise_age(finished, now),
             })
 
@@ -222,9 +342,9 @@ async def _active_and_recent_jobs() -> dict:
             from datetime import timedelta
             since = now - timedelta(hours=1)
             since_iso = since.isoformat()
-            total = await _db.bridge_jobs.count_documents({"finished_at": {"$gte": since_iso}})
+            total = await _db.bridge_jobs.count_documents({"completed_at": {"$gte": since_iso}})
             ok = await _db.bridge_jobs.count_documents({
-                "finished_at": {"$gte": since_iso}, "status": "completed",
+                "completed_at": {"$gte": since_iso}, "status": "done",
             })
             out["throughput"] = {
                 "jobs_per_hour": total,
@@ -257,13 +377,85 @@ def _humanise_age(iso_value, now) -> str:
         return ""
 
 
+async def _dependency_health() -> dict:
+    """v2.1.59 — Single-shot check of every external dependency a Krexion
+    feature needs so the dashboard can show GREEN/YELLOW/RED for each
+    one and the customer knows which feature is usable.
+
+    Currently covers:
+        chromium      Playwright browser engine (RUT, Visual Recorder,
+                      Browser Profiles, Form Filler all need this)
+        playwright    The Python package itself
+        adb           Android Debug Bridge (CPI module — Android only)
+
+    Each entry: {status: "ok"|"installing"|"missing"|"error", message: str}
+    `status="ok"` means the feature that needs it WILL work right now.
+    Anything else is a clear, actionable hint the UI can show.
+    """
+    out: dict = {}
+
+    # ── Playwright package import ───────────────────────────────────
+    try:
+        import importlib
+        importlib.import_module("playwright.async_api")
+        out["playwright"] = {"status": "ok", "message": "package importable"}
+    except Exception as exc:  # noqa: BLE001
+        out["playwright"] = {
+            "status": "missing",
+            "message": f"playwright package not importable: {exc}",
+        }
+
+    # ── Playwright Chromium binary (the file Playwright actually runs) ─
+    try:
+        from real_user_traffic import get_engine_status  # type: ignore
+        engine = get_engine_status()
+        s = (engine or {}).get("status") or "error"
+        # Map the existing 4 states 1:1 — the names align with the
+        # rest of this dict for easy UI consumption.
+        out["chromium"] = {
+            "status": s,
+            "message": (engine or {}).get("message") or "",
+            "expected_revision": (engine or {}).get("expected_revision"),
+        }
+    except Exception as exc:  # noqa: BLE001
+        out["chromium"] = {
+            "status": "error",
+            "message": f"engine status helper failed: {str(exc)[:120]}",
+        }
+
+    # ── adb (Android Debug Bridge) — needed for the CPI Android flow ─
+    # Lazy: don't crash this whole endpoint if shutil is funky on the
+    # native install (we've seen weird PATH situations on Windows).
+    try:
+        import shutil as _sh
+        adb_path = _sh.which("adb")
+        if adb_path:
+            out["adb"] = {
+                "status": "ok",
+                "message": f"adb on PATH: {adb_path}",
+            }
+        else:
+            out["adb"] = {
+                "status": "missing",
+                "message": (
+                    "adb.exe not on PATH. Required for CPI Android flow. "
+                    "Install Android Platform-Tools or use the Krexion "
+                    "CPI worker which bundles it."
+                ),
+            }
+    except Exception as exc:  # noqa: BLE001
+        out["adb"] = {"status": "error", "message": str(exc)[:120]}
+
+    return out
+
+
 # ── Routes ──────────────────────────────────────────────────────────
 
 @desktop_router.get("/stats")
 async def desktop_stats():
     """One-shot snapshot the PyWebView dashboard polls every 2s. We
-    keep it heterogeneous (system + license + jobs + cloud-link) so
-    the dashboard makes ONE request, not five.
+    keep it heterogeneous (system + license + jobs + cloud-link +
+    dependency-health) so the dashboard makes ONE request, not five.
     """
     # Lazy import — keeps the cloud edge clean (system_info is shipped
     # with the desktop bundle, not necessarily present in production
@@ -285,6 +477,13 @@ async def desktop_stats():
         "active": [], "recent": [],
         "throughput": {"jobs_per_hour": 0, "success_rate_pct": 0},
     }
+    # v2.1.59 — dependency health so dashboard can show which features
+    # are usable right now vs still installing.
+    try:
+        deps = await _dependency_health() if _is_local_mode() else {}
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"dependency health check failed: {exc}")
+        deps = {}
 
     return {
         "ok": True,
@@ -295,6 +494,7 @@ async def desktop_stats():
         "cloud": cloud_link,
         "license": _read_license_summary(),
         "jobs": jobs,
+        "dependencies": deps,
         "ts": datetime.now(timezone.utc).isoformat(),
     }
 

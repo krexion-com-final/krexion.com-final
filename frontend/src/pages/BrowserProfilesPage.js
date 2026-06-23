@@ -441,7 +441,7 @@ export default function BrowserProfilesPage() {
                             <Shield className="w-3 h-3 mr-0.5" /> AD
                           </Badge>
                         )}
-                        <Badge variant="outline" className={`text-[10px] ${p.status === 'running' ? 'bg-emerald-950/40 border-emerald-700 text-emerald-300' : p.status === 'launching' ? 'bg-amber-950/40 border-amber-700 text-amber-300' : 'bg-zinc-900 border-zinc-700 text-zinc-400'}`}>
+                        <Badge variant="outline" className={`text-[10px] ${p.status === 'running' ? 'bg-emerald-950/40 border-emerald-700 text-emerald-300' : p.status === 'launching' ? 'bg-amber-950/40 border-amber-700 text-amber-300' : p.status === 'error' ? 'bg-red-950/40 border-red-700 text-red-300' : 'bg-zinc-900 border-zinc-700 text-zinc-400'}`}>
                           {p.status || "idle"}
                         </Badge>
                       </div>
@@ -480,6 +480,11 @@ export default function BrowserProfilesPage() {
                   </div>
                   {statusMap[p.id]?.message && (
                     <div className="mt-2 text-[10px] text-amber-300/80 italic">{statusMap[p.id].message}</div>
+                  )}
+                  {p.status === "error" && p.last_error && (
+                    <div className="mt-2 text-[10px] text-red-300/90 italic break-words" data-testid={`bp-last-error-${p.id}`}>
+                      ⚠ {p.last_error}
+                    </div>
                   )}
                 </CardContent>
               </Card>

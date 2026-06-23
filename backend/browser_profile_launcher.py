@@ -65,18 +65,155 @@ async def launch_profile_session(
     Returns:
         {"ok": bool, "session_id": ..., "duration_sec": ..., "error": ...}
     """
-    try:
-        from playwright.async_api import async_playwright
-    except ImportError:
-        return {"ok": False, "error": "Playwright not installed on this host"}
-
+    # ── 2026-07 (v2.1.59) crash-visibility wrapper ──────────────────────
+    # Customer report: Browser Profile "Launch" pressed → card chip
+    # stuck on "launching" forever, Chromium never opens. Root cause:
+    # every failure path BEFORE the in-body `on_session_update("running")`
+    # call (Playwright import error, browser launch crash, context
+    # creation OOM, proxy probe explosion, etc.) just `return`ed or
+    # raised — and since sync_client fires this function as a
+    # `asyncio.create_task(...)`, the exception was silently swallowed
+    # by the event loop. The cloud's `_bridge/session-update` endpoint
+    # was therefore NEVER notified, so the profile status was wedged
+    # at "launching" with no actionable error for the operator.
+    #
+    # Fix: outer try/except that ALWAYS notifies the cloud with the
+    # actual error, plus guaranteed cleanup of `_RUNNING_SESSIONS`.
     profile_id = str(profile_config.get("id") or "")
-    started_at = time.time()
-    _RUNNING_SESSIONS[session_id] = {
-        "profile_id": profile_id,
-        "started_at": started_at,
-        "stop_requested": False,
-    }
+
+    async def _notify_error(msg: str) -> None:
+        """Best-effort cloud notification so the UI un-sticks from
+        'launching' and shows the real reason. Failure here is logged
+        but never re-raised — we already have an error to report."""
+        logger.warning(f"[profile-launch] session={session_id[:8]} ERROR: {msg}")
+        if on_session_update is None:
+            return
+        try:
+            await on_session_update({
+                "profile_id": profile_id,
+                "session_id": session_id,
+                "status": "error",
+                "error_message": msg,
+            })
+        except Exception as _nerr:  # noqa: BLE001
+            logger.warning(f"[profile-launch] error notify itself failed: {_nerr}")
+
+    try:
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError as _ie:
+            await _notify_error(
+                "Playwright is not installed on this host. The Krexion "
+                "desktop install should auto-bundle it; please reinstall "
+                "or run `python -m playwright install chromium` manually."
+            )
+            return {"ok": False, "error": f"Playwright not installed: {_ie}"}
+
+        # ── v2.1.59 Pre-flight: Chromium binary readiness check ─────────
+        # On a fresh Krexion install the PowerShell installer tries to
+        # download the pre-bundled Chromium ZIP from GitHub Releases —
+        # when that step is skipped/fails it logs:
+        #   "Krexion backend will auto-download Chromium on first launch"
+        # The actual download is then kicked off in the backend's
+        # startup hook (_ensure_playwright_chromium) and runs for ~60s.
+        # If the customer clicks Launch on a Browser Profile DURING that
+        # window, Playwright's `chromium.launch()` raises a cryptic
+        # "Executable doesn't exist at ..." error. We pre-check the
+        # binary HERE and surface a friendly status that the UI can
+        # render — auto-triggering the install if it hasn't started yet,
+        # so the customer's next click "just works" after ~60-90s.
+        try:
+            from real_user_traffic import get_engine_status, _ensure_chromium_available  # type: ignore
+            engine = get_engine_status()
+            estatus = (engine or {}).get("status") or "error"
+            if estatus == "ready":
+                pass  # All good — proceed to launch
+            elif estatus == "installing":
+                await _notify_error(
+                    "Chromium browser engine is still downloading "
+                    "(~150 MB). Please wait ~60 seconds and click "
+                    "Launch again."
+                )
+                return {"ok": False, "session_id": session_id,
+                        "error": "chromium_installing"}
+            elif estatus == "missing":
+                # Kick off the install in the background and tell the
+                # operator to retry. We deliberately don't await here —
+                # the download takes too long for a synchronous UI click.
+                try:
+                    asyncio.create_task(_ensure_chromium_available())
+                except Exception:  # noqa: BLE001
+                    pass
+                await _notify_error(
+                    "Chromium browser engine is missing — downloading "
+                    "it now (~150 MB, takes ~60-90 seconds). Click "
+                    "Launch again once this banner clears."
+                )
+                return {"ok": False, "session_id": session_id,
+                        "error": "chromium_missing_install_started"}
+            else:
+                # 'error' or unknown — fall through to the actual launch
+                # so Playwright surfaces its native error (better than
+                # blocking on a metadata read glitch).
+                logger.warning(
+                    f"[profile-launch] chromium engine status='{estatus}' "
+                    f"(msg={(engine or {}).get('message','')}); continuing anyway"
+                )
+        except ImportError:
+            # real_user_traffic helper isn't available in this build —
+            # not fatal, just skip the pre-check and let Playwright handle it.
+            logger.debug("[profile-launch] engine status helper not importable; skipping pre-check")
+        except Exception as _ge:  # noqa: BLE001
+            logger.debug(f"[profile-launch] chromium pre-check skipped: {_ge}")
+
+        started_at = time.time()
+        _RUNNING_SESSIONS[session_id] = {
+            "profile_id": profile_id,
+            "started_at": started_at,
+            "stop_requested": False,
+        }
+
+        try:
+            return await _launch_profile_session_inner(
+                profile_config,
+                session_id=session_id,
+                start_url=start_url,
+                on_session_update=on_session_update,
+                async_playwright=async_playwright,
+                started_at=started_at,
+                profile_id=profile_id,
+            )
+        except Exception as _inner_err:  # noqa: BLE001
+            # Surface launch crash to the cloud + frontend UI
+            import traceback as _tb
+            tb_short = _tb.format_exc()[:600]
+            logger.warning(
+                f"[profile-launch] launch crashed: {type(_inner_err).__name__}: "
+                f"{_inner_err}\n{tb_short}"
+            )
+            await _notify_error(
+                f"{type(_inner_err).__name__}: {str(_inner_err)[:240]}"
+            )
+            return {"ok": False, "session_id": session_id, "error": str(_inner_err)}
+    finally:
+        # ALWAYS reclaim the session slot so a hard-crashing launch
+        # doesn't leak _RUNNING_SESSIONS entries forever (used by the
+        # /stop endpoint to find the right session).
+        _RUNNING_SESSIONS.pop(session_id, None)
+
+
+async def _launch_profile_session_inner(
+    profile_config: Dict[str, Any],
+    *,
+    session_id: str,
+    start_url: str,
+    on_session_update: Optional[Any],
+    async_playwright: Any,
+    started_at: float,
+    profile_id: str,
+) -> Dict[str, Any]:
+    """Real launch flow — kept separate so the outer wrapper can centralise
+    crash-notification + cleanup. All previous behaviour preserved."""
 
     ua = profile_config.get("user_agent") or ""
     viewport = profile_config.get("viewport") or {"width": 1920, "height": 1080}
