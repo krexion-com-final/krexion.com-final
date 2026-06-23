@@ -10430,6 +10430,115 @@ def _extract_text_click_label(script: Any) -> Optional[str]:
     return t or None
 
 
+def _extract_selectors_from_evaluate_js(script: Any) -> List[str]:
+    """v2.1.60 — Pull every CSS / id selector referenced from a Visual-
+    Recorder-emitted evaluate script so the engine can pre-wait for the
+    element BEFORE running `page.evaluate(js)`.
+
+    Customer report (v2.1.59 follow-up): Live RUT grid showed many
+    failures saying `REQUIRED step N of M (evaluate ...) did not
+    complete` — but ONLY on some visits, same offer config, same steps.
+    Root cause: the evaluate script does
+        `document.querySelector('#submit-btn').click()`
+    immediately, with zero wait. On fast page loads the button is
+    already in the DOM → click works. On slow proxies / slow pages /
+    SPA re-renders the button arrives a few hundred ms later →
+    `querySelector(...)` returns `null` → `.click()` throws TypeError
+    → step marked as required-failure → whole visit aborted.
+
+    This helper finds the selectors used inside the JS so the caller
+    can do a bounded `page.wait_for_selector(sel, state="attached")`
+    before running the script. The pre-wait is a no-op when the
+    element is already there (current happy path) and adds the missing
+    robustness on slow page loads (current broken path).
+
+    Patterns we recognise (all the ones our Visual Recorder emits):
+        document.querySelector('CSS')
+        document.querySelectorAll('CSS')[i]
+        document.getElementById('id')
+        el = document.querySelector('CSS')   (with optional `var`/`let`/`const`)
+
+    Only the FIRST few selectors (max 4) are returned — past that the
+    script is probably doing complex DOM walking that we shouldn't
+    try to second-guess.
+    """
+    import re as _re
+    if not isinstance(script, str) or not script:
+        return []
+    out: List[str] = []
+    seen: set = set()
+
+    def _add(sel: str) -> None:
+        sel = sel.strip()
+        if not sel or sel in seen:
+            return
+        # Reject obvious template placeholders we can't wait on
+        if "{{" in sel or "}}" in sel:
+            return
+        seen.add(sel)
+        out.append(sel)
+
+    # document.getElementById('foo') / "foo"
+    for m in _re.finditer(r"getElementById\(\s*['\"]([^'\"]+)['\"]\s*\)", script):
+        _add(f"#{m.group(1)}")
+        if len(out) >= 4:
+            return out
+
+    # document.querySelector('...') / document.querySelectorAll('...')
+    # Allow ` ` (space) inside the selector but stop at the quote.
+    for m in _re.finditer(
+        r"querySelector(?:All)?\(\s*['\"]([^'\"\n]+)['\"]\s*\)",
+        script,
+    ):
+        _add(m.group(1))
+        if len(out) >= 4:
+            return out
+
+    return out
+
+
+async def _pre_wait_for_evaluate_selectors(
+    page: Any,
+    js_script: str,
+    timeout_ms: int,
+) -> None:
+    """v2.1.60 — Best-effort pre-wait so synthetic evaluate scripts don't
+    race the page render.
+
+    Strategy:
+      1. Extract selectors from `js_script`.
+      2. For each selector, call page.wait_for_selector(state="attached")
+         with a bounded timeout (cap individual waits at the smaller of
+         `timeout_ms` or 12s so a slow proxy can't stall the entire
+         visit waiting forever for one missing button).
+      3. Swallow timeouts silently — the actual evaluate() call below
+         still runs and will either work (rare race recovered) or fail
+         with its own error (which keeps existing diagnostics intact).
+
+    This is purely additive: removes a race that was already there,
+    never breaks a currently-working flow.
+    """
+    if not page or not js_script:
+        return
+    selectors = _extract_selectors_from_evaluate_js(js_script)
+    if not selectors:
+        return
+    per_sel_cap = min(int(timeout_ms or 12000), 12000)
+    if per_sel_cap < 500:
+        per_sel_cap = 500
+    for sel in selectors:
+        try:
+            # Use 'attached' (in DOM) not 'visible' — many click targets
+            # are rendered off-screen / behind anti-detect overlays but
+            # still receive clicks correctly.
+            await page.wait_for_selector(sel, state="attached", timeout=per_sel_cap)
+        except Exception:
+            # Don't fail the visit just because the pre-wait timed out.
+            # The real evaluate() below will surface a clean error if
+            # the element is truly missing.
+            continue
+
+
 async def _native_click_by_text(page: Any, text: str, timeout_ms: int = 8000) -> Tuple[bool, str, str]:
     """Click an element by visible text using Playwright's native
     locator API. Searches the main frame AND every sub-frame
@@ -12296,6 +12405,17 @@ async def _execute_automation_steps(
                     # normally to the next step. The downstream
                     # wait_for_load_state below handles the new page.
                     if not _native_handled:
+                        # v2.1.60 — pre-wait for selectors referenced
+                        # inside the JS. Fixes the inconsistent
+                        # "REQUIRED step N of M (evaluate ...) did not
+                        # complete" failures where the same step works
+                        # on fast page loads but fails on slow proxies
+                        # because `document.querySelector(...).click()`
+                        # races the DOM and returns null.
+                        try:
+                            await _pre_wait_for_evaluate_selectors(page, js, timeout)
+                        except Exception:
+                            pass
                         try:
                             await page.evaluate(js)
                         except Exception as _ev_err:
@@ -13692,6 +13812,14 @@ async def _dispatch_single_action(page: Page, action: str, selector: str,
             await page.evaluate(f"window.scrollBy(0,{int(step.get('y') or 500)})")
     elif action == "evaluate":
         js = _substitute(step.get("script") or step.get("js") or "", row)
+        # v2.1.60 — same pre-wait race fix as the main handler.
+        # Without this, a self-heal retry on a slow-loading page hits
+        # the same `querySelector(...).click()` null-deref the original
+        # step did, just with extra latency added by the heal pass.
+        try:
+            await _pre_wait_for_evaluate_selectors(page, js, timeout)
+        except Exception:
+            pass
         # Mirror the navigation-aware behaviour from
         # _execute_automation_steps so single-step self-heal and other
         # callers also benefit from waiting on JS-triggered navigation.

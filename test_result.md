@@ -139,6 +139,97 @@ backend:
     stuck_count: 0
     priority: "high"
     needs_retesting: false
+
+  - task: "RUT evaluate-step race condition fix — pre-wait for selector before page.evaluate()"
+    implemented: true
+    working: "NA"
+    file: "backend/real_user_traffic.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: false
+        agent: "user"
+        comment: |
+          "mein ne job chalai es mein bht se visit pr error a rha … step ni mile
+          pr step add hai already kuch pr step thk kaam kie hein pr kuch pr
+          error a raha hai" — same job + same step config, but visits inconsistently
+          fail with "❌ REQUIRED step N of M (evaluate ...) did not complete".
+          Screenshot showed multiple visits failing at evaluate #submit-btn /
+          various step indices (4, 5, 28, 29 of 46), while other visits on the
+          same job succeeded past those steps.
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Root cause: Visual Recorder emits `evaluate` steps containing literal
+          DOM-access JS like `document.querySelector('#submit-btn').click()` —
+          executed via `page.evaluate(js)` with ZERO wait for the selector to
+          exist in the DOM first. On fast page loads the element is already
+          there → click works. On slow proxies / SPA re-renders / slow mobile
+          sims the element renders a few hundred ms after page load →
+          querySelector returns null → .click() throws TypeError → step
+          required-fails → whole visit aborts. Pure race condition explaining
+          the inconsistent pattern: same step works on fast loads, fails on
+          slow loads.
+
+          Fix applied in backend/real_user_traffic.py:
+          1) Added `_extract_selectors_from_evaluate_js(script)`:
+             parses the JS string for querySelector / querySelectorAll /
+             getElementById references (the patterns our Visual Recorder
+             actually emits) and returns up to 4 selectors. Skips template
+             placeholders, dedupes, handles single + double quotes.
+          2) Added `_pre_wait_for_evaluate_selectors(page, js, timeout_ms)`:
+             best-effort `page.wait_for_selector(state="attached")` for each
+             selector with per-selector cap of 12s (so a single missing
+             element can't waste an entire 60s step budget) and min floor
+             of 500ms (proxy round-trip alone often > 100ms). Swallows
+             all exceptions — if pre-wait fails, the real evaluate() runs
+             and surfaces its own diagnostic (existing behaviour preserved).
+          3) Wired the pre-wait into BOTH evaluate call sites:
+             - Main handler in `_execute_automation_steps`
+               (the one customers hit on every step)
+             - Single-step dispatch in `_dispatch_single_action`
+               (self-heal retry path)
+
+          Tests: 19 new tests in tests/test_rut_evaluate_prewait.py — all pass.
+          Cover extraction (10 cases) + async pre-wait behaviour (9 cases
+          including timeout swallowing, per-sel cap, min floor, continue
+          after-failure, None-page safety).
+
+agent_communication:
+  - agent: "main"
+    message: |
+      v2.1.60 RUT evaluate-step race fix applied. Combined test count: 44/44 pass.
+        tests/test_desktop_stats_fix.py            → 11/11
+        tests/test_browser_profile_launch_fix.py   →  6/6
+        tests/test_dependency_health.py            →  8/8
+        tests/test_rut_evaluate_prewait.py         → 19/19  (NEW)
+
+      Please verify:
+      1. Run the new test suite (`tests/test_rut_evaluate_prewait.py`) and
+         confirm all 19 tests pass.
+      2. Re-run all 4 test files together to confirm no test-isolation
+         regression (sibling test files inject sys.modules stubs that
+         previously broke this test file — now defensively overridden).
+      3. Read the two new helpers in real_user_traffic.py and confirm:
+           a) `_extract_selectors_from_evaluate_js` returns ≤ 4 selectors,
+              dedupes, skips `{{var}}` placeholders, supports single AND
+              double quotes, prepends `#` to getElementById matches
+           b) `_pre_wait_for_evaluate_selectors` calls
+              page.wait_for_selector(state="attached", timeout=min(12s, ms))
+              for each extracted selector, swallows ALL exceptions (incl.
+              asyncio.TimeoutError and generic Exception), and is safe to
+              call with `page=None`.
+      4. Confirm the pre-wait is wired in TWO call sites:
+           - Line ~12298: `if not _native_handled:` block in
+             _execute_automation_steps (main per-step handler)
+           - Line ~13695: top of the `elif action == "evaluate":` branch
+             in _dispatch_single_action (single-step + self-heal dispatch)
+         Each call site MUST guard with try/except so a malformed JS or
+         a None page can't take down the visit.
+
+      Non-breaking: pure additive — selectors not found = no waits = same
+      old behaviour. No DB schema, no API contract changes.
     status_history:
       - working: false
         agent: "user"
