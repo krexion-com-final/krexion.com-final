@@ -7541,7 +7541,15 @@ async def rut_preview_data_file(
             )
             if not doc:
                 raise HTTPException(status_code=404, detail="Uploaded data file not found")
-            file_path = doc.get("file_path")
+            # 2026-06 — Prefer remaining_file_path (rows still unused);
+            # fall back to file_path (original master). This way the
+            # preview reflects what an actual job would consume.
+            remaining_fp = (doc.get("remaining_file_path") or "").strip()
+            file_path = (
+                remaining_fp
+                if (remaining_fp and Path(remaining_fp).exists())
+                else doc.get("file_path")
+            )
             if not file_path or not Path(file_path).exists():
                 raise HTTPException(status_code=404, detail="Uploaded data file no longer on disk")
             content = Path(file_path).read_bytes()
@@ -17022,6 +17030,11 @@ class UploadedResourceResponse(BaseModel):
     depleted: bool = False                  # all items consumed; batch kept for record
     depleted_at: Optional[str] = None       # ISO timestamp when depleted=True
     last_synced_at: Optional[str] = None    # ISO timestamp of last gsheet refresh
+    has_remaining_file: bool = False        # 2026-06 — True for data_file uploads
+                                             # that have an auto-maintained
+                                             # remaining-leads file ready to
+                                             # download (after at least one
+                                             # job has consumed rows).
     created_at: datetime
 
 
@@ -17047,6 +17060,9 @@ def _upload_doc_to_response(doc: dict) -> dict:
     depleted = bool(doc.get("depleted")) or (
         original_item_count > 0 and available_count == 0 and consumed_count > 0
     )
+    # 2026-06 — flag whether a downloadable remaining-leads file exists
+    remaining_fp = (doc.get("remaining_file_path") or "").strip()
+    has_remaining_file = bool(remaining_fp) and Path(remaining_fp).exists()
     return {
         "id": doc["id"],
         "user_id": doc.get("user_id", ""),
@@ -17066,6 +17082,7 @@ def _upload_doc_to_response(doc: dict) -> dict:
         "depleted": depleted,
         "depleted_at": doc.get("depleted_at"),
         "last_synced_at": doc.get("last_synced_at"),
+        "has_remaining_file": has_remaining_file,
         "created_at": doc.get("created_at", datetime.now(timezone.utc)).isoformat() if isinstance(doc.get("created_at"), datetime) else (doc.get("created_at") or ""),
     }
 
@@ -17695,6 +17712,13 @@ async def delete_upload(
             Path(fp).unlink(missing_ok=True)
         except Exception:
             pass
+    # 2026-06 — also clean up the auto-maintained remaining-leads file
+    remaining_fp = (doc.get("remaining_file_path") or "").strip()
+    if remaining_fp:
+        try:
+            Path(remaining_fp).unlink(missing_ok=True)
+        except Exception:
+            pass
     await user_db["uploaded_resources"].delete_one({"id": upload_id, "user_id": current_user["id"]})
     return {"ok": True, "deleted_id": upload_id}
 
@@ -17721,13 +17745,20 @@ async def bulk_delete_uploads(
     user_db = get_user_db(current_user["id"])
     docs = await user_db["uploaded_resources"].find(
         {"id": {"$in": ids}, "user_id": current_user["id"]},
-        {"_id": 0, "id": 1, "file_path": 1},
+        {"_id": 0, "id": 1, "file_path": 1, "remaining_file_path": 1},
     ).to_list(length=len(ids))
     for d in docs:
         fp = d.get("file_path")
         if fp:
             try:
                 Path(fp).unlink(missing_ok=True)
+            except Exception:
+                pass
+        # 2026-06 — also clean up auto-maintained remaining-leads file
+        remaining_fp = (d.get("remaining_file_path") or "").strip()
+        if remaining_fp:
+            try:
+                Path(remaining_fp).unlink(missing_ok=True)
             except Exception:
                 pass
     res = await user_db["uploaded_resources"].delete_many(
@@ -17749,6 +17780,8 @@ async def bulk_delete_uploads(
 @api_router.get("/uploads/{upload_id}/download")
 async def download_upload(
     upload_id: str,
+    which: str = "original",   # 2026-06 — "original" (default, master upload)
+                               # or "remaining" (auto-maintained unused-leads file)
     current_user: dict = Depends(get_current_user_with_fresh_data),
 ):
     check_user_feature(current_user, "real_user_traffic")
@@ -17763,6 +17796,33 @@ async def download_upload(
         raise HTTPException(
             status_code=400,
             detail="Download is only available for data files (Excel/CSV uploads).",
+        )
+    which = (which or "original").strip().lower()
+    if which == "remaining":
+        # 2026-06 — Auto-maintained pending-leads file. The user
+        # explicitly asked for this:
+        #   "data file jo 1857 reh gi wo download b ho sake"
+        # Returns 410 if no job has consumed rows yet (no file to send).
+        remaining_fp = (doc.get("remaining_file_path") or "").strip()
+        if not remaining_fp or not Path(remaining_fp).exists():
+            raise HTTPException(
+                status_code=410,
+                detail="No remaining-leads file yet — run a job first or all rows have been consumed.",
+            )
+        base_name = doc.get("file_name") or "data_file.xlsx"
+        # Insert "_remaining" before the extension for clarity
+        try:
+            stem, dot, ext = base_name.rpartition(".")
+            if dot:
+                dl_name = f"{stem}_remaining.{ext}"
+            else:
+                dl_name = f"{base_name}_remaining.xlsx"
+        except Exception:
+            dl_name = "data_file_remaining.xlsx"
+        return FileResponse(
+            path=remaining_fp,
+            filename=dl_name,
+            media_type="application/octet-stream",
         )
     fp = doc.get("file_path")
     if not fp or not Path(fp).exists():
@@ -18068,6 +18128,15 @@ async def _load_upload_data_file(user_id: str, upload_id: str) -> Optional[Tuple
             return None
 
     # ── Static file path ────────────────────────────────────────────
+    # 2026-06 — Prefer the auto-maintained `remaining_file_path` if it
+    # exists (rows that haven't been consumed yet). The original
+    # `file_path` is preserved untouched so the user can always
+    # re-download the master upload. New jobs against the same upload
+    # automatically see only the unused rows — no manual re-upload
+    # of pending leads needed.
+    remaining_fp = (doc.get("remaining_file_path") or "").strip()
+    if remaining_fp and Path(remaining_fp).exists():
+        return (remaining_fp, doc.get("file_name") or "leads.xlsx")
     fp = doc.get("file_path")
     if not fp or not Path(fp).exists():
         return None
@@ -18332,18 +18401,39 @@ async def _consume_uploads(
                         logger.debug(f"pending_leads row count failed: {e}")
 
                     prev_item_count = int(doc.get("item_count") or 0)
+                    # ── 2026-06 — Preserve the ORIGINAL uploaded file ──
+                    # User explicitly requested: "jo lead row use ho wo
+                    # actual file se delete na ho, aik new file ban jay
+                    # ta k har bar pending lead download kr k dobara
+                    # na upload krni pare."
+                    # New behaviour:
+                    #   • `file_path`  → ORIGINAL upload (immutable —
+                    #                     1920 rows stay as 1920).
+                    #   • `remaining_file_path` → auto-maintained Excel
+                    #                     of unused rows (1857 etc.),
+                    #                     regenerated after every job.
+                    # Next job that uses this upload_id reads from
+                    # `remaining_file_path` (see _load_upload_data_file).
+                    user_dir = UPLOADS_DATA_DIR / user_id
+                    try:
+                        user_dir.mkdir(parents=True, exist_ok=True)
+                    except Exception:
+                        pass
+                    remaining_fp = str(user_dir / f"{up_id}__remaining.xlsx")
+                    old_remaining_fp = (doc.get("remaining_file_path") or "").strip()
                     if pending_rows == 0:
-                        # All rows consumed → free the disk file but KEEP
-                        # the DB entry as a depleted record.
-                        if current_fp:
+                        # Every available row consumed → clear remaining
+                        # file (free disk) but KEEP the original file_path
+                        # so the user can still download the master copy.
+                        if old_remaining_fp:
                             try:
-                                Path(current_fp).unlink(missing_ok=True)
+                                Path(old_remaining_fp).unlink(missing_ok=True)
                             except Exception:
                                 pass
                         consumed_inc = max(0, prev_item_count)
                         update_set = {
                             "item_count": 0,
-                            "file_path": None,
+                            "remaining_file_path": None,
                             "updated_at": now_iso,
                         }
                         if not doc.get("depleted"):
@@ -18357,26 +18447,30 @@ async def _consume_uploads(
                             update_op,
                         )
                     elif pending_rows > 0:
-                        # Replace stored file with the pending leads file
+                        # Write the pending file as the AUTO-MAINTAINED
+                        # remaining-leads copy (not as a replacement of
+                        # the original). The original file_path stays
+                        # untouched so the user can re-download the
+                        # 1920-row master at any time.
                         consumed_inc = max(0, prev_item_count - pending_rows)
-                        if current_fp:
-                            try:
-                                import shutil
-                                shutil.copyfile(str(pending_p), current_fp)
-                                update_set = {
-                                    "updated_at": now_iso,
-                                    "item_count": pending_rows,
-                                    "row_count": pending_rows,
-                                }
-                                update_op = {"$set": update_set}
-                                if consumed_inc:
-                                    update_op["$inc"] = {"consumed_count": consumed_inc}
-                                await user_db["uploaded_resources"].update_one(
-                                    {"id": up_id, "user_id": user_id},
-                                    update_op,
-                                )
-                            except Exception as e:
-                                logger.warning(f"data_file pending replace failed: {e}")
+                        try:
+                            import shutil
+                            shutil.copyfile(str(pending_p), remaining_fp)
+                            update_set = {
+                                "updated_at": now_iso,
+                                "item_count": pending_rows,
+                                "row_count": pending_rows,
+                                "remaining_file_path": remaining_fp,
+                            }
+                            update_op = {"$set": update_set}
+                            if consumed_inc:
+                                update_op["$inc"] = {"consumed_count": consumed_inc}
+                            await user_db["uploaded_resources"].update_one(
+                                {"id": up_id, "user_id": user_id},
+                                update_op,
+                            )
+                        except Exception as e:
+                            logger.warning(f"data_file remaining file write failed: {e}")
                 # else: pending file missing — leave batch + file untouched
                 # so the user doesn't lose their data on a failed run.
     except Exception as e:

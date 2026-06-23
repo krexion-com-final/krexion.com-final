@@ -580,9 +580,13 @@ export default function UploadedThingsPage() {
   // type only). Uses fetch+blob so we can pass the Authorization
   // header (a plain <a href=...> can't carry headers). Falls back to
   // the upload's display name if the original filename is gone.
-  const downloadOne = async (u) => {
+  // 2026-06 — `which` ("original" | "remaining") lets the user grab
+  // the auto-maintained pending-leads file (1857 of 1920 etc.) without
+  // having to re-upload anything.
+  const downloadOne = async (u, which = "original") => {
     try {
       const r = await axios.get(`${API}/uploads/${u.id}/download`, {
+        params: { which },
         headers: { Authorization: `Bearer ${token}` },
         responseType: "blob",
       });
@@ -590,13 +594,22 @@ export default function UploadedThingsPage() {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = u.file_name || `${u.name || "data_file"}.xlsx`;
+      const baseName = u.file_name || `${u.name || "data_file"}.xlsx`;
+      a.download = which === "remaining"
+        ? baseName.replace(/(\.[a-zA-Z0-9]+)?$/, "_remaining$1")
+        : baseName;
       document.body.appendChild(a);
       a.click();
       a.remove();
       window.URL.revokeObjectURL(url);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Download failed");
+      const detail =
+        e?.response?.data?.detail ||
+        (e?.response?.status === 410
+          ? "No remaining-leads file yet — run a job first."
+          : null) ||
+        "Download failed";
+      toast.error(detail);
     }
   };
 
@@ -1291,7 +1304,19 @@ export default function UploadedThingsPage() {
                         onClick={() => downloadOne(u)}
                         className="text-emerald-400 hover:text-emerald-300 hover:bg-emerald-900/20"
                         data-testid={`ut-dl-${u.id}`}
-                        title="Download original file"
+                        title="Download ORIGINAL master file (all rows, untouched)"
+                      >
+                        <Download size={16} />
+                      </Button>
+                    )}
+                    {canDownload && u.has_remaining_file && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => downloadOne(u, "remaining")}
+                        className="text-amber-400 hover:text-amber-300 hover:bg-amber-900/20"
+                        data-testid={`ut-dl-remaining-${u.id}`}
+                        title={`Download REMAINING leads (${u.available_count} of ${u.original_item_count} unused)`}
                       >
                         <Download size={16} />
                       </Button>

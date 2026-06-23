@@ -3788,11 +3788,21 @@ export default function RealUserTrafficPage() {
                         data-testid="rut-upload-data-id"
                       >
                         <option value="">— upload manually below —</option>
-                        {uploadedLibrary.filter(u => u.type === "data_file").map((u) => (
-                          <option key={u.id} value={u.id}>
-                            {u.name} · {u.item_count} rows · {u.file_name}
-                          </option>
-                        ))}
+                        {uploadedLibrary.filter(u => u.type === "data_file").map((u) => {
+                          // 2026-06 — Show "1857 / 1920" when some rows
+                          // have already been consumed, so the user
+                          // knows the file auto-skips used leads.
+                          const original = u.original_item_count || u.item_count || 0;
+                          const available = u.available_count != null ? u.available_count : u.item_count;
+                          const countLabel = (u.consumed_count > 0 && available !== original)
+                            ? `${available} / ${original} rows`
+                            : `${available} rows`;
+                          return (
+                            <option key={u.id} value={u.id}>
+                              {u.name} · {countLabel} · {u.file_name}
+                            </option>
+                          );
+                        })}
                       </select>
                     </div>
                   )}
@@ -3815,7 +3825,9 @@ export default function RealUserTrafficPage() {
                     className="bg-zinc-800 border-zinc-700 text-zinc-100 file:text-zinc-100 file:bg-zinc-700 file:border-0 file:rounded disabled:opacity-50"
                   />
                   {selectedUploadDataId && (
-                    <p className="text-xs text-zinc-500">Using uploaded batch (will auto-delete after job)</p>
+                    <p className="text-xs text-zinc-500">
+                      Using saved batch · used rows are tracked automatically — original file stays intact, a separate "remaining" file is auto-maintained.
+                    </p>
                   )}
 
                   {/* ── Data file analysis: detected states + filter ────────── */}
