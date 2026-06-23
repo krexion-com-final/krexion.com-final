@@ -497,6 +497,11 @@ export default function RealUserTrafficPage() {
   const [dataPreview, setDataPreview] = useState(null);     // {total_rows, states:[{code,count}], quality, ...}
   const [previewLoading, setPreviewLoading] = useState(false);
   const [selectedStates, setSelectedStates] = useState([]); // [] = no filter (use all)
+  // ── 2026-06 — Email-domain filter (gmail / yahoo / hotmail …) ──
+  // Mirrors `selectedStates`. Empty = no filter (use all rows whose
+  // email is present). When a subset is ticked, only rows with those
+  // domains pass through to the job.
+  const [selectedEmailDomains, setSelectedEmailDomains] = useState([]);
   const [invalidDetectionEnabled, setInvalidDetectionEnabled] = useState(false);
   const [skipCaptcha, setSkipCaptcha] = useState(true);
   const [postSubmitWait, setPostSubmitWait] = useState(6);
@@ -954,6 +959,7 @@ export default function RealUserTrafficPage() {
     setPreviewLoading(true);
     setDataPreview(null);
     setSelectedStates([]);
+    setSelectedEmailDomains([]);
     try {
       const fd = new FormData();
       if (fileObj) fd.append("file", fileObj);
@@ -970,6 +976,11 @@ export default function RealUserTrafficPage() {
       // Default: pre-select all detected states so user can deselect
       const codes = (d.states || []).map((s) => s.code);
       setSelectedStates(codes);
+      // 2026-06 — Default: pre-select all detected email domains so
+      // current behaviour is unchanged (filter ON only when user
+      // deselects some).
+      const domains = (d.email_domains || []).map((e) => e.domain);
+      setSelectedEmailDomains(domains);
     } catch (e) {
       toast.error(`Could not analyze data file: ${e.message || e}`);
     } finally {
@@ -1667,6 +1678,18 @@ export default function RealUserTrafficPage() {
           selectedStates.length < dataPreview.states.length
         ) {
           fd.append("selected_states", selectedStates.join(","));
+        }
+        // 2026-06 — Email-domain subset: same semantics as states.
+        // Only send when user has narrowed to a subset of detected
+        // domains; empty string = no filter (backend uses all rows).
+        if (
+          dataPreview &&
+          dataPreview.email_domains &&
+          dataPreview.email_domains.length > 0 &&
+          selectedEmailDomains.length > 0 &&
+          selectedEmailDomains.length < dataPreview.email_domains.length
+        ) {
+          fd.append("selected_email_domains", selectedEmailDomains.join(","));
         }
         fd.append("invalid_detection_enabled", String(invalidDetectionEnabled));
         fd.append("skip_captcha", String(skipCaptcha));
@@ -3758,6 +3781,7 @@ export default function RealUserTrafficPage() {
                           } else {
                             setDataPreview(null);
                             setSelectedStates([]);
+                            setSelectedEmailDomains([]);
                           }
                         }}
                         className="w-full h-8 px-2 rounded bg-zinc-800 border border-zinc-700 text-zinc-100 text-xs"
@@ -3784,6 +3808,7 @@ export default function RealUserTrafficPage() {
                       } else {
                         setDataPreview(null);
                         setSelectedStates([]);
+                        setSelectedEmailDomains([]);
                       }
                     }}
                     disabled={!!selectedUploadDataId}
@@ -3886,6 +3911,84 @@ export default function RealUserTrafficPage() {
                         </div>
                       )}
 
+                      {/* ── 2026-06 Email-domain filter (gmail / yahoo / hotmail …) ── */}
+                      {dataPreview.email_domains && dataPreview.email_domains.length > 0 && (
+                        <div className="space-y-1.5 border-t border-emerald-900/40 pt-2 mt-2" data-testid="rut-email-filter-block">
+                          <div className="flex items-center justify-between">
+                            <div className="text-[12px] font-semibold text-emerald-200">
+                              📧 Email-domain filter
+                              <span className="text-emerald-300/70 font-normal"> · {dataPreview.email_domains.length} domain{dataPreview.email_domains.length !== 1 ? "s" : ""} detected</span>
+                            </div>
+                            <div className="flex gap-1 text-[11px]">
+                              <button
+                                type="button"
+                                onClick={() => setSelectedEmailDomains(dataPreview.email_domains.map((d) => d.domain))}
+                                className="px-2 py-0.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-100 rounded"
+                                data-testid="rut-email-select-all"
+                              >
+                                Select all
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setSelectedEmailDomains([])}
+                                className="px-2 py-0.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-100 rounded"
+                                data-testid="rut-email-clear-all"
+                              >
+                                Clear all
+                              </button>
+                            </div>
+                          </div>
+                          <div className="text-[11px] text-emerald-200/70">
+                            Tick which email providers this job should run on (only rows whose email is at those domains).
+                          </div>
+                          <div className="flex flex-wrap gap-1.5" data-testid="rut-email-list">
+                            {dataPreview.email_domains.map((e) => {
+                              const checked = selectedEmailDomains.includes(e.domain);
+                              return (
+                                <label
+                                  key={e.domain}
+                                  className={`px-2 py-1 rounded text-xs flex items-center gap-1.5 cursor-pointer border transition ${
+                                    checked
+                                      ? "bg-emerald-600/30 border-emerald-500 text-emerald-100"
+                                      : "bg-zinc-900 border-zinc-700 text-zinc-400 hover:border-zinc-500"
+                                  }`}
+                                  data-testid={`rut-email-pill-${e.domain}`}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    onChange={() =>
+                                      setSelectedEmailDomains((prev) =>
+                                        prev.includes(e.domain)
+                                          ? prev.filter((d) => d !== e.domain)
+                                          : [...prev, e.domain]
+                                      )
+                                    }
+                                    className="h-3 w-3 accent-emerald-500"
+                                  />
+                                  <span className="font-semibold">{e.domain}</span>
+                                  <span className="opacity-70">({e.count})</span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                          <div className="text-[11px] text-emerald-300">
+                            Selected: <b>{selectedEmailDomains.length}</b> / {dataPreview.email_domains.length} domains ·{" "}
+                            <b>
+                              {dataPreview.email_domains
+                                .filter((e) => selectedEmailDomains.includes(e.domain))
+                                .reduce((sum, e) => sum + e.count, 0)}
+                            </b>{" "}
+                            rows match
+                          </div>
+                        </div>
+                      )}
+                      {dataPreview.email_column && (!dataPreview.email_domains || dataPreview.email_domains.length === 0) && (
+                        <div className="text-[11px] text-amber-300 border-t border-emerald-900/40 pt-2 mt-2">
+                          ⚠ Email column detected but no valid email domains found.
+                        </div>
+                      )}
+
                       {/* Quality warnings — only show fields that have empties */}
                       {dataPreview.quality && Object.values(dataPreview.quality).some((v) => v > 0) && (
                         <div className="text-[11px] text-amber-300/90 border-t border-emerald-900/40 pt-1.5">
@@ -3911,6 +4014,7 @@ export default function RealUserTrafficPage() {
                     setGsheetUrl(e.target.value);
                     setDataPreview(null);
                     setSelectedStates([]);
+                    setSelectedEmailDomains([]);
                   }}
                   onBlur={(e) => {
                     const v = e.target.value.trim();

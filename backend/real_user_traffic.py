@@ -5111,6 +5111,57 @@ def _find_state_column(rows: List[Dict[str, Any]]) -> Optional[str]:
     return None
 
 
+# ── 2026-06 — Email-domain filter helpers ────────────────────────────────
+# Mirrors `_find_state_column` / `_normalize_state` so the RUT job can
+# subset uploaded leads by the user's choice of email providers (gmail,
+# yahoo, hotmail, etc.). Empty / unrecognised → "" so the caller can
+# decide whether to treat that as "unknown" or include in the filter.
+def _find_email_column(rows: List[Dict[str, Any]]) -> Optional[str]:
+    """Return the key in the row dicts that holds the email value, or None."""
+    if not rows:
+        return None
+    seen = []
+    for r in rows[:10]:
+        for k in r.keys():
+            if k not in seen:
+                seen.append(k)
+    priority = [
+        "email", "Email", "EMAIL",
+        "e_mail", "E_mail", "e-mail", "E-mail",
+        "EmailAddress", "email_address", "emailAddress",
+        "mail", "Mail",
+    ]
+    for p in priority:
+        if p in seen:
+            return p
+    for k in seen:
+        if k.strip().lower() in ("email", "e_mail", "e-mail", "emailaddress", "email_address", "mail"):
+            return k
+    return None
+
+
+def _extract_email_domain(s: Any) -> str:
+    """Extract the lowercase domain portion of an email address.
+
+    Returns the part after '@', e.g. 'gmail.com' for 'foo@Gmail.com '.
+    Returns '' if the value is empty / not a valid email shape.
+    """
+    if s is None:
+        return ""
+    txt = str(s).strip().lower()
+    if not txt or "@" not in txt:
+        return ""
+    # Take part after the LAST '@' in case of weird inputs
+    domain = txt.rsplit("@", 1)[-1].strip()
+    # Strip trailing punctuation noise (commas, semis) that sometimes
+    # appears in dirty uploads
+    domain = domain.rstrip(".,;:|/\\ ")
+    # Basic sanity — must contain a dot (e.g. "gmail.com")
+    if "." not in domain:
+        return ""
+    return domain
+
+
 async def _detect_validation_errors(page: Page) -> Tuple[bool, str]:
     """Scan a page for inline / server-side validation errors.
 

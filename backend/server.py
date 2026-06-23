@@ -7250,6 +7250,38 @@ async def _rut_prepare_and_run(
                 except Exception as e:
                     logger.warning(f"State filter failed (continuing without): {e}")
 
+            # ── 2026-06 — Email-domain subset filter ─────────────────
+            # When set, keep only rows whose email is at one of the
+            # selected domains (e.g. "gmail.com,yahoo.com"). Same
+            # semantics as `selected_states`. Empty → no filter.
+            sel_emails_raw = (params.get("selected_email_domains") or "").strip()
+            if sel_emails_raw and rows:
+                try:
+                    from real_user_traffic import _find_email_column, _extract_email_domain
+                    sel_domains = {
+                        d.strip().lower() for d in sel_emails_raw.split(",") if d.strip()
+                    }
+                    if sel_domains:
+                        ecol = _find_email_column(rows)
+                        if ecol:
+                            before = len(rows)
+                            rows = [
+                                r for r in rows
+                                if _extract_email_domain(r.get(ecol)) in sel_domains
+                            ]
+                            await _set_step(
+                                f"✓ Email-domain filter applied: kept {len(rows)} / {before} rows "
+                                f"(domains: {', '.join(sorted(sel_domains))})"
+                            )
+                            if not rows:
+                                return await _mark_failed(
+                                    "Email-domain filter removed all rows — no leads at selected domains"
+                                )
+                        else:
+                            await _set_step("⚠ Email-domain filter ignored: no email column in data file")
+                except Exception as e:
+                    logger.warning(f"Email-domain filter failed (continuing without): {e}")
+
         # ── 4. Duplicate-IP blocklist (await the parallel fetch from step 0) ─
         dup_ip_set = None
         if params.get("skip_duplicate_ip"):
@@ -7492,7 +7524,7 @@ async def rut_preview_data_file(
     gsheet_url: Optional[str] = Form(None),
     user: dict = Depends(get_current_user),
 ):
-    from real_user_traffic import _find_state_column, _normalize_state
+    from real_user_traffic import _find_state_column, _normalize_state, _find_email_column, _extract_email_domain
     rows: List[Dict[str, Any]] = []
     src = ""
     try:
@@ -7554,6 +7586,21 @@ async def rut_preview_data_file(
             else:
                 unknown_state_rows += 1
 
+    # ── 2026-06 — Per-email-domain row counts (mirrors state filter) ──
+    # Lets the operator subset uploaded leads by gmail / yahoo / hotmail
+    # etc. on the RUT page. Returned alongside `states` so the frontend
+    # can render an identical pill picker.
+    email_col = _find_email_column(rows)
+    email_domain_counts: Dict[str, int] = {}
+    unknown_email_rows = 0
+    if email_col:
+        for r in rows:
+            dom = _extract_email_domain(r.get(email_col))
+            if dom:
+                email_domain_counts[dom] = email_domain_counts.get(dom, 0) + 1
+            else:
+                unknown_email_rows += 1
+
     # Quality stats — count empty values for common required fields
     def _empty_count(keys: List[str]) -> int:
         n = 0
@@ -7583,6 +7630,12 @@ async def rut_preview_data_file(
         for code, cnt in sorted(state_counts.items(), key=lambda x: -x[1])
     ]
 
+    # Sort email domains by count desc (same shape as states)
+    email_domains_sorted = [
+        {"domain": dom, "count": cnt}
+        for dom, cnt in sorted(email_domain_counts.items(), key=lambda x: -x[1])
+    ]
+
     return {
         "source": src,
         "total_rows": len(rows),
@@ -7590,6 +7643,9 @@ async def rut_preview_data_file(
         "state_column": state_col,
         "states": states_sorted,
         "unknown_state_rows": unknown_state_rows,
+        "email_column": email_col,
+        "email_domains": email_domains_sorted,
+        "unknown_email_rows": unknown_email_rows,
         "quality": quality,
     }
 
@@ -7631,6 +7687,11 @@ async def rut_create_job(
                                                       # only data rows whose state
                                                       # matches are used; others are
                                                       # filtered OUT before the job runs.
+    # ── 2026-06 — Email-domain subset filter ───────────────────────────
+    # CSV of lowercase email domains (e.g. "gmail.com,yahoo.com"). When
+    # set, only rows whose email column belongs to one of those domains
+    # are kept. Mirrors `selected_states` semantics.
+    selected_email_domains: Optional[str] = Form(None),
     invalid_detection_enabled: bool = Form(False),    # OFF by default — landing
                                                       # pages with consent banners
                                                       # trigger false positives
@@ -7958,6 +8019,7 @@ async def rut_create_job(
         "form_fill_enabled": form_fill_enabled,
         "state_match_enabled": state_match_enabled,
         "selected_states": (selected_states or "").strip(),
+        "selected_email_domains": (selected_email_domains or "").strip(),
         "automation_json": automation_json,
         "self_heal": self_heal,
         "pure_json_mode": bool(pure_json_mode),
