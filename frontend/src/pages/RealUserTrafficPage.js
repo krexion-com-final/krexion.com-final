@@ -503,6 +503,11 @@ export default function RealUserTrafficPage() {
   // domains pass through to the job.
   const [selectedEmailDomains, setSelectedEmailDomains] = useState([]);
   const [invalidDetectionEnabled, setInvalidDetectionEnabled] = useState(false);
+  // 2026-06 — Max replacement leads per visit when invalid_detection_enabled
+  // is ON. Was hard-coded to 3 inside the engine; now configurable so a
+  // visit with dirty data can absorb up to 50 bad rows before giving up
+  // (proxy/UA aren't wasted). Default 10.
+  const [invalidDataRetryLimit, setInvalidDataRetryLimit] = useState(10);
   const [skipCaptcha, setSkipCaptcha] = useState(true);
   const [postSubmitWait, setPostSubmitWait] = useState(6);
   const [automationJson, setAutomationJson] = useState("");
@@ -1692,6 +1697,7 @@ export default function RealUserTrafficPage() {
           fd.append("selected_email_domains", selectedEmailDomains.join(","));
         }
         fd.append("invalid_detection_enabled", String(invalidDetectionEnabled));
+        fd.append("invalid_data_retry_limit", String(invalidDataRetryLimit));
         fd.append("skip_captcha", String(skipCaptcha));
         fd.append("post_submit_wait", String(postSubmitWait));
         if (useCustomJson) {
@@ -4100,6 +4106,30 @@ export default function RealUserTrafficPage() {
                   ⚠️ Keep OFF for offer pages that show consent / marketing banners — those can be misread as errors and cause every visit to loop-retry without any conversion.
                 </span>
               </p>
+              {invalidDetectionEnabled && (
+                <div className="mt-3 pl-7 flex flex-wrap items-center gap-3">
+                  <Label className="text-red-200 text-xs whitespace-nowrap" htmlFor="rut-invalid-retry">
+                    Max replacement leads per visit:
+                  </Label>
+                  <Input
+                    id="rut-invalid-retry"
+                    type="number"
+                    min={1}
+                    max={50}
+                    value={invalidDataRetryLimit}
+                    onChange={(e) =>
+                      setInvalidDataRetryLimit(
+                        Math.max(1, Math.min(50, Number(e.target.value) || 10))
+                      )
+                    }
+                    className="bg-zinc-800 border-zinc-700 text-zinc-100 max-w-[80px] h-8 text-xs"
+                    data-testid="rut-invalid-retry-limit"
+                  />
+                  <span className="text-[11px] text-zinc-400">
+                    Higher = visit absorbs more dirty rows before giving up (proxy/UA not wasted). Default 10.
+                  </span>
+                </div>
+              )}
             </div>
 
             <CheckRow testId="rut-skip-captcha" checked={skipCaptcha} onChange={setSkipCaptcha}>

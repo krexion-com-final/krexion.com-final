@@ -5725,6 +5725,12 @@ async def run_real_user_traffic_job(
     max_attempts: int = 0,
     invalid_detection_enabled: bool = False,    # OFF by default — consent-text
                                                 # banners were causing false positives
+    # 2026-06 — Configurable max retries when a lead row triggers an
+    # invalid-data error. Was hard-coded to 3, which the user reported
+    # often wasted a visit when their data file had a streak of dirty
+    # rows. Default bumped to 10 so a typical visit can absorb a long
+    # tail of bad-state / bad-email rows without losing the proxy + UA.
+    invalid_data_retry_limit: int = 10,
     db=None,
     link_id: Optional[str] = None,
     link_owner_id: Optional[str] = None,
@@ -8555,8 +8561,9 @@ async def run_real_user_traffic_job(
                     return await _record(job_id, entry, report, report_lock, db)
 
                 # Form-fill path — with validation-error detection + same-session
-                # retry using the next available lead row (max 3 invalid retries).
-                MAX_INVALID_RETRIES = 3
+                # retry using the next available lead row. Limit is now
+                # configurable via `invalid_data_retry_limit` (default 10).
+                MAX_INVALID_RETRIES = max(1, int(invalid_data_retry_limit or 10))
                 retry_attempt = 0
                 tried_row_ids: List[int] = []
                 if row_index is not None:
@@ -8943,6 +8950,8 @@ async def run_real_user_traffic_job(
                             step_res = await _multi_step_fill(
                                 page, row or {}, picker=ai_picker,
                                 pre_submit_cb=_pre_submit_cb,
+                                job_id=job_id,           # 2026-06: manual takeover pause hook (heuristic path)
+                                visit_idx=i + 1,         # 2026-06: manual takeover pause hook (heuristic path)
                             )
                             if _pre_submit_shots:
                                 entry["pre_submit_screenshots"] = _pre_submit_shots
@@ -13965,6 +13974,8 @@ async def _multi_step_fill(
     row: Dict[str, Any],
     picker: Any = None,
     pre_submit_cb: Optional[Callable[[str], Awaitable[None]]] = None,
+    job_id: Optional[str] = None,        # 2026-06 — manual takeover pause hook
+    visit_idx: Optional[int] = None,     # 2026-06 — manual takeover pause hook
 ) -> Dict[str, Any]:
     """
     The pre_submit_cb (if provided) is invoked RIGHT BEFORE each attempt
@@ -13997,6 +14008,22 @@ async def _multi_step_fill(
     survey_picks: List[Any] = []  # list of (q_sig, answer_text)
 
     for step in range(max_steps):
+        # ── 2026-06 — Manual takeover pause hook (heuristic path) ──
+        # Mirror of the JSON-automation pause hook in
+        # `_execute_automation_steps`. Without this, the heuristic
+        # multi-step fill would keep advancing through stages even
+        # while the operator paused the visit, making manual takeover
+        # effectively impossible for non-JSON jobs. The loop spins in
+        # 0.5-s ticks so /input/ endpoints can drive the page
+        # freely until /resume is called.
+        if job_id and visit_idx:
+            while is_visit_paused(job_id, visit_idx):
+                try:
+                    await asyncio.sleep(0.5)
+                except asyncio.CancelledError:
+                    raise
+                if get_live_page(job_id, visit_idx) is None:
+                    break
         await page.wait_for_timeout(500 + random.randint(0, 400))
         await _dismiss_popups(page)
 

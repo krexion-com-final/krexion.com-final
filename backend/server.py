@@ -7443,6 +7443,7 @@ async def _rut_prepare_and_run(
             target_conversions=int(params.get("target_conversions") or 0),
             max_attempts=int(params.get("max_attempts") or 0),
             invalid_detection_enabled=bool(params.get("invalid_detection_enabled")),
+            invalid_data_retry_limit=int(params.get("invalid_data_retry_limit") or 10),
             db=db,
             link_id=link.get("id") if link else None,
             link_owner_id=(link or {}).get("user_id") or user["id"],
@@ -7703,6 +7704,11 @@ async def rut_create_job(
     invalid_detection_enabled: bool = Form(False),    # OFF by default — landing
                                                       # pages with consent banners
                                                       # trigger false positives
+    # 2026-06 — Max retries when invalid_detection_enabled flags a lead.
+    # Used to be a hard-coded 3 inside the engine; now configurable so
+    # operators with dirty data can ask the engine to absorb a longer
+    # tail of bad rows without losing the visit/proxy/UA. 1..50 range.
+    invalid_data_retry_limit: int = Form(10),
     skip_captcha: bool = Form(True),
     post_submit_wait: int = Form(6),                  # seconds 3..600
     automation_json: Optional[str] = Form(None),      # custom step-list JSON
@@ -8041,6 +8047,7 @@ async def rut_create_job(
         "skip_captcha": skip_captcha,
         "post_submit_wait": post_submit_wait,
         "invalid_detection_enabled": invalid_detection_enabled,
+        "invalid_data_retry_limit": max(1, min(50, int(invalid_data_retry_limit or 10))),
         "target_screenshot_threshold": target_screenshot_threshold,
         "target_screenshot_upload_id": target_screenshot_upload_id,
         "target_screenshot_bytes": target_screenshot_bytes,
@@ -8173,6 +8180,7 @@ async def rut_create_job(
             "no_repeated_proxy": no_repeated_proxy,
             "skip_captcha": skip_captcha,
             "invalid_detection_enabled": invalid_detection_enabled,
+            "invalid_data_retry_limit": max(1, min(50, int(invalid_data_retry_limit or 10))),
             "force_tracker_url": force_tracker_url,
             "use_proxyjet_auto": bool(use_proxyjet_auto),
             "proxyjet_country": (proxyjet_country or "US").strip().upper() or "US",
