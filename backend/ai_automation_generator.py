@@ -116,6 +116,13 @@ def _resolve_provider_and_key(user_doc: Optional[Dict[str, Any]]) -> tuple:
         if k:
             return PROVIDER_CLAUDE, k
     if chosen == PROVIDER_EMERGENT:
+        # 2026-06 — User can save their OWN Emergent universal key
+        # (sk-emergent-...) in settings to use their personal subscription
+        # instead of the Krexion-platform key. Falls back to platform
+        # key if the user hasn't saved one.
+        own = (user_doc.get("emergent_api_key") or "").strip()
+        if own:
+            return PROVIDER_EMERGENT, own
         return PROVIDER_EMERGENT, _emergent_key()
 
     # No explicit choice OR chosen provider has no key — fall back to
@@ -124,6 +131,7 @@ def _resolve_provider_and_key(user_doc: Optional[Dict[str, Any]]) -> tuple:
         (PROVIDER_GEMINI, "gemini_api_key"),
         (PROVIDER_OPENAI, "openai_api_key"),
         (PROVIDER_CLAUDE, "anthropic_api_key"),
+        (PROVIDER_EMERGENT, "emergent_api_key"),
     ):
         k = (user_doc.get(field) or "").strip()
         if k:
@@ -664,16 +672,37 @@ async def generate_automation_for_user(
                 api_key, image_paths, video_path, sys_prompt, user_prompt,
             )
         else:
-            # Emergent universal — reuse existing LlmChat path
-            existing = await generate_automation_from_media(
-                image_paths=image_paths,
-                video_path=video_path,
-                target_url=target_url,
-                description=description,
-                excel_columns=excel_columns,
+            # Emergent universal — use LlmChat with the resolved key
+            # (user's own sk-emergent-… key if saved, else platform key).
+            from emergentintegrations.llm.chat import (
+                LlmChat,
+                UserMessage,
+                FileContentWithMimeType,
             )
-            existing.setdefault("provider", "emergent")
-            return existing
+            file_contents: List[Any] = []
+            if video_path and Path(video_path).exists():
+                vp = Path(video_path)
+                file_contents.append(FileContentWithMimeType(
+                    file_path=str(vp),
+                    mime_type=VIDEO_MIMES.get(vp.suffix.lower(), "video/mp4"),
+                ))
+            for p in image_paths[:MAX_IMAGES]:
+                ip = Path(p)
+                if not ip.exists():
+                    continue
+                file_contents.append(FileContentWithMimeType(
+                    file_path=str(ip),
+                    mime_type=IMAGE_MIMES.get(ip.suffix.lower(), "image/png"),
+                ))
+            if not file_contents:
+                return {"status": "failed", "error": "No readable media files"}
+            chat = LlmChat(
+                api_key=api_key,
+                session_id=f"ai-automation-{uuid.uuid4().hex[:10]}",
+                system_message=sys_prompt,
+            ).with_model("gemini", GEMINI_MODEL)
+            msg = UserMessage(text=user_prompt, file_contents=file_contents)
+            raw = await chat.send_message(msg)
     except Exception as e:
         logger.exception(f"AI generator failed via {provider}")
         return {

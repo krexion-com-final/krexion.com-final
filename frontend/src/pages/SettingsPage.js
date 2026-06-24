@@ -81,7 +81,7 @@ export default function SettingsPage() {
   const [aiGemini, setAiGemini] = useState({ has_key: false, key_preview: "" });
   const [aiOpenai, setAiOpenai] = useState({ has_key: false, key_preview: "" });
   const [aiClaude, setAiClaude] = useState({ has_key: false, key_preview: "" });
-  const [aiEmergent, setAiEmergent] = useState({ available: false });
+  const [aiEmergent, setAiEmergent] = useState({ has_key: false, key_preview: "", available: false, platform_fallback: false });
   const [aiSaving, setAiSaving] = useState(false);
 
   // ── Notification settings (low-stock email alerts) ──
@@ -148,7 +148,7 @@ export default function SettingsPage() {
       setAiGemini(r.data?.gemini || { has_key: false, key_preview: "" });
       setAiOpenai(r.data?.openai || { has_key: false, key_preview: "" });
       setAiClaude(r.data?.claude || { has_key: false, key_preview: "" });
-      setAiEmergent(r.data?.emergent || { available: false });
+      setAiEmergent(r.data?.emergent || { has_key: false, key_preview: "", available: false, platform_fallback: false });
     } catch (e) {
       // ignore
     }
@@ -195,7 +195,7 @@ export default function SettingsPage() {
       if (aiProvider === "gemini") payload.gemini_api_key = aiKey;
       else if (aiProvider === "openai") payload.openai_api_key = aiKey;
       else if (aiProvider === "claude") payload.anthropic_api_key = aiKey;
-      // emergent provider needs no key (server-side)
+      else if (aiProvider === "emergent") payload.emergent_api_key = aiKey;
       await axios.put(`${API}/ai-settings`, payload, {
         headers: { Authorization: `Bearer ${getToken()}` },
       });
@@ -215,10 +215,11 @@ export default function SettingsPage() {
       if (which === "gemini") payload = { gemini_api_key: "" };
       else if (which === "openai") payload = { openai_api_key: "" };
       else if (which === "claude") payload = { anthropic_api_key: "" };
+      else if (which === "emergent") payload = { emergent_api_key: "" };
       await axios.put(`${API}/ai-settings`, payload, {
         headers: { Authorization: `Bearer ${getToken()}` },
       });
-      const labels = { gemini: "Gemini", openai: "OpenAI", claude: "Claude" };
+      const labels = { gemini: "Gemini", openai: "OpenAI", claude: "Claude", emergent: "Emergent" };
       toast.success(`${labels[which] || which} key cleared`);
       await fetchAiSettings();
     } catch (e) {
@@ -518,7 +519,7 @@ export default function SettingsPage() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <span className="text-purple-400">⚡</span> AI Integrations
-                {(aiGemini.has_key || aiOpenai.has_key || aiClaude.has_key || (aiProvider === "emergent" && aiEmergent.available)) && (
+                {(aiGemini.has_key || aiOpenai.has_key || aiClaude.has_key || aiEmergent.has_key || (aiProvider === "emergent" && aiEmergent.platform_fallback)) && (
                   <span className="ml-2 rounded-full bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-300">
                     Active ({aiProvider})
                   </span>
@@ -594,13 +595,11 @@ export default function SettingsPage() {
                         ? "bg-blue-600 text-white border border-blue-500"
                         : "bg-zinc-900 text-zinc-300 border border-zinc-700 hover:border-zinc-500"
                     }`}
-                    title={aiEmergent.available
-                      ? "Krexion-managed universal AI key — zero setup, may be rate-limited"
-                      : "Krexion universal key not configured on this server"}
+                    title="Use your own Emergent universal key, OR the Krexion-built-in fallback if no key saved"
                   >
-                    <div className="font-semibold">Krexion Built-in</div>
+                    <div className="font-semibold">Emergent Universal</div>
                     <div className="text-xs opacity-70 mt-0.5">
-                      No setup {aiEmergent.available ? "✓" : "—"}
+                      {aiEmergent.has_key ? "Your key ✓" : (aiEmergent.platform_fallback ? "Built-in fallback" : "Not configured")}
                     </div>
                   </button>
                 </div>
@@ -647,14 +646,24 @@ export default function SettingsPage() {
               )}
               {aiProvider === "emergent" && (
                 <div className="rounded-md border border-blue-900/40 bg-blue-950/20 p-3 text-xs text-blue-200/90 space-y-1.5">
-                  <div className="font-semibold text-blue-300 text-sm">Krexion Built-in (Emergent universal key)</div>
+                  <div className="font-semibold text-blue-300 text-sm">Emergent Universal Key — Setup steps</div>
                   <ol className="list-decimal list-inside space-y-1">
-                    <li>Zero setup — koi key save karne ki zarurat nahi.</li>
-                    <li>Krexion ki taraf se universal LLM key use hoti hai (Gemini 2.5 Pro backend).</li>
-                    <li>Fair-use limits apply — heavy daily usage par apna khud ka key save karein.</li>
+                    <li>
+                      <span className="font-semibold">Option A — Use your own Emergent universal key (recommended):</span><br/>
+                      Open <a href="https://app.emergent.sh/" target="_blank" rel="noreferrer" className="text-blue-300 underline">app.emergent.sh</a> → Profile → "Universal Key" → copy the key (starts with <code className="bg-zinc-900 px-1 rounded">sk-emergent-…</code>) → paste below.<br/>
+                      Yeh ek hi key Gemini, OpenAI aur Claude — sab models par chalti hai. Aap apni Emergent subscription quota use karenge.
+                    </li>
+                    <li>
+                      <span className="font-semibold">Option B — Built-in fallback:</span><br/>
+                      Koi key na save karein → Krexion ki platform-managed Emergent key automatically use hogi (fair-use limit).
+                    </li>
                   </ol>
                   <div className={`pt-1 ${aiEmergent.available ? "text-blue-300/70" : "text-rose-300/80"}`}>
-                    Status: {aiEmergent.available ? "Available on this server" : "Not configured on this server — please use Gemini/OpenAI/Claude instead."}
+                    Status: {aiEmergent.has_key
+                      ? "Using your own Emergent key ✓"
+                      : (aiEmergent.platform_fallback
+                          ? "No personal key saved — Krexion platform key will be used as fallback"
+                          : "No personal key AND no platform fallback configured — please save your own key OR pick a different provider.")}
                   </div>
                 </div>
               )}
@@ -696,40 +705,56 @@ export default function SettingsPage() {
                   >Clear</Button>
                 </div>
               )}
-
-              {/* Key input — hidden for emergent (no per-user key) */}
-              {aiProvider !== "emergent" && (
-                <div className="flex flex-col gap-2 sm:flex-row">
-                  <input
-                    type="password"
-                    placeholder={
-                      aiProvider === "gemini"
-                        ? (aiGemini.has_key ? "Paste new key to replace…" : "AIzaSy...")
-                        : aiProvider === "openai"
-                          ? (aiOpenai.has_key ? "Paste new key to replace…" : "sk-...")
-                          : (aiClaude.has_key ? "Paste new key to replace…" : "sk-ant-...")
-                    }
-                    value={aiKey}
-                    onChange={(e) => setAiKey(e.target.value)}
-                    className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-purple-500 focus:outline-none"
-                    data-testid="ai-key-input"
-                  />
+              {aiProvider === "emergent" && aiEmergent.has_key && (
+                <div className="flex items-center justify-between rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm">
+                  <span>
+                    <span className="text-zinc-500">Saved Emergent key: </span>
+                    <code className="text-zinc-300">{aiEmergent.key_preview || "sk-emergent-…"}</code>
+                  </span>
                   <Button
-                    onClick={handleSaveAiKey}
-                    disabled={aiSaving || !aiKey}
-                    data-testid="save-ai-key-button"
-                    className={
-                      aiProvider === "openai"
-                        ? "bg-emerald-600 hover:bg-emerald-700"
-                        : aiProvider === "claude"
-                          ? "bg-orange-600 hover:bg-orange-700"
-                          : "bg-purple-600 hover:bg-purple-700"
-                    }
-                  >
-                    {aiSaving ? "Saving..." : "Save Key"}
-                  </Button>
+                    variant="outline" size="sm"
+                    onClick={() => handleClearAiKey("emergent")}
+                    data-testid="clear-emergent-key"
+                    className="border-red-700 text-red-300 hover:bg-red-950"
+                  >Clear</Button>
                 </div>
               )}
+
+              {/* Key input — always available (Emergent allows optional personal key) */}
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <input
+                  type="password"
+                  placeholder={
+                    aiProvider === "gemini"
+                      ? (aiGemini.has_key ? "Paste new key to replace…" : "AIzaSy...")
+                      : aiProvider === "openai"
+                        ? (aiOpenai.has_key ? "Paste new key to replace…" : "sk-...")
+                        : aiProvider === "claude"
+                          ? (aiClaude.has_key ? "Paste new key to replace…" : "sk-ant-...")
+                          : (aiEmergent.has_key ? "Paste new key to replace…" : "sk-emergent-... (optional — leave blank to use platform fallback)")
+                  }
+                  value={aiKey}
+                  onChange={(e) => setAiKey(e.target.value)}
+                  className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-purple-500 focus:outline-none"
+                  data-testid="ai-key-input"
+                />
+                <Button
+                  onClick={handleSaveAiKey}
+                  disabled={aiSaving || !aiKey}
+                  data-testid="save-ai-key-button"
+                  className={
+                    aiProvider === "openai"
+                      ? "bg-emerald-600 hover:bg-emerald-700"
+                      : aiProvider === "claude"
+                        ? "bg-orange-600 hover:bg-orange-700"
+                        : aiProvider === "emergent"
+                          ? "bg-blue-600 hover:bg-blue-700"
+                          : "bg-purple-600 hover:bg-purple-700"
+                  }
+                >
+                  {aiSaving ? "Saving..." : "Save Key"}
+                </Button>
+              </div>
               <div className="text-xs text-zinc-500">
                 Tip: AI features (Visual Recorder "Generate with AI", Form-filler
                 self-heal, RUT recovery) sirf tab call hoti hain jab rule-based

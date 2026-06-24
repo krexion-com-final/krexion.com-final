@@ -201,3 +201,53 @@ Working tree clean except these 5 files. `.env` and `.emergent/emergent.yml` unt
 
 ### Not yet pushed
 User will trigger Save-to-GitHub when ready (he wants to batch more changes first per his strict deploy-when-I-say rule).
+
+---
+
+## Session: 2026-06-24 — User's Emergent key + AI dialog Proxy selector (E1)
+
+User ask (Roman Urdu):
+1. "idar proxy select krne ka b option ho ta k koi offer esi hoti hai jo siraf USA mein yan kisi specific country mein kholti hai to os k liye proxy use ki ja sake" — proxy selector inside the Visual Recorder AI dialog.
+2. "emergent ki apni jo universal key hoti hai wo b add krne ki option ho ta k jis k pas emergent hai wo apni universel key use kar sake" — let the user save their OWN Emergent universal key (not just the platform fallback).
+
+### Backend changes
+- `backend/ai_automation_generator.py`:
+  - `_resolve_provider_and_key()` now reads `user_doc['emergent_api_key']`. If set, used directly. If absent → fall back to platform `EMERGENT_LLM_KEY`. The auto-pick chain also walks emergent last.
+  - `generate_automation_for_user()` Emergent branch: replaced the call to `generate_automation_from_media()` (which always used platform key) with inline LlmChat using the **resolved** key. So when a user saves `sk-emergent-...`, that personal key — not the platform's — is sent to the model.
+- `backend/server.py`:
+  - `AISettingsUpdate` accepts `emergent_api_key` (validated `sk-emergent-` prefix).
+  - `GET /api/ai-settings` returns emergent with `has_key`, `key_preview`, `available`, `platform_fallback`.
+  - RUT + Visual Recorder AI endpoints fetch `emergent_api_key` from the user doc.
+
+### Frontend changes
+- `frontend/src/pages/SettingsPage.js`:
+  - `aiEmergent` state extended with `has_key`, `key_preview`, `platform_fallback`.
+  - Save/Clear handlers extended for emergent.
+  - Provider card renamed "Emergent Universal" (was "Krexion Built-in"), shows "Your key ✓" when set, "Built-in fallback" when only platform key is available.
+  - Setup steps card explains Option A (paste own `sk-emergent-…`) vs Option B (use platform key automatically).
+  - Saved-key indicator + Clear button for emergent.
+  - The key input is no longer hidden for emergent — user can paste their own key.
+  - Active badge logic includes `aiEmergent.has_key` and the platform fallback case.
+- `frontend/src/pages/VisualRecorderPage.js`:
+  - New state: `aiProxy`, `aiProxyJetBusy`.
+  - New `aiUseProxyJet()` handler — re-uses `/api/proxyjet/generate-batch` to load a fresh proxy directly into the AI dialog (uses currently-selected `pjCountry`).
+  - On AI success: `aiProxy` is auto-copied into the main `proxy` state so the upcoming Start Recording uses it. `aiTargetUrl` is copied to main `url` if main is empty.
+  - AI dialog UI: new "Proxy" row between Target URL and Description with input + conditional ProxyJet button. Placeholder helpfully shows currently-saved main proxy if present.
+
+### Verified
+- `_resolve_provider_and_key()` unit cases — user-key wins over platform key, falls back when empty, picks emergent when no other key in fallback chain. All 5 cases PASS.
+- `PUT /api/ai-settings {"emergent_api_key":"sk-emergent-...","ai_provider":"emergent"}` → 200; subsequent GET returns `emergent.has_key=true, key_preview="sk-emergent-my...2345", available=true, platform_fallback=true`.
+- Bad prefix `"badprefix-xxx"` → 400 with validation message.
+- Settings page screenshot: "Active (emergent)" badge, "Your key ✓" button, setup steps card, saved-key row with Clear, input visible.
+- Visual Recorder AI dialog screenshot: new Proxy row between Target URL and Description, with input + tip text.
+
+### Files modified this turn (4)
+1. `backend/ai_automation_generator.py` (+47 / -…)
+2. `backend/server.py` (+38)
+3. `frontend/src/pages/SettingsPage.js` (+117)
+4. `frontend/src/pages/VisualRecorderPage.js` (+95)
+
+Combined with the previous turn's 5 files, the total work waiting for user's Save-to-GitHub:
+- `backend/ai_automation_generator.py`, `backend/server.py`, `frontend/src/pages/RealUserTrafficPage.js`, `frontend/src/pages/SettingsPage.js`, `frontend/src/pages/VisualRecorderPage.js`, `memory/PRD.md`.
+
+Still no `git push` performed — user controls deploy timing.

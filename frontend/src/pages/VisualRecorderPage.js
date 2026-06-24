@@ -248,12 +248,19 @@ export default function VisualRecorderPage() {
   // Settings → AI Integrations) generates a starter step-list. The
   // generated steps replace the current draft so the user can refine,
   // re-record specific selectors, or Start Recording on top of them.
+  //
+  // 2026-06 update: proxy selector field added because "kuch offers
+  // sirf USA ya specific country mein khulti hain — to AI dialog se
+  // hi proxy choose kar paayen taa ke generation ke baad Start
+  // Recording wahi proxy use kare."
   const [aiDialogOpen, setAiDialogOpen] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiFiles, setAiFiles] = useState([]);              // File[] from <input>
   const [aiDescription, setAiDescription] = useState("");
   const [aiTargetUrl, setAiTargetUrl] = useState("");
   const [aiExcelCols, setAiExcelCols] = useState("");      // optional CSV header list
+  const [aiProxy, setAiProxy] = useState("");              // proxy string for the eventual recording
+  const [aiProxyJetBusy, setAiProxyJetBusy] = useState(false);
   const [aiProviderUsed, setAiProviderUsed] = useState(""); // returned by backend
   const [aiError, setAiError] = useState("");
   // 2026-06 — Electron-safe prompt/confirm replacement.
@@ -638,6 +645,37 @@ export default function VisualRecorderPage() {
   };
 
   // ── 2026-06 — AI Step Generator handler ──────────────────────────
+  // Fetch a fresh ProxyJet proxy directly into the AI dialog's local
+  // proxy field. Doesn't touch the main setup `proxy` state until the
+  // user actually clicks Generate (avoids overwriting their existing
+  // proxy if they cancel mid-dialog).
+  const aiUseProxyJet = async () => {
+    if (!pjAvailable) {
+      toast.error("Save ProxyJet credentials first (Proxies page → ProxyJet Auto)");
+      return;
+    }
+    setAiProxyJetBusy(true);
+    try {
+      const r = await fetch(`${API_URL}/api/proxyjet/generate-batch`, {
+        method: "POST",
+        headers: authH(),
+        body: JSON.stringify({ count: 1, country: pjCountry }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      if (d.proxies?.[0]) {
+        setAiProxy(d.proxies[0]);
+        toast.success(`Fresh ${pjCountry} ProxyJet proxy loaded into AI dialog`);
+      } else {
+        toast.error("No proxy returned");
+      }
+    } catch (e) {
+      toast.error(e.message || "ProxyJet fetch failed");
+    } finally {
+      setAiProxyJetBusy(false);
+    }
+  };
+
   const handleAiGenerate = async () => {
     if (!aiFiles.length) {
       setAiError("Please attach at least one screenshot (or a short demo video).");
@@ -675,13 +713,29 @@ export default function VisualRecorderPage() {
       // Replace the current draft with the AI-generated steps. The
       // user can still Start Recording on top and edit each step.
       setSteps(generated);
-      toast.success(`AI generated ${generated.length} steps via ${data.provider || "provider"} — review & start recording to refine.`);
+
+      // 2026-06 — Propagate AI dialog's selections to the main setup
+      // screen so "Start Recording" (and the eventual recording) uses
+      // them automatically. Target URL is copied only if the main
+      // `url` field is empty (don't trample manual input).
+      if (aiProxy.trim()) {
+        setProxy(aiProxy.trim());
+      }
+      if (aiTargetUrl.trim() && !url.trim()) {
+        setUrl(aiTargetUrl.trim());
+      }
+
+      const proxyNote = aiProxy.trim() ? " · Proxy applied to setup" : "";
+      toast.success(
+        `AI generated ${generated.length} steps via ${data.provider || "provider"}${proxyNote} — review & Start Recording to refine.`
+      );
       setAiDialogOpen(false);
       // Reset form so next open starts clean
       setAiFiles([]);
       setAiDescription("");
       setAiTargetUrl("");
       setAiExcelCols("");
+      setAiProxy("");
     } catch (e) {
       setAiError(e.message || String(e));
       toast.error(`AI generation error: ${e.message || e}`);
@@ -5869,6 +5923,45 @@ export default function VisualRecorderPage() {
                   className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-purple-500 focus:outline-none"
                   data-testid="vr-ai-target-url"
                 />
+              </div>
+
+              {/* 2026-06 — Proxy selector (US-only offers etc.). Once
+                  AI generates steps, this proxy is auto-copied into the
+                  main setup screen so Start Recording uses it. */}
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-xs font-medium text-zinc-300">
+                    Proxy <span className="text-zinc-500 font-normal">(optional — for geo-restricted offers like US-only)</span>
+                  </label>
+                  {pjAvailable && (
+                    <button
+                      type="button"
+                      onClick={aiUseProxyJet}
+                      disabled={aiProxyJetBusy || aiBusy}
+                      className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md bg-indigo-600/30 hover:bg-indigo-600/60 border border-indigo-500/40 text-indigo-200 disabled:opacity-50"
+                      data-testid="vr-ai-use-pj-proxy"
+                      title={`Fetch fresh ${pjCountry} residential proxy from ProxyJet`}
+                    >
+                      {aiProxyJetBusy
+                        ? <Loader2 className="w-3 h-3 animate-spin" />
+                        : <Zap className="w-3 h-3" />}
+                      ProxyJet ({pjCountry})
+                    </button>
+                  )}
+                </div>
+                <input
+                  type="text"
+                  value={aiProxy}
+                  onChange={(e) => setAiProxy(e.target.value)}
+                  placeholder={proxy ? `Currently using: ${proxy.slice(0, 60)}${proxy.length > 60 ? "…" : ""} (clear to override)` : "http://user:pass@host:port  or  host:port"}
+                  className="w-full px-3 py-2 rounded-md border border-zinc-700 bg-zinc-900 text-zinc-100 placeholder:text-zinc-600 focus:border-purple-500 focus:outline-none font-mono text-xs"
+                  data-testid="vr-ai-proxy-input"
+                />
+                <p className="text-[10px] text-zinc-500 mt-1">
+                  {pjAvailable
+                    ? "Click ProxyJet button for one-click fresh residential proxy, OR paste your own. Used during Start Recording / Live Test."
+                    : "Tip: save ProxyJet credentials on Proxies page for one-click fresh proxies. Or paste your own proxy URL."}
+                </p>
               </div>
 
               <div>
