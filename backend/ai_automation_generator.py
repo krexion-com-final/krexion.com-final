@@ -767,3 +767,161 @@ async def generate_automation_for_user(
         # programmatic logic (telemetry / future migrations).
         "provider_display": "Krexion AI" if provider == PROVIDER_EMERGENT else provider,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 2026-06 — Refine existing step-list via natural-language instruction.
+# User ask (Roman Urdu): "agar koi changes karni ho to AI ko hi bol kar
+# changes kara le jaye — k 'ye issue hai, isko solve kar do'".
+# Same provider resolution + brand-clean error mapping as the generator.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _refine_system_prompt() -> str:
+    return (
+        "You are an expert Playwright automation engineer. The user already "
+        "has an automation JSON step-list. They will give you the CURRENT "
+        "step-list and a natural-language instruction describing what to "
+        "fix, add, remove, or improve. You must return the FULL UPDATED "
+        "step-list (not a diff) as valid JSON.\n\n"
+        "Rules:\n"
+        " 1. Preserve every step that the user did NOT ask you to change.\n"
+        " 2. If the user asks for 'randomization' or 'unique per visit' on "
+        "    survey clicks, use multiple OR-separated CSS selectors and "
+        "    keep the step `optional: true` so the Playwright runner can "
+        "    fail-soft per visit, producing a different click pattern per "
+        "    run when combined with the bot's randomized survey hooks.\n"
+        " 3. Action vocabulary remains identical to the generator: goto, "
+        "    click, fill, select, check, uncheck, press, scroll, "
+        "    wait, wait_for_selector, wait_for_load, evaluate.\n"
+        " 4. Excel placeholders use double-curly syntax: {{first}}, "
+        "    {{last}}, {{email}}, etc. — only use columns the user "
+        "    actually provides.\n"
+        " 5. Output ONLY a valid JSON array. NO markdown fence, NO prose.\n"
+        + ALLOWED_ACTIONS_DOC
+    )
+
+
+def _refine_user_prompt(current_steps: List[Dict[str, Any]],
+                        instruction: str,
+                        target_url: Optional[str] = None,
+                        excel_columns: Optional[List[str]] = None) -> str:
+    parts: List[str] = []
+    parts.append("CURRENT step-list (JSON):")
+    parts.append("```json\n" + json.dumps(current_steps, indent=2) + "\n```")
+    parts.append("USER INSTRUCTION (English / Roman-Urdu mix accepted):")
+    parts.append(instruction.strip() or "(no instruction provided)")
+    if target_url:
+        parts.append(f"Target URL context: {target_url}")
+    if excel_columns:
+        parts.append("Available Excel/CSV columns (use these EXACT names in {{placeholders}}): " + ", ".join(excel_columns))
+    parts.append(
+        "Return the FULL updated step-list as a JSON array. Preserve the "
+        "structure and keep every step the user did not ask you to change."
+    )
+    return "\n\n".join(parts)
+
+
+async def refine_automation_for_user(
+    user_doc: Optional[Dict[str, Any]],
+    current_steps: List[Dict[str, Any]],
+    instruction: str,
+    image_paths: Optional[List[str]] = None,
+    target_url: Optional[str] = None,
+    excel_columns: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Take an existing step-list + a user instruction, ask the user's
+    chosen AI provider to return an updated step-list. Same return shape
+    as `generate_automation_for_user`.
+    """
+    if not isinstance(current_steps, list) or not current_steps:
+        return {"status": "failed", "error": "No current steps to refine — generate a baseline first."}
+    if not instruction or not instruction.strip():
+        return {"status": "failed", "error": "Please describe what change you want (e.g. 'survey clicks ko randomize karen, 1 page tak rukna nahi')."}
+
+    image_paths = [p for p in (image_paths or []) if Path(p).exists()]
+
+    try:
+        provider, api_key = _resolve_provider_and_key(user_doc)
+    except Exception as e:
+        return {"status": "failed", "error": f"AI provider misconfigured: {str(e)[:200]}"}
+
+    sys_prompt = _refine_system_prompt()
+    user_prompt = _refine_user_prompt(current_steps, instruction, target_url, excel_columns)
+
+    raw: str = ""
+    try:
+        if provider == PROVIDER_GEMINI:
+            raw = await _generate_gemini_direct(api_key, image_paths, None, sys_prompt, user_prompt)
+        elif provider == PROVIDER_OPENAI:
+            raw = await _generate_openai_direct(api_key, image_paths, None, sys_prompt, user_prompt)
+        elif provider == PROVIDER_CLAUDE:
+            raw = await _generate_claude_direct(api_key, image_paths, None, sys_prompt, user_prompt)
+        else:
+            # Emergent universal via LlmChat — reuse existing helpers.
+            from emergentintegrations.llm.chat import (
+                LlmChat, UserMessage, FileContentWithMimeType,
+            )
+            file_contents: List[Any] = []
+            for p in image_paths[:MAX_IMAGES]:
+                ip = Path(p)
+                if not ip.exists():
+                    continue
+                file_contents.append(FileContentWithMimeType(
+                    file_path=str(ip),
+                    mime_type=IMAGE_MIMES.get(ip.suffix.lower(), "image/png"),
+                ))
+            chat = LlmChat(
+                api_key=api_key,
+                session_id=f"ai-refine-{uuid.uuid4().hex[:10]}",
+                system_message=sys_prompt,
+            ).with_model("gemini", GEMINI_MODEL)
+            msg = UserMessage(text=user_prompt, file_contents=file_contents)
+            raw = await chat.send_message(msg)
+    except Exception as e:
+        # Reuse the brand-safe error mapping by raising into the same
+        # path. Simpler: inline the mapper.
+        raw_msg = str(e)
+        low = raw_msg.lower()
+        display_provider = "Krexion AI" if provider == PROVIDER_EMERGENT else (
+            "Gemini" if provider == PROVIDER_GEMINI else
+            "ChatGPT" if provider == PROVIDER_OPENAI else
+            "Claude" if provider == PROVIDER_CLAUDE else provider
+        )
+        if "budget" in low and ("exceed" in low or "exhaust" in low):
+            friendly = f"{display_provider} key ka monthly budget exhaust ho gaya hai. Settings → AI Integrations mein key replace karen ya doosra provider chunen."
+        elif "invalid" in low and ("token" in low or "api key" in low):
+            friendly = f"{display_provider} key invalid hai. Settings → AI Integrations kholen aur key dobara paste karen."
+        elif "quota" in low or "rate limit" in low or "429" in raw_msg:
+            friendly = f"{display_provider} ne rate-limit lagaya hai. Kuch minutes baad try karen."
+        else:
+            cleaned = raw_msg
+            for noisy in ("litellm.", "OpenAIException", "AnthropicException", "GoogleException"):
+                cleaned = cleaned.replace(noisy, "").strip(" -:")
+            friendly = f"{display_provider} refine failed: {cleaned[:280]}"
+        logger.exception(f"AI refine failed via {provider}")
+        return {
+            "status": "failed",
+            "error": friendly,
+            "provider": provider,
+            "provider_display": display_provider,
+        }
+
+    steps = _parse_steps_from_response(raw)
+    if steps is None:
+        return {
+            "status": "failed",
+            "error": "AI returned a response that wasn't valid JSON. Try a more specific instruction.",
+            "raw": raw[:2000] if isinstance(raw, str) else str(raw)[:2000],
+            "provider": provider,
+            "provider_display": "Krexion AI" if provider == PROVIDER_EMERGENT else provider,
+        }
+    steps = _sanitize_steps(steps)
+    return {
+        "status": "ok",
+        "steps": steps,
+        "raw": raw if isinstance(raw, str) else str(raw),
+        "provider": provider,
+        "provider_display": "Krexion AI" if provider == PROVIDER_EMERGENT else provider,
+    }
+

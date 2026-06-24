@@ -18747,6 +18747,47 @@ async def vr_ai_generate_steps(
 
 
 
+# ─────────────────────────────────────────────────────────────────────
+# 2026-06 — Visual Recorder: Refine existing step-list via AI.
+# User ask (Roman Urdu): "agar koi changes karni ho to AI ko hi bol kar
+# changes kara le jaye — k 'ye issue hai, isko solve kar do'". User
+# provides the CURRENT steps JSON + a freeform instruction. AI returns
+# an updated step-list. Optional new screenshots can be attached if the
+# user wants AI to see a fresh page state.
+# ─────────────────────────────────────────────────────────────────────
+class VRRefineReq(BaseModel):
+    steps: List[Dict[str, Any]]
+    instruction: str
+    target_url: Optional[str] = None
+    excel_columns: Optional[List[str]] = None
+
+
+@api_router.post("/visual-recorder/ai-refine-steps")
+async def vr_ai_refine_steps(
+    req: VRRefineReq,
+    user: dict = Depends(get_current_user),
+):
+    check_user_feature(user, "real_user_traffic")
+
+    from ai_automation_generator import refine_automation_for_user
+
+    user_doc = await db.users.find_one(
+        {"id": user["id"]},
+        {"_id": 0, "ai_provider": 1, "gemini_api_key": 1,
+         "openai_api_key": 1, "anthropic_api_key": 1, "emergent_api_key": 1},
+    ) or {}
+
+    result = await refine_automation_for_user(
+        user_doc=user_doc,
+        current_steps=req.steps,
+        instruction=req.instruction,
+        image_paths=None,  # text-only refine for now
+        target_url=req.target_url,
+        excel_columns=req.excel_columns,
+    )
+    return result
+
+
 @api_router.post("/visual-recorder/start")
 async def vr_start(
     req: VRStartReq,

@@ -240,6 +240,20 @@ export default function VisualRecorderPage() {
   const [viewport, setViewport] = useState({ width: 412, height: 914 });
   const [steps, setSteps] = useState([]);
 
+  // ─── 2026-06: AI Refine state (post-generation step editing) ───
+  // User ask (Roman Urdu): "agar koi changes karni ho to AI ko hi bol
+  // kar changes kara le jaye — k 'ye issue hai, isko solve kar do'".
+  // Opens a small inline panel when there are existing steps in the
+  // draft. User types an instruction, we POST to /ai-refine-steps,
+  // backend's `refine_automation_for_user` returns updated steps, we
+  // swap them in. The "Undo" button keeps the previous version one
+  // click away so the user can roll back a bad AI edit.
+  const [aiRefineOpen, setAiRefineOpen] = useState(false);
+  const [aiRefineInstruction, setAiRefineInstruction] = useState("");
+  const [aiRefineBusy, setAiRefineBusy] = useState(false);
+  const [aiRefineError, setAiRefineError] = useState("");
+  const [aiRefinePrevSteps, setAiRefinePrevSteps] = useState(null);
+
   // ─── 2026-06: AI Step Generator (Visual Recorder) ─────────────────
   // User ask (Roman Urdu): "Visual recorder mein AI integration ka option
   // ho ta k AI k zarye JSON banana aur b asan ho jaaye." Open the dialog,
@@ -712,6 +726,72 @@ export default function VisualRecorderPage() {
     } finally {
       setAiProxyJetBusy(false);
     }
+  };
+
+  // ── 2026-06 — AI Refine handler ──────────────────────────────────
+  // Send the current step-list + a natural-language instruction to the
+  // backend's refine endpoint. Swap returned steps in. Keep the
+  // previous step-list in `aiRefinePrevSteps` so the user can Undo.
+  const handleAiRefine = async () => {
+    if (!aiRefineInstruction.trim()) {
+      setAiRefineError("Please describe what to change (e.g. 'survey ke jawab har visit pe random karen').");
+      return;
+    }
+    if (!steps || steps.length === 0) {
+      setAiRefineError("Pehle koi steps generate ya record karen, phir refine kar sakte hain.");
+      return;
+    }
+    setAiRefineBusy(true);
+    setAiRefineError("");
+    try {
+      const payload = {
+        steps,
+        instruction: aiRefineInstruction.trim(),
+        target_url: url || undefined,
+        excel_columns: (headers && headers.length) ? headers : undefined,
+      };
+      const r = await fetch(`${API_URL}/api/visual-recorder/ai-refine-steps`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${localStorage.getItem("token")}`,
+        },
+        body: JSON.stringify(payload),
+      });
+      if (r.status === 502 || r.status === 504) {
+        setAiRefineError(`Backend gateway error (HTTP ${r.status}). 30 second wait karke dobara try karen.`);
+        return;
+      }
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || data.status !== "ok") {
+        const err = data?.detail || data?.error || `HTTP ${r.status}`;
+        setAiRefineError(typeof err === "string" ? err : JSON.stringify(err));
+        return;
+      }
+      const refined = Array.isArray(data.steps) ? data.steps : [];
+      if (!refined.length) {
+        setAiRefineError("AI ne empty step-list return ki. Try a more specific instruction.");
+        return;
+      }
+      setAiRefinePrevSteps(steps);  // remember for undo
+      setSteps(refined);
+      toast.success(
+        `${data.provider_display || "AI"} updated ${refined.length} steps — review the diff above. "Undo" se previous version par jayen.`
+      );
+      setAiRefineInstruction("");
+      // Keep panel open so user can chain instructions or undo
+    } catch (e) {
+      setAiRefineError(e.message || String(e));
+    } finally {
+      setAiRefineBusy(false);
+    }
+  };
+
+  const handleAiRefineUndo = () => {
+    if (!aiRefinePrevSteps) return;
+    setSteps(aiRefinePrevSteps);
+    setAiRefinePrevSteps(null);
+    toast.success("Refine undone — pichli steps wapas restore ho gayin");
   };
 
   const handleAiGenerate = async () => {
@@ -4625,6 +4705,15 @@ export default function VisualRecorderPage() {
                 </h3>
                 <div className="flex items-center gap-1">
                   <button
+                    onClick={() => { setAiRefineOpen(o => !o); setAiRefineError(""); }}
+                    title="AI ko bol kar steps mein changes karwayen — surveys randomize, fix selectors, remove unnecessary steps, etc."
+                    disabled={steps.length === 0}
+                    className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md bg-purple-800/40 hover:bg-purple-600/60 border border-purple-500/30 hover:border-purple-400/60 text-purple-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    data-testid="vr-ai-refine-btn"
+                  >
+                    <Sparkles className="w-3 h-3" /> Refine with AI
+                  </button>
+                  <button
                     onClick={runLint}
                     title="Pre-flight lint — checks for missing selectors, invalid actions, hard-waits >30s, etc."
                     className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md bg-zinc-800 hover:bg-emerald-700/40 border border-zinc-700 hover:border-emerald-500/40 text-zinc-300 hover:text-emerald-200 transition-colors"
@@ -4708,6 +4797,65 @@ export default function VisualRecorderPage() {
                       ))}
                     </ul>
                   )}
+                </div>
+              )}
+
+              {/* 2026-06 — AI Refine panel: opens when user clicks the
+                  "Refine with AI" button in the header. Lets them give
+                  the AI a natural-language change request. */}
+              {aiRefineOpen && (
+                <div className="mb-2 p-2.5 rounded-lg bg-purple-950/30 border border-purple-700/40" data-testid="vr-ai-refine-panel">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-semibold text-purple-200 flex items-center gap-1">
+                      <Sparkles className="w-3 h-3" /> Refine with AI
+                    </span>
+                    <div className="flex items-center gap-1">
+                      {aiRefinePrevSteps && (
+                        <button
+                          onClick={handleAiRefineUndo}
+                          disabled={aiRefineBusy}
+                          className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-200 border border-zinc-600"
+                          data-testid="vr-ai-refine-undo"
+                          title="Undo the last AI refine and restore the previous step-list"
+                        >
+                          ⤺ Undo
+                        </button>
+                      )}
+                      <button
+                        onClick={() => setAiRefineOpen(false)}
+                        className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-300"
+                        data-testid="vr-ai-refine-close"
+                      >✕</button>
+                    </div>
+                  </div>
+                  <textarea
+                    value={aiRefineInstruction}
+                    onChange={(e) => setAiRefineInstruction(e.target.value)}
+                    rows={3}
+                    disabled={aiRefineBusy}
+                    placeholder="Example: 'Survey k jawab har visit pe random karen', 'First name selector galat hai, input[id=fname] use karen', 'Step 5 par 5 second wait add karen', 'Final 3 deal clicks ke beech 4 second ka pause dalein'..."
+                    className="w-full text-xs rounded-md border border-purple-800/40 bg-zinc-950 px-2.5 py-1.5 text-zinc-100 placeholder:text-zinc-500 focus:border-purple-500 focus:outline-none resize-none"
+                    data-testid="vr-ai-refine-input"
+                  />
+                  {aiRefineError && (
+                    <div className="mt-1.5 text-[11px] text-rose-300 bg-rose-950/40 rounded px-2 py-1 border border-rose-700/40">
+                      {aiRefineError}
+                    </div>
+                  )}
+                  <div className="mt-1.5 flex items-center justify-between">
+                    <span className="text-[10px] text-zinc-500">
+                      Current steps: {steps.length}{aiRefinePrevSteps ? ` (was ${aiRefinePrevSteps.length})` : ""}
+                    </span>
+                    <button
+                      onClick={handleAiRefine}
+                      disabled={aiRefineBusy || !aiRefineInstruction.trim()}
+                      className="inline-flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-md bg-purple-600 hover:bg-purple-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white"
+                      data-testid="vr-ai-refine-submit"
+                    >
+                      {aiRefineBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+                      {aiRefineBusy ? "Refining…" : "Apply"}
+                    </button>
+                  </div>
                 </div>
               )}
 
