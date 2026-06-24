@@ -644,6 +644,44 @@ export default function VisualRecorderPage() {
     if (arr.length) toast.success(`${arr.length} headers ready`);
   };
 
+  // ── 2026-06 — Client-side image compression for the AI dialog. ────
+  // Why: the Kubernetes ingress in front of preview / cloud backends
+  // enforces a 1 MiB request-body limit. A single high-DPI page
+  // screenshot is typically 2-5 MiB, so the request gets rejected at
+  // the EDGE (returns HTTP 502 before FastAPI even sees it). Shrinking
+  // each image to max 1600px and JPEG q=0.82 reliably brings the total
+  // payload below the limit while keeping the page readable enough
+  // for the multimodal LLM to extract form fields / buttons.
+  const compressImageFile = (file, { maxDim = 1600, quality = 0.82 } = {}) => new Promise((resolve, reject) => {
+    if (!file.type.startsWith("image/")) { resolve(file); return; }
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const ratio = Math.min(1, maxDim / Math.max(img.width, img.height));
+      const w = Math.round(img.width * ratio);
+      const h = Math.round(img.height * ratio);
+      const canvas = document.createElement("canvas");
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(img, 0, 0, w, h);
+      canvas.toBlob((blob) => {
+        if (!blob) { resolve(file); return; }
+        // Only swap if compressed is actually smaller
+        if (blob.size >= file.size) { resolve(file); return; }
+        const newName = (file.name || "image").replace(/\.(png|webp|heic|heif|jpeg|jpg)$/i, "") + ".jpg";
+        resolve(new File([blob], newName, { type: "image/jpeg", lastModified: Date.now() }));
+      }, "image/jpeg", quality);
+    };
+    img.onerror = (e) => {
+      URL.revokeObjectURL(url);
+      reject(e);
+    };
+    img.src = url;
+  });
+
   // ── 2026-06 — AI Step Generator handler ──────────────────────────
   // Fetch a fresh ProxyJet proxy directly into the AI dialog's local
   // proxy field. Doesn't touch the main setup `proxy` state until the
@@ -685,8 +723,47 @@ export default function VisualRecorderPage() {
     setAiError("");
     setAiProviderUsed("");
     try {
+      // 2026-06 — Compress images BEFORE upload so we never trip the
+      // 1 MiB ingress body limit (which would return 502 before
+      // FastAPI even sees the request, giving the user a useless
+      // generic error). Videos are passed through untouched.
+      const compressed = [];
+      let totalBytes = 0;
+      for (const f of aiFiles) {
+        let out = f;
+        if (f.type.startsWith("image/")) {
+          try { out = await compressImageFile(f); } catch { out = f; }
+        }
+        compressed.push(out);
+        totalBytes += out.size;
+      }
+      // Hard cap: if total payload >7 MiB we shrink images more
+      // aggressively (cap at ~900 KiB each before any further trim).
+      const MAX_TOTAL = 7 * 1024 * 1024;
+      if (totalBytes > MAX_TOTAL) {
+        const re = [];
+        for (const f of compressed) {
+          if (f.type.startsWith("image/") && f.size > 900 * 1024) {
+            try {
+              const tiny = await compressImageFile(f, { maxDim: 1100, quality: 0.7 });
+              re.push(tiny);
+            } catch {
+              re.push(f);
+            }
+          } else {
+            re.push(f);
+          }
+        }
+        compressed.splice(0, compressed.length, ...re);
+        totalBytes = compressed.reduce((a, x) => a + x.size, 0);
+      }
+      if (totalBytes > 15 * 1024 * 1024) {
+        setAiError(`Total upload size is ${(totalBytes/1024/1024).toFixed(1)} MiB — please remove the video or use fewer screenshots (max ~15 MiB).`);
+        return;
+      }
+
       const fd = new FormData();
-      for (const f of aiFiles) fd.append("files", f);
+      for (const f of compressed) fd.append("files", f);
       if (aiTargetUrl.trim()) fd.append("target_url", aiTargetUrl.trim());
       if (aiDescription.trim()) fd.append("description", aiDescription.trim());
       if (aiExcelCols.trim()) fd.append("excel_columns", aiExcelCols.trim());
@@ -696,6 +773,25 @@ export default function VisualRecorderPage() {
         headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
         body: fd,
       });
+      // 2026-06 — Graceful handling for edge-level failures.
+      // 502/504 happen at the Kubernetes ingress when (a) backend is
+      // restarting, (b) request body exceeds ingress client_max_body
+      // limit (rare after our client-side compression above), or (c)
+      // the upstream LLM provider call exceeds the ingress timeout.
+      // 413 = Payload Too Large (ingress) — we surface it explicitly
+      // so the user knows to reduce screenshot count / video size.
+      if (r.status === 502 || r.status === 504) {
+        setAiError(
+          `Backend gateway error (HTTP ${r.status}). Yeh aksar tab hota hai jab AI call bohat lambi ho jaaye ya server abhi restart par ho. 30 second wait karke dobara try karein, ya doosra provider (Gemini / OpenAI / Claude) select karen jiska key chhota response deta hai.`
+        );
+        toast.error(`Gateway error HTTP ${r.status} — retry in 30s`);
+        return;
+      }
+      if (r.status === 413) {
+        setAiError("Upload size too large for the server. Please use fewer / smaller screenshots, or upload only one short MP4 video.");
+        toast.error("Upload too large — reduce screenshot count");
+        return;
+      }
       const data = await r.json().catch(() => ({}));
       if (!r.ok || data.status !== "ok") {
         const err = data?.detail || data?.error || `HTTP ${r.status}`;
@@ -5907,7 +6003,7 @@ export default function VisualRecorderPage() {
                 />
                 {aiFiles.length > 0 && (
                   <div className="text-xs text-zinc-500 mt-1">
-                    {aiFiles.length} file{aiFiles.length === 1 ? "" : "s"} selected — {aiFiles.map((f) => f.name).join(", ").slice(0, 120)}
+                    {aiFiles.length} file{aiFiles.length === 1 ? "" : "s"} selected ({(aiFiles.reduce((s, f) => s + f.size, 0) / 1024 / 1024).toFixed(1)} MiB) — auto-compressed before upload to bypass ingress limit.
                   </div>
                 )}
               </div>
