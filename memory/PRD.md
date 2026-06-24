@@ -120,3 +120,21 @@ This exposed krexion.com tracker URL inside `u=` param → advertiser dashboards
 - Implement changes carefully on `/app/`
 - Test via preview URL
 - On user's "deploy" command → `git add -A && git commit -m "<msg>" && git push origin main`
+
+---
+
+## Session: 2026-06-24 — Preview Re-Setup (E1)
+- Cloned repo into `/app`, restored git remote → `dennisedmaartins9-sudo/krexion.com` (main).
+- Backend + frontend dependencies reinstalled.
+- `.env` configured for preview only (gitignored, NOT pushed):
+  - `KREXION_MODE=cloud` so `cloud_proxy_module` does NOT forward `/api/auth/*` and `/api/admin/*` to production `krexion.com` from inside the preview.
+  - `STRICT_CLOUD_HEAVY_BLOCK=false`
+  - Admin creds: `admin@krexion.local` / `Krexion@2026` (see `memory/test_credentials.md`).
+- Verified live:
+  - `GET /` → 200 Krexion landing.
+  - `GET /api/public/status` → `{api_ok:true, mongo_ok:true, version:"2.1.61"}`.
+  - `POST /api/admin/login` → JWT issued.
+  - `POST /api/auth/register` → user created.
+  - `/login` and `/admin-login` pages render.
+- Working tree clean — no accidental changes will leak on next save-to-GitHub.
+- Awaiting user's bug-fix list. Will NOT push until user explicitly says deploy.
