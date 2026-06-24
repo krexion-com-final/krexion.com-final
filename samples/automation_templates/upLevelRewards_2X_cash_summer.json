@@ -1,0 +1,185 @@
+[
+  {
+    "action": "goto",
+    "url": "https://offer-luxe-spot.lovable.app",
+    "wait_nav": true,
+    "comment": "Landing page \u2014 Krexion lovable.app teaser. Loads via US proxy."
+  },
+  {
+    "action": "wait",
+    "ms": 3500
+  },
+  {
+    "action": "evaluate",
+    "script": "() => { const a = Array.from(document.querySelectorAll('a')).find(x => /EARN 2X|GET STARTED|GET A QUICK|CLAIM YOUR 2X/i.test(x.innerText||'')); if (a) { a.removeAttribute('target'); a.click(); } }",
+    "comment": "Click any of the 5 CTAs in same tab (force-strip target=_blank). All lead to https://trksy.org/aff_c?offer_id=312&aff_id=171338"
+  },
+  {
+    "action": "wait_for_load",
+    "state": "domcontentloaded",
+    "ms": 12000,
+    "comment": "trksy.org \u2192 uplevelrewards.com redirect chain takes ~5-8s"
+  },
+  {
+    "action": "wait_for_selector",
+    "selector": "form, #cid-inflow, input[type='submit'], button[type='submit']",
+    "timeout_ms": 30000,
+    "comment": "Wait for the uplevelrewards.com form page to load (Rewards Giant)"
+  },
+  {
+    "action": "wait",
+    "ms": 2000
+  },
+  {
+    "action": "evaluate",
+    "script": "() => { const f = document.querySelector('form'); if (!f) return null; const s = f.querySelector('input[type=submit], button[type=submit], button:not([type]), input[type=button][value*=Continue i], input[type=button][value*=Start i], input[type=button][value*=Yes i], input[type=button][value*=Submit i]'); if (s) { s.click(); return s.tagName + ':' + (s.value||s.innerText||'').slice(0,30); } f.submit(); return 'form.submit()'; }",
+    "comment": "Submit the landing-page form (uplevelrewards 1-click pre-pop)"
+  },
+  {
+    "action": "wait_for_load",
+    "state": "domcontentloaded",
+    "ms": 10000
+  },
+  {
+    "action": "wait",
+    "ms": 2500
+  },
+  {
+    "action": "evaluate",
+    "script": "() => {  const labels = Array.from(document.querySelectorAll('label, button, input[type=button], input[type=submit], a.btn, div[role=button]')).filter(el => el.offsetParent); const targets = labels.filter(el => { const t=((el.innerText||el.value||'')).trim().toLowerCase(); return /^(yes|no|male|female|18-24|25-34|35-44|45-54|55-64|65\\+|single|married|own|rent|employed|student|never|sometimes|often|always|continue|next|start|submit)$/.test(t); }); if (!targets.length) return null; const pick = targets[Math.floor(Math.random()*Math.min(targets.length, 3))]; pick.scrollIntoView({block:'center'}); pick.click(); return 'clicked: '+((pick.innerText||pick.value||'').slice(0,30)); }",
+    "optional": true,
+    "comment": "Survey Q1 \u2014 RANDOM answer per visit (Math.random picks from first 3 visible options)"
+  },
+  {
+    "action": "wait",
+    "ms": 2000
+  },
+  {
+    "action": "evaluate",
+    "script": "() => { const targets = Array.from(document.querySelectorAll('label, button, input[type=button], input[type=submit]')).filter(el => el.offsetParent && /^(yes|no|male|female|18-24|25-34|35-44|45-54|55-64|65\\+|continue|next|start|submit)$/i.test((el.innerText||el.value||'').trim())); if (!targets.length) return null; const pick = targets[Math.floor(Math.random()*Math.min(targets.length, 3))]; pick.click(); return 'clicked: '+((pick.innerText||pick.value||'').slice(0,30)); }",
+    "optional": true,
+    "comment": "Survey Q2 \u2014 RANDOM"
+  },
+  {
+    "action": "wait",
+    "ms": 2000
+  },
+  {
+    "action": "evaluate",
+    "script": "() => { const targets = Array.from(document.querySelectorAll('label, button, input[type=button], input[type=submit]')).filter(el => el.offsetParent && /^(yes|no|continue|next|submit)$/i.test((el.innerText||el.value||'').trim())); if (!targets.length) return null; const pick = targets[Math.floor(Math.random()*Math.min(targets.length, 2))]; pick.click(); return ''+((pick.innerText||pick.value||'').slice(0,20)); }",
+    "optional": true,
+    "comment": "Survey Q3 \u2014 RANDOM"
+  },
+  {
+    "action": "wait",
+    "ms": 2000
+  },
+  {
+    "action": "evaluate",
+    "script": "() => { const targets = Array.from(document.querySelectorAll('label, button, input[type=button], input[type=submit]')).filter(el => el.offsetParent && /^(yes|no|continue|next|submit)$/i.test((el.innerText||el.value||'').trim())); if (!targets.length) return null; const pick = targets[Math.floor(Math.random()*Math.min(targets.length, 2))]; pick.click(); return ''+((pick.innerText||pick.value||'').slice(0,20)); }",
+    "optional": true,
+    "comment": "Survey Q4 \u2014 RANDOM"
+  },
+  {
+    "action": "wait",
+    "ms": 2000
+  },
+  {
+    "action": "wait_for_selector",
+    "selector": "input[name*='first' i], input[name*='email' i], input[type='email'], input[name*='zip' i], input[id*='first' i]",
+    "timeout_ms": 25000,
+    "optional": true,
+    "comment": "Wait for lead form (any 1 of: first / email / zip)"
+  },
+  {
+    "action": "evaluate",
+    "script": "((LEAD) => { const ns = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set; const fill = (el,v) => { ns.call(el,v); el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); }; document.querySelectorAll('input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio]):not([type=image])').forEach(inp => { if (!inp.offsetParent || inp.value) return; const slot=((inp.name||'')+' '+(inp.placeholder||'')+' '+(inp.id||'')+' '+(inp.getAttribute('aria-label')||'')).toLowerCase(); const t=(inp.type||'text').toLowerCase(); if (slot.match(/first|fname/)) fill(inp, LEAD.first); else if (slot.match(/last|lname/)) fill(inp, LEAD.last); else if (slot.includes('email') || t==='email') fill(inp, LEAD.email); else if (slot.match(/phone|tel|cell|mobile/) || t==='tel') fill(inp, LEAD.cellphone); else if (slot.match(/addr|street/)) fill(inp, LEAD.address); else if (slot.includes('city')) fill(inp, LEAD.city); else if (slot.match(/zip|postal/)) fill(inp, LEAD.zip_code); else if (slot.match(/dob|birth/)) fill(inp, LEAD.month+'/'+LEAD.day+'/'+LEAD.year); }); document.querySelectorAll('select').forEach(s => { if (!s.offsetParent || s.value) return; const n=(s.name||s.id||'').toLowerCase(); let v=null; if (n.includes('state')) v=LEAD.state; else if (n.includes('gender')) v=LEAD.gender; else if (n.includes('month')) v=LEAD.month; else if (n.includes('day')) v=LEAD.day; else if (n.includes('year')) v=LEAD.year; if (v) { for (const o of s.options) { if (o.value===v || (o.text||'').toLowerCase()===v.toLowerCase() || o.value===String(parseInt(v))) { s.value=o.value; s.dispatchEvent(new Event('change',{bubbles:true})); break; } } } }); document.querySelectorAll('input[type=checkbox]').forEach(cb => { const slot=((cb.name||'')+' '+(cb.id||'')+' '+((cb.parentElement&&cb.parentElement.innerText)||'')).toLowerCase(); if (!cb.checked && slot.match(/terms|agree|consent|tcpa|privacy/)) { cb.click(); } }); return 'filled all'; })({first:'{{first}}',last:'{{last}}',email:'{{email}}',cellphone:'{{cellphone}}',address:'{{address}}',city:'{{city}}',state:'{{state}}',zip_code:'{{zip_code}}',gender:'{{gender}}',day:'{{day}}',month:'{{month}}',year:'{{year}}'})",
+    "comment": "Fill EVERY visible input + dropdown + check terms checkbox in one shot \u2014 uses native React-compatible value setter (works on classic forms AND modern React)"
+  },
+  {
+    "action": "wait",
+    "ms": 1500
+  },
+  {
+    "action": "evaluate",
+    "script": "() => { const f = document.querySelector('form'); if (f) { const s = f.querySelector('input[type=submit], button[type=submit]'); if (s) { s.click(); return 'submit-clicked'; } f.submit(); return 'form-submit'; } const b = Array.from(document.querySelectorAll('button, input[type=submit]')).find(el => el.offsetParent && /submit|continue|next|claim|get/i.test(el.innerText||el.value||'')); if (b) { b.click(); return 'fallback-click'; } return 'no-submit'; }",
+    "comment": "Submit lead form \u2014 works for both <form> and SPA-style"
+  },
+  {
+    "action": "wait_for_load",
+    "state": "domcontentloaded",
+    "ms": 15000
+  },
+  {
+    "action": "wait",
+    "ms": 4000
+  },
+  {
+    "action": "wait_for_selector",
+    "selector": "text=BEST MATCH FOR YOU, text=Complete the deal, text=Fillwords, text=JustPlay, button:has-text('CONTINUE')",
+    "timeout_ms": 35000,
+    "comment": "Wait for deal page (Fillwords / JustPlay / Bingo Billions)"
+  },
+  {
+    "action": "scroll",
+    "to": "bottom",
+    "ms": 1500
+  },
+  {
+    "action": "scroll",
+    "to": "top",
+    "ms": 1500
+  },
+  {
+    "action": "wait",
+    "ms": 2000
+  },
+  {
+    "action": "evaluate",
+    "script": "() => {  const cards = document.querySelectorAll('article, [class*=card i], [class*=deal i], li, div'); for (const c of cards) { const txt = (c.innerText||'').toLowerCase(); if (txt.includes('whatnot')) continue; if (!txt.match(/fillwords|justplay|bingo billions/)) continue; const btn = c.querySelector('button.bg-red-600, button:not([disabled]), a.btn'); if (btn && /continue/i.test(btn.innerText||'')) { btn.scrollIntoView({block:'center'}); btn.click(); return 'deal1:'+(c.innerText||'').slice(0,40); } }  const any = Array.from(document.querySelectorAll('button')).find(b => /continue/i.test(b.innerText||'') && !/(disabled)/.test(b.outerHTML)); if (any) { any.click(); return 'fallback1'; } return null; }",
+    "wait_after_ms": 4500,
+    "comment": "DEAL 1 \u2014 Fillwords / JustPlay / Bingo (BEST MATCH free deal, skip Whatnot)"
+  },
+  {
+    "action": "evaluate",
+    "script": "() => { history.back(); }",
+    "wait_after_ms": 3500,
+    "optional": true,
+    "comment": "Back to deal page if deal opened in same tab"
+  },
+  {
+    "action": "wait_for_selector",
+    "selector": "button:has-text('CONTINUE'), text=Fillwords, text=JustPlay",
+    "timeout_ms": 15000,
+    "optional": true
+  },
+  {
+    "action": "evaluate",
+    "script": "() => { const seen = window.__krxClicked = window.__krxClicked || new Set(); const cards = document.querySelectorAll('article, [class*=card i], [class*=deal i], li, div'); for (const c of cards) { const txt = (c.innerText||'').toLowerCase(); if (txt.includes('whatnot')) continue; const titleMatch = txt.match(/fillwords|justplay|bingo billions/); if (!titleMatch) continue; if (seen.has(titleMatch[0])) continue; const btn = c.querySelector('button.bg-red-600, button:not([disabled])'); if (btn && /continue/i.test(btn.innerText||'')) { seen.add(titleMatch[0]); btn.scrollIntoView({block:'center'}); btn.click(); return 'deal2:'+titleMatch[0]; } } return null; }",
+    "wait_after_ms": 4500,
+    "comment": "DEAL 2 \u2014 next unseen free deal"
+  },
+  {
+    "action": "evaluate",
+    "script": "() => { history.back(); }",
+    "wait_after_ms": 3500,
+    "optional": true
+  },
+  {
+    "action": "wait_for_selector",
+    "selector": "button:has-text('CONTINUE')",
+    "timeout_ms": 15000,
+    "optional": true
+  },
+  {
+    "action": "evaluate",
+    "script": "() => { const seen = window.__krxClicked = window.__krxClicked || new Set(); const cards = document.querySelectorAll('article, [class*=card i], [class*=deal i], li, div'); for (const c of cards) { const txt = (c.innerText||'').toLowerCase(); if (txt.includes('whatnot')) continue; const titleMatch = txt.match(/fillwords|justplay|bingo billions/); if (!titleMatch) continue; if (seen.has(titleMatch[0])) continue; const btn = c.querySelector('button.bg-red-600, button:not([disabled])'); if (btn && /continue/i.test(btn.innerText||'')) { seen.add(titleMatch[0]); btn.click(); return 'deal3:'+titleMatch[0]; } } return null; }",
+    "wait_after_ms": 4500,
+    "comment": "DEAL 3 \u2014 third unseen free deal \u2192 conversion fires"
+  },
+  {
+    "action": "wait",
+    "ms": 6000,
+    "comment": "Final settle \u2014 conversion pixel fires"
+  }
+]
