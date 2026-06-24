@@ -219,7 +219,7 @@ export default function SettingsPage() {
       await axios.put(`${API}/ai-settings`, payload, {
         headers: { Authorization: `Bearer ${getToken()}` },
       });
-      const labels = { gemini: "Gemini", openai: "OpenAI", claude: "Claude", emergent: "Emergent" };
+      const labels = { gemini: "Gemini", openai: "OpenAI", claude: "Claude", emergent: "Krexion Universal" };
       toast.success(`${labels[which] || which} key cleared`);
       await fetchAiSettings();
     } catch (e) {
@@ -521,7 +521,7 @@ export default function SettingsPage() {
                 <span className="text-purple-400">⚡</span> AI Integrations
                 {(aiGemini.has_key || aiOpenai.has_key || aiClaude.has_key || aiEmergent.has_key || (aiProvider === "emergent" && aiEmergent.platform_fallback)) && (
                   <span className="ml-2 rounded-full bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-300">
-                    Active ({aiProvider})
+                    Active ({aiProvider === "emergent" ? "krexion" : aiProvider})
                   </span>
                 )}
               </CardTitle>
@@ -595,9 +595,9 @@ export default function SettingsPage() {
                         ? "bg-blue-600 text-white border border-blue-500"
                         : "bg-zinc-900 text-zinc-300 border border-zinc-700 hover:border-zinc-500"
                     }`}
-                    title="Use your own Emergent universal key, OR the Krexion-built-in fallback if no key saved"
+                    title="Use your own Krexion universal AI key, OR the built-in fallback if no key saved"
                   >
-                    <div className="font-semibold">Emergent Universal</div>
+                    <div className="font-semibold">Krexion Universal</div>
                     <div className="text-xs opacity-70 mt-0.5">
                       {aiEmergent.has_key ? "Your key ✓" : (aiEmergent.platform_fallback ? "Built-in fallback" : "Not configured")}
                     </div>
@@ -646,21 +646,21 @@ export default function SettingsPage() {
               )}
               {aiProvider === "emergent" && (
                 <div className="rounded-md border border-blue-900/40 bg-blue-950/20 p-3 text-xs text-blue-200/90 space-y-1.5">
-                  <div className="font-semibold text-blue-300 text-sm">Emergent Universal Key — Setup steps</div>
+                  <div className="font-semibold text-blue-300 text-sm">Krexion Universal Key — Setup steps</div>
                   <ol className="list-decimal list-inside space-y-1">
                     <li>
-                      <span className="font-semibold">Option A — Use your own Emergent universal key (recommended):</span><br/>
-                      Open <a href="https://app.emergent.sh/" target="_blank" rel="noreferrer" className="text-blue-300 underline">app.emergent.sh</a> → Profile → "Universal Key" → copy the key (starts with <code className="bg-zinc-900 px-1 rounded">sk-emergent-…</code>) → paste below.<br/>
-                      Yeh ek hi key Gemini, OpenAI aur Claude — sab models par chalti hai. Aap apni Emergent subscription quota use karenge.
+                      <span className="font-semibold">Option A — Use your own Krexion universal AI key (recommended):</span><br/>
+                      Krexion ka universal AI key copy karen aur neeche paste karen (key <code className="bg-zinc-900 px-1 rounded">sk-…</code> se shuru hoti hai).<br/>
+                      Yeh ek hi key Gemini, OpenAI aur Claude — sab models par chalti hai. Aap apni AI subscription quota use karenge — Krexion par koi extra charge nahi padega.
                     </li>
                     <li>
                       <span className="font-semibold">Option B — Built-in fallback:</span><br/>
-                      Koi key na save karein → Krexion ki platform-managed Emergent key automatically use hogi (fair-use limit).
+                      Koi key na save karein → Krexion ki platform-managed universal AI key automatically use hogi (fair-use limit).
                     </li>
                   </ol>
                   <div className={`pt-1 ${aiEmergent.available ? "text-blue-300/70" : "text-rose-300/80"}`}>
                     Status: {aiEmergent.has_key
-                      ? "Using your own Emergent key ✓"
+                      ? "Using your own Krexion universal key ✓"
                       : (aiEmergent.platform_fallback
                           ? "No personal key saved — Krexion platform key will be used as fallback"
                           : "No personal key AND no platform fallback configured — please save your own key OR pick a different provider.")}
@@ -708,8 +708,8 @@ export default function SettingsPage() {
               {aiProvider === "emergent" && aiEmergent.has_key && (
                 <div className="flex items-center justify-between rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm">
                   <span>
-                    <span className="text-zinc-500">Saved Emergent key: </span>
-                    <code className="text-zinc-300">{aiEmergent.key_preview || "sk-emergent-…"}</code>
+                    <span className="text-zinc-500">Saved Krexion key: </span>
+                    <code className="text-zinc-300">{aiEmergent.key_preview || "sk-…"}</code>
                   </span>
                   <Button
                     variant="outline" size="sm"
@@ -731,7 +731,7 @@ export default function SettingsPage() {
                         ? (aiOpenai.has_key ? "Paste new key to replace…" : "sk-...")
                         : aiProvider === "claude"
                           ? (aiClaude.has_key ? "Paste new key to replace…" : "sk-ant-...")
-                          : (aiEmergent.has_key ? "Paste new key to replace…" : "sk-emergent-... (optional — leave blank to use platform fallback)")
+                          : (aiEmergent.has_key ? "Paste new key to replace…" : "sk-... (Krexion universal AI key — optional, blank uses platform fallback)")
                   }
                   value={aiKey}
                   onChange={(e) => setAiKey(e.target.value)}

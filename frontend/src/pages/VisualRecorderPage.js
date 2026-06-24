@@ -701,7 +701,7 @@ export default function VisualRecorderPage() {
         const err = data?.detail || data?.error || `HTTP ${r.status}`;
         setAiError(typeof err === "string" ? err : JSON.stringify(err));
         toast.error(`AI generation failed — ${err}`);
-        setAiProviderUsed(data?.provider || "");
+        setAiProviderUsed(data?.provider_display || data?.provider || "");
         return;
       }
       const generated = Array.isArray(data.steps) ? data.steps : [];
@@ -709,7 +709,7 @@ export default function VisualRecorderPage() {
         setAiError("AI returned an empty step list. Try a more detailed description or clearer screenshots.");
         return;
       }
-      setAiProviderUsed(data.provider || "");
+      setAiProviderUsed(data.provider_display || data.provider || "");
       // Replace the current draft with the AI-generated steps. The
       // user can still Start Recording on top and edit each step.
       setSteps(generated);
@@ -726,8 +726,9 @@ export default function VisualRecorderPage() {
       }
 
       const proxyNote = aiProxy.trim() ? " · Proxy applied to setup" : "";
+      const providerLabel = data.provider_display || data.provider || "AI";
       toast.success(
-        `AI generated ${generated.length} steps via ${data.provider || "provider"}${proxyNote} — review & Start Recording to refine.`
+        `${providerLabel} generated ${generated.length} steps${proxyNote} — review & Start Recording to refine.`
       );
       setAiDialogOpen(false);
       // Reset form so next open starts clean

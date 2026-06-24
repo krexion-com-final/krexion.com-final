@@ -251,3 +251,51 @@ Combined with the previous turn's 5 files, the total work waiting for user's Sav
 - `backend/ai_automation_generator.py`, `backend/server.py`, `frontend/src/pages/RealUserTrafficPage.js`, `frontend/src/pages/SettingsPage.js`, `frontend/src/pages/VisualRecorderPage.js`, `memory/PRD.md`.
 
 Still no `git push` performed — user controls deploy timing.
+
+---
+
+## Session: 2026-06-24 — Krexion rebrand + AI error UX (E1)
+
+User feedback:
+1. "user ko Emergent naam kahin na nazar ay, yahan Krexion universal key likha jay, Emergent kahin show ni krwana."
+2. "Emergent key add ki hai pr jab JSON generate krne ka button dabaya to error aya: AI generation failed / HTTP 502. Ye perfect kaam krna chahye."
+
+### Investigation (HTTP 502 / "Invalid token")
+- Backend log se reproduce: actual error was `litellm.BadRequestError: OpenAIException - Budget has been exceeded! Current cost: 0.084, Max budget: 0.001`. The preview's auto-issued Krexion universal key has a tiny per-test budget which my own earlier testing had consumed.
+- "Invalid token" was the variant when an INVALID key was pasted.
+- After fresh small test, the endpoint returned `status: ok` with 5 valid steps → confirming code path is correct. Issue was budget on the preview key only; on the customer's VPS (with their own real universal key) it will work normally.
+- Improved error mapping in `ai_automation_generator.generate_automation_for_user`: when `budget exceeded`, `invalid token`, `rate limit`, or `timeout` is in the raw error, the response now returns a friendly Roman-Urdu actionable message that points to Settings → AI Integrations. Hides partner names (LiteLLM / OpenAI / Anthropic).
+
+### Krexion rebrand (UI text — internal field names unchanged)
+- `backend/server.py`:
+  - Validation message: "Invalid Krexion universal AI key format — should start with 'sk-'" (loosened from `sk-emergent-` to `sk-` so the user never sees the partner prefix in errors).
+  - `GET /api/ai-settings` `key_preview` for emergent is now `"sk-…<last4>"` — the `emergent-` segment is stripped before sending to the UI.
+- `backend/ai_automation_generator.py`:
+  - Response now includes `provider_display`: `"Krexion AI"` for the emergent provider, else `"Gemini"` / `"ChatGPT"` / `"Claude"`.
+  - All friendly error strings reference `Krexion AI` (not Emergent).
+- `frontend/src/pages/SettingsPage.js`:
+  - Provider button: "Emergent Universal" → "**Krexion Universal**" (label, title, setup card heading).
+  - Active badge: `Active (emergent)` → `Active (krexion)`.
+  - Setup steps: removed the `app.emergent.sh` link, the `sk-emergent-…` prefix mention, "Emergent subscription" — replaced with neutral "Krexion universal AI key … (key sk-… se shuru hoti hai)".
+  - Saved-key row label: "Saved Emergent key:" → "Saved Krexion key:".
+  - Input placeholder: "sk-… (Krexion universal AI key — optional, blank uses platform fallback)".
+  - Clear-button toast: "Emergent key cleared" → "Krexion Universal key cleared".
+- `frontend/src/pages/VisualRecorderPage.js`:
+  - Success toast now reads "**Krexion AI** generated N steps · Proxy applied to setup" (was "via emergent").
+  - Error display + `aiProviderUsed` use `provider_display` from the backend.
+
+### Verified
+- `GET /api/ai-settings` → `emergent.key_preview = "sk-…f4eD"` (no partner brand in preview).
+- `POST /api/visual-recorder/ai-generate-steps` with small valid image → `status: ok, steps: [5 entries], provider_display: "Krexion AI"`.
+- Invalid key test → `status: failed, error: "Krexion AI key invalid hai. Settings → AI Integrations kholen aur key dobara paste karein (extra spaces ya line-breaks na hon).", provider_display: "Krexion AI"`.
+- Playwright text scan of Settings card → **no occurrences** of "Emergent", "emergent.sh", or "sk-emergent" in user-visible text.
+
+### Files modified this turn (4)
+1. `backend/ai_automation_generator.py` (friendly error mapping + `provider_display`)
+2. `backend/server.py` (key_preview masking + validation message)
+3. `frontend/src/pages/SettingsPage.js` (all "Emergent" → "Krexion" in UI)
+4. `frontend/src/pages/VisualRecorderPage.js` (toast + error use `provider_display`)
+
+### Important note for the user (production deploy)
+On the customer's VPS, when they paste their REAL Krexion universal AI key (`sk-…`), the AI call should work without "budget exceeded". The preview's auto-issued key has a tiny test budget. If they want to FULLY test on preview before deploying, they can paste their actual Krexion key into Settings → AI Integrations → Krexion Universal → Save Key.
+

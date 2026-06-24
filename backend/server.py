@@ -4174,6 +4174,17 @@ async def get_ai_settings(user: dict = Depends(get_current_user)):
     o_key = (db_user.get("openai_api_key") or "").strip()
     c_key = (db_user.get("anthropic_api_key") or "").strip()
     e_key = (db_user.get("emergent_api_key") or "").strip()
+    # 2026-06 — Brand-safe key preview: strip the "emergent-" segment
+    # so the customer sees "sk-…" not "sk-emergent-…". The actual key
+    # format is unchanged on the wire.
+    if e_key:
+        # Show "sk-…tail" — hide the middle (which may contain partner branding).
+        if len(e_key) >= 10:
+            e_preview = "sk-…" + e_key[-4:]
+        else:
+            e_preview = "sk-…"
+    else:
+        e_preview = ""
     # 2026-06 — Emergent provider: prefers user's OWN key (so their
     # personal subscription quota is used). If user hasn't saved one,
     # falls back to the Krexion-platform key (env EMERGENT_LLM_KEY).
@@ -4196,7 +4207,7 @@ async def get_ai_settings(user: dict = Depends(get_current_user)):
             # `has_key` = user has saved their own emergent key.
             # `available` = either user has key OR platform has key.
             "has_key": bool(e_key),
-            "key_preview": (e_key[:14] + "..." + e_key[-4:]) if len(e_key) >= 20 else "",
+            "key_preview": e_preview,
             "available": bool(e_key) or platform_emergent_available,
             "platform_fallback": platform_emergent_available,
         },
@@ -4263,10 +4274,14 @@ async def update_ai_settings(
         update_doc["anthropic_api_key"] = new_key
     if update.emergent_api_key is not None:
         new_key = update.emergent_api_key.strip()
-        if new_key and not new_key.startswith("sk-emergent-"):
+        # 2026-06 — Krexion-branded universal AI key. Internally this is
+        # the Emergent universal key format (sk-emergent-…) but we don't
+        # surface that prefix in error messages — just "sk-" so users
+        # don't see partner branding.
+        if new_key and not new_key.startswith("sk-"):
             raise HTTPException(
                 status_code=400,
-                detail="Invalid Emergent universal key format — should start with 'sk-emergent-'",
+                detail="Invalid Krexion universal AI key format — should start with 'sk-'",
             )
         update_doc["emergent_api_key"] = new_key
     if update.ai_provider is not None:

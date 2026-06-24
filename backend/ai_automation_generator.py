@@ -705,10 +705,46 @@ async def generate_automation_for_user(
             raw = await chat.send_message(msg)
     except Exception as e:
         logger.exception(f"AI generator failed via {provider}")
+        # 2026-06 — Surface user-friendly errors. Hide partner brand
+        # names (LiteLLM / OpenAI / Anthropic / Emergent) so the UI
+        # consistently speaks "Krexion AI". Map common failure modes
+        # to actionable Roman-Urdu hints.
+        raw_msg = str(e)
+        low = raw_msg.lower()
+        display_provider = "Krexion AI" if provider == PROVIDER_EMERGENT else (
+            "Gemini" if provider == PROVIDER_GEMINI else
+            "ChatGPT" if provider == PROVIDER_OPENAI else
+            "Claude" if provider == PROVIDER_CLAUDE else provider
+        )
+        if "budget" in low and ("exceed" in low or "exhaust" in low):
+            friendly = (
+                f"{display_provider} key ka monthly budget exhaust ho gaya hai. "
+                "Settings → AI Integrations mein apni key replace karein, OR doosra "
+                "provider (Gemini / OpenAI / Claude) select karke us ka key save karein."
+            )
+        elif "invalid" in low and ("token" in low or "api key" in low or "api_key" in low):
+            friendly = (
+                f"{display_provider} key invalid hai. Settings → AI Integrations kholen "
+                "aur key dobara paste karein (extra spaces ya line-breaks na hon)."
+            )
+        elif "quota" in low or "rate limit" in low or "429" in raw_msg:
+            friendly = (
+                f"{display_provider} ne rate-limit lagaya hua hai. Kuch minutes baad "
+                "dobara try karein, ya doosra provider select karein."
+            )
+        elif "timeout" in low or "timed out" in low:
+            friendly = f"{display_provider} ne timeout diya — bara video file ya slow connection. Chhote screenshots use karke try karein."
+        else:
+            # Strip provider-specific prefixes the user shouldn't see
+            cleaned = raw_msg
+            for noisy in ("litellm.", "OpenAIException", "AnthropicException", "GoogleException"):
+                cleaned = cleaned.replace(noisy, "").strip(" -:")
+            friendly = f"{display_provider} call failed: {cleaned[:280]}"
         return {
             "status": "failed",
-            "error": f"AI call failed ({provider}): {str(e)[:300]}",
+            "error": friendly,
             "provider": provider,
+            "provider_display": display_provider,
         }
 
     steps = _parse_steps_from_response(raw)
@@ -718,6 +754,7 @@ async def generate_automation_for_user(
             "error": "Could not parse JSON from model output",
             "raw": raw[:2000] if isinstance(raw, str) else str(raw)[:2000],
             "provider": provider,
+            "provider_display": "Krexion AI" if provider == PROVIDER_EMERGENT else provider,
         }
     steps = _sanitize_steps(steps)
     return {
@@ -725,4 +762,8 @@ async def generate_automation_for_user(
         "steps": steps,
         "raw": raw if isinstance(raw, str) else str(raw),
         "provider": provider,
+        # 2026-06 — Brand-safe label for the UI so customers never see
+        # "emergent" anywhere. Internal `provider` field stays for
+        # programmatic logic (telemetry / future migrations).
+        "provider_display": "Krexion AI" if provider == PROVIDER_EMERGENT else provider,
     }
