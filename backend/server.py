@@ -4167,10 +4167,14 @@ async def get_ai_settings(user: dict = Depends(get_current_user)):
     """Return whether the user has saved AI keys (don't return the keys)."""
     db_user = await db.users.find_one(
         {"id": user["id"]},
-        {"_id": 0, "gemini_api_key": 1, "openai_api_key": 1, "ai_provider": 1},
+        {"_id": 0, "gemini_api_key": 1, "openai_api_key": 1, "anthropic_api_key": 1, "ai_provider": 1},
     ) or {}
     g_key = (db_user.get("gemini_api_key") or "").strip()
     o_key = (db_user.get("openai_api_key") or "").strip()
+    c_key = (db_user.get("anthropic_api_key") or "").strip()
+    # 2026-06 — "emergent" provider uses the platform's universal key
+    # so we report it as always-available (no per-user key needed).
+    emergent_available = bool(os.environ.get("EMERGENT_LLM_KEY", "").strip())
     return {
         "provider": db_user.get("ai_provider") or "gemini",
         "gemini": {
@@ -4181,18 +4185,28 @@ async def get_ai_settings(user: dict = Depends(get_current_user)):
             "has_key": bool(o_key),
             "key_preview": (o_key[:7] + "..." + o_key[-4:]) if len(o_key) >= 12 else "",
         },
+        "claude": {
+            "has_key": bool(c_key),
+            "key_preview": (c_key[:10] + "..." + c_key[-4:]) if len(c_key) >= 16 else "",
+        },
+        "emergent": {
+            "available": emergent_available,
+        },
         # Legacy fields for backwards-compat
-        "has_key": bool(g_key) or bool(o_key),
+        "has_key": bool(g_key) or bool(o_key) or bool(c_key) or emergent_available,
         "key_preview": (g_key[:6] + "..." + g_key[-4:]) if len(g_key) >= 12 else (
-            (o_key[:7] + "..." + o_key[-4:]) if len(o_key) >= 12 else ""
+            (o_key[:7] + "..." + o_key[-4:]) if len(o_key) >= 12 else (
+                (c_key[:10] + "..." + c_key[-4:]) if len(c_key) >= 16 else ""
+            )
         ),
     }
 
 
 class AISettingsUpdate(BaseModel):
-    gemini_api_key: Optional[str] = None  # None=leave, ""=clear, "AIza..."=set
-    openai_api_key: Optional[str] = None  # None=leave, ""=clear, "sk-..."=set
-    ai_provider: Optional[str] = None     # 'gemini' | 'openai' (which key to use)
+    gemini_api_key: Optional[str] = None      # None=leave, ""=clear, "AIza..."=set
+    openai_api_key: Optional[str] = None      # None=leave, ""=clear, "sk-..."=set
+    anthropic_api_key: Optional[str] = None   # None=leave, ""=clear, "sk-ant-..."=set
+    ai_provider: Optional[str] = None         # 'gemini' | 'openai' | 'claude' | 'emergent'
 
 
 @api_router.put("/ai-settings")
@@ -4202,12 +4216,16 @@ async def update_ai_settings(
 ):
     """Save / clear the user's AI API keys + select active provider.
 
-    The keys are used by the Form Filler / RUT bot as a fallback when the
-    rule-based survey/form logic can't progress.
+    The keys are used by the Form Filler / RUT bot / Visual Recorder AI
+    step generator as a fallback when the rule-based logic can't progress
+    or when the user explicitly asks "Generate with AI".
 
-    Free options:
-        Gemini: https://aistudio.google.com/apikey  (1500 req/day free)
-        OpenAI: https://platform.openai.com/api-keys ($5 trial credit, ~50k calls)
+    Free / cheap options:
+        Gemini:    https://aistudio.google.com/apikey      (1500 req/day free)
+        OpenAI:    https://platform.openai.com/api-keys    ($5 trial credit)
+        Anthropic: https://console.anthropic.com/settings/keys (paid; ~$3 per 1M input tokens)
+        Emergent:  built-in Krexion universal key — zero setup, uses
+                   platform quota (may be rate-limited under heavy use)
     """
     update_doc: Dict[str, Any] = {}
     if update.gemini_api_key is not None:
@@ -4226,12 +4244,20 @@ async def update_ai_settings(
                 detail="Invalid OpenAI key format — should start with 'sk-'",
             )
         update_doc["openai_api_key"] = new_key
-    if update.ai_provider is not None:
-        prov = update.ai_provider.strip().lower()
-        if prov and prov not in ("gemini", "openai"):
+    if update.anthropic_api_key is not None:
+        new_key = update.anthropic_api_key.strip()
+        if new_key and not new_key.startswith("sk-ant-"):
             raise HTTPException(
                 status_code=400,
-                detail="provider must be 'gemini' or 'openai'",
+                detail="Invalid Anthropic key format — should start with 'sk-ant-'",
+            )
+        update_doc["anthropic_api_key"] = new_key
+    if update.ai_provider is not None:
+        prov = update.ai_provider.strip().lower()
+        if prov and prov not in ("gemini", "openai", "claude", "emergent"):
+            raise HTTPException(
+                status_code=400,
+                detail="provider must be 'gemini', 'openai', 'claude' or 'emergent'",
             )
         update_doc["ai_provider"] = prov or "gemini"
 
@@ -4239,7 +4265,13 @@ async def update_ai_settings(
         return {"message": "no change"}
 
     await db.users.update_one({"id": user["id"]}, {"$set": update_doc})
-    return {"message": "AI settings saved", **update_doc, "openai_api_key": "***" if update_doc.get("openai_api_key") else update_doc.get("openai_api_key"), "gemini_api_key": "***" if update_doc.get("gemini_api_key") else update_doc.get("gemini_api_key")}
+    return {
+        "message": "AI settings saved",
+        **update_doc,
+        "openai_api_key": "***" if update_doc.get("openai_api_key") else update_doc.get("openai_api_key"),
+        "gemini_api_key": "***" if update_doc.get("gemini_api_key") else update_doc.get("gemini_api_key"),
+        "anthropic_api_key": "***" if update_doc.get("anthropic_api_key") else update_doc.get("anthropic_api_key"),
+    }
 
 # ==================== SUB-USER MANAGEMENT ====================
 
@@ -9365,7 +9397,7 @@ async def rut_ai_generate_automation(
     check_user_feature(user, "real_user_traffic")
 
     from ai_automation_generator import (
-        generate_automation_from_media,
+        generate_automation_for_user,
         classify_upload,
         MAX_IMAGES,
         MAX_VIDEO_BYTES,
@@ -9373,6 +9405,16 @@ async def rut_ai_generate_automation(
 
     if not files:
         raise HTTPException(status_code=400, detail="At least one screenshot or video is required")
+
+    # 2026-06 — Pass full user doc to the generator so it picks the
+    # user's chosen provider (gemini / openai / claude / emergent) and
+    # the matching key. Falls back to Emergent universal key when the
+    # user hasn't configured anything yet.
+    user_doc = await db.users.find_one(
+        {"id": user["id"]},
+        {"_id": 0, "ai_provider": 1, "gemini_api_key": 1,
+         "openai_api_key": 1, "anthropic_api_key": 1},
+    ) or {}
 
     workdir = Path(tempfile.mkdtemp(prefix="rut_ai_"))
     image_paths: List[str] = []
@@ -9407,7 +9449,8 @@ async def rut_ai_generate_automation(
         if excel_columns:
             cols = [c.strip() for c in excel_columns.split(",") if c.strip()]
 
-        result = await generate_automation_from_media(
+        result = await generate_automation_for_user(
+            user_doc=user_doc,
             image_paths=image_paths,
             video_path=video_path,
             target_url=(target_url or None),
@@ -18566,6 +18609,109 @@ class VRStartReq(BaseModel):
     viewport_w: Optional[int] = 0
     viewport_h: Optional[int] = 0
     device_scale_factor: Optional[float] = 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 2026-06 — Visual Recorder: AI-assisted step generation.
+# User ask (Roman Urdu): "Visual recorder mein AI integration ka option
+# ho ta k AI k zarye JSON banana aur b asan ho jaaye." Endpoint accepts
+# 1-15 screenshots and/or 1 short video + a freeform description and
+# returns a JSON step-list that the Visual Recorder can import as the
+# starting point for a recording. Provider+key come from the user's
+# /api/ai-settings configuration (Gemini / OpenAI / Claude / Emergent).
+# ─────────────────────────────────────────────────────────────────────
+@api_router.post("/visual-recorder/ai-generate-steps")
+async def vr_ai_generate_steps(
+    target_url: Optional[str] = Form(None),
+    description: Optional[str] = Form(None),
+    excel_columns: Optional[str] = Form(None),
+    files: List[UploadFile] = File(...),
+    user: dict = Depends(get_current_user),
+):
+    """Generate a Visual Recorder step-list from screenshots/video via
+    the user's configured AI provider. Mirrors
+    `/api/real-user-traffic/ai-generate-automation` so the same
+    underlying generator + step schema is used everywhere — keeping
+    Visual Recorder, RUT and Form Filler step formats compatible.
+    """
+    check_user_feature(user, "real_user_traffic")
+
+    from ai_automation_generator import (
+        generate_automation_for_user,
+        classify_upload,
+        MAX_IMAGES,
+        MAX_VIDEO_BYTES,
+    )
+
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one screenshot or video is required")
+
+    user_doc = await db.users.find_one(
+        {"id": user["id"]},
+        {"_id": 0, "ai_provider": 1, "gemini_api_key": 1,
+         "openai_api_key": 1, "anthropic_api_key": 1},
+    ) or {}
+
+    workdir = Path(tempfile.mkdtemp(prefix="vr_ai_"))
+    image_paths: List[str] = []
+    video_path: Optional[str] = None
+    try:
+        for up in files:
+            kind = classify_upload(up.filename or "")
+            if kind is None:
+                continue
+            data = await up.read()
+            if kind == "video":
+                if len(data) > MAX_VIDEO_BYTES:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Video exceeds {MAX_VIDEO_BYTES // (1024*1024)} MB limit",
+                    )
+                if video_path is not None:
+                    raise HTTPException(status_code=400, detail="Only one video per request")
+                dest = workdir / (up.filename or f"video_{uuid.uuid4().hex[:6]}.mp4")
+                dest.write_bytes(data)
+                video_path = str(dest)
+            else:
+                if len(image_paths) >= MAX_IMAGES:
+                    continue
+                dest = workdir / (up.filename or f"img_{uuid.uuid4().hex[:6]}.png")
+                dest.write_bytes(data)
+                image_paths.append(str(dest))
+
+        if not image_paths and not video_path:
+            raise HTTPException(
+                status_code=400,
+                detail="No valid image/video files (accepted: png, jpg, jpeg, webp, mp4, mov, webm, mpeg, avi)",
+            )
+
+        cols: Optional[List[str]] = None
+        if excel_columns:
+            cols = [c.strip() for c in excel_columns.split(",") if c.strip()]
+
+        result = await generate_automation_for_user(
+            user_doc=user_doc,
+            image_paths=image_paths,
+            video_path=video_path,
+            target_url=(target_url or None),
+            description=(description or None),
+            excel_columns=cols,
+        )
+        return result
+    finally:
+        try:
+            for p in image_paths:
+                try: os.remove(p)
+                except Exception: pass
+            if video_path:
+                try: os.remove(video_path)
+                except Exception: pass
+            try: workdir.rmdir()
+            except Exception: pass
+        except Exception:
+            pass
+
+
 
 
 @api_router.post("/visual-recorder/start")

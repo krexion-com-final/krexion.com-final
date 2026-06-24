@@ -75,11 +75,13 @@ export default function SettingsPage() {
     }
   });
 
-  // ── AI Vision (free Google Gemini / OpenAI) settings ──
-  const [aiProvider, setAiProvider] = useState("gemini"); // 'gemini' | 'openai'
+  // ── AI Vision settings (Gemini / OpenAI / Claude / Emergent — 2026-06) ──
+  const [aiProvider, setAiProvider] = useState("gemini"); // 'gemini' | 'openai' | 'claude' | 'emergent'
   const [aiKey, setAiKey] = useState("");
   const [aiGemini, setAiGemini] = useState({ has_key: false, key_preview: "" });
   const [aiOpenai, setAiOpenai] = useState({ has_key: false, key_preview: "" });
+  const [aiClaude, setAiClaude] = useState({ has_key: false, key_preview: "" });
+  const [aiEmergent, setAiEmergent] = useState({ available: false });
   const [aiSaving, setAiSaving] = useState(false);
 
   // ── Notification settings (low-stock email alerts) ──
@@ -145,6 +147,8 @@ export default function SettingsPage() {
       setAiProvider(r.data?.provider || "gemini");
       setAiGemini(r.data?.gemini || { has_key: false, key_preview: "" });
       setAiOpenai(r.data?.openai || { has_key: false, key_preview: "" });
+      setAiClaude(r.data?.claude || { has_key: false, key_preview: "" });
+      setAiEmergent(r.data?.emergent || { available: false });
     } catch (e) {
       // ignore
     }
@@ -189,7 +193,9 @@ export default function SettingsPage() {
     try {
       const payload = { ai_provider: aiProvider };
       if (aiProvider === "gemini") payload.gemini_api_key = aiKey;
-      else payload.openai_api_key = aiKey;
+      else if (aiProvider === "openai") payload.openai_api_key = aiKey;
+      else if (aiProvider === "claude") payload.anthropic_api_key = aiKey;
+      // emergent provider needs no key (server-side)
       await axios.put(`${API}/ai-settings`, payload, {
         headers: { Authorization: `Bearer ${getToken()}` },
       });
@@ -205,11 +211,15 @@ export default function SettingsPage() {
 
   const handleClearAiKey = async (which) => {
     try {
-      const payload = which === "gemini" ? { gemini_api_key: "" } : { openai_api_key: "" };
+      let payload = {};
+      if (which === "gemini") payload = { gemini_api_key: "" };
+      else if (which === "openai") payload = { openai_api_key: "" };
+      else if (which === "claude") payload = { anthropic_api_key: "" };
       await axios.put(`${API}/ai-settings`, payload, {
         headers: { Authorization: `Bearer ${getToken()}` },
       });
-      toast.success(`${which === "gemini" ? "Gemini" : "OpenAI"} key cleared`);
+      const labels = { gemini: "Gemini", openai: "OpenAI", claude: "Claude" };
+      toast.success(`${labels[which] || which} key cleared`);
       await fetchAiSettings();
     } catch (e) {
       toast.error("Failed to clear key");
@@ -503,12 +513,12 @@ export default function SettingsPage() {
             </CardContent>
           </Card>
 
-          {/* ────── AI Vision (FREE Gemini OR OpenAI) ────── */}
+          {/* ────── AI Vision (Gemini / OpenAI / Claude / Emergent) ────── */}
           <Card className="bg-[var(--brand-card)] border-[var(--brand-border)]" data-testid="ai-settings-card">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
-                <span className="text-purple-400">⚡</span> AI Vision Fallback
-                {(aiGemini.has_key || aiOpenai.has_key) && (
+                <span className="text-purple-400">⚡</span> AI Integrations
+                {(aiGemini.has_key || aiOpenai.has_key || aiClaude.has_key || (aiProvider === "emergent" && aiEmergent.available)) && (
                   <span className="ml-2 rounded-full bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-300">
                     Active ({aiProvider})
                   </span>
@@ -516,81 +526,135 @@ export default function SettingsPage() {
               </CardTitle>
               <CardDescription className="space-y-1">
                 <div>
-                  When the bot can't progress on a survey/form page, AI Vision uses
-                  the selected provider to look at the page and decide the next action.
-                  Choose the provider you have a key for — saves quota cost.
+                  Apna AI provider chunein. Yeh AI Visual Recorder mein JSON
+                  steps auto-generate karne, Form Filler / RUT mein stuck pages se
+                  recover karne, aur AI Vision fallback ke liye use hoti hai.
+                  Aap apna khud ka API key save karenge — Krexion par koi extra
+                  charge nahi padega.
                 </div>
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
 
-              {/* Provider selector */}
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              {/* Provider selector — 4 options */}
+              <div className="flex flex-col gap-2">
                 <label className="text-sm font-medium text-zinc-300">Active provider:</label>
-                <div className="flex gap-2">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                   <button
                     type="button"
                     onClick={() => handleProviderChange("gemini")}
                     data-testid="ai-provider-gemini"
-                    className={`rounded-md px-3 py-1.5 text-sm transition ${
+                    className={`rounded-md px-3 py-2 text-sm transition text-left ${
                       aiProvider === "gemini"
-                        ? "bg-purple-600 text-white"
-                        : "bg-zinc-900 text-zinc-400 border border-zinc-700 hover:border-zinc-500"
+                        ? "bg-purple-600 text-white border border-purple-500"
+                        : "bg-zinc-900 text-zinc-300 border border-zinc-700 hover:border-zinc-500"
                     }`}
                   >
-                    Google Gemini {aiGemini.has_key && "✓"}
+                    <div className="font-semibold">Google Gemini</div>
+                    <div className="text-xs opacity-70 mt-0.5">
+                      Free 1500/day {aiGemini.has_key && "✓"}
+                    </div>
                   </button>
                   <button
                     type="button"
                     onClick={() => handleProviderChange("openai")}
                     data-testid="ai-provider-openai"
-                    className={`rounded-md px-3 py-1.5 text-sm transition ${
+                    className={`rounded-md px-3 py-2 text-sm transition text-left ${
                       aiProvider === "openai"
-                        ? "bg-emerald-600 text-white"
-                        : "bg-zinc-900 text-zinc-400 border border-zinc-700 hover:border-zinc-500"
+                        ? "bg-emerald-600 text-white border border-emerald-500"
+                        : "bg-zinc-900 text-zinc-300 border border-zinc-700 hover:border-zinc-500"
                     }`}
                   >
-                    OpenAI ChatGPT {aiOpenai.has_key && "✓"}
+                    <div className="font-semibold">OpenAI ChatGPT</div>
+                    <div className="text-xs opacity-70 mt-0.5">
+                      $5 trial credit {aiOpenai.has_key && "✓"}
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleProviderChange("claude")}
+                    data-testid="ai-provider-claude"
+                    className={`rounded-md px-3 py-2 text-sm transition text-left ${
+                      aiProvider === "claude"
+                        ? "bg-orange-600 text-white border border-orange-500"
+                        : "bg-zinc-900 text-zinc-300 border border-zinc-700 hover:border-zinc-500"
+                    }`}
+                  >
+                    <div className="font-semibold">Anthropic Claude</div>
+                    <div className="text-xs opacity-70 mt-0.5">
+                      Best JSON quality {aiClaude.has_key && "✓"}
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleProviderChange("emergent")}
+                    data-testid="ai-provider-emergent"
+                    className={`rounded-md px-3 py-2 text-sm transition text-left ${
+                      aiProvider === "emergent"
+                        ? "bg-blue-600 text-white border border-blue-500"
+                        : "bg-zinc-900 text-zinc-300 border border-zinc-700 hover:border-zinc-500"
+                    }`}
+                    title={aiEmergent.available
+                      ? "Krexion-managed universal AI key — zero setup, may be rate-limited"
+                      : "Krexion universal key not configured on this server"}
+                  >
+                    <div className="font-semibold">Krexion Built-in</div>
+                    <div className="text-xs opacity-70 mt-0.5">
+                      No setup {aiEmergent.available ? "✓" : "—"}
+                    </div>
                   </button>
                 </div>
               </div>
 
-              {/* Provider info */}
-              {aiProvider === "gemini" ? (
-                <div className="rounded-md border border-purple-900/40 bg-purple-950/20 p-3 text-xs text-purple-200/80">
-                  <div className="font-semibold text-purple-300 mb-1">Google Gemini 2.5 Flash</div>
-                  <div>FREE — 1500 requests/day. Get key at{" "}
-                    <a
-                      href="https://aistudio.google.com/apikey"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-purple-300 underline hover:text-purple-200"
-                    >
-                      aistudio.google.com/apikey
-                    </a>
-                  </div>
-                  <div className="mt-1 text-purple-300/60">
-                    If "Unable to create API key" error: first create a free project at{" "}
-                    <a href="https://console.cloud.google.com/" target="_blank" rel="noreferrer" className="underline">
-                      console.cloud.google.com
-                    </a> → New Project → return to AI Studio → "Create in existing project".
-                  </div>
+              {/* Provider-specific step-by-step setup guide */}
+              {aiProvider === "gemini" && (
+                <div className="rounded-md border border-purple-900/40 bg-purple-950/20 p-3 text-xs text-purple-200/90 space-y-1.5">
+                  <div className="font-semibold text-purple-300 text-sm">Google Gemini 2.5 Pro — Setup steps</div>
+                  <ol className="list-decimal list-inside space-y-1">
+                    <li>Open <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="text-purple-300 underline">aistudio.google.com/apikey</a> (sign-in with Google).</li>
+                    <li>Click "Create API key" → choose / create a project.</li>
+                    <li>Copy the key (starts with <code className="bg-zinc-900 px-1 rounded">AIza…</code>).</li>
+                    <li>Paste below and click Save.</li>
+                  </ol>
+                  <div className="text-purple-300/60 pt-1">Free tier: 1500 requests/day. Best for JSON generation + screenshot vision.</div>
                 </div>
-              ) : (
-                <div className="rounded-md border border-emerald-900/40 bg-emerald-950/20 p-3 text-xs text-emerald-200/80">
-                  <div className="font-semibold text-emerald-300 mb-1">OpenAI GPT-4o-mini Vision</div>
-                  <div>$5 trial credit on new accounts (~50,000 calls). Get key at{" "}
-                    <a
-                      href="https://platform.openai.com/api-keys"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-emerald-300 underline hover:text-emerald-200"
-                    >
-                      platform.openai.com/api-keys
-                    </a>
-                  </div>
-                  <div className="mt-1 text-emerald-300/60">
-                    Sign up → Settings → Billing → "Free trial credit" auto-applied. Then create API key.
+              )}
+              {aiProvider === "openai" && (
+                <div className="rounded-md border border-emerald-900/40 bg-emerald-950/20 p-3 text-xs text-emerald-200/90 space-y-1.5">
+                  <div className="font-semibold text-emerald-300 text-sm">OpenAI GPT-4o — Setup steps</div>
+                  <ol className="list-decimal list-inside space-y-1">
+                    <li>Open <a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer" className="text-emerald-300 underline">platform.openai.com/api-keys</a> and sign in.</li>
+                    <li>Click "Create new secret key" → name it "Krexion".</li>
+                    <li>Copy the key (starts with <code className="bg-zinc-900 px-1 rounded">sk-…</code>) — shown only once.</li>
+                    <li>Settings → Billing → confirm trial credit OR add payment method.</li>
+                    <li>Paste key below and click Save.</li>
+                  </ol>
+                  <div className="text-emerald-300/60 pt-1">$5 trial credit on new accounts (~50k vision calls). After that pay-as-you-go.</div>
+                </div>
+              )}
+              {aiProvider === "claude" && (
+                <div className="rounded-md border border-orange-900/40 bg-orange-950/20 p-3 text-xs text-orange-200/90 space-y-1.5">
+                  <div className="font-semibold text-orange-300 text-sm">Anthropic Claude Sonnet 4.5 — Setup steps</div>
+                  <ol className="list-decimal list-inside space-y-1">
+                    <li>Open <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" className="text-orange-300 underline">console.anthropic.com/settings/keys</a> and sign in.</li>
+                    <li>Console → Billing → add at least $5 credit (Claude has no free tier).</li>
+                    <li>Settings → API Keys → "Create Key" → name it "Krexion".</li>
+                    <li>Copy the key (starts with <code className="bg-zinc-900 px-1 rounded">sk-ant-…</code>) — shown only once.</li>
+                    <li>Paste below and click Save.</li>
+                  </ol>
+                  <div className="text-orange-300/60 pt-1">Highest JSON output quality. ~$3 per 1M input tokens + $15 per 1M output.</div>
+                </div>
+              )}
+              {aiProvider === "emergent" && (
+                <div className="rounded-md border border-blue-900/40 bg-blue-950/20 p-3 text-xs text-blue-200/90 space-y-1.5">
+                  <div className="font-semibold text-blue-300 text-sm">Krexion Built-in (Emergent universal key)</div>
+                  <ol className="list-decimal list-inside space-y-1">
+                    <li>Zero setup — koi key save karne ki zarurat nahi.</li>
+                    <li>Krexion ki taraf se universal LLM key use hoti hai (Gemini 2.5 Pro backend).</li>
+                    <li>Fair-use limits apply — heavy daily usage par apna khud ka key save karein.</li>
+                  </ol>
+                  <div className={`pt-1 ${aiEmergent.available ? "text-blue-300/70" : "text-rose-300/80"}`}>
+                    Status: {aiEmergent.available ? "Available on this server" : "Not configured on this server — please use Gemini/OpenAI/Claude instead."}
                   </div>
                 </div>
               )}
@@ -618,37 +682,59 @@ export default function SettingsPage() {
                   >Clear</Button>
                 </div>
               )}
+              {aiProvider === "claude" && aiClaude.has_key && (
+                <div className="flex items-center justify-between rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm">
+                  <span>
+                    <span className="text-zinc-500">Saved Claude key: </span>
+                    <code className="text-zinc-300">{aiClaude.key_preview || "sk-ant-…"}</code>
+                  </span>
+                  <Button
+                    variant="outline" size="sm"
+                    onClick={() => handleClearAiKey("claude")}
+                    data-testid="clear-claude-key"
+                    className="border-red-700 text-red-300 hover:bg-red-950"
+                  >Clear</Button>
+                </div>
+              )}
 
-              {/* Key input */}
-              <div className="flex flex-col gap-2 sm:flex-row">
-                <input
-                  type="password"
-                  placeholder={
-                    aiProvider === "gemini"
-                      ? (aiGemini.has_key ? "Paste new key to replace…" : "AIzaSy...")
-                      : (aiOpenai.has_key ? "Paste new key to replace…" : "sk-...")
-                  }
-                  value={aiKey}
-                  onChange={(e) => setAiKey(e.target.value)}
-                  className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-purple-500 focus:outline-none"
-                  data-testid="ai-key-input"
-                />
-                <Button
-                  onClick={handleSaveAiKey}
-                  disabled={aiSaving || !aiKey}
-                  data-testid="save-ai-key-button"
-                  className={
-                    aiProvider === "openai"
-                      ? "bg-emerald-600 hover:bg-emerald-700"
-                      : "bg-purple-600 hover:bg-purple-700"
-                  }
-                >
-                  {aiSaving ? "Saving..." : "Save Key"}
-                </Button>
-              </div>
+              {/* Key input — hidden for emergent (no per-user key) */}
+              {aiProvider !== "emergent" && (
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <input
+                    type="password"
+                    placeholder={
+                      aiProvider === "gemini"
+                        ? (aiGemini.has_key ? "Paste new key to replace…" : "AIzaSy...")
+                        : aiProvider === "openai"
+                          ? (aiOpenai.has_key ? "Paste new key to replace…" : "sk-...")
+                          : (aiClaude.has_key ? "Paste new key to replace…" : "sk-ant-...")
+                    }
+                    value={aiKey}
+                    onChange={(e) => setAiKey(e.target.value)}
+                    className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-purple-500 focus:outline-none"
+                    data-testid="ai-key-input"
+                  />
+                  <Button
+                    onClick={handleSaveAiKey}
+                    disabled={aiSaving || !aiKey}
+                    data-testid="save-ai-key-button"
+                    className={
+                      aiProvider === "openai"
+                        ? "bg-emerald-600 hover:bg-emerald-700"
+                        : aiProvider === "claude"
+                          ? "bg-orange-600 hover:bg-orange-700"
+                          : "bg-purple-600 hover:bg-purple-700"
+                    }
+                  >
+                    {aiSaving ? "Saving..." : "Save Key"}
+                  </Button>
+                </div>
+              )}
               <div className="text-xs text-zinc-500">
-                Tip: AI is only called when rule-based code can't progress (saves quota).
-                Aap Gemini ya OpenAI mein se koi bhi (ya dono) save kar sakte ho — active provider toggle se switch karein.
+                Tip: AI features (Visual Recorder "Generate with AI", Form-filler
+                self-heal, RUT recovery) sirf tab call hoti hain jab rule-based
+                logic stuck ho ya aap explicitly Generate-with-AI button daboye —
+                taa ke API quota bachay.
               </div>
             </CardContent>
           </Card>

@@ -239,6 +239,23 @@ export default function VisualRecorderPage() {
   const [shotErrorCount, setShotErrorCount] = useState(0);
   const [viewport, setViewport] = useState({ width: 412, height: 914 });
   const [steps, setSteps] = useState([]);
+
+  // ─── 2026-06: AI Step Generator (Visual Recorder) ─────────────────
+  // User ask (Roman Urdu): "Visual recorder mein AI integration ka option
+  // ho ta k AI k zarye JSON banana aur b asan ho jaaye." Open the dialog,
+  // upload screenshots/video + description, and the user's chosen AI
+  // provider (gemini / openai / claude / emergent — configured in
+  // Settings → AI Integrations) generates a starter step-list. The
+  // generated steps replace the current draft so the user can refine,
+  // re-record specific selectors, or Start Recording on top of them.
+  const [aiDialogOpen, setAiDialogOpen] = useState(false);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiFiles, setAiFiles] = useState([]);              // File[] from <input>
+  const [aiDescription, setAiDescription] = useState("");
+  const [aiTargetUrl, setAiTargetUrl] = useState("");
+  const [aiExcelCols, setAiExcelCols] = useState("");      // optional CSV header list
+  const [aiProviderUsed, setAiProviderUsed] = useState(""); // returned by backend
+  const [aiError, setAiError] = useState("");
   // 2026-06 — Electron-safe prompt/confirm replacement.
   // Electron Renderer removed `await vrPrompt()` / `window.confirm()` —
   // any code path that hit them threw "prompt() is and will not be
@@ -618,6 +635,59 @@ export default function VisualRecorderPage() {
       .filter(Boolean);
     setHeaders(arr);
     if (arr.length) toast.success(`${arr.length} headers ready`);
+  };
+
+  // ── 2026-06 — AI Step Generator handler ──────────────────────────
+  const handleAiGenerate = async () => {
+    if (!aiFiles.length) {
+      setAiError("Please attach at least one screenshot (or a short demo video).");
+      return;
+    }
+    setAiBusy(true);
+    setAiError("");
+    setAiProviderUsed("");
+    try {
+      const fd = new FormData();
+      for (const f of aiFiles) fd.append("files", f);
+      if (aiTargetUrl.trim()) fd.append("target_url", aiTargetUrl.trim());
+      if (aiDescription.trim()) fd.append("description", aiDescription.trim());
+      if (aiExcelCols.trim()) fd.append("excel_columns", aiExcelCols.trim());
+      else if (headers && headers.length) fd.append("excel_columns", headers.join(","));
+      const r = await fetch(`${API_URL}/api/visual-recorder/ai-generate-steps`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
+        body: fd,
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || data.status !== "ok") {
+        const err = data?.detail || data?.error || `HTTP ${r.status}`;
+        setAiError(typeof err === "string" ? err : JSON.stringify(err));
+        toast.error(`AI generation failed — ${err}`);
+        setAiProviderUsed(data?.provider || "");
+        return;
+      }
+      const generated = Array.isArray(data.steps) ? data.steps : [];
+      if (!generated.length) {
+        setAiError("AI returned an empty step list. Try a more detailed description or clearer screenshots.");
+        return;
+      }
+      setAiProviderUsed(data.provider || "");
+      // Replace the current draft with the AI-generated steps. The
+      // user can still Start Recording on top and edit each step.
+      setSteps(generated);
+      toast.success(`AI generated ${generated.length} steps via ${data.provider || "provider"} — review & start recording to refine.`);
+      setAiDialogOpen(false);
+      // Reset form so next open starts clean
+      setAiFiles([]);
+      setAiDescription("");
+      setAiTargetUrl("");
+      setAiExcelCols("");
+    } catch (e) {
+      setAiError(e.message || String(e));
+      toast.error(`AI generation error: ${e.message || e}`);
+    } finally {
+      setAiBusy(false);
+    }
   };
 
   // ── Recording session ─────────────────────────────────────────────
@@ -3497,15 +3567,29 @@ export default function VisualRecorderPage() {
                   </div>
                 </div>
               )}
-              <button
-                onClick={startRecording}
-                disabled={busy || (editUploadId ? !editTemplate : !url.trim())}
-                className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white font-medium text-base transition-colors shadow-lg shadow-emerald-900/30"
-                data-testid="vr-start-btn"
-              >
-                {busy ? <Loader2 className="w-5 h-5 animate-spin" /> : <Play className="w-5 h-5" />}
-                {editUploadId ? "Start Editing (loads existing steps)" : "Start Recording"}
-              </button>
+              <div className="flex flex-wrap items-center gap-3 justify-center">
+                <button
+                  onClick={startRecording}
+                  disabled={busy || (editUploadId ? !editTemplate : !url.trim())}
+                  className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white font-medium text-base transition-colors shadow-lg shadow-emerald-900/30"
+                  data-testid="vr-start-btn"
+                >
+                  {busy ? <Loader2 className="w-5 h-5 animate-spin" /> : <Play className="w-5 h-5" />}
+                  {editUploadId ? "Start Editing (loads existing steps)" : "Start Recording"}
+                </button>
+                {/* 2026-06 — AI step generator (per-user provider config in Settings → AI Integrations) */}
+                <button
+                  type="button"
+                  onClick={() => { setAiDialogOpen(true); setAiError(""); }}
+                  disabled={busy}
+                  className="inline-flex items-center gap-2 px-5 py-3 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white font-medium text-base transition-colors shadow-lg shadow-purple-900/30"
+                  data-testid="vr-ai-generate-btn"
+                  title="Auto-generate Visual Recorder steps from screenshots/video using your configured AI provider (Settings → AI Integrations)"
+                >
+                  <Sparkles className="w-5 h-5" />
+                  Generate with AI
+                </button>
+              </div>
               {editUploadId && !url.trim() && (
                 <p className="text-[11px] text-zinc-500 max-w-md text-center mt-1">
                   No URL — recorder will open <code className="text-zinc-400">about:blank</code>.
@@ -5714,6 +5798,153 @@ export default function VisualRecorderPage() {
           </div>
         </div>
       )}
+
+      {/* 2026-06 — AI Step Generator dialog (Visual Recorder).
+          Provider + key come from user's Settings → AI Integrations.
+          Output replaces the current `steps` array. Z-index 70 above
+          prompt modal so a self-heal prompt mid-AI-call doesn't hide
+          this dialog. */}
+      {aiDialogOpen && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 backdrop-blur-sm"
+          data-testid="vr-ai-dialog-backdrop"
+          onClick={() => { if (!aiBusy) setAiDialogOpen(false); }}
+        >
+          <div
+            className="w-[min(640px,92vw)] max-h-[88vh] overflow-y-auto rounded-2xl border border-purple-500/30 bg-zinc-950 p-6 shadow-2xl shadow-purple-900/40"
+            data-testid="vr-ai-dialog"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between mb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-purple-600/20 border border-purple-500/40 flex items-center justify-center">
+                  <Sparkles className="w-5 h-5 text-purple-300" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-white">Generate steps with AI</h3>
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    Upload 1-15 screenshots (or one short MP4 walkthrough) and let AI
+                    generate the Visual Recorder steps. Refine selectors live after.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => { if (!aiBusy) setAiDialogOpen(false); }}
+                className="text-zinc-500 hover:text-white p-1"
+                data-testid="vr-ai-dialog-close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-zinc-300 mb-1.5">
+                  Screenshots / video <span className="text-zinc-500">(png, jpg, webp, mp4, mov, webm — up to 15 images or 1 video)</span>
+                </label>
+                <input
+                  type="file"
+                  multiple
+                  accept="image/png,image/jpeg,image/jpg,image/webp,video/mp4,video/quicktime,video/webm,video/mpeg,video/x-msvideo"
+                  onChange={(e) => setAiFiles(Array.from(e.target.files || []))}
+                  className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 file:mr-3 file:rounded file:border-0 file:bg-purple-600 file:px-3 file:py-1 file:text-white hover:file:bg-purple-500"
+                  data-testid="vr-ai-files-input"
+                />
+                {aiFiles.length > 0 && (
+                  <div className="text-xs text-zinc-500 mt-1">
+                    {aiFiles.length} file{aiFiles.length === 1 ? "" : "s"} selected — {aiFiles.map((f) => f.name).join(", ").slice(0, 120)}
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-zinc-300 mb-1.5">
+                  Target URL <span className="text-zinc-500">(optional — helps AI orient)</span>
+                </label>
+                <input
+                  type="text"
+                  value={aiTargetUrl}
+                  onChange={(e) => setAiTargetUrl(e.target.value)}
+                  placeholder={url || "https://example.com/offer"}
+                  className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-purple-500 focus:outline-none"
+                  data-testid="vr-ai-target-url"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-zinc-300 mb-1.5">
+                  Describe the flow <span className="text-zinc-500">(English / Urdu / mixed — be specific about consent boxes, popups, submit button text)</span>
+                </label>
+                <textarea
+                  value={aiDescription}
+                  onChange={(e) => setAiDescription(e.target.value)}
+                  rows={4}
+                  placeholder="Example: Click 'Get Started' → fill First Name, Last Name, Email, Zip → check Terms checkbox → click Submit → wait for thank-you page."
+                  className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-purple-500 focus:outline-none resize-none"
+                  data-testid="vr-ai-description"
+                />
+              </div>
+
+              {headers && headers.length > 0 && (
+                <div className="text-xs text-emerald-300 bg-emerald-950/30 border border-emerald-900/40 rounded px-3 py-2">
+                  ✓ Using Excel headers from your upload as placeholders: <code className="text-emerald-200">{headers.slice(0, 8).join(", ")}{headers.length > 8 ? "…" : ""}</code>
+                </div>
+              )}
+              {(!headers || !headers.length) && (
+                <div>
+                  <label className="block text-xs font-medium text-zinc-300 mb-1.5">
+                    Excel/CSV columns <span className="text-zinc-500">(optional, comma-separated — used as placeholders)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={aiExcelCols}
+                    onChange={(e) => setAiExcelCols(e.target.value)}
+                    placeholder="first, last, email, zip, phone"
+                    className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-purple-500 focus:outline-none"
+                    data-testid="vr-ai-excel-cols"
+                  />
+                </div>
+              )}
+
+              {aiError && (
+                <div className="rounded-md border border-rose-700/50 bg-rose-950/40 px-3 py-2 text-xs text-rose-200" data-testid="vr-ai-error">
+                  <div className="font-semibold mb-0.5">AI generation failed</div>
+                  <div className="opacity-90">{aiError}</div>
+                  <div className="mt-1.5 text-rose-300/80">
+                    Tip: open <Link to="/settings" className="underline">Settings → AI Integrations</Link> and verify your provider + API key.
+                  </div>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between pt-2 border-t border-zinc-800">
+                <div className="text-[11px] text-zinc-500">
+                  Provider is picked from your Settings → AI Integrations. {aiProviderUsed && <>Last used: <span className="text-zinc-300">{aiProviderUsed}</span></>}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => { if (!aiBusy) setAiDialogOpen(false); }}
+                    disabled={aiBusy}
+                    className="px-3 py-1.5 text-sm text-zinc-400 hover:text-white rounded-md hover:bg-zinc-800"
+                    data-testid="vr-ai-cancel-btn"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleAiGenerate}
+                    disabled={aiBusy || !aiFiles.length}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-purple-600 hover:bg-purple-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-white text-sm font-medium"
+                    data-testid="vr-ai-submit-btn"
+                  >
+                    {aiBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                    {aiBusy ? "Generating…" : "Generate steps"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
 
       {/* 2026-06 — Electron-safe prompt/confirm modal.
           Drives `vrPrompt()` / `vrConfirm()`. See state definition for

@@ -695,6 +695,36 @@ export default function RealUserTrafficPage() {
   const [expandedVisit, setExpandedVisit] = useState(null); // tile id when expanded to fullscreen
   const visualGridTimerRef = useRef(null);
 
+  // 2026-06 — Customer ask (Roman Urdu): "Live visual grid mein siraf
+  // wo screen show ho jo active chal rahi hai. Jo complete / cancelled
+  // / failed ho gayi ho us ki tile turant khatam ho jaaye, taa ke pata
+  // chalta rahe ke abhi kitne actually chal rahe hain. Agar 5 concurrent
+  // chala rahe hain to ek waqt mein 5 tile he dikhein — jab ek complete /
+  // cancel / fail ho jaaye, tab next visit ki tile uski jagah le."
+  //
+  // The backend keeps every visit (running, done, failed, cancelled) in
+  // its `live_visits` dict so post-mortem inspection is possible. The
+  // grid however should only render visits that are currently ACTIVE —
+  // anything else is dead weight that confuses the operator's "kitne
+  // actually chal rahe hain?" mental model. This helper is the single
+  // source of truth; it's used by the grid renderer AND by the header
+  // counter so the two never disagree.
+  const isVisitActive = (v) => {
+    if (!v) return false;
+    const ev = v.latest_event || {};
+    const evStatus = ev.status;
+    const vStatus = v.status;
+    // Cancelled (manual kill OR job-level cancel) → tile must vanish
+    if (vStatus === 'cancelled' || ev.stage === 'manual_cancel') return false;
+    // Done successfully (Visit ok) → tile must vanish
+    if (evStatus === 'ok' || vStatus === 'done' || vStatus === 'ok') return false;
+    // Failed (validation / proxy / VPN-block / etc.) → tile must vanish
+    if (evStatus === 'failed' || vStatus === 'failed') return false;
+    // Skipped (silent_skip_burnt_ip etc.) → tile must vanish
+    if (vStatus === 'skipped' || evStatus === 'skipped') return false;
+    return true;
+  };
+
   // ─── 2026-06 — Manual Takeover + Hybrid Streaming state ──────────────
   // Customer ask (Roman Urdu): "live visual grid mein sab smoothly live
   // dikhe… or live visual grid mein manually kam krne ka b option ho jese
@@ -1129,15 +1159,41 @@ export default function RealUserTrafficPage() {
     if (!activeJob?.job_id || !visualGridOpen) return;
     const visitIds = Object.keys(liveVisits);
     visitIds.forEach((vid) => {
+      const v = liveVisits[vid];
+      // 2026-06 — Don't keep streaming visits that have already
+      // finished (ok / failed / cancelled / skipped). The tile is
+      // hidden from the grid the moment isVisitActive() returns
+      // false, so streaming bytes for it is pure waste of backend +
+      // bandwidth. Forcing stream=off here also prevents the
+      // backend's daemon from re-attaching to a finished page.
+      if (!isVisitActive(v)) {
+        if (v && v.frame_source !== "off") {
+          setVisitStreamMode(vid, "off");
+        }
+        return;
+      }
       const desired = (expandedVisit && String(expandedVisit) === String(vid))
         ? "expanded"
         : "grid";
-      const v = liveVisits[vid];
       if (v && v.frame_source === desired) return;  // already at target cadence
       setVisitStreamMode(vid, desired);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visualGridOpen, expandedVisit, Object.keys(liveVisits).join(",")]);
+
+  // 2026-06 — If the user expanded a tile that has since finished
+  // (visit completed / failed / cancelled), auto-collapse so the user
+  // is not stuck staring at a dead screenshot. The grid below will
+  // also have hidden the tile, so without this auto-collapse the
+  // expanded modal would point at a vanished tile id.
+  useEffect(() => {
+    if (!expandedVisit) return;
+    const v = liveVisits[expandedVisit];
+    if (v && !isVisitActive(v)) {
+      setExpandedVisit(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveVisits, expandedVisit]);
 
   // ─── 2026-05: Manually kill ONE in-flight visit (per-tile button) ──
   // User ask (Roman Urdu): "agar kisi profile mein koi issue ai to os
@@ -5194,7 +5250,7 @@ export default function RealUserTrafficPage() {
             >
               <span className="flex items-center gap-2">
                 <Activity size={14} className="animate-pulse" />
-                Live Grid ({Object.keys(liveVisits).length} visits)
+                Live Grid ({Object.values(liveVisits).filter(isVisitActive).length} visits)
               </span>
               <span className="text-xs opacity-70">▴ click to expand</span>
             </button>
@@ -5207,7 +5263,7 @@ export default function RealUserTrafficPage() {
                   <h3 className="text-white font-semibold">
                     Live Visual Grid —
                     <span className="text-blue-300 ml-1">
-                      {Object.keys(liveVisits).length}
+                      {Object.values(liveVisits).filter(isVisitActive).length}
                     </span>
                     <span className="text-zinc-500 text-sm font-normal ml-1">
                       / {activeJob?.concurrency || activeJob?.total || '?'} concurrent visits
@@ -5266,7 +5322,7 @@ export default function RealUserTrafficPage() {
               </div>
               {/* Grid body */}
               <div className="flex-1 overflow-y-auto p-3" data-testid="rut-visual-grid-body">
-                {Object.keys(liveVisits).length === 0 ? (
+                {Object.values(liveVisits).filter(isVisitActive).length === 0 ? (
                   <div className="text-center text-zinc-500 py-20">
                     <Loader2 className="w-8 h-8 animate-spin inline-block mb-2" />
                     <div>Waiting for first visit to start…</div>
@@ -5279,6 +5335,7 @@ export default function RealUserTrafficPage() {
                     gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
                   }}>
                     {Object.entries(liveVisits)
+                      .filter(([, v]) => isVisitActive(v))
                       .sort(([a], [b]) => parseInt(a, 10) - parseInt(b, 10))
                       .map(([vid, v]) => {
                         const ev = v.latest_event || {};
