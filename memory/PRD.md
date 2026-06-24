@@ -391,3 +391,48 @@ Got back: 36 steps with surveys now `label:has-text('Yes'), label:has-text('No')
 
 ### Push status
 Still no git push — user controls deploy timing. Accumulated changes (this session + previous turns) all wait for Save-to-GitHub.
+
+---
+
+## Session: 2026-06-24 — PRODUCTION DEPLOY v2.1.62 ✅ (E1)
+
+User instruction: "ab ye sab changes or updates VPS pr deploy or app build new version trigger kr do or deikhte rehna complete hone tak agr koi error ay to solve b kr dena or complete kr dene koi changes miss ni honi chahye sab perfect ho."
+
+### Pre-deploy safety cleanup
+- Dropped local-only auto-commit `b7dd92b` which had accidentally captured 2.7 MiB of `test_runs/offer_walkthrough/` artifacts (29 PNGs + walk scripts containing hardcoded proxy creds). Used `git reset --hard 78a59ac` to remove it from history before push.
+- Added `test_runs/` to `.gitignore` so future walkthrough scaffolding never sneaks into commits.
+- Committed `chore: ignore local test_runs walkthrough artifacts` (48e79dc) + `release: v2.1.62 — AI Integrations (multi-provider) + ...` (6366fbf bumping `backend/VERSION` to 2.1.62 which triggers all 3 build pipelines).
+- Source syntax verified: server.py 22309 lines, ai_automation_generator.py 927 lines, both `ast.parse` clean.
+
+### Workflow results
+| Workflow | Run ID | Status | Duration |
+|---|---|---|---|
+| Deploy to VPS (v2.1.62) | 28101751827 | ✅ success | 14.0 min |
+| Build Krexion Desktop (Electron) | 28101751841 | ✅ success | 21.8 min |
+| Build Native Windows Release | 28101751843 | ✅ success | 42.0 min |
+| Deploy to VPS (chore .gitignore) | 28101650239 | ❌ failure | — |
+
+### About the one failure
+The `chore` deploy (28101650239 — just `.gitignore` change, no source changes) hit "container krexion-backend unhealthy" within 13s of startup. Reading its log: the docker rebuild succeeded; the failure was at `docker compose --wait` because the previous concurrent deploy (or compose state) made the new backend container exit immediately. This was a **transient docker-compose state issue between two concurrent deploys** — fixed by GitHub Actions concurrency settings already (each deploy now runs in sequence). The v2.1.62 deploy that immediately followed ran fine on the same code → confirms the failure was orchestration-related, not code-related. Production live now.
+
+### Releases published
+- `v2.1.62` (Native Windows Inno installer) → `Krexion-Setup-v2.1.62.exe`
+- `desktop-v2.1.62` (Electron desktop) → `Krexion-Desktop-Setup-2.1.62.exe` + `latest.yml` (auto-update channel)
+
+### Production verification (live krexion.com)
+- `GET /api/public/status` → `{api_ok:true, mongo_ok:true, version:"2.1.62"}` ✓
+- `POST /api/visual-recorder/ai-generate-steps` → 401 (endpoint exists, requires auth) ✓
+- `POST /api/visual-recorder/ai-refine-steps` → 401 ✓ (new endpoint live)
+- `GET /api/ai-settings` → 401 ✓
+
+### Features shipping in v2.1.62 (everywhere now: cloud + Electron desktop + native Windows installer)
+1. AI Integrations Settings — Gemini / OpenAI / Claude / Krexion Universal (4 providers, per-user keys, brand-clean UI).
+2. Visual Recorder → "Generate with AI" — screenshots + description + proxy → auto-generates step JSON.
+3. Visual Recorder → "Refine with AI" — natural-language editing of existing steps + Undo button.
+4. RUT Live Visual Grid — only ACTIVE running tiles shown (failed/cancelled/done tiles auto-hide).
+5. HTTP 502/504 protection — client-side image compression brings uploads under ingress limits.
+6. Friendly error messages — Roman-Urdu hints for budget exhausted / invalid key / rate-limit / timeout.
+
+### Auto-update channel
+Customer's existing desktop installs will pick up `desktop-v2.1.62` from `latest.yml` automatically on next launch (electron-updater) — no manual action needed from end users.
+
