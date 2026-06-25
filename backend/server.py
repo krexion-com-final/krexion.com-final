@@ -593,7 +593,7 @@ async def _inline_upload_refs(user_id: str, kv: list) -> list:
         df_id = (d.get("upload_data_file_id") or "").strip()
 
         if not ua_ids and not px_ids and not aj_id and not df_id:
-            return kv
+            return kv, []
 
         user_db = get_user_db(user_id)
 
@@ -664,31 +664,28 @@ async def _inline_upload_refs(user_id: str, kv: list) -> list:
         if aj_id:
             aj_text = await _load_aj_text(aj_id)
 
-        # 2026-06-25 — Resolve data_file upload → base64 bytes for bridge
-        # replay. We DELIBERATELY don't use `await file.read()` style
-        # multipart attachment because the bridge replay path strips
-        # files (see require_local_mode body-capture loop). Instead we
-        # rebuild the file as base64 inside the urlencoded payload and
-        # the desktop's RUT endpoint decodes it back to a file before
-        # the BG task runs.
-        df_b64: str = ""
-        df_b64_name: str = ""
+        # 2026-06-25 — Resolve data_file upload → multipart file attachment
+        # for bridge replay. We rebuild the bridge body as multipart so the
+        # desktop's existing `file: Optional[UploadFile]` Form param picks
+        # up the data file natively — NO new endpoint code needed on the
+        # desktop side. Avoids the urlencoded body limitation (multipart
+        # files were getting stripped by the bridge body-capture loop).
+        df_bytes: bytes = b""
+        df_name: str = ""
         if df_id:
             try:
                 pair = await _load_upload_data_file(user_id, df_id)
                 if pair:
-                    df_path, df_name = pair
+                    df_path, _df_name_loaded = pair
                     try:
                         with open(df_path, "rb") as _dfh:
-                            _df_bytes = _dfh.read()
-                        if _df_bytes:
-                            import base64 as _b64_df
-                            df_b64 = _b64_df.b64encode(_df_bytes).decode("ascii")
-                            df_b64_name = (df_name or "data.xlsx")[:200]
+                            df_bytes = _dfh.read()
+                        df_name = (_df_name_loaded or "data.xlsx")[:200]
                     except Exception as _df_read_err:  # noqa: BLE001
                         logger.warning(
                             f"[bridge] data_file read failed for upload {df_id[:8]}: {_df_read_err}"
                         )
+                        df_bytes = b""
                 else:
                     logger.warning(
                         f"[bridge] _load_upload_data_file returned None for "
@@ -709,12 +706,12 @@ async def _inline_upload_refs(user_id: str, kv: list) -> list:
             "upload_automation_json_id",
         }
         # 2026-06-25 — Only drop upload_data_file_id when we SUCCESSFULLY
-        # inlined the file bytes. If load failed (e.g. file vanished from
+        # loaded the file bytes. If load failed (e.g. file vanished from
         # disk), keep the upload_data_file_id in the payload so the
         # desktop's existing "DB doc missing" diagnostic still surfaces
         # the same error to the user instead of silently dropping the
         # data-file reference entirely.
-        if df_b64:
+        if df_bytes:
             DROP = DROP | {"upload_data_file_id"}
         new_kv = []
         merged_user_agents_pushed = False
@@ -750,25 +747,27 @@ async def _inline_upload_refs(user_id: str, kv: list) -> list:
             new_kv.append(("proxies", "\n".join(px_items)))
         if aj_text and not replaced_aj_pushed:
             new_kv.append(("automation_json", aj_text))
-        # 2026-06-25 — Inline data_file bytes for bridge replay. Two new
-        # form fields the desktop's RUT endpoint decodes back to the
-        # `file_bytes` inline-upload path so the BG task NEVER tries to
-        # look up the upload doc in its empty local DB.
-        if df_b64:
-            new_kv.append(("data_file_b64", df_b64))
-            new_kv.append(("data_file_b64_name", df_b64_name))
+
+        # 2026-06-25 — Build the optional file-attachments list. The
+        # bridge handler will switch the body encoding to multipart and
+        # attach these as real `file` upload parts so the desktop's
+        # existing `file: Optional[UploadFile]` Form param picks them
+        # up — no desktop-side decoding required.
+        file_attachments: list = []
+        if df_bytes:
+            file_attachments.append(("file", df_name or "data.xlsx", df_bytes))
 
         logger.info(
             f"[bridge] inlined uploads for user={user_id[:8]} "
             f"ua_ids={len(ua_ids)} ua_items={len(ua_items)} "
             f"px_ids={len(px_ids)} px_items={len(px_items)} "
             f"aj_id={'yes' if aj_id else 'no'} aj_chars={len(aj_text)} "
-            f"df_id={'yes' if df_id else 'no'} df_b64_kb={len(df_b64)//1024 if df_b64 else 0}"
+            f"df_id={'yes' if df_id else 'no'} df_bytes_kb={len(df_bytes)//1024 if df_bytes else 0}"
         )
-        return new_kv
+        return new_kv, file_attachments
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"[bridge] _inline_upload_refs error: {e}")
-        return kv
+        logger.warning(f"[bridge] _inline_upload_refs failed: {e}")
+        return kv, []
 
 
 async def require_local_mode(request: Request):
@@ -943,17 +942,54 @@ async def require_local_mode(request: Request):
                         # collection.  Works against ANY desktop
                         # client version, no rebuild needed.
                         try:
-                            kv = await _inline_upload_refs(_uid, kv)
+                            kv, file_attachments = await _inline_upload_refs(_uid, kv)
                         except Exception as _inline_err:  # noqa: BLE001
                             logger.warning(f"[bridge] upload inline failed: {_inline_err}")
+                            file_attachments = []
 
-                        # Both raw_body (urlencoded) AND body_json (dict)
-                        # so the bridge replay can decide which to use.
-                        raw_body = _urlencode(kv).encode("utf-8")
-                        body_json = {k: v for k, v in kv}
-                        # Force content-type to urlencoded for the replay
-                        # since we just rebuilt it that way.
-                        content_type = "application/x-www-form-urlencoded"
+                        # 2026-06-25 — If `_inline_upload_refs` produced
+                        # any file attachments (e.g. the saved data_file
+                        # was resolved into bytes), rebuild the body as
+                        # multipart/form-data with those files attached.
+                        # The desktop's existing endpoint signature
+                        # already has `file: Optional[UploadFile] =
+                        # File(None)` so it picks them up natively — no
+                        # desktop-side code change required.  Otherwise
+                        # stick with the urlencoded body (smaller +
+                        # backwards-compatible).
+                        if file_attachments:
+                            try:
+                                from urllib3.filepost import encode_multipart_formdata as _enc_mp
+                                fields_for_mp: list = []
+                                for k_, v_ in kv:
+                                    fields_for_mp.append((k_, str(v_)))
+                                for fname, filename, fbytes in file_attachments:
+                                    fields_for_mp.append(
+                                        (fname, (filename, fbytes, "application/octet-stream"))
+                                    )
+                                raw_body, content_type = _enc_mp(fields_for_mp)
+                                # body_json is a best-effort dict for any
+                                # bridge consumer that prefers JSON; we
+                                # exclude binary file bytes from it.
+                                body_json = {k: v for k, v in kv}
+                                logger.info(
+                                    f"[bridge] multipart-mode body built "
+                                    f"fields={len(kv)} attachments={len(file_attachments)} "
+                                    f"body_bytes={len(raw_body)}"
+                                )
+                            except Exception as _mp_err:  # noqa: BLE001
+                                logger.warning(
+                                    f"[bridge] multipart build failed, "
+                                    f"falling back to urlencoded: {_mp_err}"
+                                )
+                                raw_body = _urlencode(kv).encode("utf-8")
+                                body_json = {k: v for k, v in kv}
+                                content_type = "application/x-www-form-urlencoded"
+                        else:
+                            # No file attachments — urlencoded as before
+                            raw_body = _urlencode(kv).encode("utf-8")
+                            body_json = {k: v for k, v in kv}
+                            content_type = "application/x-www-form-urlencoded"
                     elif "application/json" in ct_lower:
                         try:
                             body_json = await request.json()
