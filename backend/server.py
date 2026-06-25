@@ -568,8 +568,15 @@ async def _inline_upload_refs(user_id: str, kv: list) -> list:
             px_ids.extend([s.strip() for s in d["upload_proxy_ids"].split(",") if s.strip()])
         if d.get("upload_proxy_id"):
             px_ids.append(d["upload_proxy_id"].strip())
+        # 2026-06: also resolve automation_json upload ref. The desktop's
+        # local DB has NO copy of the cloud's automation JSON templates
+        # (they live in cloud's uploaded_resources only), so without
+        # inlining the desktop's RUT endpoint fails immediately with
+        # "Selected automation JSON is invalid" — silently 500ing the
+        # whole bridged job.
+        aj_id = (d.get("upload_automation_json_id") or "").strip()
 
-        if not ua_ids and not px_ids:
+        if not ua_ids and not px_ids and not aj_id:
             return kv
 
         user_db = get_user_db(user_id)
@@ -594,6 +601,36 @@ async def _inline_upload_refs(user_id: str, kv: list) -> list:
                 items = doc.get("items") or []
             return [str(x).strip() for x in items if str(x).strip()]
 
+        async def _load_aj_text(upload_id: str) -> str:
+            """Load an automation_json upload's full text payload."""
+            if not upload_id:
+                return ""
+            doc = await user_db["uploaded_resources"].find_one(
+                {"id": upload_id, "user_id": user_id, "type": "automation_json"},
+                {"_id": 0},
+            )
+            if not doc:
+                return ""
+            # automation_json uploads store the full template either as
+            # a single `automation_json` string field OR as `items` list
+            # (one big JSON string element) depending on the upload
+            # endpoint version. Try both.
+            txt = doc.get("automation_json") or ""
+            if not txt:
+                items = doc.get("items") or []
+                if items and isinstance(items, list):
+                    # join with newline OR take first if single
+                    if len(items) == 1:
+                        txt = str(items[0])
+                    else:
+                        # multiple steps stored as list of dicts → re-serialize
+                        try:
+                            import json as _json
+                            txt = _json.dumps(items)
+                        except Exception:
+                            txt = ""
+            return str(txt or "").strip()
+
         ua_items: list = []
         for uid_ in ua_ids:
             ua_items.extend(await _load(uid_, "user_agents"))
@@ -607,12 +644,23 @@ async def _inline_upload_refs(user_id: str, kv: list) -> list:
         seen = set()
         px_items = [x for x in px_items if not (x in seen or seen.add(x))]
 
+        aj_text: str = ""
+        if aj_id:
+            aj_text = await _load_aj_text(aj_id)
+
         # Rebuild kv: drop the upload_*_id keys, merge inline lines
-        # into user_agents / proxies.
-        DROP = {"upload_ua_id", "upload_ua_ids", "upload_proxy_id", "upload_proxy_ids"}
+        # into user_agents / proxies, AND inline the automation JSON
+        # text so the desktop's RUT endpoint sees `automation_json=...`
+        # instead of an unresolvable upload reference.
+        DROP = {
+            "upload_ua_id", "upload_ua_ids",
+            "upload_proxy_id", "upload_proxy_ids",
+            "upload_automation_json_id",
+        }
         new_kv = []
         merged_user_agents_pushed = False
         merged_proxies_pushed = False
+        replaced_aj_pushed = False
         for k, v in kv:
             if k in DROP:
                 continue
@@ -629,16 +677,26 @@ async def _inline_upload_refs(user_id: str, kv: list) -> list:
                 new_kv.append(("proxies", "\n".join(combined)))
                 merged_proxies_pushed = True
                 continue
+            if k == "automation_json" and aj_text:
+                # paste-text wins; if both present, keep the paste-text
+                # so the user's last manual edit is honoured.
+                existing_aj = (v or "").strip()
+                new_kv.append(("automation_json", existing_aj or aj_text))
+                replaced_aj_pushed = True
+                continue
             new_kv.append((k, v))
         if ua_items and not merged_user_agents_pushed:
             new_kv.append(("user_agents", "\n".join(ua_items)))
         if px_items and not merged_proxies_pushed:
             new_kv.append(("proxies", "\n".join(px_items)))
+        if aj_text and not replaced_aj_pushed:
+            new_kv.append(("automation_json", aj_text))
 
         logger.info(
             f"[bridge] inlined uploads for user={user_id[:8]} "
             f"ua_ids={len(ua_ids)} ua_items={len(ua_items)} "
-            f"px_ids={len(px_ids)} px_items={len(px_items)}"
+            f"px_ids={len(px_ids)} px_items={len(px_items)} "
+            f"aj_id={'yes' if aj_id else 'no'} aj_chars={len(aj_text)}"
         )
         return new_kv
     except Exception as e:  # noqa: BLE001

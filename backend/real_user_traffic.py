@@ -6794,11 +6794,60 @@ async def run_real_user_traffic_job(
             if not proxyjet_needs_data_file:
                 on_demand_row_pick = None
                 _row_idx = -1
+                # 2026-06 fix: when the user attaches an automation JSON
+                # whose `fill` steps reference {{first}}, {{email}},
+                # {{phone}} etc and no data-file is selected, we used
+                # to leave `_row = {}` which made every placeholder
+                # resolve to an empty string — submitting an empty
+                # form, failing validation, and never reaching the
+                # deal page. The user's explicit ask: "har visit pr
+                # unique answer ho... kabi koi jawab kabi koi". So
+                # synthesise a Faker-generated lead per visit — unique
+                # name/email/phone/address/DOB — when the automation
+                # references such placeholders. State is biased
+                # towards the proxy's exit state when known so the
+                # offer's geo-check passes.
                 _row = {}
-                row_state_code = (proxyjet_default_state or "").strip().upper()
+                if automation_steps:
+                    try:
+                        from faker import Faker as _Faker  # noqa: WPS433
+                        _faker = _Faker("en_US")
+                        _fake_first = _faker.first_name()
+                        _fake_last = _faker.last_name()
+                        _fake_state = (proxyjet_default_state or _faker.state_abbr()).upper()
+                        _fake_zip = _faker.zipcode()
+                        _fake_city = _faker.city()
+                        _fake_email = f"{_fake_first.lower()}.{_fake_last.lower()}{random.randint(10, 99)}@{random.choice(['gmail.com','yahoo.com','outlook.com','hotmail.com'])}"
+                        _fake_phone_digits = "".join(random.choice("0123456789") for _ in range(10))
+                        _fake_dob_year = random.randint(1965, 2002)
+                        _fake_dob_month = f"{random.randint(1, 12):02d}"
+                        _fake_dob_day = f"{random.randint(1, 28):02d}"
+                        _row = {
+                            "first": _fake_first, "firstname": _fake_first, "first_name": _fake_first,
+                            "last": _fake_last, "lastname": _fake_last, "last_name": _fake_last,
+                            "email": _fake_email,
+                            "phone": _fake_phone_digits, "cellphone": _fake_phone_digits, "mobile": _fake_phone_digits,
+                            "address": _faker.street_address(),
+                            "city": _fake_city,
+                            "state": _fake_state,
+                            "zip": _fake_zip, "zipcode": _fake_zip, "postal": _fake_zip,
+                            "year": str(_fake_dob_year), "dobyear": str(_fake_dob_year), "dob_year": str(_fake_dob_year),
+                            "month": _fake_dob_month, "dobmonth": _fake_dob_month, "dob_month": _fake_dob_month,
+                            "day": _fake_dob_day, "dobday": _fake_dob_day, "dob_day": _fake_dob_day,
+                            "gender": random.choice(["male", "female", "M", "F"]),
+                            "country": "US", "country_code": "US",
+                        }
+                    except Exception as _faker_err:  # noqa: BLE001
+                        logger.warning(f"[rut] faker fake-row generation failed: {_faker_err}")
+                        _row = {}
+                row_state_code = (
+                    (_row.get("state") if _row else "")
+                    or (proxyjet_default_state or "").strip().upper()
+                )
                 push_live_step(
                     job_id, i + 1, "row", "ok",
-                    f"Click-only visit — no data row needed (state={row_state_code or 'random'})",
+                    f"Click-only visit — no data row needed (state={row_state_code or 'random'})"
+                    + (f" · fake lead {_row.get('first', '')} {_row.get('last', '')}" if _row else ""),
                 )
             else:
                 # Step 1: pick row first — try sequential, then state-rotate
@@ -8548,8 +8597,18 @@ async def run_real_user_traffic_job(
                         )
                     return await _record(job_id, entry, report, report_lock, db)
 
-                # No form fill → plain real click, just screenshot
-                if not form_fill_enabled:
+                # No form fill AND no custom automation JSON → plain
+                # real click, just screenshot. If a custom automation
+                # JSON is present we MUST still execute it even when
+                # form_fill_enabled=false — the user's 242-step
+                # survey/deal flow is encoded in automation_steps and
+                # has nothing to do with the legacy heuristic form
+                # filler (which is what `form_fill_enabled` historically
+                # gated). 2026-06 fix: customer reported "RUT visit
+                # lands on offer page then says Visit complete instead
+                # of running my survey JSON" — was caused by this
+                # branch returning early before the automation runner.
+                if not form_fill_enabled and not automation_steps:
                     try:
                         entry["final_url"] = page.url
                     except Exception:
