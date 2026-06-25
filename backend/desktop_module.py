@@ -310,6 +310,67 @@ async def _active_and_recent_jobs() -> dict:
                 "started_ago": ago,
             })
 
+        # 1b. 2026-06 — ALSO surface in-flight RUT / Form-Filler jobs
+        # that live in the per-feature collections. The bridge_job
+        # itself flips to "done" the moment the desktop replays the
+        # POST response (a few seconds), but the real RUT visit loop
+        # continues running asynchronously for the next 5-30 minutes.
+        # Customer reported "active heavy job mein kuch nazar ni a
+        # raha ho ta jab job chal rahi hoti" — exactly because the
+        # dashboard was only inspecting bridge_jobs. Add the live
+        # RUT + FF + VR collections so the Active Heavy Jobs card
+        # reflects ground truth for the duration of the visit loop.
+        try:
+            rut_cursor = _db.real_user_traffic_jobs.find(
+                {"status": {"$in": ["prepping", "running", "queued"]}},
+                projection={
+                    "_id": 0, "job_id": 1, "status": 1, "target_url": 1,
+                    "total": 1, "processed": 1, "succeeded": 1, "failed": 1,
+                    "created_at": 1, "prep_step": 1,
+                },
+                sort=[("created_at", -1)],
+                limit=5,
+            )
+            async for jd in rut_cursor:
+                processed = int(jd.get("processed") or 0)
+                total = int(jd.get("total") or 0)
+                succ = int(jd.get("succeeded") or 0)
+                detail = (
+                    f"{processed}/{total} visits · {succ} ok"
+                    if total
+                    else (jd.get("prep_step") or "preparing…")[:60]
+                )
+                out["active"].append({
+                    "kind": "Real User Traffic",
+                    "status": jd.get("status") or "running",
+                    "detail": detail[:80],
+                    "started_ago": _humanise_age(jd.get("created_at"), now),
+                })
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            ff_cursor = _db.form_filler_jobs.find(
+                {"status": {"$in": ["prepping", "running", "queued"]}},
+                projection={
+                    "_id": 0, "job_id": 1, "status": 1, "total": 1,
+                    "processed": 1, "succeeded": 1, "created_at": 1,
+                },
+                sort=[("created_at", -1)],
+                limit=5,
+            )
+            async for jd in ff_cursor:
+                detail = (
+                    f"{int(jd.get('processed') or 0)}/{int(jd.get('total') or 0)} rows"
+                )
+                out["active"].append({
+                    "kind": "Form Filler",
+                    "status": jd.get("status") or "running",
+                    "detail": detail[:80],
+                    "started_ago": _humanise_age(jd.get("created_at"), now),
+                })
+        except Exception:  # noqa: BLE001
+            pass
+
         # 2. Recent completed/failed (last 8)
         cursor = _db.bridge_jobs.find(
             {"status": {"$in": ["done", "failed"]}},
@@ -410,8 +471,17 @@ async def _dependency_health() -> dict:
         from real_user_traffic import get_engine_status  # type: ignore
         engine = get_engine_status()
         s = (engine or {}).get("status") or "error"
-        # Map the existing 4 states 1:1 — the names align with the
-        # rest of this dict for easy UI consumption.
+        # 2026-06: `get_engine_status()` historically returns "ready"
+        # when the binary is on disk, but the dashboard UI only knows
+        # the four canonical states {ok, installing, missing, error}.
+        # An unmapped "ready" silently fell through to the red "error"
+        # badge — UI showed "Chromium browser · error" with a green
+        # "Chromium ready · using full chromium (--headless=new)"
+        # message right below it, which was confusing and made
+        # customers think the engine was broken when it wasn't.
+        # Normalise "ready" → "ok" here.
+        if s == "ready":
+            s = "ok"
         out["chromium"] = {
             "status": s,
             "message": (engine or {}).get("message") or "",
