@@ -7309,7 +7309,54 @@ async def _rut_prepare_and_run(
                 if upload_data_file_id:
                     pair = await _load_upload_data_file(user["id"], upload_data_file_id)
                     if not pair:
-                        return await _mark_failed("Selected data-file upload not found")
+                        # ── 2026-06-25 — Verbose diagnostic for the
+                        # "Selected data-file upload not found" report.
+                        # Inspect the per-user DB directly so the user
+                        # gets an actionable message (doc missing vs
+                        # file vanished from disk vs depleted) instead
+                        # of a one-line dead end.
+                        _diag_detail = "unknown"
+                        try:
+                            _user_db = get_user_db(user["id"])
+                            _doc_check = await _user_db["uploaded_resources"].find_one(
+                                {"id": upload_data_file_id},
+                                {"_id": 0, "items": 0},
+                            )
+                            if not _doc_check:
+                                _diag_detail = "DB doc missing (re-upload required)"
+                            else:
+                                _dtype = _doc_check.get("type")
+                                _file_path = _doc_check.get("file_path")
+                                _remaining_fp = _doc_check.get("remaining_file_path")
+                                _depleted = bool(_doc_check.get("depleted"))
+                                _user_id_field = _doc_check.get("user_id", "?")
+                                _exists_file = bool(_file_path) and Path(_file_path).exists() if _file_path else False
+                                _exists_rem = bool(_remaining_fp) and Path(_remaining_fp).exists() if _remaining_fp else False
+                                _diag_detail = (
+                                    f"type='{_dtype}' depleted={_depleted} "
+                                    f"file_path_exists={_exists_file} "
+                                    f"remaining_exists={_exists_rem} "
+                                    f"doc.user_id={_user_id_field}"
+                                )
+                                if _depleted:
+                                    _diag_detail = (
+                                        "Upload is marked DEPLETED — all rows already "
+                                        "consumed by previous jobs. Re-upload to re-use."
+                                    )
+                                elif not _exists_file and not _exists_rem:
+                                    _diag_detail = (
+                                        "File missing on disk (deployment volume / "
+                                        "file_path issue). Please re-upload the data file."
+                                    )
+                        except Exception as _ex:
+                            _diag_detail = f"diag-error: {_ex}"
+                        logger.warning(
+                            f"data-file upload not loadable for job {job_id}: "
+                            f"id={upload_data_file_id} user={user['id'][:8]} :: {_diag_detail}"
+                        )
+                        return await _mark_failed(
+                            f"Selected data-file upload not found · {_diag_detail}"
+                        )
                     fp, orig_name = pair
                     try:
                         with open(fp, "rb") as fh:
@@ -7838,6 +7885,11 @@ async def rut_create_job(
     # visit's current step finishes before the engine moves on.
     # 1.0 = no change (default). 0.5..5.0 (clamped server-side).
     step_timeout_multiplier: float = Form(1.0),
+    # 2026-06-25 — Per-job stuck-watchdog inactivity threshold (seconds).
+    # Default 240s; raise to 600s+ for slow survey-heavy flows so a
+    # legitimate 5-7 minute deal walk doesn't get killed by the
+    # inactivity watchdog. Clamped 30..1800 server-side.
+    stuck_watchdog_seconds: float = Form(240.0),
     skip_captcha: bool = Form(True),
     post_submit_wait: int = Form(6),                  # seconds 3..600
     automation_json: Optional[str] = Form(None),      # custom step-list JSON
@@ -8178,6 +8230,9 @@ async def rut_create_job(
         "invalid_detection_enabled": invalid_detection_enabled,
         "invalid_data_retry_limit": max(1, min(50, int(invalid_data_retry_limit or 10))),
         "step_timeout_multiplier": max(0.5, min(5.0, float(step_timeout_multiplier or 1.0))),
+        # 2026-06-25 — Per-job watchdog inactivity ceiling (seconds).
+        # Clamped 30..1800. Default 240 preserves existing behaviour.
+        "stuck_watchdog_seconds": max(30.0, min(1800.0, float(stuck_watchdog_seconds or 240.0))),
         "target_screenshot_threshold": target_screenshot_threshold,
         "target_screenshot_upload_id": target_screenshot_upload_id,
         "target_screenshot_bytes": target_screenshot_bytes,
@@ -8312,6 +8367,8 @@ async def rut_create_job(
             "invalid_detection_enabled": invalid_detection_enabled,
             "invalid_data_retry_limit": max(1, min(50, int(invalid_data_retry_limit or 10))),
             "step_timeout_multiplier": max(0.5, min(5.0, float(step_timeout_multiplier or 1.0))),
+            # 2026-06-25 — Per-job watchdog inactivity ceiling (persisted)
+            "stuck_watchdog_seconds": max(30.0, min(1800.0, float(stuck_watchdog_seconds or 240.0))),
             "force_tracker_url": force_tracker_url,
             "use_proxyjet_auto": bool(use_proxyjet_auto),
             "proxyjet_country": (proxyjet_country or "US").strip().upper() or "US",
@@ -18221,16 +18278,67 @@ async def _load_upload_data_file(user_id: str, upload_id: str) -> Optional[Tuple
         the "paste a Google Sheet link once, edit the sheet whenever
         you want, every future job auto-uses the latest data" flow work
         without forcing the user to re-upload anything.
+
+    2026-06-25 — RESILIENCE PASS (production multi-worker env):
+      Under high-load multi-worker uvicorn + Cloudflare Tunnel + Caddy
+      stacks we saw rare races where `find_one({id, user_id, type})`
+      returned None while the SAME doc was visible to the listing
+      endpoint and the file was clearly present on disk (verified via
+      `/api/uploads/{id}/download`). Causes seen in the wild:
+        a) Doc was created with a slightly different `user_id` casing
+           (legacy migration from sub-user → main-user without rewrite)
+        b) Race between the user's POST /uploads/data-file (worker A)
+           and the BG task pickup (worker B) where Mongo replication
+           lag briefly hid the doc from non-primary reads.
+      Both fail silently with the same "not found" message and the
+      user is stuck. The new logic adds:
+        • Two-level lookup: first the strict {id, user_id, type} filter,
+          then a relaxed {id, type} fallback that ONLY accepts the doc
+          when it lives in the requested user's per-tenant DB (so we
+          can never leak across users — the per-user DB partition is
+          the security boundary).
+        • Verbose logging on every miss so future regressions are
+          diagnosable without code surgery.
     """
     if not upload_id:
         return None
     user_db = get_user_db(user_id)
+    # Strict lookup first — preserves prior behaviour when everything is
+    # well-formed.
     doc = await user_db["uploaded_resources"].find_one(
         {"id": upload_id, "user_id": user_id, "type": "data_file"},
         {"_id": 0},
     )
     if not doc:
-        return None
+        # Fallback: same per-user DB, id+type only. The per-user DB
+        # partition guarantees we cannot cross tenant boundaries.
+        try:
+            doc_relaxed = await user_db["uploaded_resources"].find_one(
+                {"id": upload_id, "type": "data_file"},
+                {"_id": 0},
+            )
+        except Exception as _e:
+            doc_relaxed = None
+            logger.warning(
+                f"_load_upload_data_file: relaxed lookup raised for "
+                f"user={user_id[:8]} id={upload_id[:8]}: {_e}"
+            )
+        if not doc_relaxed:
+            logger.warning(
+                f"_load_upload_data_file: NO doc in per-user DB for "
+                f"user={user_id[:8]} id={upload_id} type=data_file "
+                f"(strict+relaxed both empty)"
+            )
+            return None
+        # Found via relaxed; log the user_id mismatch for forensics but
+        # accept the doc since the DB partition is per-user.
+        logger.warning(
+            f"_load_upload_data_file: STRICT miss but RELAXED hit — "
+            f"doc.user_id='{doc_relaxed.get('user_id','')}' "
+            f"jwt.user_id='{user_id}' id={upload_id} — accepting "
+            f"(same per-user DB partition)."
+        )
+        doc = doc_relaxed
 
     # ── Live Google Sheet path ──────────────────────────────────────
     gsheet_url = (doc.get("gsheet_url") or "").strip()

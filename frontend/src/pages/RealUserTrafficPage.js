@@ -2948,11 +2948,11 @@ export default function RealUserTrafficPage() {
                 min={10}
                 max={600}
                 value={stuckWatchdogSeconds}
-                onChange={(e) => setStuckWatchdogSeconds(Math.max(10, Math.min(600, Number(e.target.value) || 240)))}
+                onChange={(e) => setStuckWatchdogSeconds(Math.max(30, Math.min(1800, Number(e.target.value) || 240)))}
                 className="mt-1 bg-zinc-800 border-zinc-700 text-zinc-100"
               />
               <p className="text-xs text-gray-500 mt-1">
-                If page URL & DOM both stay frozen for this many seconds the visit is aborted. Default 240 (4 min) — raise for very slow offers, lower for fast fail-on-stuck. Dead proxies / chrome-errors are aborted instantly regardless.
+                If page URL & DOM both stay frozen for this many seconds the visit is aborted. Default 240 (4 min) — raise to 600 (10 min) for slow survey-heavy / multi-deal offers, lower for fast fail-on-stuck. Range: 30-1800s. Dead proxies / chrome-errors are aborted instantly regardless.
               </p>
             </div>
           </div>
