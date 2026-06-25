@@ -21131,6 +21131,26 @@ async def _vr_bridge_middleware(request: Request, call_next):
             return await call_next(request)
         if path.rstrip("/") == "/api/real-user-traffic/jobs" and request.method.upper() == "POST":
             return await call_next(request)
+        # 2026-06 CRITICAL FIX: when STRICT_CLOUD_HEAVY_BLOCK is OFF
+        # (admin disabled strict mode), the POST endpoint runs INLINE
+        # on the cloud (require_local_mode short-circuits at line ~687).
+        # In that case the job lives in the CLOUD's
+        # real_user_traffic_jobs collection, NOT the desktop's. Bridging
+        # the polling GETs to the desktop would return an empty list /
+        # 404 "Job not found" because the desktop never created the job.
+        # When strict is OFF we MUST serve polling GETs from the cloud
+        # directly so the user can see their jobs. This also covers the
+        # case where the customer's desktop is on a stale version
+        # (v2.1.4) that doesn't know how to run modern v2.1.62 RUT prep.
+        # Visual Recorder is unaffected — it always bridges to desktop
+        # because chromium can only run there.
+        if is_rut_job:
+            try:
+                _strict_now = await get_effective_strict_heavy_block()
+            except Exception:
+                _strict_now = STRICT_CLOUD_HEAVY_BLOCK
+            if not _strict_now:
+                return await call_next(request)
         # Resolve user from header OR ?t= query param (screenshot uses
         # ?t= so <img src> can load without a custom fetch).
         token_str = None
