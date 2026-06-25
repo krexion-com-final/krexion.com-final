@@ -576,7 +576,23 @@ async def _inline_upload_refs(user_id: str, kv: list) -> list:
         # whole bridged job.
         aj_id = (d.get("upload_automation_json_id") or "").strip()
 
-        if not ua_ids and not px_ids and not aj_id:
+        # 2026-06-25 — also resolve data_file upload ref. Same problem as
+        # automation_json above but with a different failure mode: the
+        # desktop's BG task can't find the upload doc in its local
+        # `uploaded_resources` and fails with "DB doc missing (re-upload
+        # required)". The file bytes themselves live ONLY on cloud disk
+        # (UPLOADS_DATA_DIR), so we MUST read them here on the cloud edge
+        # and inline as base64 in the bridge payload. The desktop's RUT
+        # endpoint has been taught (same patch) to decode `data_file_b64`
+        # / `data_file_b64_name` form fields back into a file the BG task
+        # can consume via the existing inline-file path. Behaviour for
+        # `upload_data_file_id` lookups that fail (file vanished from
+        # disk, depleted upload, gsheet refetch error) is to log + leave
+        # the upload_data_file_id untouched so the desktop surfaces the
+        # original error to the user — never silent.
+        df_id = (d.get("upload_data_file_id") or "").strip()
+
+        if not ua_ids and not px_ids and not aj_id and not df_id:
             return kv
 
         user_db = get_user_db(user_id)
@@ -648,6 +664,41 @@ async def _inline_upload_refs(user_id: str, kv: list) -> list:
         if aj_id:
             aj_text = await _load_aj_text(aj_id)
 
+        # 2026-06-25 — Resolve data_file upload → base64 bytes for bridge
+        # replay. We DELIBERATELY don't use `await file.read()` style
+        # multipart attachment because the bridge replay path strips
+        # files (see require_local_mode body-capture loop). Instead we
+        # rebuild the file as base64 inside the urlencoded payload and
+        # the desktop's RUT endpoint decodes it back to a file before
+        # the BG task runs.
+        df_b64: str = ""
+        df_b64_name: str = ""
+        if df_id:
+            try:
+                pair = await _load_upload_data_file(user_id, df_id)
+                if pair:
+                    df_path, df_name = pair
+                    try:
+                        with open(df_path, "rb") as _dfh:
+                            _df_bytes = _dfh.read()
+                        if _df_bytes:
+                            import base64 as _b64_df
+                            df_b64 = _b64_df.b64encode(_df_bytes).decode("ascii")
+                            df_b64_name = (df_name or "data.xlsx")[:200]
+                    except Exception as _df_read_err:  # noqa: BLE001
+                        logger.warning(
+                            f"[bridge] data_file read failed for upload {df_id[:8]}: {_df_read_err}"
+                        )
+                else:
+                    logger.warning(
+                        f"[bridge] _load_upload_data_file returned None for "
+                        f"user={user_id[:8]} id={df_id[:8]} — leaving "
+                        f"upload_data_file_id untouched so desktop surfaces "
+                        f"the original error."
+                    )
+            except Exception as _df_err:  # noqa: BLE001
+                logger.warning(f"[bridge] data_file inline load failed: {_df_err}")
+
         # Rebuild kv: drop the upload_*_id keys, merge inline lines
         # into user_agents / proxies, AND inline the automation JSON
         # text so the desktop's RUT endpoint sees `automation_json=...`
@@ -657,6 +708,14 @@ async def _inline_upload_refs(user_id: str, kv: list) -> list:
             "upload_proxy_id", "upload_proxy_ids",
             "upload_automation_json_id",
         }
+        # 2026-06-25 — Only drop upload_data_file_id when we SUCCESSFULLY
+        # inlined the file bytes. If load failed (e.g. file vanished from
+        # disk), keep the upload_data_file_id in the payload so the
+        # desktop's existing "DB doc missing" diagnostic still surfaces
+        # the same error to the user instead of silently dropping the
+        # data-file reference entirely.
+        if df_b64:
+            DROP = DROP | {"upload_data_file_id"}
         new_kv = []
         merged_user_agents_pushed = False
         merged_proxies_pushed = False
@@ -691,12 +750,20 @@ async def _inline_upload_refs(user_id: str, kv: list) -> list:
             new_kv.append(("proxies", "\n".join(px_items)))
         if aj_text and not replaced_aj_pushed:
             new_kv.append(("automation_json", aj_text))
+        # 2026-06-25 — Inline data_file bytes for bridge replay. Two new
+        # form fields the desktop's RUT endpoint decodes back to the
+        # `file_bytes` inline-upload path so the BG task NEVER tries to
+        # look up the upload doc in its empty local DB.
+        if df_b64:
+            new_kv.append(("data_file_b64", df_b64))
+            new_kv.append(("data_file_b64_name", df_b64_name))
 
         logger.info(
             f"[bridge] inlined uploads for user={user_id[:8]} "
             f"ua_ids={len(ua_ids)} ua_items={len(ua_items)} "
             f"px_ids={len(px_ids)} px_items={len(px_items)} "
-            f"aj_id={'yes' if aj_id else 'no'} aj_chars={len(aj_text)}"
+            f"aj_id={'yes' if aj_id else 'no'} aj_chars={len(aj_text)} "
+            f"df_id={'yes' if df_id else 'no'} df_b64_kb={len(df_b64)//1024 if df_b64 else 0}"
         )
         return new_kv
     except Exception as e:  # noqa: BLE001
@@ -7886,10 +7953,11 @@ async def rut_create_job(
     # 1.0 = no change (default). 0.5..5.0 (clamped server-side).
     step_timeout_multiplier: float = Form(1.0),
     # 2026-06-25 — Per-job stuck-watchdog inactivity threshold (seconds).
-    # Default 240s; raise to 600s+ for slow survey-heavy flows so a
-    # legitimate 5-7 minute deal walk doesn't get killed by the
-    # inactivity watchdog. Clamped 30..1800 server-side.
-    stuck_watchdog_seconds: float = Form(240.0),
+    # Default 600s (raised from 240s on 2026-06-25 per operator feedback —
+    # survey-heavy deal flows routinely take 5-10 min legitimately and
+    # the lower default was killing healthy long visits). Clamped 30..1800
+    # server-side; users can still lower this from the UI for fast flows.
+    stuck_watchdog_seconds: float = Form(600.0),
     skip_captcha: bool = Form(True),
     post_submit_wait: int = Form(6),                  # seconds 3..600
     automation_json: Optional[str] = Form(None),      # custom step-list JSON
@@ -7907,6 +7975,18 @@ async def rut_create_job(
     # safety net (up to 100 attempts, exp backoff).
     auto_resume_enabled: bool = Form(True),
     file: Optional[UploadFile] = File(None),
+    # 2026-06-25 — Bridge-replay base64 file payload. When the cloud
+    # bridges a heavy job to a customer's desktop, the bridge replay
+    # path is urlencoded (bytes-stripped multipart), so an
+    # `upload_data_file_id` reference would 404 on the desktop's empty
+    # local `uploaded_resources`. The cloud edge reads the cloud-side
+    # file bytes and inlines them as base64 here. When set, this takes
+    # precedence over `upload_data_file_id` (which is dropped by the
+    # edge inline-pass) and is decoded back to `file_bytes` before the
+    # BG task runs. Both fields are OPTIONAL and have no effect on
+    # direct (non-bridged) job submissions.
+    data_file_b64: Optional[str] = Form(None),
+    data_file_b64_name: Optional[str] = Form(None),
     # Target Screenshot Verification — user-uploaded reference image of the
     # expected final/thank-you page. After every visit we screenshot the
     # final page and compare via perceptual hash. Distance ≤ threshold ⇒
@@ -8126,6 +8206,27 @@ async def rut_create_job(
             file_name = file.filename or "data.xlsx"
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"File read failed: {e}")
+    # 2026-06-25 — Bridge-replay base64 decode. The cloud edge inlines
+    # cloud-side data files into the bridge payload as base64 to bypass
+    # the urlencoded body limitation (multipart files get stripped by
+    # the bridge body-capture). When `data_file_b64` is present and no
+    # direct file was multipart-attached, decode it back to bytes here
+    # so the rest of the pipeline (persistence to disk + BG task
+    # consumption) is identical to the direct-upload path.
+    if file_bytes is None and (data_file_b64 or "").strip():
+        try:
+            import base64 as _b64_in
+            file_bytes = _b64_in.b64decode(data_file_b64.strip())
+            file_name = (data_file_b64_name or "data.xlsx").strip() or "data.xlsx"
+            # Force data_source=excel since we now have inline bytes — the
+            # edge bridge may also have stripped `upload_data_file_id`.
+            if not data_source or data_source.strip().lower() == "excel":
+                data_source = "excel"
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(
+                status_code=400,
+                detail=f"data_file_b64 decode failed: {e}",
+            )
     target_screenshot_bytes: Optional[bytes] = None
     if target_screenshot is not None:
         try:
@@ -8155,7 +8256,7 @@ async def rut_create_job(
         skip_duplicate_ip = True
     if not upload_ua_id and not upload_ua_ids and not paste_ua_lines:
         raise HTTPException(status_code=400, detail="At least one User Agent required (paste or pick a saved batch)")
-    if form_fill_enabled and data_source == "excel" and not file and not upload_data_file_id and not import_pending_from_job_id:
+    if form_fill_enabled and data_source == "excel" and not file and not file_bytes and not upload_data_file_id and not import_pending_from_job_id:
         raise HTTPException(status_code=400, detail="Excel/CSV file required when form fill is enabled (upload a file, pick a saved data-file, or import from a previous job)")
     if form_fill_enabled and data_source == "gsheet" and not (gsheet_url or "").strip():
         raise HTTPException(status_code=400, detail="gsheet_url required when form fill is enabled with data_source='gsheet'")
@@ -8232,7 +8333,7 @@ async def rut_create_job(
         "step_timeout_multiplier": max(0.5, min(5.0, float(step_timeout_multiplier or 1.0))),
         # 2026-06-25 — Per-job watchdog inactivity ceiling (seconds).
         # Clamped 30..1800. Default 240 preserves existing behaviour.
-        "stuck_watchdog_seconds": max(30.0, min(1800.0, float(stuck_watchdog_seconds or 240.0))),
+        "stuck_watchdog_seconds": max(30.0, min(1800.0, float(stuck_watchdog_seconds or 600.0))),
         "target_screenshot_threshold": target_screenshot_threshold,
         "target_screenshot_upload_id": target_screenshot_upload_id,
         "target_screenshot_bytes": target_screenshot_bytes,
@@ -8368,7 +8469,7 @@ async def rut_create_job(
             "invalid_data_retry_limit": max(1, min(50, int(invalid_data_retry_limit or 10))),
             "step_timeout_multiplier": max(0.5, min(5.0, float(step_timeout_multiplier or 1.0))),
             # 2026-06-25 — Per-job watchdog inactivity ceiling (persisted)
-            "stuck_watchdog_seconds": max(30.0, min(1800.0, float(stuck_watchdog_seconds or 240.0))),
+            "stuck_watchdog_seconds": max(30.0, min(1800.0, float(stuck_watchdog_seconds or 600.0))),
             "force_tracker_url": force_tracker_url,
             "use_proxyjet_auto": bool(use_proxyjet_auto),
             "proxyjet_country": (proxyjet_country or "US").strip().upper() or "US",

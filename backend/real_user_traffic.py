@@ -5785,12 +5785,13 @@ async def run_real_user_traffic_job(
     # 2026-01: per-job override for the stuck-watchdog inactivity
     # threshold (seconds the page's main-frame URL is allowed to stay
     # unchanged before the visit is force-aborted). Default raised from
-    # 60 → 240 (2026-05) so slow survey-style offer pages get enough
-    # time to complete multi-step SPA + form-submit + thank-you flows.
+    # 240 → 600 (2026-06-25) so slow survey-style offer pages with
+    # multi-step deal flows (e.g. RewardZone $750 target) get enough
+    # time to complete legitimate 5-10 min legitimate user walks.
     # chrome-error:// fast-path still fires INSTANTLY so dead proxies
     # are still aborted immediately. Operators can lower it (faster
     # fail-fast) or raise it via UI for extreme cases.
-    stuck_watchdog_seconds: float = 240.0,
+    stuck_watchdog_seconds: float = 600.0,
     # ── 2026-05: Pure JSON Mode ─────────────────────────────────────
     # When True, the engine STRICTLY follows the recorded automation
     # JSON without any AI involvement:
@@ -8781,7 +8782,7 @@ async def run_real_user_traffic_job(
                         _watchdog = asyncio.create_task(
                             _stuck_watchdog(
                                 page, job_id, i + 1,
-                                threshold_s=float(stuck_watchdog_seconds or 240.0),
+                                threshold_s=float(stuck_watchdog_seconds or 600.0),
                                 shots_dir=shots_dir,
                                 on_stuck=_trigger_abort_steps,
                                 state=_wd_state,
@@ -8832,7 +8833,7 @@ async def run_real_user_traffic_job(
                                 else:
                                     step_res = {
                                         "status": "stuck",
-                                        "error": f"Visit aborted by watchdog (page stuck >{int(stuck_watchdog_seconds or 240)}s on {_stuck_url_for_err[:200]})",
+                                        "error": f"Visit aborted by watchdog (page stuck >{int(stuck_watchdog_seconds or 600)}s on {_stuck_url_for_err[:200]})",
                                         "executed_steps": 0,
                                     }
                         finally:
