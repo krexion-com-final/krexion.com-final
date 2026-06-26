@@ -18261,6 +18261,76 @@ async def update_automation_json(
     return _upload_doc_to_response(doc)
 
 
+# 2026-06-26 — GET endpoint to fetch the raw automation_json template
+# text. Useful for: (a) the RUT page picker to populate the textarea
+# when the user wants to inspect / tweak the saved template before
+# kicking off a job, (b) main agent + testing agent debugging of
+# template failures (e.g. "step 37 failed with TypeError") — there was
+# previously NO way to retrieve a saved template's content via API
+# without admin-level Mongo access.
+@api_router.get("/uploads/automation-json/{upload_id}")
+async def get_automation_json_content(
+    upload_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    user_db = get_user_db(current_user["id"])
+    doc = await user_db["uploaded_resources"].find_one(
+        {"id": upload_id, "user_id": current_user["id"], "type": "automation_json"},
+        {"_id": 0},
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Automation JSON template not found")
+
+    txt = doc.get("automation_json") or ""
+    if not txt:
+        items = doc.get("items") or []
+        if items and isinstance(items, list):
+            if len(items) == 1:
+                txt = str(items[0])
+            else:
+                try:
+                    txt = json.dumps(items)
+                except Exception:
+                    txt = ""
+
+    return {
+        "id": doc.get("id"),
+        "name": doc.get("name"),
+        "type": "automation_json",
+        "step_count": doc.get("item_count") or doc.get("original_item_count") or 0,
+        "automation_json": txt,
+        "updated_at": (doc.get("updated_at") or doc.get("created_at") or "").isoformat()
+        if hasattr(doc.get("updated_at") or doc.get("created_at"), "isoformat")
+        else str(doc.get("updated_at") or doc.get("created_at") or ""),
+    }
+
+
+# 2026-06-26 — Clear the per-user persistent burnt-IP blocklist. Each
+# RUT visit that gets duplicate-IP-blocked persists the burnt exit
+# IP into `rut_burnt_ips` so future visits don't waste a proxy quota
+# attempting the same IP. After many test runs (especially during
+# template iteration) this collection grows to 200+ entries which
+# causes every new job to spend its first 2-10 retries cycling burnt
+# IPs before finding a fresh one. Customers complained about it
+# looking like a stuck job. This endpoint lets the user wipe their
+# OWN blocklist (never another user's — strict user_id filter) so
+# the next job starts with a fresh canvas.
+@api_router.delete("/real-user-traffic/burnt-ips")
+async def rut_clear_burnt_ips(
+    current_user: dict = Depends(get_current_user),
+):
+    user_db = get_user_db(current_user["id"])
+    try:
+        res = await user_db["rut_burnt_ips"].delete_many(
+            {"user_id": current_user["id"]}
+        )
+        deleted = int(getattr(res, "deleted_count", 0) or 0)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[rut_burnt_ips] clear failed for {current_user.get('email','?')}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to clear burnt-IPs: {e}")
+    return {"ok": True, "deleted": deleted}
+
+
 async def _load_upload_items(user_id: str, upload_id: str, expected_type: str) -> List[str]:
     """Internal helper: load text items (UAs / proxy lines) from an uploaded
     batch. Returns [] if missing or wrong type.

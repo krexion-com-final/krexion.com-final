@@ -12624,6 +12624,45 @@ async def _execute_automation_steps(
                                     f"[evaluate] context destroyed by navigation — treating as success "
                                     f"(was: {_url_before}, now: {page.url if _navigated else '?'})"
                                 )
+                            # 2026-06-26 — Slow-DOM resilience: certain
+                            # saved automation templates iterate over a
+                            # DOM node-list that's not yet populated
+                            # when the JS runs on a slow proxy → throws
+                            # "TypeError: undefined is not iterable" /
+                            # "Cannot read properties of undefined". The
+                            # SAME script works on a fast load. We
+                            # retry ONCE after a short wait so the DOM
+                            # has time to render the targeted elements.
+                            # If the retry succeeds we continue; if it
+                            # still fails we re-raise so self_heal /
+                            # required-step logic kick in as before.
+                            elif (
+                                "is not iterable" in _ev_msg
+                                or "cannot read properties of undefined" in _ev_msg
+                                or "cannot read property" in _ev_msg
+                                or "is not a function" in _ev_msg
+                            ):
+                                logger.info(
+                                    f"[evaluate] transient DOM-not-ready error "
+                                    f"({str(_ev_err)[:120]}) — retrying once after 2s"
+                                )
+                                try:
+                                    await page.wait_for_timeout(2000)
+                                    # Re-run the same pre-wait + evaluate
+                                    # so any selectors referenced in the
+                                    # JS get a fresh chance to resolve.
+                                    try:
+                                        await _pre_wait_for_evaluate_selectors(page, js, timeout)
+                                    except Exception:
+                                        pass
+                                    await page.evaluate(js)
+                                    logger.info("[evaluate] retry succeeded")
+                                except Exception as _ev_err2:
+                                    logger.warning(
+                                        f"[evaluate] retry also failed: "
+                                        f"{str(_ev_err2)[:120]} — re-raising original"
+                                    )
+                                    raise _ev_err
                             else:
                                 # Real script error (syntax, ReferenceError, etc.)
                                 raise

@@ -3721,6 +3721,36 @@ export default function RealUserTrafficPage() {
             <CheckRow testId="rut-skip-duplicate-ip" checked={skipDuplicateIp} onChange={setSkipDuplicateIp}>
               <span className="text-zinc-300">🚫 Skip duplicate exit IP</span>
             </CheckRow>
+            {/* 2026-06-26 — quick action to wipe the per-user burnt-IP
+                cache. After many test runs the persistent blocklist
+                grows to 200+ entries which causes every new job to
+                burn 2-10 attempts cycling stale IPs before finding a
+                fresh one. Operator can hit this once to start fresh. */}
+            <button
+              type="button"
+              data-testid="rut-clear-burnt-ips"
+              onClick={async () => {
+                if (!window.confirm("Aap ke account ki SAARI burnt-IP history clear ho jaye gi. Confirm?")) return;
+                try {
+                  const r = await fetch(`${API_URL}/api/real-user-traffic/burnt-ips`, {
+                    method: "DELETE",
+                    headers: { Authorization: `Bearer ${localStorage.getItem("token") || ""}` },
+                  });
+                  const data = await r.json().catch(() => ({}));
+                  if (r.ok) {
+                    toast.success(`✓ Cleared ${data?.deleted ?? 0} burnt-IP entries — next job starts fresh.`);
+                  } else {
+                    toast.error(`Clear failed: ${data?.detail || r.statusText}`);
+                  }
+                } catch (e) {
+                  toast.error(`Clear failed: ${e.message}`);
+                }
+              }}
+              className="text-xs text-zinc-400 hover:text-amber-300 underline-offset-2 hover:underline transition-colors"
+              title="Wipe your burnt-IP blocklist so the next job doesn't waste retries on stale duplicate-IP burns"
+            >
+              🧹 Clear my burnt-IP cache
+            </button>
             <CheckRow testId="rut-skip-vpn" checked={skipVpn} onChange={setSkipVpn}>
               <span className="text-zinc-300">🛡️ Skip VPN / datacenter</span>
             </CheckRow>
