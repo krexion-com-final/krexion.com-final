@@ -7740,9 +7740,9 @@ async def _rut_prepare_and_run(
             proxyjet_states_pool=list(params.get("proxyjet_states") or []),
             proxyjet_unique_retry_cap=int(params.get("proxyjet_unique_retry_cap") or 50),
             # 2026-01 — per-job watchdog inactivity threshold (seconds).
-            # Default raised 60 → 240 (2026-05). UI exposes a number
-            # input so operators can tune per offer.
-            stuck_watchdog_seconds=float(params.get("stuck_watchdog_seconds") or 240.0),
+            # Default raised 60 → 240 (2026-05) → 600 (2026-06-27, user request).
+            # UI exposes a number input so operators can tune per offer.
+            stuck_watchdog_seconds=float(params.get("stuck_watchdog_seconds") or 600.0),
             # 2026-02 v2.1.31 — Anti-Detect wiring (Phase 1)
             pacing_per_hour=int(params.get("pacing_per_hour") or 0),
             identity_label=str(params.get("identity_label") or "").strip(),

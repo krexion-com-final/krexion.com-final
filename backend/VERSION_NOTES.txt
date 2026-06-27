@@ -1,1 +1,23 @@
 # Force redeploy trigger 1782418017
+# v2.1.68 — 2026-06-27 — RUT reliability + Live Visual Grid bugfix
+#   1. Live Visual Grid no longer hides actively-running visits.
+#      `isVisitActive()` was checking per-step `latest_event.status === 'ok'`
+#      which fired on EVERY successful automation step — so the grid stayed
+#      empty even when 118-step flows were running in the background.
+#      Customers saw "Waiting for first visit to start…" forever.
+#      Fix: use VISIT-level `v.status` only as the done-signal; the
+#      `stage:'done'` short-circuit catches the race where push_live_step
+#      emits the final event before the dispatcher flips v.status.
+#   2. Header tile counter (✓ / ✗ / ⏵) now uses the same correct signals
+#      instead of per-step status. Counters and grid agree again.
+#   3. Stuck-watchdog default raised 240s → 600s. Survey-heavy multi-deal
+#      offers (like "target 750 v10") routinely have 5-8 min idle pauses
+#      on the post-survey wait page — 240s was too aggressive and was
+#      mass-aborting otherwise-healthy visits. UI input range also
+#      widened to 30-1800s to match the backend cap.
+#   4. Mid-flow chrome-error://chromewebdata/ is now tagged as a transient
+#      tunnel failure (proxy dropped during form submit). The
+#      `target_mode=conversions` dispatcher excludes these from the
+#      max_attempts budget so a single proxy hiccup mid-flow no longer
+#      burns one of the customer's conversion attempts.
+

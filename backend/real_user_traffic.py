@@ -8322,8 +8322,18 @@ async def run_real_user_traffic_job(
                     if cur_url.startswith("chrome-error://") or cur_url.startswith("chrome://network-error"):
                         entry["status"] = "failed"
                         entry["error"] = f"Browser navigation error (proxy tunnel broken): {cur_url}"
+                        # 2026-06-27 — Mark as transient tunnel failure
+                        # so target_mode=conversions dispatcher retries
+                        # without counting this against max_attempts.
+                        entry["tunnel_failed"] = True
+                        try:
+                            RUT_JOBS[job_id]["tunnel_fail_count"] = int(
+                                RUT_JOBS[job_id].get("tunnel_fail_count", 0) or 0
+                            ) + 1
+                        except Exception:
+                            pass
                         push_live_step(job_id, i + 1, "browser", "failed",
-                                       f"Navigation error: {cur_url[:80]}")
+                                       f"Navigation error: {cur_url[:80]} (transient — will retry)")
                         await context.close()
                         return await _record(job_id, entry, report, report_lock, db)
                     # Grab a lightweight landing thumbnail so the Live Activity
@@ -9279,8 +9289,22 @@ async def run_real_user_traffic_job(
                     entry["status"] = "failed"
                     if not entry.get("error"):
                         entry["error"] = f"Browser navigation error (proxy tunnel broken mid-flow): {_fu}"
+                    # 2026-06-27 — Mark mid-flow chrome-error as transient
+                    # tunnel failure so the dispatcher (target_mode=conversions)
+                    # excludes it from the max_attempts budget. Without this
+                    # tag, a single proxy disconnect mid-flow would count
+                    # against the user's conversion attempts budget — even
+                    # though the lead row + UA + form data were all fine
+                    # and the issue is purely a proxy provider hiccup.
+                    entry["tunnel_failed"] = True
+                    try:
+                        RUT_JOBS[job_id]["tunnel_fail_count"] = int(
+                            RUT_JOBS[job_id].get("tunnel_fail_count", 0) or 0
+                        ) + 1
+                    except Exception:
+                        pass
                     push_live_step(job_id, i + 1, "nav", "failed",
-                                   f"Navigation error after submit: {_fu[:80]}")
+                                   f"Navigation error after submit: {_fu[:80]} (transient — will retry)")
 
                 # STRICT thank-you page detection: needs host change + URL
                 # keyword + page text keyword. Only TRUE thank-you pages

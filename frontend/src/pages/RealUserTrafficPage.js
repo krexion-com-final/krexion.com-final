@@ -404,10 +404,11 @@ export default function RealUserTrafficPage() {
   // 2026-01: per-job stuck-watchdog inactivity threshold (seconds).
   // Pages where the URL doesn't change for longer than this are
   // force-aborted. Default raised from old hardcoded 25 → 60 → 240
-  // (2026-05) so slow survey-style offer pages don't get killed
-  // mid-flow. chrome-error:// fast-path still fires instantly for
-  // dead proxies / DNS failures (handled in backend watchdog).
-  const [stuckWatchdogSeconds, setStuckWatchdogSeconds] = useState(240);
+  // (2026-05) → 600 (2026-06-27, user request — survey-heavy multi-
+  // deal offers like target 750 v10 need 10+ min on slow pages).
+  // chrome-error:// fast-path still fires instantly for dead proxies
+  // / DNS failures (handled in backend watchdog).
+  const [stuckWatchdogSeconds, setStuckWatchdogSeconds] = useState(600);
   const [proxyJetCountry, setProxyJetCountry] = useState("US");
   const [proxyJetState, setProxyJetState] = useState("");
   // ── 2026-06-11: ProxyJet Multi-Geo MIX ──────────────────────────
@@ -712,16 +713,27 @@ export default function RealUserTrafficPage() {
   const isVisitActive = (v) => {
     if (!v) return false;
     const ev = v.latest_event || {};
-    const evStatus = ev.status;
     const vStatus = v.status;
     // Cancelled (manual kill OR job-level cancel) → tile must vanish
     if (vStatus === 'cancelled' || ev.stage === 'manual_cancel') return false;
-    // Done successfully (Visit ok) → tile must vanish
-    if (evStatus === 'ok' || vStatus === 'done' || vStatus === 'ok') return false;
-    // Failed (validation / proxy / VPN-block / etc.) → tile must vanish
-    if (evStatus === 'failed' || vStatus === 'failed') return false;
-    // Skipped (silent_skip_burnt_ip etc.) → tile must vanish
-    if (vStatus === 'skipped' || evStatus === 'skipped') return false;
+    // 2026-06-27 BUGFIX — Use VISIT-level status only as source of truth
+    // for "is visit done?". Previously we also checked
+    // `ev.status === 'ok'`, but the automation engine emits
+    // `{action: 'click', status: 'ok', idx: 38}` on EVERY successful
+    // step. That made every mid-flow visit instantly disappear from the
+    // grid and the user saw "Waiting for first visit to start…" even
+    // though a visit was actively running through 118 steps. The
+    // visit-level v.status is the only authoritative signal.
+    if (vStatus === 'done' || vStatus === 'ok') return false;
+    if (vStatus === 'failed') return false;
+    if (vStatus === 'skipped') return false;
+    // Catch the brief race where push_live_step has emitted the final
+    // {stage:'done'} event but the dispatcher has not yet flipped
+    // v.status. This is the ONLY safe per-step short-circuit because
+    // `stage:"done"` is reserved for visit completion (push_live_step
+    // calls — never the per-step automation callback which uses
+    // `action`/`selector` and never sets `stage`).
+    if (ev.stage === 'done') return false;
     return true;
   };
 
@@ -1675,7 +1687,7 @@ export default function RealUserTrafficPage() {
       // longer than this (URL not changing) are force-aborted. Default
       // 60 — raised from old hardcoded 25 to handle slow form-submit
       // sequences.
-      fd.append("stuck_watchdog_seconds", String(stuckWatchdogSeconds || 240));
+      fd.append("stuck_watchdog_seconds", String(stuckWatchdogSeconds || 600));
       // 2026-02 v2.1.31 — Anti-Detect Phase 1
       fd.append("pacing_per_hour", String(pacingPerHour || 0));
       fd.append("identity_label", identityLabel || "");
@@ -2945,14 +2957,14 @@ export default function RealUserTrafficPage() {
               <Input
                 data-testid="rut-stuck-watchdog-seconds"
                 type="number"
-                min={10}
-                max={600}
+                min={30}
+                max={1800}
                 value={stuckWatchdogSeconds}
-                onChange={(e) => setStuckWatchdogSeconds(Math.max(30, Math.min(1800, Number(e.target.value) || 240)))}
+                onChange={(e) => setStuckWatchdogSeconds(Math.max(30, Math.min(1800, Number(e.target.value) || 600)))}
                 className="mt-1 bg-zinc-800 border-zinc-700 text-zinc-100"
               />
               <p className="text-xs text-gray-500 mt-1">
-                If page URL & DOM both stay frozen for this many seconds the visit is aborted. Default 240 (4 min) — raise to 600 (10 min) for slow survey-heavy / multi-deal offers, lower for fast fail-on-stuck. Range: 30-1800s. Dead proxies / chrome-errors are aborted instantly regardless.
+                If page URL & DOM both stay frozen for this many seconds the visit is aborted. Default 600 (10 min) — survey-heavy / multi-deal offers need this much. Lower to 240 for fast fail-on-stuck. Range: 30-1800s. Dead proxies / chrome-errors are aborted instantly regardless.
               </p>
             </div>
           </div>
@@ -5341,11 +5353,16 @@ export default function RealUserTrafficPage() {
                 <span>Polling every 800ms · live browser frames</span>
                 <span className="text-zinc-600">·</span>
                 <span>
-                  Tiles: <span className="text-emerald-300 font-mono">{Object.values(liveVisits).filter(v => v.latest_event?.status === 'ok').length}✓</span>
+                  {/* 2026-06-27 BUGFIX — Same root cause as isVisitActive:
+                      `latest_event.status` is per-STEP, not per-visit. Use
+                      v.status (visit-level) or stage==='done' for the ✓
+                      counter, and v.status === 'failed' for the ✗ counter.
+                      The ⏵ "in-flight" counter is just `isVisitActive`. */}
+                  Tiles: <span className="text-emerald-300 font-mono">{Object.values(liveVisits).filter(v => v && (v.status === 'ok' || v.status === 'done' || (v.latest_event?.stage === 'done' && v.latest_event?.status === 'ok'))).length}✓</span>
                   {' '}
-                  <span className="text-rose-300 font-mono">{Object.values(liveVisits).filter(v => v.status === 'failed').length}✗</span>
+                  <span className="text-rose-300 font-mono">{Object.values(liveVisits).filter(v => v && v.status === 'failed').length}✗</span>
                   {' '}
-                  <span className="text-blue-300 font-mono">{Object.values(liveVisits).filter(v => v.latest_event?.status === 'running').length}⏵</span>
+                  <span className="text-blue-300 font-mono">{Object.values(liveVisits).filter(isVisitActive).length}⏵</span>
                 </span>
                 <span className="text-zinc-600">·</span>
                 <span>Click any tile to expand</span>
@@ -5357,7 +5374,7 @@ export default function RealUserTrafficPage() {
                     <Loader2 className="w-8 h-8 animate-spin inline-block mb-2" />
                     <div>Waiting for first visit to start…</div>
                     <div className="text-xs text-zinc-600 mt-1">
-                      Visits begin streaming once they hit the form page.
+                      Live frames begin streaming the moment a visit&apos;s browser opens.
                     </div>
                   </div>
                 ) : (
