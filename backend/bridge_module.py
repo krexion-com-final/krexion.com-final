@@ -401,8 +401,12 @@ async def worker_post_result(
         # Track requeue count to avoid an infinite ping-pong if the
         # Python sync_client is somehow absent or also broken. After
         # 3 requeues we let the failure stand.
+        # v2.1.71 HEAL: same user_id-OR-email pattern.
+        _u_rq: list = [{"user_id": user["id"]}]
+        if user.get("email"):
+            _u_rq.append({"email": user["email"]})
         existing = await _db.bridge_jobs.find_one(
-            {"id": job_id, "user_id": user["id"]}, {"requeue_count": 1}
+            {"id": job_id, "$or": _u_rq}, {"requeue_count": 1}
         )
         requeue_count = int((existing or {}).get("requeue_count") or 0)
         if requeue_count >= 3:
@@ -417,7 +421,7 @@ async def worker_post_result(
                 f"picked up by the Python sync_client on next pull."
             )
             await _db.bridge_jobs.update_one(
-                {"id": job_id, "user_id": user["id"]},
+                {"id": job_id, "$or": _u_rq},
                 {
                     "$set": {
                         "status": "pending",
@@ -439,6 +443,14 @@ async def worker_post_result(
             )
             return {"updated": 0, "requeued": True}
 
+    # v2.1.71 HEAL: same user_id-OR-email pattern as worker_pull_jobs.
+    # Desktop side resolves user via license; cloud side may have a
+    # different user.id for the same email. Result-post must also
+    # widen its match, else claimed jobs get stuck in "running" and
+    # the cloud's wait_for_result times out at 35 s.
+    _u_post: list = [{"user_id": user["id"]}]
+    if user.get("email"):
+        _u_post.append({"email": user["email"]})
     update = {
         "$set": {
             "status": new_status,
@@ -448,7 +460,7 @@ async def worker_post_result(
         }
     }
     res = await _db.bridge_jobs.update_one(
-        {"id": job_id, "user_id": user["id"], "status": {"$in": ["running", "pending"]}},
+        {"id": job_id, "$or": _u_post, "status": {"$in": ["running", "pending"]}},
         update,
     )
     logger.info(
