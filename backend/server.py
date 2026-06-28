@@ -21625,12 +21625,19 @@ async def _vr_bridge_middleware(request: Request, call_next):
         )
         # Visual Recorder operations are usually quick (<2s) but allow
         # up to 30s for the chromium spin-up call inside the session.
+        # v2.1.72: bump 35s → 60s. Customers with large
+        # real_user_traffic_jobs collections (10k+ records) need a bit
+        # more headroom for the desktop's local Mongo sort to complete
+        # before the cloud middleware gives up and returns queued. The
+        # added index on (user_id, created_at) makes 99% of queries
+        # finish in <2s anyway — this is just a safety buffer for the
+        # remaining cold-cache slow tail.
         bridge_resp = await enqueue_bridge_job(
             {"id": uid, "email": user_doc.get("email")},
             feature,
             payload,
             wait_for_result=True,
-            wait_timeout=35,
+            wait_timeout=60,
         )
         from fastapi.responses import JSONResponse as _JR, Response as _Resp
         if not bridge_resp:
