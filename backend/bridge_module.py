@@ -224,8 +224,13 @@ async def get_my_local_status_for(user_id: str) -> dict:
     return await is_user_local_online(user_id)
 
 
-async def get_my_job(job_id: str, user_id: str) -> dict:
-    j = await _db.bridge_jobs.find_one({"id": job_id, "user_id": user_id}, {"_id": 0})
+async def get_my_job(job_id: str, user_id: str, email: Optional[str] = None) -> dict:
+    # v2.1.70 HEAL: same user_id-OR-email pattern as worker_pull_jobs
+    # so a stale users-collection duplicate doesn't 404 the customer.
+    _u: list = [{"user_id": user_id}]
+    if email:
+        _u.append({"email": email})
+    j = await _db.bridge_jobs.find_one({"id": job_id, "$or": _u}, {"_id": 0})
     if not j:
         raise HTTPException(status_code=404, detail="Job not found")
     if j.get("status") == "pending":
@@ -243,8 +248,12 @@ async def get_my_job(job_id: str, user_id: str) -> dict:
     return j
 
 
-async def list_jobs_for(user_id: str, limit: int = 50) -> list:
-    cursor = _db.bridge_jobs.find({"user_id": user_id}, {"_id": 0}).sort("created_at", -1).limit(min(limit, 200))
+async def list_jobs_for(user_id: str, limit: int = 50, email: Optional[str] = None) -> list:
+    # v2.1.70 HEAL: same user_id-OR-email pattern.
+    _u: list = [{"user_id": user_id}]
+    if email:
+        _u.append({"email": email})
+    cursor = _db.bridge_jobs.find({"$or": _u}, {"_id": 0}).sort("created_at", -1).limit(min(limit, 200))
     return await cursor.to_list(200)
 
 
@@ -308,7 +317,15 @@ async def worker_pull_jobs(
     limit = max(1, min(limit, 20))
 
     claimed = []
-    base_query: dict = {"user_id": user["id"], "status": "pending"}
+    # v2.1.70 HEAL: match by user_id OR email so a stale users-collection
+    # duplicate (where find_one({"email": ...}) returns a different
+    # `id` than the one the cloud enqueue path saw) doesn't strand the
+    # bridge job in "pending" forever. Same pattern that v1.0.23 added
+    # to sync_heartbeats — see sync_module.py:197 comment.
+    _user_match: list = [{"user_id": user["id"]}]
+    if user.get("email"):
+        _user_match.append({"email": user["email"]})
+    base_query: dict = {"$or": _user_match, "status": "pending"}
     # v1.0.19: workers identify themselves via `worker_type` (free-form
     # string). The Python sync_client passes `worker_type=python`, the
     # legacy PowerShell scheduled task passes nothing. Any job that was

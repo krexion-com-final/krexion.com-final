@@ -220,11 +220,17 @@ async def generate_automation_from_media(
         {"status":"ok", "steps":[...], "raw": "<model text>"}
     or {"status":"failed", "error":"..."}
     """
-    from emergentintegrations.llm.chat import (
-        LlmChat,
-        UserMessage,
-        FileContentWithMimeType,
-    )
+    # v2.1.70 — graceful when emergentintegrations isn't installed
+    # (e.g. customer native install). Caller sees status=failed and
+    # can show the existing "AI unavailable on this build" message.
+    try:
+        from emergentintegrations.llm.chat import (
+            LlmChat,
+            UserMessage,
+            FileContentWithMimeType,
+        )
+    except ImportError:
+        return {"status": "failed", "error": "AI integration not available on this install"}
 
     image_paths = image_paths or []
     if not image_paths and not video_path:
@@ -302,11 +308,19 @@ async def suggest_self_heal_action(
     failed_step: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Ask Gemini to propose a single recovery action. Returns dict or None."""
-    from emergentintegrations.llm.chat import (
-        LlmChat,
-        UserMessage,
-        FileContentWithMimeType,
-    )
+    # v2.1.70 — emergentintegrations isn't bundled in the customer's
+    # native desktop installer (it's a cloud-side dep). When absent
+    # we simply skip AI self-heal — the engine already retries the
+    # original step. We swallow the ImportError silently so the
+    # warning isn't spammed 30+ times per job.
+    try:
+        from emergentintegrations.llm.chat import (
+            LlmChat,
+            UserMessage,
+            FileContentWithMimeType,
+        )
+    except ImportError:
+        return None
 
     sp = Path(screenshot_path)
     if not sp.exists():

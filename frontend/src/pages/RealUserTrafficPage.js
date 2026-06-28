@@ -676,6 +676,10 @@ export default function RealUserTrafficPage() {
   // Job state
   const [submitting, setSubmitting] = useState(false);
   const [jobs, setJobs] = useState([]);
+  // v2.1.70 — true when the cloud's /jobs list call timed out waiting
+  // for the desktop bridge (response: {queued:true, via:"bridge"}).
+  // Frontend keeps polling and shows a friendly hint in Past Jobs.
+  const [bridgePending, setBridgePending] = useState(false);
   const [activeJob, setActiveJob] = useState(null);
   const [selectedJobIds, setSelectedJobIds] = useState(new Set());
   const pollRef = useRef(null);
@@ -771,6 +775,14 @@ export default function RealUserTrafficPage() {
         }
       );
       if (!r.ok) {
+        // v2.1.70 — stream-mode + cancel are best-effort cleanup calls.
+        // When a job finishes the backend purges it from in-memory
+        // _RUT_JOBS so any in-flight POST gets a 404 — that's expected,
+        // not an error to surface to the user. Toast only for genuine
+        // failures (auth, server crash, etc.).
+        if (r.status === 404 && (path === "stream" || path === "cancel")) {
+          return null;
+        }
         const t = await r.text();
         let msg = `${path} failed (${r.status})`;
         try { msg = JSON.parse(t).detail || msg; } catch (_) { /* ignore */ }
@@ -930,6 +942,17 @@ export default function RealUserTrafficPage() {
       const r = await fetch(`${API_URL}/api/real-user-traffic/jobs`, { headers: authH() });
       if (r.ok) {
         const data = await r.json();
+        // v2.1.70 — when the cloud bridge times out waiting for the
+        // desktop it returns {queued:true, via:"bridge", state, message}
+        // with HTTP 202 (still "ok" for fetch). Don't blow away the
+        // existing jobs list in that case — leave it so the user keeps
+        // seeing the last good snapshot while we retry. We just flag
+        // bridge-pending so the UI can show a friendly hint.
+        if (data && data.queued && !Array.isArray(data.jobs)) {
+          setBridgePending(true);
+          return;
+        }
+        setBridgePending(false);
         setJobs(data.jobs || []);
       }
     } catch (e) { /* ignore */ }
@@ -940,6 +963,10 @@ export default function RealUserTrafficPage() {
       const r = await fetch(`${API_URL}/api/real-user-traffic/jobs/pending-candidates`, { headers: authH() });
       if (r.ok) {
         const data = await r.json();
+        // v2.1.70 — same bridge-pending tolerance as fetchJobs above.
+        if (data && data.queued && !Array.isArray(data.items)) {
+          return;
+        }
         setPendingCandidates(data.items || []);
       }
     } catch (e) { /* ignore */ }
@@ -4931,9 +4958,16 @@ export default function RealUserTrafficPage() {
         </CardHeader>
         <CardContent>
           {jobs.length === 0 ? (
-            <p className="text-zinc-500 text-sm text-center py-6">
-              No jobs yet — start one above 👆
-            </p>
+            bridgePending ? (
+              <p className="text-blue-300 text-sm text-center py-6" data-testid="rut-past-jobs-bridge-loading">
+                <RefreshCw size={14} className="inline mr-2 animate-spin" />
+                Loading jobs from your PC… <span className="text-zinc-500">(auto-refreshing — your desktop is responding)</span>
+              </p>
+            ) : (
+              <p className="text-zinc-500 text-sm text-center py-6">
+                No jobs yet — start one above 👆
+              </p>
+            )
           ) : (
             <div className="border border-zinc-800 rounded-lg overflow-hidden">
               <table className="w-full text-sm">

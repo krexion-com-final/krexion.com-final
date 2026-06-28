@@ -20868,11 +20868,11 @@ try:
 
     @_bridge_router.get("/jobs/{job_id}")
     async def _bridge_get_job(job_id: str, user: dict = Depends(get_current_user)):
-        return await get_my_job(job_id, user["id"])
+        return await get_my_job(job_id, user["id"], user.get("email"))
 
     @_bridge_router.get("/jobs")
     async def _bridge_list_jobs(limit: int = 50, user: dict = Depends(get_current_user)):
-        return {"jobs": await list_jobs_for(user["id"], limit)}
+        return {"jobs": await list_jobs_for(user["id"], limit, user.get("email"))}
 
     @_bridge_router.post("/resync-to-desktop")
     async def _bridge_resync_to_desktop(user: dict = Depends(get_current_user)):
@@ -22683,6 +22683,25 @@ async def _krexion_customer_startup_tasks():
          scan, integrity self-check). License module supplies a no-op
          function if any check is unavailable so nothing breaks.
     """
+    # v2.1.70 — Silence noisy "Future exception was never retrieved:
+    # TargetClosedError(...)" log lines that come from RUT browser
+    # tear-down races (an internal Playwright watcher future resolves
+    # AFTER the page/context was already closed by the engine). They
+    # are harmless cleanup-order races, not real failures — but the
+    # default asyncio handler logs them at ERROR level, which scares
+    # both ops and customers. Demote to debug.
+    try:
+        import asyncio as _aio
+        _loop = _aio.get_running_loop()
+        def _kx_excl_handler(loop, context):
+            exc = context.get("exception")
+            if exc is not None and type(exc).__name__ == "TargetClosedError":
+                logger.debug(f"[playwright cleanup race] {exc} — ignored")
+                return
+            loop.default_exception_handler(context)
+        _loop.set_exception_handler(_kx_excl_handler)
+    except Exception as _eh_e:
+        logger.debug(f"could not install playwright exc filter: {_eh_e}")
     # 1. Auto-install full chromium in the background
     try:
         # Respect the existing VPS safety flag — cloud edge / shared

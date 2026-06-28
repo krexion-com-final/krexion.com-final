@@ -121,7 +121,16 @@ async def _http_download(url: str, dest: Path) -> bool:
         ) as client:
             async with client.stream("GET", url) as r:
                 if r.status_code != 200:
-                    logger.warning(f"download {url} → HTTP {r.status_code}")
+                    # v2.1.70 — Brave's GitHub releases don't actually
+                    # ship portable zip artefacts (only installer .exe).
+                    # 404 here is the EXPECTED outcome for the Brave
+                    # auto-download path — the code already falls back
+                    # to the bundled Chromium binary. Log at info level
+                    # so it stops looking like a real warning to ops.
+                    if r.status_code == 404 and "brave-browser" in url:
+                        logger.info(f"optional Brave portable not on releases ({url.split('/')[-1]}) — using Chromium fallback")
+                    else:
+                        logger.warning(f"download {url} → HTTP {r.status_code}")
                     return False
                 with open(tmp, "wb") as f:
                     total = 0
