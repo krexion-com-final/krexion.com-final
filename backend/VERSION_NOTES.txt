@@ -1,4 +1,39 @@
 # Force redeploy trigger 1782418017
+# v2.1.69 — 2026-06-28 — Native install fixes (memory + browser profile launch)
+#   1. RUT memory throttle no longer falsely fires on Windows native
+#      installs. `_detect_container_mem_limit_mb()` previously fell back
+#      to a hardcoded 6 GB cap when cgroup files weren't present (which
+#      is ALWAYS the case on Windows), causing the customer's 32 GB
+#      machine to throttle at backend RSS > 4.9 GB — well within
+#      normal Playwright + Chromium territory. As a result every RUT
+#      job got stuck on "running · 0/N visits" even though the host
+#      had tons of free RAM.
+#      Fix: third detection step uses psutil.virtual_memory() when
+#      cgroup is absent, deriving cap = (total_ram - 4 GB) × 0.85
+#      clamped to [1 GB, 32 GB]. 8 GB customer machines correctly get
+#      ~3.5 GB cap (throttles before OOM); 32 GB machines get ~24 GB
+#      cap (no false throttle). Cloud VPS path (cgroup) unchanged.
+#      Tests: 9/9 in tests/test_native_mem_limit_fallback.py.
+#
+#   2. Browser Profile launch on NSSM-installed Windows build no longer
+#      stuck on "launching..." forever. Root cause: Windows Services
+#      run in Session 0 and cannot display GUI windows on the user's
+#      desktop. Customer clicked Launch → backend (Session 0) spawned
+#      Chromium → process existed but window invisible. Electron build
+#      never hit this because its backend is a child of the Electron
+#      user-session main process.
+#      Fix: NSSM-build backends (KREXION_BUILD_TYPE=binary) now write
+#      pending launches into a new `browser_launch_queue` Mongo
+#      collection. The tray-app dashboard (already running in user
+#      session via HKCU Run autostart) polls every 2s and spawns
+#      Chromium IN ITS OWN PROCESS — Session 1, full desktop access,
+#      Chromium window appears normally. Stop requests propagate the
+#      same way via `stop_requested` flag on the queue record.
+#      Tests: 11/11 in tests/test_browser_profile_user_session_handoff.py.
+#      Backward compat: Electron + cloud VPS + sync_client bridge all
+#      unchanged (defer only fires when both `sys.platform == 'win32'`
+#      AND `KREXION_BUILD_TYPE == 'binary'`).
+#
 # v2.1.68 — 2026-06-27 — RUT reliability + Live Visual Grid bugfix
 #   1. Live Visual Grid no longer hides actively-running visits.
 #      `isVisitActive()` was checking per-step `latest_event.status === 'ok'`

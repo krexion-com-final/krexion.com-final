@@ -618,8 +618,25 @@ async def stop_profile(request: Request, profile_id: str):
     # directly via the in-process launcher. Bridge-based stop only makes
     # sense from cloud → customer's PC; trying to enqueue here would just
     # be a no-op.
+    #
+    # 2026-06-28 (Session-0 fix): on the NSSM-installed Windows build the
+    # actual headed browser is owned by the tray app (Session 1), not
+    # the backend service (Session 0). We can't kill it from here —
+    # write a stop_requested flag into the `browser_launch_queue`
+    # record instead so the tray app's polling loop closes the browser
+    # in its own process.
     _is_local_desktop = (os.environ.get("KREXION_MODE", "cloud").lower() == "native")
-    if _is_local_desktop and sid:
+    _is_session0_service = bool(_is_local_desktop and (os.environ.get("KREXION_BUILD_TYPE") or "").strip().lower() == "binary")
+    if _is_session0_service and sid:
+        try:
+            await _DB.browser_launch_queue.update_one(
+                {"id": sid},
+                {"$set": {"stop_requested": True,
+                          "stop_requested_at": _now_iso()}},
+            )
+        except Exception as e:
+            logger.warning(f"local browser-profile stop (queued) failed: {e}")
+    elif _is_local_desktop and sid:
         try:
             from browser_profile_launcher import request_stop
             request_stop(sid)

@@ -25,6 +25,7 @@ place it actually executes).
 from __future__ import annotations
 
 # ── File logger setup FIRST — every other import below may raise ─────
+import asyncio
 import logging
 import os
 import sys
@@ -329,12 +330,139 @@ def main() -> int:
     # v1.0.21: auto-update check (non-blocking daemon).
     threading.Thread(target=_check_for_updates, daemon=True, name="krexion-update-check").start()
 
+    # 2026-06-28 — user-session browser-profile launcher (Session-0 fix).
+    # The NSSM-installed backend service runs in Session 0 and can't
+    # display Chromium on the user's desktop, so it writes pending
+    # launches into a local Mongo queue. THIS process (the tray app)
+    # runs in the user's interactive session via the HKCU Run
+    # autostart key, so it CAN display Chromium correctly — we run a
+    # tiny polling loop in a daemon thread that drains the queue and
+    # spawns the headed browser inline. See
+    # `backend/browser_profile_launcher.py::process_pending_user_session_launches`.
+    threading.Thread(
+        target=_user_session_browser_launcher_loop,
+        daemon=True,
+        name="krexion-user-session-launcher",
+    ).start()
+
     if _launch_pywebview_window():
         return 0
     # PyWebView failed - fallback so customer ALWAYS sees a window
     logger.warning("Falling back to native Win32 MessageBox compatibility dialog.")
     _launch_native_messagebox_fallback()
     return 0
+
+
+def _user_session_browser_launcher_loop() -> None:
+    """Daemon thread that drives the browser-profile-launch queue.
+
+    Runs an asyncio event loop dedicated to this thread (NOT the
+    pywebview main loop — pywebview can't tolerate having an async
+    coroutine scheduled into its UI loop). Polls every 2 seconds.
+
+    Cleanly exits if any of:
+      * the backend module isn't importable (dev run, no embedded
+        Python site-packages) → the queue is empty anyway so this is a
+        no-op for those builds.
+      * MongoDB isn't reachable on 127.0.0.1:27017 → retries every 10s
+        in case the service starts later.
+    """
+    # Brief sleep so the rest of the dashboard finishes booting first
+    import time as _t
+    _t.sleep(4)
+    logger.info("[user-session-launcher] thread starting")
+
+    async def _loop() -> None:
+        # Lazy import — these only need to work on the customer build
+        # where the embedded Python ships with backend libs. On a dev
+        # / non-installed run the imports may fail; we silently no-op.
+        try:
+            from motor.motor_asyncio import AsyncIOMotorClient  # type: ignore
+            from browser_profile_launcher import (  # type: ignore
+                process_pending_user_session_launches,
+            )
+        except Exception as imp_err:  # noqa: BLE001
+            logger.info(
+                f"[user-session-launcher] backend libs not available "
+                f"({imp_err}); queue runner disabled (this is normal on "
+                f"non-installed/dev runs)"
+            )
+            return
+
+        mongo_url = os.environ.get("MONGO_URL", "mongodb://127.0.0.1:27017")
+        db_name = os.environ.get("DB_NAME", "krexion")
+        cloud_base = os.environ.get("KREXION_CLOUD_URL", "https://krexion.com").rstrip("/")
+        cloud_session_update_url = (
+            f"{cloud_base}/api/browser-profiles/_bridge/session-update"
+        )
+
+        # Read license key file once at startup; the cloud notify is
+        # optional so a missing key just disables the cloud-push half.
+        license_key = ""
+        try:
+            lk_path = os.environ.get(
+                "LICENSE_KEY_FILE",
+                "C:/ProgramData/Krexion/license-key.txt",
+            )
+            if os.path.exists(lk_path):
+                with open(lk_path, "r", encoding="utf-8") as fh:
+                    license_key = fh.read().strip()
+        except Exception:  # noqa: BLE001
+            pass
+
+        client = None
+        backoff = 10.0
+        while True:
+            if client is None:
+                try:
+                    client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=3000)
+                    # Trigger a ping so we surface auth/reachability errors here
+                    await client.admin.command("ping")
+                    logger.info(
+                        f"[user-session-launcher] mongo connected: {mongo_url} / {db_name}"
+                    )
+                    backoff = 10.0
+                except Exception as conn_err:  # noqa: BLE001
+                    logger.warning(
+                        f"[user-session-launcher] mongo not reachable "
+                        f"({conn_err}); retrying in {backoff:.0f}s"
+                    )
+                    client = None
+                    await asyncio.sleep(backoff)
+                    backoff = min(60.0, backoff * 1.5)
+                    continue
+
+            try:
+                processed = await process_pending_user_session_launches(
+                    client[db_name],
+                    cloud_session_update_url=cloud_session_update_url,
+                    license_key=license_key,
+                )
+                if processed:
+                    logger.info(
+                        f"[user-session-launcher] dispatched {processed} "
+                        f"browser-profile launch(es)"
+                    )
+            except Exception as work_err:  # noqa: BLE001
+                logger.warning(f"[user-session-launcher] cycle error: {work_err}")
+                # Force reconnect on next iteration in case the client died
+                try:
+                    client.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                client = None
+
+            await asyncio.sleep(2.0)
+
+    # Run the asyncio loop inside THIS thread (asyncio.new_event_loop
+    # is required because asyncio.run() can't share with another loop
+    # running elsewhere in the process — pywebview owns its own).
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_loop())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[user-session-launcher] thread crashed: {exc}", exc_info=True)
 
 
 def _check_for_updates() -> None:

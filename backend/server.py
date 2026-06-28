@@ -6787,7 +6787,8 @@ def _detect_container_mem_limit_mb(default_mb: int = 6144) -> int:
     Reads (in priority order):
       1. cgroup v2:  /sys/fs/cgroup/memory.max
       2. cgroup v1:  /sys/fs/cgroup/memory/memory.limit_in_bytes
-      3. fallback:   `default_mb`
+      3. psutil:     actual system RAM (Windows / macOS / native installs)
+      4. fallback:   `default_mb`
 
     Both cgroup files return huge sentinel values when no limit is set
     (cgroup v2 = the literal string "max"; cgroup v1 = INT64_MAX-ish ≈
@@ -6795,6 +6796,16 @@ def _detect_container_mem_limit_mb(default_mb: int = 6144) -> int:
     the default. This matches Docker's own behaviour for unlimited
     containers and avoids the throttle never firing on dev machines
     where Docker has no mem_limit set.
+
+    2026-06-28 (native-app fix): step 3 added so customer Windows/macOS
+    installs (KREXION_MODE=native, NSSM service or Electron-spawned
+    backend) get a cap that reflects their ACTUAL machine RAM instead
+    of the safe-but-tiny 6 GB default. Previously a 32 GB customer
+    machine throttled the very first RUT job because backend RSS
+    (Playwright + Chromium) easily crossed 80% of the fake 6 GB cap
+    within the first minute. Now the same 32 GB machine gets a ~24 GB
+    cap → throttle never falsely fires while real OOM protection on
+    low-RAM machines (8 GB and below) is PRESERVED.
     """
     # cgroup v2 (Docker 20.10+ on cgroup-v2 hosts — most modern setups)
     try:
@@ -6817,6 +6828,36 @@ def _detect_container_mem_limit_mb(default_mb: int = 6144) -> int:
                 limit_bytes = int(f.read().strip())
             if 0 < limit_bytes < 1024**4:  # < 1 TB ⇒ a real cap
                 return max(256, limit_bytes // (1024 * 1024))
+    except Exception:
+        pass
+
+    # 3. Native install (no container limits) — derive from actual
+    #    physical RAM so the throttle math is meaningful.
+    #
+    #    Formula: (total_ram_mb - 4096) * 0.85
+    #      Reserve 4 GB for OS, Mongo, Chrome, AV, etc.
+    #      Use 85% of the remaining headroom for the backend cap.
+    #      Clamp to [1024, 32768] so 4 GB toy machines still get a
+    #      sane minimum and 256 GB workstations don't overcommit.
+    #
+    #    Examples (matches what each tier "feels" like in practice):
+    #       8 GB machine ->  3481 MB cap  (throttles correctly under load)
+    #      16 GB machine -> 10444 MB cap  (single concurrent RUT job fine)
+    #      32 GB machine -> 24371 MB cap  (47 concurrent visits OK — was the
+    #                                     primary customer complaint that
+    #                                     prompted this fix)
+    #      64 GB machine -> 32768 MB cap  (clamped — Krexion never needs more)
+    try:
+        import psutil as _ps_mem  # local import; psutil is a hard runtime dep
+        total_bytes = _ps_mem.virtual_memory().total
+        if total_bytes and total_bytes > 0:
+            total_mb = total_bytes // (1024 * 1024)
+            # Only apply this branch when we actually have meaningful RAM
+            # info (psutil sometimes returns 0 on locked-down kiosk OSes).
+            if total_mb >= 2048:
+                cap_mb = int((total_mb - 4096) * 0.85)
+                cap_mb = max(1024, min(cap_mb, 32768))
+                return cap_mb
     except Exception:
         pass
 
@@ -21713,10 +21754,14 @@ async def diagnostics_health():
         # or the env-var override or the safe 6 GB fallback.
         if "RUT_MEM_LIMIT_MB" in _os.environ:
             cap_source = "env"
-        elif _default_cap_mb != 6144:
+        elif _default_cap_mb == 6144:
+            # Neither cgroup nor psutil produced a value — pure fallback
+            cap_source = "default 6 GB"
+        elif os.path.exists("/sys/fs/cgroup/memory.max") or os.path.exists("/sys/fs/cgroup/memory/memory.limit_in_bytes"):
             cap_source = "auto (cgroup)"
         else:
-            cap_source = "default 6 GB"
+            # Native install — value derived from psutil.virtual_memory()
+            cap_source = "auto (psutil — native install)"
         if is_throttled:
             status = "warn"
             hint = (

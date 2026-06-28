@@ -31,6 +31,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -39,6 +40,130 @@ logger = logging.getLogger("browser_profile_launcher")
 
 # Track running sessions so the UI / stop endpoint can find them
 _RUNNING_SESSIONS: Dict[str, Dict[str, Any]] = {}
+
+# ── 2026-06-28 — Windows Service Session-0 isolation workaround ─────
+# On the NSSM-installed customer build (`KREXION_BUILD_TYPE=binary`)
+# the backend runs as a Windows Service in Session 0. Services in
+# Session 0 CANNOT show GUI windows on the user's desktop — Chromium
+# spawns as a headless ghost process the customer never sees, even
+# though Playwright reports `launch()` succeeded. This is the root
+# cause of the "Browser Profile launch krte hein pr Chromium open ni
+# hota" customer report. The Electron build doesn't have this bug
+# because its backend is a child of the Electron main process (which
+# is itself a user-session GUI app), so child processes inherit the
+# user's session and Chromium displays correctly.
+#
+# Fix: when running as a Windows Service, the backend defers headed
+# launches to a small in-process helper INSIDE the existing tray app
+# (`desktop/krexion_dashboard.py`), which already runs in the user's
+# interactive session via the HKCU Run autostart entry. Coordination
+# is via a tiny `browser_launch_queue` collection in the shared local
+# MongoDB — no new HTTP endpoint, no IPC complexity.
+#
+# Detection signal: `KREXION_BUILD_TYPE=binary` is set ONLY by the
+# Inno-Setup NSSM installer (see `installer/krexion-setup.iss`).
+# Electron + cloud-edge deployments don't set it, so they continue to
+# spawn Chromium directly via `asyncio.create_task` exactly as before.
+_LAUNCH_QUEUE_COLLECTION = "browser_launch_queue"
+
+
+def _should_defer_to_user_session() -> bool:
+    """True when the current process runs as the NSSM-installed Windows
+    Service. Defers headed browser launches to the tray-app helper
+    instead of spawning them inline (which would land in Session 0)."""
+    if not sys.platform.startswith("win"):
+        return False
+    build_type = (os.environ.get("KREXION_BUILD_TYPE") or "").strip().lower()
+    return build_type == "binary"
+
+
+async def _enqueue_for_user_session(
+    profile_config: Dict[str, Any],
+    session_id: str,
+    start_url: str,
+    on_session_update: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Write a pending launch record so the tray-app helper can pick it
+    up and run the headed browser in the user's interactive session.
+
+    The tray app polls the same local MongoDB every ~2s (see
+    `process_pending_user_session_launches`) and runs the actual
+    Playwright launch with full Session 1+ desktop access.
+
+    We also call the on_session_update callback with status="queued"
+    so the frontend UI flips from "launching" to a clearer state
+    quickly, instead of staring at "launching..." for 2 seconds while
+    the tray app picks up the queue.
+    """
+    profile_id = str(profile_config.get("id") or "")
+    queued_at = _now_iso()
+    record = {
+        "id": session_id,
+        "profile_id": profile_id,
+        "profile_config": profile_config,
+        "start_url": start_url,
+        "status": "queued",
+        "queued_at": queued_at,
+        "claimed_at": "",
+        "completed_at": "",
+        "error_message": "",
+    }
+    try:
+        # Lazy import to avoid circulars at module load — server.py is
+        # the module that owns the motor client.
+        from server import db as _db  # type: ignore
+        await _db[_LAUNCH_QUEUE_COLLECTION].insert_one(record)
+        logger.info(
+            f"[profile-launch] queued for user-session helper "
+            f"session_id={session_id[:8]} profile={profile_id[:8]}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        # If we can't even queue the launch, fall back to inline launch
+        # so the customer at least sees the error rather than silently
+        # losing the click.
+        logger.warning(
+            f"[profile-launch] queue insert failed ({exc}); falling back "
+            f"to inline launch (may not display on NSSM service)"
+        )
+        return await _launch_inline_for_fallback(
+            profile_config,
+            session_id=session_id,
+            start_url=start_url,
+            on_session_update=on_session_update,
+        )
+
+    # Tell the frontend the launch is queued. The tray helper will then
+    # send "running"/"closed"/"error" updates via the same callback when
+    # it processes the queue entry.
+    if on_session_update is not None:
+        try:
+            await on_session_update({
+                "profile_id": profile_id,
+                "session_id": session_id,
+                "status": "queued",
+                "message": "Waiting for user-session helper to pick up the launch...",
+            })
+        except Exception as _cb_err:  # noqa: BLE001
+            logger.debug(f"queued-callback failed: {_cb_err}")
+
+    return {"ok": True, "session_id": session_id, "queued": True}
+
+
+async def _launch_inline_for_fallback(*args, **kwargs) -> Dict[str, Any]:
+    """Internal: fallback path when queue insert fails. Calls the real
+    launcher inline. Imported lazily to avoid recursion on import."""
+    # Manually re-invoke the inner inline launch flow. We rebuild the
+    # same arguments the wrapped function expects.
+    profile_config = args[0] if args else kwargs.get("profile_config")
+    session_id = kwargs.get("session_id")
+    start_url = kwargs.get("start_url")
+    on_session_update = kwargs.get("on_session_update")
+    return await _launch_session_inline(
+        profile_config,
+        session_id=session_id,
+        start_url=start_url,
+        on_session_update=on_session_update,
+    )
 
 
 def _now_iso() -> str:
@@ -55,6 +180,14 @@ async def launch_profile_session(
     """Open a HEADED Chromium for manual browsing with all anti-detect
     layers applied. Blocks until the customer closes the browser.
 
+    2026-06-28: on the NSSM-installed Windows native build the call
+    is silently rerouted to `_enqueue_for_user_session()` because
+    Windows Services in Session 0 cannot display GUI windows. The
+    tray app (running in the user's interactive session via the HKCU
+    Run autostart) polls the queue and runs the launch instead — see
+    `process_pending_user_session_launches` below. All other deployment
+    modes (Electron, cloud-edge bridge, dev runs) still spawn inline.
+
     Args:
         profile_config: Full profile document from MongoDB
         session_id: Unique session id (also used to track stop signals)
@@ -64,6 +197,35 @@ async def launch_profile_session(
 
     Returns:
         {"ok": bool, "session_id": ..., "duration_sec": ..., "error": ...}
+    """
+    # ── 2026-06-28 — Session-0 detection + handoff to tray app ──────
+    if _should_defer_to_user_session():
+        return await _enqueue_for_user_session(
+            profile_config,
+            session_id=session_id,
+            start_url=start_url,
+            on_session_update=on_session_update,
+        )
+    # Otherwise: in-process inline launch (Electron, cloud-edge bridge, dev)
+    return await _launch_session_inline(
+        profile_config,
+        session_id=session_id,
+        start_url=start_url,
+        on_session_update=on_session_update,
+    )
+
+
+async def _launch_session_inline(
+    profile_config: Dict[str, Any],
+    *,
+    session_id: str,
+    start_url: str,
+    on_session_update: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Real inline launch flow — the original `launch_profile_session`
+    body before the 2026-06-28 Session-0 split. Spawns Chromium directly
+    in the current process. Works correctly when the process is in the
+    user's interactive session (Electron child, dev run, tray helper).
     """
     # ── 2026-07 (v2.1.59) crash-visibility wrapper ──────────────────────
     # Customer report: Browser Profile "Launch" pressed → card chip
@@ -636,4 +798,169 @@ def list_running() -> Dict[str, Dict[str, Any]]:
     return dict(_RUNNING_SESSIONS)
 
 
-__all__ = ["launch_profile_session", "request_stop", "list_running"]
+# ── 2026-06-28 — User-session helper (called BY the tray app) ───────
+# Lives in the tray app's process (which runs in the user's
+# interactive Windows session) and drains the `browser_launch_queue`
+# collection that the NSSM-service backend writes into.
+
+async def process_pending_user_session_launches(
+    motor_db: Any,
+    cloud_session_update_url: str = "",
+    license_key: str = "",
+) -> int:
+    """Pick up to ONE queued launch and run it inline. Returns the
+    number of launches started (0 or 1). The tray app calls this in a
+    loop with ~2s pause between calls — we deliberately process one
+    at a time so a single misconfigured profile can't block the queue.
+
+    Also drains stop_requested flags on already-claimed entries so a
+    customer's "Stop" click on the cloud / desktop UI propagates from
+    the backend service (Session 0) to the running browser owned by
+    THIS process (Session 1).
+
+    All status updates are written DIRECTLY into the local Mongo
+    `browser_profile_sessions` and the parent `browser_profiles`
+    collections — same shape the backend's normal flow writes. The
+    cloud is also notified via `cloud_session_update_url` when the
+    profile was launched from the cloud UI (krexion.com), so the
+    customer's cloud view stays in sync.
+    """
+    # 1. Honour stop requests on already-claimed launches first. The
+    #    backend writes `stop_requested=true` into the queue record;
+    #    we forward it to the in-process `request_stop()` so the
+    #    polling loop inside `_launch_session_inline` closes Chromium.
+    try:
+        async for stop_doc in motor_db[_LAUNCH_QUEUE_COLLECTION].find({
+            "stop_requested": True,
+            "status": "claimed",
+            "stop_acknowledged": {"$ne": True},
+        }):
+            try:
+                request_stop(str(stop_doc.get("id") or ""))
+                await motor_db[_LAUNCH_QUEUE_COLLECTION].update_one(
+                    {"id": stop_doc.get("id")},
+                    {"$set": {"stop_acknowledged": True,
+                              "stop_acknowledged_at": _now_iso()}},
+                )
+                logger.info(
+                    f"[user-session] stop forwarded session_id={str(stop_doc.get('id') or '')[:8]}"
+                )
+            except Exception as _stop_err:  # noqa: BLE001
+                logger.debug(f"[user-session] stop forward failed: {_stop_err}")
+    except Exception as _drain_err:  # noqa: BLE001
+        logger.debug(f"[user-session] stop drain query failed: {_drain_err}")
+
+    # 2. Atomically claim one queued launch
+    try:
+        doc = await motor_db[_LAUNCH_QUEUE_COLLECTION].find_one_and_update(
+            {"status": "queued"},
+            {"$set": {"status": "claimed", "claimed_at": _now_iso()}},
+            sort=[("queued_at", 1)],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"[user-session] queue poll failed: {exc}")
+        return 0
+    if not doc:
+        return 0
+
+    session_id = str(doc.get("id") or "")
+    profile_config = doc.get("profile_config") or {}
+    profile_id = str(profile_config.get("id") or doc.get("profile_id") or "")
+    start_url = str(doc.get("start_url") or "https://www.google.com/")
+    logger.info(
+        f"[user-session] claimed launch session_id={session_id[:8]} "
+        f"profile={profile_id[:8]}"
+    )
+
+    async def _on_update(body: Dict[str, Any]) -> None:
+        """Mirror status into the local Mongo collections that the
+        normal flow writes, AND optionally push to the cloud."""
+        try:
+            sid = str(body.get("session_id") or session_id)
+            status = str(body.get("status") or "")
+            now = _now_iso()
+            if status:
+                await motor_db.browser_profile_sessions.update_one(
+                    {"id": sid},
+                    {"$set": {
+                        "status": status,
+                        "fingerprint_hash": body.get("fingerprint_hash", ""),
+                        "error_message": body.get("error_message", "")[:500],
+                        "updated_at": now,
+                    }},
+                )
+                if status == "running":
+                    await motor_db.browser_profiles.update_one(
+                        {"id": profile_id},
+                        {"$set": {"status": "running"}},
+                    )
+                elif status in ("stopped", "closed", "error"):
+                    await motor_db.browser_profiles.update_one(
+                        {"id": profile_id},
+                        {"$set": {"status": "idle", "session_id": ""}},
+                    )
+        except Exception as _local_err:  # noqa: BLE001
+            logger.debug(f"[user-session] local mirror failed: {_local_err}")
+
+        # Optional: forward to cloud session-update endpoint
+        if cloud_session_update_url:
+            try:
+                import httpx as _httpx
+                async with _httpx.AsyncClient(timeout=15) as client:
+                    headers = {"Content-Type": "application/json"}
+                    if license_key:
+                        headers["X-Krexion-License"] = license_key
+                    await client.post(
+                        cloud_session_update_url, json=body, headers=headers,
+                    )
+            except Exception as _cloud_err:  # noqa: BLE001
+                logger.debug(f"[user-session] cloud push failed: {_cloud_err}")
+
+    # Run the actual inline launch in THIS user-session process.
+    # The launch blocks until the customer closes the browser, so we
+    # fire it as a background task and return — the queue polling
+    # loop can then start the next claim immediately if needed.
+    async def _run_and_finalize() -> None:
+        try:
+            await _launch_session_inline(
+                profile_config,
+                session_id=session_id,
+                start_url=start_url,
+                on_session_update=_on_update,
+            )
+            await motor_db[_LAUNCH_QUEUE_COLLECTION].update_one(
+                {"id": session_id},
+                {"$set": {"status": "completed",
+                          "completed_at": _now_iso()}},
+            )
+        except Exception as exc:  # noqa: BLE001
+            err_msg = f"{type(exc).__name__}: {str(exc)[:240]}"
+            logger.warning(
+                f"[user-session] launch crashed session_id={session_id[:8]}: {err_msg}"
+            )
+            try:
+                await motor_db[_LAUNCH_QUEUE_COLLECTION].update_one(
+                    {"id": session_id},
+                    {"$set": {"status": "error",
+                              "error_message": err_msg,
+                              "completed_at": _now_iso()}},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            await _on_update({
+                "session_id": session_id,
+                "profile_id": profile_id,
+                "status": "error",
+                "error_message": err_msg,
+            })
+
+    asyncio.create_task(_run_and_finalize())
+    return 1
+
+
+__all__ = [
+    "launch_profile_session",
+    "request_stop",
+    "list_running",
+    "process_pending_user_session_launches",
+]
