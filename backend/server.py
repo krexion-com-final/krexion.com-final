@@ -21592,6 +21592,52 @@ async def _vr_bridge_middleware(request: Request, call_next):
         if not local_status.get("online"):
             return await call_next(request)
 
+        # ── v2.1.73 — Cloud-side cache for slow desktop bridges ──
+        # Read-only GET LIST endpoints (`/jobs` and `/pending-candidates`)
+        # on heavy customer DBs (10k+ records) sometimes take >60s on
+        # the desktop's local Mongo even with the (user_id, created_at)
+        # compound index — typically when the index page has been
+        # evicted from RAM. We cache the LAST successful bridge response
+        # per (user_id, path, query) for 30 s fresh + 5 min stale.
+        # Behaviour:
+        #   • Cache hit (< 30 s old) → instant return, NO bridge fire
+        #   • Bridge succeeds (200)  → refresh cache, return live data
+        #   • Bridge times out (202) → return STALE cache (if < 5 min)
+        #     so the user sees their data instead of "Loading…" forever
+        # Only `GET` requests for the two safe LIST endpoints are cached
+        # to avoid masking action results (start/cancel/stream).
+        _cache_eligible = (
+            request.method.upper() == "GET"
+            and (
+                path.rstrip("/") == "/api/real-user-traffic/jobs"
+                or path.rstrip("/") == "/api/real-user-traffic/jobs/pending-candidates"
+            )
+        )
+        _cache_key = None
+        if _cache_eligible:
+            try:
+                import hashlib as _h
+                import json as _j
+                _qs = _j.dumps(sorted(dict(request.query_params).items()), separators=(",", ":"))
+                _cache_key = f"{uid}:{path}:{_h.md5(_qs.encode()).hexdigest()[:12]}"
+                # FRESH hit (< 30 s) — return without bridging
+                _now_utc = datetime.now(timezone.utc)
+                _hit = await db.bridge_response_cache.find_one(
+                    {"_id": _cache_key, "fresh_until": {"$gt": _now_utc}},
+                    {"body": 1, "status_code": 1, "_id": 0},
+                )
+                if _hit and isinstance(_hit.get("body"), dict):
+                    from fastapi.responses import JSONResponse as _JRcached
+                    logger.debug(f"[bridge-cache] HIT fresh {_cache_key[:30]}")
+                    return _JRcached(
+                        status_code=int(_hit.get("status_code") or 200),
+                        content={**_hit["body"], "_cache": "fresh"},
+                    )
+            except Exception as _ce:
+                logger.debug(f"[bridge-cache] fresh-lookup err: {_ce}")
+                _cache_key = None
+        # ── end v2.1.73 cache fresh-check ──
+
         # Capture body + content-type + auth for faithful replay.
         import base64 as _b64
         try:
@@ -21669,10 +21715,64 @@ async def _vr_bridge_middleware(request: Request, call_next):
                     status_code=sc,
                     headers={"Cache-Control": "no-store"},
                 )
+            # v2.1.73 — populate cache on successful bridge response so
+            # subsequent calls (within 30 s fresh / 5 min stale) skip the
+            # slow desktop roundtrip.
+            if (
+                _cache_eligible
+                and _cache_key
+                and 200 <= sc < 300
+                and isinstance(body_back, dict)
+            ):
+                try:
+                    _now_utc = datetime.now(timezone.utc)
+                    await db.bridge_response_cache.update_one(
+                        {"_id": _cache_key},
+                        {
+                            "$set": {
+                                "body": body_back,
+                                "status_code": sc,
+                                "fresh_until": _now_utc + timedelta(seconds=30),
+                                "stale_until": _now_utc + timedelta(seconds=300),
+                                "updated_at": _now_utc,
+                                "user_id": uid,
+                                "path": path,
+                            }
+                        },
+                        upsert=True,
+                    )
+                except Exception as _wc:
+                    logger.debug(f"[bridge-cache] write err: {_wc}")
             return _JR(status_code=sc, content=body_back if body_back is not None else {"ok": True, "via": "bridge"})
         if status_s == "failed":
             return _JR(status_code=500, content={"error": "bridge_execution_failed", "reason": bridge_resp.get("error")})
-        # pending after 35s
+        # ── v2.1.73 — Stale-cache fallback when bridge times out ──
+        # Bridge took longer than 60 s. Instead of returning a useless
+        # {queued:true} placeholder that the frontend then has to retry,
+        # serve the LAST successful response for this user+path if it
+        # is < 5 min old. UX win: user sees their (slightly stale) jobs
+        # list immediately. Cache miss → still return queued (existing
+        # behaviour).
+        if _cache_eligible and _cache_key:
+            try:
+                _now_utc = datetime.now(timezone.utc)
+                _stale = await db.bridge_response_cache.find_one(
+                    {"_id": _cache_key, "stale_until": {"$gt": _now_utc}},
+                    {"body": 1, "status_code": 1, "fresh_until": 1, "_id": 0},
+                )
+                if _stale and isinstance(_stale.get("body"), dict):
+                    logger.info(
+                        f"[bridge-cache] STALE fallback {_cache_key[:30]} "
+                        f"(bridge timeout — serving cached)"
+                    )
+                    return _JR(
+                        status_code=int(_stale.get("status_code") or 200),
+                        content={**_stale["body"], "_cache": "stale"},
+                    )
+            except Exception as _se:
+                logger.debug(f"[bridge-cache] stale-lookup err: {_se}")
+        # ── end v2.1.73 stale-cache fallback ──
+        # pending after 60s with no cache → original behaviour
         return _JR(
             status_code=202,
             content={
