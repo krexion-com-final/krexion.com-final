@@ -1146,6 +1146,18 @@ class RecorderSession:
     # un-recordable. See `_attach_page_listeners` + `switch_tab`.
     pages: List[Any] = field(default_factory=list)
     active_page_index: int = 0
+    # ── 2026-06 (v2.1.74) — JS dialog capture ──
+    # When the live page fires alert() / confirm() / prompt() Playwright's
+    # default is to auto-DISMISS so they never appear to the user (and the
+    # user can't choose to accept/dismiss/type a response). We override
+    # via page.on("dialog") to PARK the dialog handle in pending_dialog
+    # until the user (or a recorded `accept_dialog` / `dismiss_dialog`
+    # step) explicitly resolves it. Operator UI polls
+    # GET /api/visual-recorder/{sid}/dialog and shows an in-app banner
+    # with [Accept] [Dismiss] (+ prompt-text field if type == "prompt")
+    # and POSTs the answer to /dialog/answer which also records the
+    # decision as a step so replay reproduces the same choice.
+    pending_dialog: Optional[Dict[str, Any]] = None
     # Lock to serialize actions on the same browser
     lock: Optional[asyncio.Lock] = None
     # Background startup task (so we can cancel it on stop)
@@ -1338,6 +1350,60 @@ Object.defineProperty(document.fonts, 'ready', {
 """
 
 
+def _attach_dialog_listener(sess: "RecorderSession", target_page: Any) -> None:
+    """v2.1.74 — Capture native JS dialogs (alert/confirm/prompt/beforeunload)
+    that the offer page fires. Playwright's default is to auto-dismiss
+    them so the operator never even sees the popup. We park the dialog
+    in `sess.pending_dialog` and wait for the operator to call
+    `POST /api/visual-recorder/{sid}/dialog/answer` (which then resolves
+    the Playwright Dialog handle with accept/dismiss + optional prompt
+    text). The decision is also recorded as a step so RUT replay
+    reproduces the same answer.
+
+    Idempotent — uses a per-page flag so repeat invocations on the same
+    page don't stack listeners.
+    """
+    if target_page is None:
+        return
+    if getattr(target_page, "_kx_dialog_attached", False):
+        return
+    try:
+        setattr(target_page, "_kx_dialog_attached", True)
+    except Exception:
+        pass
+
+    def _on_dialog(dialog: Any) -> None:
+        # Sync handler — Playwright supports both sync + async, sync is
+        # safer here because we don't want to await inside the event
+        # dispatch (would race with other concurrent dialogs).
+        try:
+            sess.pending_dialog = {
+                "type": getattr(dialog, "type", "alert"),
+                "message": (getattr(dialog, "message", "") or "")[:2000],
+                "default_value": (getattr(dialog, "default_value", "") or "")[:500],
+                "page_url": (target_page.url or "")[:300],
+                "_handle": dialog,  # python ref; serialized away by /dialog GET
+                "captured_at": time.time(),
+            }
+            logger.info(
+                f"[vr {sess.session_id}] dialog captured: "
+                f"type={sess.pending_dialog['type']!r} "
+                f"msg={sess.pending_dialog['message'][:80]!r}"
+            )
+        except Exception as _e:
+            logger.debug(f"[vr {sess.session_id}] dialog capture err: {_e}")
+            # Fall back to dismissing so the page doesn't hang
+            try:
+                asyncio.create_task(dialog.dismiss())
+            except Exception:
+                pass
+
+    try:
+        target_page.on("dialog", _on_dialog)
+    except Exception as _e:
+        logger.debug(f"[vr {sess.session_id}] dialog listener attach err: {_e}")
+
+
 def _attach_page_listeners(sess: "RecorderSession") -> None:
     """Wire up the context-level "page" event so any popup / new tab
     that the live page spawns is tracked AND auto-promoted to the
@@ -1364,6 +1430,12 @@ def _attach_page_listeners(sess: "RecorderSession") -> None:
                 await new_page.add_init_script(_PAGE_INIT_SCRIPT)
             except Exception:
                 pass
+
+            # v2.1.74 — wire up JS dialog capture for popups
+            try:
+                _attach_dialog_listener(sess, new_page)
+            except Exception as _de:
+                logger.debug(f"[vr {sess.session_id}] dialog wire on new page failed: {_de}")
 
             # Wait briefly for the page to load content. Don't block
             # too long — some popups never fire `load` (ad iframes,
@@ -1697,6 +1769,11 @@ async def _init_browser_inner(sess: RecorderSession) -> None:
     #   3) Re-attach the font-blocking init script so screenshot calls
     #      on this new page also don't hang waiting for webfonts.
     _attach_page_listeners(sess)
+    # v2.1.74 — also wire dialog capture on the initial page
+    try:
+        _attach_dialog_listener(sess, sess.page)
+    except Exception as _de:
+        logger.debug(f"[vr {sess.session_id}] dialog wire on initial page failed: {_de}")
 
     # Block font files to prevent font loading delays
     # This prevents Playwright screenshot from hanging on fonts.ready

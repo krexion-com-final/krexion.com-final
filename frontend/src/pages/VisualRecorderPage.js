@@ -152,6 +152,18 @@ function getStepDisplayName(s) {
       const i = typeof s.index === "number" ? `#${s.index}` : "(current)";
       return `✕ Close tab ${i}`;
     }
+    case "accept_dialog": {
+      // v2.1.74 — JS dialog accept (alert/confirm/prompt)
+      const t = s.dialog_type || "dialog";
+      const m = s.message_contains ? ` · "${_val(s.message_contains, 24)}"` : "";
+      const pt = s.prompt_text ? ` → ${_val(s.prompt_text, 18)}` : "";
+      return `✓ Accept ${t}()${m}${pt}`;
+    }
+    case "dismiss_dialog": {
+      const t = s.dialog_type || "dialog";
+      const m = s.message_contains ? ` · "${_val(s.message_contains, 24)}"` : "";
+      return `✕ Dismiss ${t}()${m}`;
+    }
     default:
       return s.action || "step";
   }
@@ -1097,6 +1109,71 @@ export default function VisualRecorderPage() {
     const t = setInterval(pollTabs, 1500);
     return () => { cancelled = true; clearInterval(t); };
   }, [setupStage, sessionId, sessionState]);
+
+  // ── v2.1.74 — JS dialog (alert/confirm/prompt) capture banner ─────
+  // While recording, if the offer page fires alert() / confirm() /
+  // prompt() the backend parks it. We poll for it and pop a banner
+  // with Accept / Dismiss buttons + a text input for prompt(). When
+  // the user picks, we POST /dialog/answer which both resolves the
+  // Playwright dialog AND appends an accept_dialog / dismiss_dialog
+  // step so RUT replay reproduces the same choice.
+  const [pendingDialog, setPendingDialog] = useState(null);
+  const [dialogPromptText, setDialogPromptText] = useState("");
+  useEffect(() => {
+    if (setupStage !== "recording" || !sessionId || sessionState !== "ready") return;
+    let cancelled = false;
+    const pollDialog = async () => {
+      try {
+        const r = await fetch(
+          `${API_URL}/api/visual-recorder/${sessionId}/dialog`,
+          { headers: authH() },
+        );
+        if (!r.ok) return;
+        const d = await r.json();
+        if (cancelled) return;
+        if (d && d.pending) {
+          setPendingDialog((prev) => prev || d);
+          if (d.type === "prompt") setDialogPromptText((cur) => cur || d.default_value || "");
+        } else {
+          setPendingDialog(null);
+          setDialogPromptText("");
+        }
+      } catch {}
+    };
+    pollDialog();
+    const t = setInterval(pollDialog, 700);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [setupStage, sessionId, sessionState]);
+
+  const answerDialog = useCallback(async (decision) => {
+    if (!sessionId || !pendingDialog) return;
+    try {
+      const body = { decision };
+      if (pendingDialog.type === "prompt" && decision === "accept") {
+        body.prompt_text = dialogPromptText;
+      }
+      const r = await fetch(
+        `${API_URL}/api/visual-recorder/${sessionId}/dialog/answer`,
+        {
+          method: "POST",
+          headers: { ...authH(), "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+      const d = await r.json();
+      if (!r.ok || !d.ok) {
+        toast.error(`Dialog answer failed: ${d.error || d.detail || "unknown"}`);
+        return;
+      }
+      setPendingDialog(null);
+      setDialogPromptText("");
+      toast.success(`Dialog ${decision === "accept" ? "accepted" : "dismissed"} — step recorded`);
+      // Force step list refresh
+      setShotTick((x) => x + 1);
+    } catch (err) {
+      toast.error(`Dialog answer failed: ${err.message || err}`);
+    }
+  }, [sessionId, pendingDialog, dialogPromptText]);
 
   // ── 2026-01 (multi-tab) — switch / close tab actions ────────────
   const switchTab = useCallback(async (index) => {
@@ -3885,6 +3962,47 @@ export default function VisualRecorderPage() {
                       {tabs.length}
                     </span>
                   </button>
+
+                  {/* v2.1.74 — JS dialog (alert/confirm/prompt) banner */}
+                  {pendingDialog && (
+                    <div
+                      data-testid="vr-dialog-banner"
+                      className="ml-2 flex items-center gap-2 px-3 py-1.5 rounded-md bg-amber-500/20 border border-amber-400/60 shadow-[0_0_0_1px_rgba(251,191,36,0.4)] animate-pulse"
+                    >
+                      <span className="text-amber-200 text-[11px] font-bold uppercase tracking-wide">
+                        {pendingDialog.type}()
+                      </span>
+                      <span className="text-amber-100 text-[12px] max-w-[280px] truncate" title={pendingDialog.message}>
+                        {pendingDialog.message || "(no message)"}
+                      </span>
+                      {pendingDialog.type === "prompt" && (
+                        <input
+                          type="text"
+                          data-testid="vr-dialog-prompt-input"
+                          value={dialogPromptText}
+                          onChange={(e) => setDialogPromptText(e.target.value)}
+                          placeholder={pendingDialog.default_value || "type response…"}
+                          className="px-2 py-0.5 rounded bg-zinc-900 border border-amber-500/50 text-amber-100 text-[11px] w-32"
+                        />
+                      )}
+                      <button
+                        type="button"
+                        data-testid="vr-dialog-accept-btn"
+                        onClick={() => answerDialog("accept")}
+                        className="px-2 py-0.5 rounded bg-emerald-500/30 hover:bg-emerald-500/50 text-emerald-100 text-[11px] font-semibold border border-emerald-400/60"
+                      >
+                        Accept
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="vr-dialog-dismiss-btn"
+                        onClick={() => answerDialog("dismiss")}
+                        className="px-2 py-0.5 rounded bg-rose-500/30 hover:bg-rose-500/50 text-rose-100 text-[11px] font-semibold border border-rose-400/60"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  )}
 
                   {/* Existing inline tab strip (kept for quick clicks). */}
                   {tabs.length > 1 && tabs.map((t) => {

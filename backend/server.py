@@ -19404,6 +19404,111 @@ async def vr_close_tab(
     return await vr.close_tab(sess, index)
 
 
+# ── v2.1.74 — JS Dialog (alert/confirm/prompt) capture endpoints ────
+# The offer page sometimes fires native JS dialogs (e.g. "Are you sure
+# you want to leave?", "Confirm subscription?"). Playwright's default
+# is to auto-dismiss so the operator never sees them and can't record
+# an explicit accept/dismiss. Backend now PARKS the dialog in
+# sess.pending_dialog; these endpoints let the frontend poll for one
+# and resolve it (the answer is also recorded as a step so RUT replay
+# reproduces the same choice).
+
+@api_router.get("/visual-recorder/{session_id}/dialog")
+async def vr_get_dialog(
+    session_id: str,
+    user: dict = Depends(get_current_user),
+):
+    """Returns the currently-parked JS dialog (if any) — serialisable
+    fields only (no Playwright handle). Frontend polls this at ~600ms."""
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    d = getattr(sess, "pending_dialog", None)
+    if not d:
+        return {"pending": False}
+    return {
+        "pending": True,
+        "type": d.get("type"),
+        "message": d.get("message", ""),
+        "default_value": d.get("default_value", ""),
+        "page_url": d.get("page_url", ""),
+        "captured_at": d.get("captured_at"),
+    }
+
+
+class _VRDialogAnswerReq(BaseModel):
+    decision: str  # "accept" | "dismiss"
+    prompt_text: Optional[str] = None  # only for type=="prompt" + accept
+
+
+@api_router.post("/visual-recorder/{session_id}/dialog/answer")
+async def vr_answer_dialog(
+    session_id: str,
+    body: _VRDialogAnswerReq,
+    user: dict = Depends(get_current_user),
+):
+    """Resolves the parked JS dialog with the operator's choice. Also
+    appends a `accept_dialog` / `dismiss_dialog` step so RUT replay
+    reproduces the same answer at the same point in the flow."""
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    pd = getattr(sess, "pending_dialog", None)
+    if not pd:
+        raise HTTPException(status_code=409, detail="No pending dialog")
+
+    decision = (body.decision or "").strip().lower()
+    if decision not in ("accept", "dismiss"):
+        raise HTTPException(status_code=400, detail="decision must be 'accept' or 'dismiss'")
+
+    handle = pd.get("_handle")
+    dialog_type = pd.get("type", "alert")
+    prompt_text = (body.prompt_text or "") if (dialog_type == "prompt" and decision == "accept") else None
+
+    # Resolve the actual Playwright dialog handle
+    try:
+        if handle is not None:
+            if decision == "accept":
+                if prompt_text is not None:
+                    await handle.accept(prompt_text)
+                else:
+                    await handle.accept()
+            else:
+                await handle.dismiss()
+    except Exception as e:
+        # Even if resolve fails, clear the parked dialog so the UI
+        # doesn't stay stuck. The page may have already navigated away.
+        logger.warning(f"[vr {session_id}] dialog resolve failed: {e}")
+    finally:
+        sess.pending_dialog = None
+
+    # Record the decision as a step so replay reproduces it
+    try:
+        step_action = "accept_dialog" if decision == "accept" else "dismiss_dialog"
+        step: Dict[str, Any] = {
+            "action": step_action,
+            "dialog_type": dialog_type,
+            "message_contains": (pd.get("message") or "")[:200],
+        }
+        if prompt_text is not None:
+            step["prompt_text"] = prompt_text
+        # Use the public helper if available, else append directly
+        if hasattr(vr, "append_step"):
+            await vr.append_step(sess, step)
+        else:
+            sess.steps.append(step)
+    except Exception as e:
+        logger.debug(f"[vr {session_id}] could not record dialog step: {e}")
+
+    return {"ok": True, "decision": decision, "type": dialog_type}
+
+
 
 # ══════════════════════════════════════════════════════════════════════
 # ── 2026-01 Phase 1: "any-offer" coverage endpoints ─────────────────
