@@ -250,6 +250,57 @@ jobs:
             docker rm -fv krexion-backend 2>/dev/null || true
             docker rm -fv krexion-frontend 2>/dev/null || true
 
+            # ─────────────────────────────────────────────────────
+            # MONGO AUTO-HEAL — Deploy run 28435687428 (v2.1.75) failed with:
+            #   "Container krexion-mongo Error  dependency mongo failed to start"
+            #   "dependency failed to start: container krexion-mongo is unhealthy"
+            # Root cause: mongo container was 'Running' but its healthcheck
+            # (`mongosh ping`) timed out — likely from long uptime / OOM /
+            # transient deadlock. Because backend has
+            # `depends_on: mongo: condition: service_healthy`, the whole
+            # deploy aborted before backend/frontend could start →
+            # production went DOWN until the next manual intervention.
+            #
+            # This step makes the deploy self-healing: if mongo is not
+            # healthy right now, restart it and wait up to 90s for it to
+            # become healthy before recreating backend+frontend. If it's
+            # already healthy, this is a no-op (zero downtime added).
+            # mongo-data volume is persistent — no data loss either way.
+            # ─────────────────────────────────────────────────────
+            echo ">> Mongo health pre-check + auto-heal..."
+            MONGO_EXISTS=$(docker ps -a --filter "name=krexion-mongo" --format "{{.Names}}" | head -1)
+            if [ -z "$MONGO_EXISTS" ]; then
+              echo "   Mongo container not found — letting compose create it fresh."
+            else
+              MONGO_HEALTH=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' krexion-mongo 2>/dev/null || echo "missing")
+              echo "   Current mongo health: $MONGO_HEALTH"
+              if [ "$MONGO_HEALTH" != "healthy" ]; then
+                echo "   ⚠ Mongo not healthy — capturing diagnostics then restarting..."
+                docker logs --tail 30 krexion-mongo 2>&1 | sed 's/^/     [mongo-log] /' || true
+                echo "   Disk free on /:"
+                df -h / | tail -1 | sed 's/^/     /'
+                echo "   Restarting mongo container..."
+                docker compose restart mongo || docker restart krexion-mongo || true
+                # Wait up to 90s for mongo to become healthy (6 × 15s)
+                for i in 1 2 3 4 5 6; do
+                  sleep 15
+                  MONGO_HEALTH=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' krexion-mongo 2>/dev/null || echo "missing")
+                  echo "   Attempt $i/6: mongo health = $MONGO_HEALTH"
+                  if [ "$MONGO_HEALTH" = "healthy" ]; then
+                    echo "   ✓ Mongo healthy — proceeding with backend/frontend recreate."
+                    break
+                  fi
+                done
+                if [ "$MONGO_HEALTH" != "healthy" ]; then
+                  echo "::error::Mongo still unhealthy after 90s restart wait. Manual intervention required (SSH in, check disk space + mongo logs, possibly recreate container)."
+                  docker logs --tail 60 krexion-mongo 2>&1 | sed 's/^/     [mongo-log] /' || true
+                  exit 1
+                fi
+              else
+                echo "   ✓ Mongo already healthy — no auto-heal needed."
+              fi
+            fi
+
             # Bring everything up
             echo ">> Starting containers..."
             docker compose up -d frontend backend
