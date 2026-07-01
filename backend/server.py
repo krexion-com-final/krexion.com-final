@@ -21837,7 +21837,7 @@ async def _vr_bridge_middleware(request: Request, call_next):
                             "$set": {
                                 "body": body_back,
                                 "status_code": sc,
-                                "fresh_until": _now_utc + timedelta(seconds=30),
+                                "fresh_until": _now_utc + timedelta(seconds=90),
                                 "stale_until": _now_utc + timedelta(seconds=300),
                                 "updated_at": _now_utc,
                                 "user_id": uid,
@@ -22914,6 +22914,81 @@ async def _krexion_customer_startup_tasks():
         _loop.set_exception_handler(_kx_excl_handler)
     except Exception as _eh_e:
         logger.debug(f"could not install playwright exc filter: {_eh_e}")
+    # v2.1.75 — Background pre-warm of bridge response cache for
+    # online customers. Without this, every customer who opens the
+    # RUT page after >30 s of inactivity hits the slow 60 s bridge
+    # cold path. With it, the cloud quietly refreshes their
+    # /jobs + /pending-candidates cache every ~25 s so the UI lands
+    # on an instant cached hit. Also auto-prunes old cache rows via
+    # TTL index on stale_until.
+    try:
+        import asyncio as _aio_pw
+        async def _kx_bridge_cache_prewarmer():
+            # Wait a bit for app to fully boot
+            await _aio_pw.sleep(45)
+            try:
+                # TTL index — auto-delete cache rows older than stale_until
+                await db.bridge_response_cache.create_index(
+                    "stale_until", expireAfterSeconds=0,
+                )
+            except Exception as _ie:
+                logger.debug(f"[prewarm] TTL index err (already exists?): {_ie}")
+            while True:
+                try:
+                    # Find users with fresh heartbeat (< 60 s) — these are
+                    # the active RUT-page viewers whose cache we want hot.
+                    cutoff = datetime.now(timezone.utc) - timedelta(seconds=60)
+                    online = await db.sync_heartbeats.find(
+                        {"last_seen": {"$gte": cutoff}},
+                        {"user_id": 1, "_id": 0},
+                    ).to_list(length=50)
+                    seen_uids = set()
+                    for hb in online:
+                        uid = hb.get("user_id")
+                        if not uid or uid in seen_uids:
+                            continue
+                        seen_uids.add(uid)
+                        # Skip if cache for /jobs is still fresh
+                        try:
+                            user_doc = await db.users.find_one({"id": uid}, {"email": 1, "_id": 0})
+                            if not user_doc:
+                                continue
+                            import hashlib as _h2
+                            cache_key = f"{uid}:/api/real-user-traffic/jobs:{_h2.md5(b'[]').hexdigest()[:12]}"
+                            now_utc = datetime.now(timezone.utc)
+                            fresh = await db.bridge_response_cache.find_one(
+                                {"_id": cache_key, "fresh_until": {"$gt": now_utc}},
+                                {"_id": 1},
+                            )
+                            if fresh:
+                                continue  # already warm
+                            # Fire bridge in background (don't block loop)
+                            _aio_pw.create_task(
+                                enqueue_bridge_job(
+                                    {"id": uid, "email": user_doc.get("email")},
+                                    "real-user-traffic/jobs",
+                                    {
+                                        "method": "GET",
+                                        "path": "/api/real-user-traffic/jobs",
+                                        "body": None,
+                                        "query": {},
+                                        "content_type": "application/json",
+                                    },
+                                    wait_for_result=True,
+                                    wait_timeout=55,
+                                )
+                            )
+                        except Exception as _ue:
+                            logger.debug(f"[prewarm] user {uid[:8]} err: {_ue}")
+                except Exception as _le:
+                    logger.debug(f"[prewarm] loop iter err: {_le}")
+                await _aio_pw.sleep(25)
+
+        _aio_pw.create_task(_kx_bridge_cache_prewarmer())
+        logger.info("[startup] bridge-cache pre-warmer scheduled (25 s loop)")
+    except Exception as _pwe:
+        logger.debug(f"could not start bridge-cache pre-warmer: {_pwe}")
+
     # 1. Auto-install full chromium in the background
     try:
         # Respect the existing VPS safety flag — cloud edge / shared
