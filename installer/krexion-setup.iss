@@ -170,7 +170,7 @@ Name: "{commonappdata}\Krexion"; Permissions: users-modify
 ;   * "Krexion Logs / Support / Renew / Uninstall" -> unchanged
 Name: "{group}\Krexion"; Filename: "{app}\{#AppLauncherBat}"; \
   WorkingDir: "{app}"; IconFilename: "{app}\krexion.ico"; \
-  Comment: "Open the Krexion Local PC Dashboard"
+  Comment: "Open the Krexion Local Dashboard (fast, offline-capable)"
 Name: "{group}\Krexion (Web)"; Filename: "{#AppURL}/login"; \
   IconFilename: "{app}\krexion.ico"; \
   Comment: "Open krexion.com login in your browser"
@@ -190,7 +190,7 @@ Name: "{group}\Krexion Logs"; Filename: "{app}\logs"; IconFilename: "{app}\krexi
 Name: "{group}\Uninstall Krexion"; Filename: "{uninstallexe}"; IconFilename: "{app}\krexion.ico"
 Name: "{autodesktop}\Krexion"; Filename: "{app}\{#AppLauncherBat}"; \
   WorkingDir: "{app}"; IconFilename: "{app}\krexion.ico"; \
-  Comment: "Open the Krexion Local PC Dashboard"; Tasks: desktopicon
+  Comment: "Open the Krexion Local Dashboard (fast, offline-capable)"; Tasks: desktopicon
 
 [Registry]
 ; Auto-start Krexion Dashboard on login (per-user). Launches the

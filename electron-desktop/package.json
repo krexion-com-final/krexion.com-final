@@ -1,8 +1,8 @@
 {
   "name": "krexion-desktop",
   "productName": "Krexion Desktop",
-  "version": "2.1.23",
-  "description": "Krexion — fully local desktop application (Database + Backend + Frontend on customer PC, like AdsPower).",
+  "version": "2.1.76",
+  "description": "Krexion \u2014 fully local desktop application (Database + Backend + Frontend on customer PC, like AdsPower).",
   "author": {
     "name": "Krexion",
     "email": "support@krexion.com",

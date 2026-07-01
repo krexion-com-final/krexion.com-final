@@ -91,6 +91,27 @@ REM local window" bug).
 >> "%LOGFILE%" echo Launching: "%PY%" -m desktop.krexion_dashboard
 start "" "%PY%" -m desktop.krexion_dashboard
 
+REM -- v2.1.76 -- Open Local Krexion UI in default browser ------
+REM Backend now serves the full React frontend on 127.0.0.1:8001
+REM (previously only krexion.com had the UI). Opening the browser
+REM to the local dashboard gives the customer the same full
+REM Krexion experience but 30-60x faster because every API call
+REM is a same-origin localhost request (no cloud bridge latency).
+REM
+REM Public tracking links are STILL created on krexion.com (POST
+REM /api/links is proxied via cloud_proxy_module) -- link URLs and
+REM click capture are unaffected. This is pure UX improvement.
+REM
+REM Wait for the KrexionBackend Windows Service to accept
+REM connections. It usually is up already because the service
+REM auto-starts on boot; the small ping covers the edge case
+REM where the customer runs the installer + immediately clicks
+REM "Launch Krexion now" before the service has bound to port
+REM 8001.
+ping -n 3 127.0.0.1 > nul 2>&1
+>> "%LOGFILE%" echo Opening local Krexion UI at http://127.0.0.1:8001/
+start "" "http://127.0.0.1:8001/"
+
 REM Brief pause to let the launched process attach to its own file
 REM handles before we exit (otherwise on very fast machines the .bat
 REM exiting can race the Python interpreter's logging init).

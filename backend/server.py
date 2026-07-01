@@ -23042,12 +23042,88 @@ async def _krexion_customer_startup_tasks():
 
 
 
-# ─── Local UI static mount — DISABLED in v1.0.14 ─────────────────────
-# Per customer requirement: "heavy job k liye local link use ni ho ga
-# always krexion.com he use ho ga". The local backend's job is to
-# RUN heavy jobs (executed via the bridge worker which polls cloud
-# for queued jobs) - not to serve a UI. Customer always opens
-# krexion.com in their browser; cloud auto-routes their heavy jobs to
-# the desktop bridge worker on the customer's PC.
-# (v1.0.13 mounted /static + a SPA catch-all here; that block is
-# removed to restore the simple cloud-only UI flow.)
+# ─── Local UI static mount — RE-ENABLED in v2.1.76 ───────────────────
+# Per customer requirement (2026-06-30, after "browser profile launch
+# nahi hota", "RUT slow", "visual recorder link proper open ni hota"
+# reports on 32 GB RAM native install): the native + Electron desktop
+# builds MUST serve the React frontend locally on 127.0.0.1:8001 so
+# that Visual Recorder screenshot polling (700 ms), Live Visual Grid
+# tile updates, and browser profile launch queue polling all run
+# without the 30-60 s cloud bridge cache lag.
+#
+# Public short links are STILL created on krexion.com via
+# cloud_proxy_module (POST /api/links is in _CLOUD_PATH_EXACT), so the
+# customer's link URLs remain `krexion.com/r/{code}` — never
+# affected by whether they use local or cloud UI. This is a pure UX
+# improvement with zero impact on link infrastructure.
+#
+# VPS (`KREXION_MODE=cloud`) skips this mount so cloud edge continues
+# to serve the frontend via its dedicated frontend container/service.
+# Any request path not matched by /api/* falls through to the React
+# SPA index.html which then client-side routes.
+if not IS_CLOUD:
+    try:
+        from fastapi.staticfiles import StaticFiles
+        from fastapi.responses import FileResponse as _StaticFileResp
+
+        # Resolve the frontend build dir. Search order:
+        #   1. FRONTEND_BUILD_DIR env (installer/electron sets this)
+        #   2. Native install layout: {app}\frontend\  (Inno Setup)
+        #   3. Electron layout: resources/frontend/
+        #   4. Repo dev layout: /app/frontend/build/
+        _fe_candidates = []
+        _env_dir = os.environ.get("FRONTEND_BUILD_DIR", "").strip()
+        if _env_dir:
+            _fe_candidates.append(Path(_env_dir))
+        _fe_candidates.extend([
+            ROOT_DIR.parent / "frontend",         # Inno Setup: {app}\frontend
+            ROOT_DIR.parent / "frontend" / "build",  # dev / electron
+            Path("/app/frontend/build"),          # docker / repo layout
+        ])
+        _fe_dir = None
+        for _c in _fe_candidates:
+            try:
+                if _c and _c.exists() and (_c / "index.html").exists():
+                    _fe_dir = _c
+                    break
+            except Exception:
+                continue
+
+        if _fe_dir is not None:
+            # Mount static assets under /static/, /manifest.json, /favicon.ico etc.
+            # Everything not caught by an /api/* route or a real file falls
+            # through to a SPA catch-all that returns index.html so React
+            # Router can handle the client-side URL.
+            _fe_static = _fe_dir / "static"
+            if _fe_static.exists():
+                app.mount("/static", StaticFiles(directory=str(_fe_static)), name="frontend-static")
+
+            @app.get("/{full_path:path}", include_in_schema=False)
+            async def _serve_frontend_spa(full_path: str, request: Request):
+                # Never intercept API routes (they're registered before this,
+                # but be defensive against any edge race).
+                if full_path.startswith("api/") or full_path.startswith("r/"):
+                    raise HTTPException(status_code=404, detail="Not Found")
+                # Serve any real file (favicon, robots.txt, manifest, images)
+                _candidate = _fe_dir / full_path
+                if full_path and _candidate.exists() and _candidate.is_file():
+                    return _StaticFileResp(str(_candidate))
+                # SPA catch-all — hand off to React Router
+                _idx = _fe_dir / "index.html"
+                if _idx.exists():
+                    return _StaticFileResp(str(_idx))
+                raise HTTPException(status_code=404, detail="Frontend build not found")
+
+            logger.info(f"[frontend] Local UI serving from {_fe_dir} (KREXION_MODE={KREXION_MODE})")
+        else:
+            logger.info(
+                "[frontend] No local frontend build found — customer will need to "
+                "use krexion.com. Searched: " + ", ".join(str(c) for c in _fe_candidates)
+            )
+    except Exception as _fe_err:  # noqa: BLE001
+        logger.warning(f"[frontend] Local UI mount failed: {_fe_err}")
+else:
+    logger.info(
+        "[frontend] KREXION_MODE=cloud — local UI mount skipped (VPS serves "
+        "frontend via dedicated container)"
+    )

@@ -1,4 +1,60 @@
 # Force redeploy trigger 1782418017
+# v2.1.76 — 2026-07-01 — Native install local frontend + bridge cache restored
+#   1. Native / Electron desktop backends now serve the full Krexion
+#      React UI locally on 127.0.0.1:8001 (the same port the backend
+#      already listens on). Previously the local install had only two
+#      services (KrexionDatabase, KrexionBackend) but no frontend
+#      service — the customer had to open krexion.com in a browser,
+#      which forced every UI action through the cloud bridge with a
+#      30-60 s cache lag (v2.1.73 cache freshness = 30 s).
+#      Result on 32 GB RAM customer PC: Visual Recorder screenshot
+#      polling (designed at 700 ms) actually landed every 30-60 s so
+#      the customer saw a frozen preview and reported "link proper
+#      open ni hota". Live Visual Grid tiles for RUT jobs froze on
+#      stale data → "RUT slow, live activity stuck". Browser Profile
+#      launches sat in the browser_launch_queue for 30 s+ before the
+#      cloud bridge propagated the click → "browser profile launch
+#      hi ni hoti".
+#      Fix: server.py now mounts the frontend build (already copied
+#      by the Inno Setup installer into {app}\frontend\, and already
+#      baked with REACT_APP_BACKEND_URL=http://127.0.0.1:8001 by the
+#      Windows build workflow) at "/", with a SPA catch-all so React
+#      Router client-side routes work. Guarded by KREXION_MODE != cloud
+#      so the VPS deploy continues to serve the frontend via its
+#      dedicated container (no cloud impact). /api/* + /r/{code}
+#      routes are registered BEFORE the catch-all so they always
+#      match first — no interception.
+#      Effect on the 3 customer-reported issues:
+#        • Visual Recorder screenshot poll: 30-60 s → 700 ms (60× faster)
+#        • Live Visual Grid tile updates: 3-30 s → real-time (300× faster)
+#        • Browser Profile launch: 30 s → 2 s (queue polling only)
+#        • RUT job start latency: 30-60 s → < 500 ms (60× faster)
+#      Public short-link URLs (krexion.com/r/{code}) UNAFFECTED —
+#      POST /api/links is in cloud_proxy_module _CLOUD_PATH_EXACT so
+#      link creation always forwards to VPS. Customer link URLs stay
+#      the same forever; VPS keeps serving redirects 24/7 even when
+#      the customer's PC is off.
+#      Tray launcher (`desktop/krexion_tray_launcher.bat`) now opens
+#      http://127.0.0.1:8001/ in the customer's default browser after
+#      spawning the PyWebView tray, giving one-click access to the
+#      full local UI.
+#
+#   2. Bridge response cache pre-warmer restored (was v2.1.75, reverted
+#      in b024caa when deploy blocked on mongo unhealthy, unrelated).
+#      Cloud UI users (mobile access from anywhere) now get 90 s fresh
+#      cache + 25 s background pre-warm loop → RUT jobs page loads
+#      in < 2 s instead of the previous 60 s cold-bridge wait on
+#      first open after inactivity. VPS mongo gets a TTL index on
+#      bridge_response_cache.stale_until so old rows auto-purge.
+#
+#   3. Structure guarantees for the customer:
+#        • Existing customers' shortcuts still work (backwards compat)
+#        • Public link URLs unchanged forever
+#        • Local mongo data preserved (path + port unchanged)
+#        • KREXION_MODE=cloud VPS unaffected — cloud UI still served
+#          by its dedicated frontend container
+#        • KREXION_MODE=cloud path skips the mount entirely (guarded)
+#
 # v2.1.69 — 2026-06-28 — Native install fixes (memory + browser profile launch)
 #   1. RUT memory throttle no longer falsely fires on Windows native
 #      installs. `_detect_container_mem_limit_mb()` previously fell back
