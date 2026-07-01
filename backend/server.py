@@ -23068,21 +23068,32 @@ if not IS_CLOUD:
 
         # Resolve the frontend build dir. Search order:
         #   1. FRONTEND_BUILD_DIR env (installer/electron sets this)
-        #   2. Native install layout: {app}\frontend\  (Inno Setup)
-        #   3. Electron layout: resources/frontend/
-        #   4. Repo dev layout: /app/frontend/build/
+        #   2. Native Inno Setup layout: server.py at
+        #        {app}\bin\app\server.py, frontend at {app}\frontend
+        #        → ROOT_DIR.parent.parent / "frontend"
+        #      (v2.1.76 initial release used only one .parent — that
+        #      resolved to {app}\bin\frontend which does NOT exist in
+        #      the Inno Setup bundle, so customer saw {"detail":"Not
+        #      Found"} on the local dashboard. Fixed here for v2.1.77.)
+        #   3. Also try ROOT_DIR.parent / "frontend" (some layouts)
+        #   4. Electron layout: resources/frontend/
+        #   5. Repo dev layout: /app/frontend/build/
         _fe_candidates = []
         _env_dir = os.environ.get("FRONTEND_BUILD_DIR", "").strip()
         if _env_dir:
             _fe_candidates.append(Path(_env_dir))
         _fe_candidates.extend([
-            ROOT_DIR.parent / "frontend",         # Inno Setup: {app}\frontend
-            ROOT_DIR.parent / "frontend" / "build",  # dev / electron
-            Path("/app/frontend/build"),          # docker / repo layout
+            ROOT_DIR.parent.parent / "frontend",       # Inno Setup: {app}\frontend  ← PRIMARY for native
+            ROOT_DIR.parent.parent / "frontend" / "build",
+            ROOT_DIR.parent / "frontend",              # legacy / alt layout
+            ROOT_DIR.parent / "frontend" / "build",    # dev / electron
+            Path("/app/frontend/build"),               # docker / repo layout
         ])
         _fe_dir = None
+        _tried = []
         for _c in _fe_candidates:
             try:
+                _tried.append(str(_c))
                 if _c and _c.exists() and (_c / "index.html").exists():
                     _fe_dir = _c
                     break
@@ -23116,9 +23127,9 @@ if not IS_CLOUD:
 
             logger.info(f"[frontend] Local UI serving from {_fe_dir} (KREXION_MODE={KREXION_MODE})")
         else:
-            logger.info(
+            logger.warning(
                 "[frontend] No local frontend build found — customer will need to "
-                "use krexion.com. Searched: " + ", ".join(str(c) for c in _fe_candidates)
+                "use krexion.com. Searched: " + ", ".join(_tried)
             )
     except Exception as _fe_err:  # noqa: BLE001
         logger.warning(f"[frontend] Local UI mount failed: {_fe_err}")

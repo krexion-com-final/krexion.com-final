@@ -1,4 +1,34 @@
 # Force redeploy trigger 1782418017
+# v2.1.77 — 2026-07-01 — Native frontend path fix (v2.1.76 hotfix)
+#   Customer report: opened http://127.0.0.1:8001/ after installing
+#   v2.1.76 and saw `{"detail":"Not Found"}` instead of the Krexion
+#   UI.
+#
+#   Root cause: In the native Inno Setup bundle, `server.py` lives at
+#     {app}\bin\app\server.py
+#   so `ROOT_DIR = Path(__file__).parent = {app}\bin\app`. The v2.1.76
+#   frontend mount was searching:
+#     ROOT_DIR.parent / "frontend"  =  {app}\bin\frontend  ← wrong
+#   but the installer copies the React build to:
+#     {app}\frontend  (see krexion-setup.iss line 106)
+#   which is TWO parents up. The mount fell through to the "no build
+#   found" branch → SPA catch-all never registered → GET / returned
+#   404 with a JSON error body from FastAPI's default 404 handler.
+#
+#   Fix: search ROOT_DIR.parent.parent / "frontend" FIRST (correct
+#   for native install), then fall back to ROOT_DIR.parent variants
+#   for other layouts. Also elevated the "no build found" log from
+#   info → warning so any future path mismatch is easier to spot in
+#   `logs\backend-service.log`. Route table, guardrails, and
+#   API-first-match behaviour unchanged.
+#
+#   Cloud VPS (KREXION_MODE=cloud) still skips this block entirely so
+#   the v2.1.76 → v2.1.77 diff has ZERO effect on the cloud deploy.
+#
+#   Tests: same 7-path suite as v2.1.76, verified locally with
+#   FRONTEND_BUILD_DIR override AND with the actual `.parent.parent`
+#   layout by placing an index.html two directories above server.py.
+#
 # v2.1.76 — 2026-07-01 — Native install local frontend + bridge cache restored
 #   1. Native / Electron desktop backends now serve the full Krexion
 #      React UI locally on 127.0.0.1:8001 (the same port the backend
