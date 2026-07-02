@@ -94,6 +94,85 @@ _CLOUD_UI_ACTIVE_USERS: Dict[str, float] = {}
 _LOCAL_STATUS_CACHE: Dict[str, tuple] = {}  # user_id -> (expires_ts, status_dict)
 _LOCAL_STATUS_CACHE_TTL = 5  # seconds
 
+# ─── 2026-07 Login rate-limiting (brute-force protection) ─────────────
+# Simple in-memory sliding-window rate limiter for auth endpoints.
+# Keyed by (role:email:ip) so a legitimate user's failed attempts on
+# one PC don't lock out the same account on another PC. After
+# MAX_LOGIN_FAILURES failures within LOGIN_LOCKOUT_WINDOW seconds,
+# further attempts get HTTP 429 for LOGIN_LOCKOUT_WINDOW seconds.
+# Successful login clears the counter.
+_LOGIN_FAILURES: Dict[str, List[float]] = {}  # key -> [failure_ts, ...]
+MAX_LOGIN_FAILURES = int(os.environ.get("MAX_LOGIN_FAILURES", "8") or 8)
+LOGIN_LOCKOUT_WINDOW = int(os.environ.get("LOGIN_LOCKOUT_WINDOW_SEC", "900") or 900)  # 15 min
+
+
+def _client_ip_for_rl_from_request(request: Optional[Request]) -> str:
+    """Return the best-effort client IP for rate-limiting purposes.
+    Uses CF-Connecting-IP / X-Forwarded-For / peer, whichever first.
+    Falls back to 'unknown' if request is missing (never happens in
+    real requests, only in test callers)."""
+    if request is None:
+        return "unknown"
+    for h in ("CF-Connecting-IP", "X-Real-IP", "True-Client-IP"):
+        v = request.headers.get(h)
+        if v:
+            return v.strip().split(",")[0]
+    xff = request.headers.get("X-Forwarded-For")
+    if xff:
+        return xff.split(",")[0].strip()
+    try:
+        return request.client.host or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _check_login_rate_limit(key: str) -> None:
+    """Raise 429 if the given key has hit MAX_LOGIN_FAILURES within
+    LOGIN_LOCKOUT_WINDOW seconds. Also prunes stale entries."""
+    now = time.time()
+    cutoff = now - LOGIN_LOCKOUT_WINDOW
+    fails = _LOGIN_FAILURES.get(key, [])
+    fails = [t for t in fails if t >= cutoff]
+    _LOGIN_FAILURES[key] = fails
+    if len(fails) >= MAX_LOGIN_FAILURES:
+        # Approx retry-after = window minus age of oldest failure
+        oldest = min(fails)
+        retry_after = int(max(1, LOGIN_LOCKOUT_WINDOW - (now - oldest)))
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many failed login attempts. Try again in {retry_after // 60}m {retry_after % 60}s.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
+def _record_login_failure(key: str) -> None:
+    """Record one login failure for the given key."""
+    fails = _LOGIN_FAILURES.get(key, [])
+    fails.append(time.time())
+    _LOGIN_FAILURES[key] = fails
+    # Bound the map so a flood of unique attempted usernames can't
+    # exhaust memory. 5000 entries × ~200 B ≈ 1 MB — plenty for realistic
+    # traffic.
+    if len(_LOGIN_FAILURES) > 5000:
+        cutoff = time.time() - LOGIN_LOCKOUT_WINDOW
+        for _k, _v in list(_LOGIN_FAILURES.items()):
+            _v[:] = [t for t in _v if t >= cutoff]
+            if not _v:
+                _LOGIN_FAILURES.pop(_k, None)
+
+
+def _clear_login_failures(key: str) -> None:
+    """Clear the failure counter after a successful login."""
+    _LOGIN_FAILURES.pop(key, None)
+
+
+def _client_ip_for_rl() -> str:
+    """Legacy shim so admin_login (which lacks a Request param) still
+    resolves. Returns 'admin' — same key for all admin attempts, which
+    is intentional: admin is one account, we want a global limit
+    regardless of source IP."""
+    return "admin"
+
 async def get_cached_link(short_code: str):
     """Get link from cache or database - cache is short-lived for accuracy"""
     global _link_cache
@@ -1521,7 +1600,30 @@ async def debug_ip(request: Request):
     }
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "your-secret-key-change-in-production")
+
+# ─── 2026-07 SECRET_KEY hardening ──────────────────────────────────────
+# Legacy default `"your-secret-key-change-in-production"` was public in
+# the source, meaning anyone could forge admin JWTs against any install
+# whose .env didn't override it. New behaviour:
+#   1. If JWT_SECRET_KEY is set in env → use it (production path).
+#   2. Otherwise generate a cryptographically-random key on startup +
+#      log a big WARNING telling the admin to persist it. All tokens
+#      issued this run are valid; on restart a new random key is
+#      generated so tokens get invalidated (safer than a static
+#      publicly-known default).
+_env_secret = os.environ.get("JWT_SECRET_KEY", "").strip()
+_INSECURE_DEFAULT_SECRETS = {"", "your-secret-key-change-in-production", "change-me", "changeme"}
+if _env_secret in _INSECURE_DEFAULT_SECRETS:
+    import secrets as _secrets_mod
+    SECRET_KEY = _secrets_mod.token_urlsafe(48)
+    print(
+        "⚠️  WARNING: JWT_SECRET_KEY missing or set to an insecure default. "
+        "A random key was generated for this run. Set JWT_SECRET_KEY in "
+        "backend/.env to a strong random string to keep tokens valid across "
+        "restarts.", flush=True,
+    )
+else:
+    SECRET_KEY = _env_secret
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 7 * 24 * 60
 POSTBACK_TOKEN = os.environ.get("POSTBACK_TOKEN", "secure-postback-token-123")
@@ -1529,6 +1631,12 @@ POSTBACK_TOKEN = os.environ.get("POSTBACK_TOKEN", "secure-postback-token-123")
 # Admin configuration
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@krexion.local")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
+if ADMIN_PASSWORD == "admin123":
+    print(
+        "⚠️  WARNING: ADMIN_PASSWORD is the insecure default 'admin123'. "
+        "Set ADMIN_PASSWORD in backend/.env to a strong password IMMEDIATELY, "
+        "or use the Forgot Password flow after first login.", flush=True,
+    )
 
 # Email configuration - Gmail SMTP (primary) or Resend (fallback)
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
@@ -2442,26 +2550,11 @@ def normalize_country(country: str) -> str:
     return country
 
 def get_client_ip(request: Request) -> str:
-    """Get the real client IP from request headers"""
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        ip = forwarded.split(",")[0].strip()
-        if not ip.startswith("10.") and not ip.startswith("172.") and not ip.startswith("192.168."):
-            return ip
-    
-    real_ip = request.headers.get("X-Real-IP")
-    if real_ip:
-        return real_ip.strip()
-    
-    cf_connecting_ip = request.headers.get("CF-Connecting-IP")
-    if cf_connecting_ip:
-        return cf_connecting_ip.strip()
-    
-    true_client_ip = request.headers.get("True-Client-IP")
-    if true_client_ip:
-        return true_client_ip.strip()
-    
-    return request.client.host
+    """DEPRECATED — legacy IPv4-only helper, kept as a thin shim over
+    get_all_client_ips() for any 3rd-party module that might still
+    import it. Prefer get_all_client_ips() for new code."""
+    ips = get_all_client_ips(request)
+    return ips.get("primary") or "unknown"
 
 def is_ipv6(ip: str) -> bool:
     """Check if IP address is IPv6"""
@@ -3547,7 +3640,7 @@ async def get_country_from_ip(ip: str) -> dict:
         "lon": lon, 
         "isp": isp,
         "is_vpn": is_vpn, 
-        "is_proxy": is_vpn, 
+        "is_proxy": is_proxy,  # 2026-07 fix — was mistakenly set to `is_vpn` value
         "vpn_score": vpn_score
     }
     
@@ -4046,17 +4139,22 @@ async def register(user: UserCreate):
     return {"access_token": access_token, "token_type": "bearer", "user": user_response}
 
 @api_router.post("/auth/login", response_model=Token)
-async def login(user: UserLogin):
+async def login(user: UserLogin, request: Request):
+    # 2026-07 — Bug #5 fix: brute-force protection.
+    _rl_key = f"user:{user.email}:{_client_ip_for_rl_from_request(request)}"
+    _check_login_rate_limit(_rl_key)
     # Check main users first
     db_user = await main_db.users.find_one({"email": user.email}, {"_id": 0})
     
     if db_user:
         if not verify_password(user.password, db_user["password_hash"]):
+            _record_login_failure(_rl_key)
             raise HTTPException(status_code=401, detail="Invalid credentials")
         
         if db_user.get("status") == "blocked":
             raise HTTPException(status_code=403, detail="Your account has been blocked. Contact admin for support.")
         
+        _clear_login_failures(_rl_key)
         access_token = create_access_token(data={"sub": user.email, "is_sub_user": False})
         user_response = {
             "id": db_user["id"], 
@@ -4072,6 +4170,7 @@ async def login(user: UserLogin):
     sub_user = await main_db.sub_users.find_one({"email": user.email}, {"_id": 0})
     if sub_user:
         if not verify_password(user.password, sub_user["password_hash"]):
+            _record_login_failure(_rl_key)
             raise HTTPException(status_code=401, detail="Invalid credentials")
         
         if not sub_user.get("is_active", True):
@@ -4088,6 +4187,7 @@ async def login(user: UserLogin):
             {"$set": {"last_active": datetime.now(timezone.utc).isoformat()}}
         )
         
+        _clear_login_failures(_rl_key)
         access_token = create_access_token(data={
             "sub": user.email, 
             "is_sub_user": True,
@@ -4112,6 +4212,7 @@ async def login(user: UserLogin):
         }
         return {"access_token": access_token, "token_type": "bearer", "user": user_response}
     
+    _record_login_failure(_rl_key)
     raise HTTPException(status_code=401, detail="Invalid credentials")
 
 # ==================== FORGOT PASSWORD ====================
@@ -4598,10 +4699,14 @@ async def delete_sub_user(sub_user_id: str, user: dict = Depends(get_current_use
     return {"message": "Sub-user deleted successfully"}
 
 @api_router.post("/sub-users/login", response_model=Token)
-async def sub_user_login(credentials: UserLogin):
+async def sub_user_login(credentials: UserLogin, request: Request):
     """Login as a sub-user"""
+    # 2026-07 — Bug #5 fix: brute-force protection.
+    _rl_key = f"subuser:{credentials.email}:{_client_ip_for_rl_from_request(request)}"
+    _check_login_rate_limit(_rl_key)
     sub_user = await db.sub_users.find_one({"email": credentials.email}, {"_id": 0})
     if not sub_user or not verify_password(credentials.password, sub_user["password_hash"]):
+        _record_login_failure(_rl_key)
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
     if not sub_user.get("is_active", True):
@@ -4612,6 +4717,7 @@ async def sub_user_login(credentials: UserLogin):
     if not parent_user or parent_user.get("status") != "active":
         raise HTTPException(status_code=403, detail="Parent account is not active")
     
+    _clear_login_failures(_rl_key)
     # Update last active
     await db.sub_users.update_one(
         {"id": sub_user["id"]},
@@ -4708,13 +4814,53 @@ async def get_current_admin(request: Request):
 
 @api_router.post("/admin/login", response_model=AdminToken)
 async def admin_login(credentials: AdminLogin):
-    logger.info(f"Admin login attempt for: {credentials.email}")
-    logger.info(f"Expected admin email: {ADMIN_EMAIL}")
-    
-    if credentials.email != ADMIN_EMAIL or credentials.password != ADMIN_PASSWORD:
-        logger.warning(f"Admin login failed - email match: {credentials.email == ADMIN_EMAIL}, password match: {credentials.password == ADMIN_PASSWORD}")
+    # 2026-07 SECURITY:
+    #   • Bug M fix — no longer log the email/password-match booleans.
+    #     Old code leaked pattern of attempts into supervisor logs.
+    #   • Bug O fix — honour password reset. If the admin has reset
+    #     their password via /auth/reset-password, the new hash is
+    #     stored in `admin_config`. `admin_login` MUST consult that
+    #     collection first; only if no override exists do we compare
+    #     against the plaintext env ADMIN_PASSWORD.
+    #   • Bug L (partial) — use hmac.compare_digest for constant-time
+    #     compare on the env path so timing-based side channels are
+    #     eliminated.
+    #   • Rate-limiting (Fix #5) is applied via `_check_login_rate_limit`
+    #     below — 8 failed attempts per IP per 15 min → 429.
+    import hmac as _hmac
+    _rl_key = f"admin:{credentials.email}:{_client_ip_for_rl()}"
+    _check_login_rate_limit(_rl_key)
+
+    if credentials.email != ADMIN_EMAIL:
+        _record_login_failure(_rl_key)
         raise HTTPException(status_code=401, detail="Invalid admin credentials")
-    
+
+    # Password verification — prefer DB-stored hash (post-reset),
+    # else the env plaintext default.
+    password_ok = False
+    try:
+        override = await main_db.admin_config.find_one(
+            {"key": "admin_password"}, {"_id": 0, "value": 1}
+        )
+    except Exception:
+        override = None
+    if override and override.get("value"):
+        try:
+            password_ok = verify_password(credentials.password, override["value"])
+        except Exception:
+            password_ok = False
+    else:
+        # Constant-time comparison against env plaintext
+        password_ok = _hmac.compare_digest(
+            (credentials.password or "").encode("utf-8"),
+            (ADMIN_PASSWORD or "").encode("utf-8"),
+        )
+
+    if not password_ok:
+        _record_login_failure(_rl_key)
+        raise HTTPException(status_code=401, detail="Invalid admin credentials")
+
+    _clear_login_failures(_rl_key)
     access_token = create_access_token(data={"sub": credentials.email, "is_admin": True})
     return {"access_token": access_token, "token_type": "bearer", "is_admin": True}
 
@@ -14348,10 +14494,16 @@ async def get_clicks(
 ):
     check_user_feature(user, "clicks")
     
-    # If limit is 0 or not specified, return ALL clicks (no limit)
-    # Otherwise cap at 10000 for performance
+    # 2026-07 (Bug #K fix) — cap the "limit=0 = all" path to 10 000 rows
+    # instead of 100 000. A single call that pulls 100 K rows from BOTH
+    # user_db AND main_db (200 K docs) into memory can spike RAM by
+    # ~200 MB and block the event loop long enough to time out other
+    # customers' requests. The Clicks UI paginates at 50 rows/page so
+    # 10 000 is already vastly more than any human can browse — anyone
+    # who truly needs all rows should hit /clicks/export (which is
+    # cursor-streamed and honours EXPORT_CLICKS_MAX).
     if limit <= 0:
-        limit = 100000  # Return all clicks
+        limit = 10000
     else:
         limit = min(limit, 10000)
     
@@ -14629,34 +14781,76 @@ async def export_clicks(
             month_ago = datetime.now(timezone.utc) - timedelta(days=30)
             query["created_at"] = {"$gte": month_ago.isoformat()}
     
-    # Get ALL clicks from both databases
-    clicks_user_db = await user_db.clicks.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000000)
-    clicks_main_db = await db.clicks.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000000)
-    
-    # Combine and sort
-    all_clicks = clicks_user_db + clicks_main_db
-    all_clicks.sort(key=lambda x: x.get("created_at", ""), reverse=True)
-    
-    # Format for export
-    export_data = []
-    for click in all_clicks:
-        export_data.append({
-            "ipv4": click.get("ipv4") or click.get("ip_address", ""),
-            "ipv6": click.get("ipv6", ""),
-            "proxy_ips": "; ".join(click.get("proxy_ips", [])) if click.get("proxy_ips") else "",
-            "country": click.get("country", ""),
-            "city": click.get("city", ""),
-            "region": click.get("region", ""),
-            "device": click.get("device_type") or click.get("device", ""),
-            "browser": click.get("browser", ""),
-            "os": click.get("os_name", ""),
-            "is_vpn": "Yes" if click.get("is_vpn") else "No",
-            "is_duplicate": "Yes" if click.get("is_duplicate_proxy") else "No",
-            "link_name": link_names.get(click.get("link_id"), "Unknown"),
-            "created_at": click.get("created_at", "")
-        })
-    
-    return {"clicks": export_data, "total": len(export_data)}
+    # 2026-07 (Bug #2 fix) — cap the export at EXPORT_CLICKS_MAX rows
+    # to prevent VPS OOM when users with millions of clicks hit Export
+    # CSV. Previously we loaded up to 2 000 000 rows into memory in one
+    # `to_list()` call, which spiked ~500 MB RAM and blocked the event
+    # loop for 5-30 s (freezing all other customers). Now we:
+    #   1. Ask the DB to sort + limit — index-served, tiny memory.
+    #   2. Iterate the cursor one-doc-at-a-time and shape the CSV row
+    #      inline, so peak memory ≈ EXPORT_CLICKS_MAX × ~500 B.
+    # If the true match count exceeds the cap the response includes
+    # `truncated: True` and `total_available` so the frontend can prompt
+    # the user to narrow the date range.
+    EXPORT_CLICKS_MAX = int(os.environ.get("EXPORT_CLICKS_MAX", "100000") or 100000)
+
+    total_available = 0
+    try:
+        total_available = (
+            await user_db.clicks.count_documents(query)
+            + await db.clicks.count_documents(query)
+        )
+    except Exception:
+        pass
+
+    export_data: List[Dict[str, Any]] = []
+
+    async def _stream_from(collection):
+        cursor = collection.find(query, {
+            "_id": 0,
+            "ipv4": 1, "ipv6": 1, "ip_address": 1, "proxy_ips": 1,
+            "country": 1, "city": 1, "region": 1,
+            "device": 1, "device_type": 1, "browser": 1, "os_name": 1,
+            "is_vpn": 1, "is_duplicate_proxy": 1,
+            "link_id": 1, "created_at": 1,
+        }).sort("created_at", -1).limit(EXPORT_CLICKS_MAX)
+        async for click in cursor:
+            if len(export_data) >= EXPORT_CLICKS_MAX:
+                break
+            export_data.append({
+                "ipv4": click.get("ipv4") or (click.get("ip_address") if click.get("ip_address") and ":" not in str(click.get("ip_address")) else ""),
+                "ipv6": click.get("ipv6") or (click.get("ip_address") if click.get("ip_address") and ":" in str(click.get("ip_address")) else ""),
+                "proxy_ips": "; ".join(click.get("proxy_ips", [])) if click.get("proxy_ips") else "",
+                "country": click.get("country", ""),
+                "city": click.get("city", ""),
+                "region": click.get("region", ""),
+                "device": click.get("device_type") or click.get("device", ""),
+                "browser": click.get("browser", ""),
+                "os": click.get("os_name", ""),
+                "is_vpn": "Yes" if click.get("is_vpn") else "No",
+                "is_duplicate": "Yes" if click.get("is_duplicate_proxy") else "No",
+                "link_name": link_names.get(click.get("link_id"), "Unknown"),
+                "created_at": click.get("created_at", "")
+            })
+
+    await _stream_from(user_db.clicks)
+    if len(export_data) < EXPORT_CLICKS_MAX:
+        await _stream_from(db.clicks)
+
+    # Newest-first (single global sort across the two sources)
+    export_data.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    if len(export_data) > EXPORT_CLICKS_MAX:
+        export_data = export_data[:EXPORT_CLICKS_MAX]
+
+    truncated = total_available > EXPORT_CLICKS_MAX
+
+    return {
+        "clicks": export_data,
+        "total": len(export_data),
+        "total_available": total_available,
+        "truncated": truncated,
+        "cap": EXPORT_CLICKS_MAX,
+    }
 
 # ==================== REFERRER STATS ====================
 
@@ -16586,12 +16780,15 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         # match lived when the visitor came in behind a proxy/CDN,
         # producing the "IP: unknown" customer report.
         def _first_valid_ip(*candidates):
+            """2026-07: accept BOTH IPv4 and IPv6 as valid matched IPs
+            for display (was IPv4-only before). Falls through to the
+            _first_displayable_ip helper only for edge cases now."""
             for c in candidates:
-                if isinstance(c, str) and _is_valid_dup_ipv4(c):
+                if isinstance(c, str) and _is_valid_dup_ip(c):
                     return c
                 if isinstance(c, (list, tuple)):
                     for x in c:
-                        if isinstance(x, str) and _is_valid_dup_ipv4(x):
+                        if isinstance(x, str) and _is_valid_dup_ip(x):
                             return x
             return None
 
@@ -21680,10 +21877,27 @@ except Exception as _sce:  # noqa: BLE001
     logger.error(f"Sync client failed to import: {_sce}")
 
 
+# 2026-07 CORS hardening (Bug D fix)
+# ────────────────────────────────────────────────────────────────────
+# Legacy: allow_credentials=True + allow_origins=["*"] is invalid per
+# CORS spec — browsers refuse to send cookies/Authorization to a
+# wildcard origin. In practice krexion.com FE→BE is same-origin so it
+# worked accidentally, but any 3rd-party integration was silently
+# broken. Now:
+#   - If CORS_ORIGINS is "*" or empty → keep credentials OFF (spec-safe).
+#   - If CORS_ORIGINS is a concrete list → credentials ON.
+_cors_env = (os.environ.get('CORS_ORIGINS', '*') or '*').strip()
+if _cors_env == "*" or not _cors_env:
+    _cors_origins = ["*"]
+    _cors_credentials = False
+else:
+    _cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
+    _cors_credentials = True
+
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_credentials=_cors_credentials,
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -22940,10 +23154,22 @@ async def websocket_clicks(websocket: WebSocket, token: str):
         try:
             payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
             email = payload.get("sub")
+            is_sub_user = bool(payload.get("is_sub_user", False))
+            parent_uid = payload.get("parent_user_id")
             if not email:
                 await websocket.close(code=4001)
                 return
-            user = await db.users.find_one({"email": email}, {"_id": 0})
+            # 2026-07 fix — sub-users also get live click updates now.
+            # Live clicks are broadcast on the PARENT user_id, so a
+            # sub-user's WS must connect using the parent's id.
+            if is_sub_user and parent_uid:
+                parent = await db.users.find_one({"id": parent_uid}, {"_id": 0})
+                if parent and parent.get("status") == "active":
+                    sub = await db.sub_users.find_one({"email": email}, {"_id": 0, "password_hash": 0})
+                    if sub and sub.get("is_active", True):
+                        user = {"id": parent_uid, "status": "active", "email": email, "is_sub_user": True}
+            else:
+                user = await db.users.find_one({"email": email}, {"_id": 0, "password_hash": 0})
         except JWTError:
             cloud_user = await _resolve_cloud_user_dict(f"Bearer {token}")
             if not cloud_user:

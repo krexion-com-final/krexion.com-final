@@ -292,13 +292,9 @@ async def _validate_license(license_key: Optional[str]):
 
 
 # ─── Admin endpoints ──────────────────────────────────────────────────
-@releases_router.post("/api/admin/releases")
-async def create_release(body: dict, admin: dict = Depends(lambda: None)):
-    # Lazy admin check
-    if _get_current_admin is None:
-        raise HTTPException(503, "Admin auth not configured")
-    # Actually we'll re-implement clean — use real admin dep
-    raise HTTPException(500, "wired below")
+# 2026-07 — removed a stub POST /api/admin/releases handler that
+# always raised HTTP 500. The real handler is registered via
+# _build_admin_endpoints() below and mounted on the app AFTER _bind().
 
 
 # We need real admin dependency injection - we'll register handlers
@@ -682,6 +678,14 @@ def _build_customer_endpoints(get_user_dep):
         mode = (os.environ.get("KREXION_MODE") or "local").lower()
         is_bridge_relay = bool(request.headers.get("X-Krexion-Bridge-Job"))
 
+        # 2026-07 fix — the admin check used to only happen on the LOCAL
+        # execution path, so a non-admin sub-user on krexion.com could
+        # trigger a container rebuild on their parent's PC by hitting
+        # this endpoint (cloud bridge relay bypassed the admin gate).
+        # We now enforce is_admin BEFORE the bridge relay too.
+        if not user.get("is_admin"):
+            raise HTTPException(403, "Only the admin user can trigger updates")
+
         if mode != "local" and not is_bridge_relay:
             # We're on the cloud edge. Bridge the call to the user's local PC.
             try:
@@ -693,8 +697,6 @@ def _build_customer_endpoints(get_user_dep):
                 wait_for_result=True, wait_timeout=25,
             )
 
-        if not user.get("is_admin"):
-            raise HTTPException(403, "Only the admin user can trigger updates")
         try:
             UPDATE_FLAG_FILE.parent.mkdir(parents=True, exist_ok=True)
             payload = {

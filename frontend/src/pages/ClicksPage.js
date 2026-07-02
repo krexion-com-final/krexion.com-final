@@ -403,6 +403,9 @@ export default function ClicksPage() {
       });
       
       const exportData = response.data.clicks;
+      const truncated = response.data.truncated;
+      const totalAvailable = response.data.total_available || 0;
+      const cap = response.data.cap || 0;
       
       if (!exportData || exportData.length === 0) {
         toast.error("No data to export");
@@ -442,6 +445,14 @@ export default function ClicksPage() {
       document.body.removeChild(link);
       
       toast.success(`Exported ${exportData.length.toLocaleString()} clicks to CSV`);
+      if (truncated) {
+        toast.info(
+          `Only the newest ${cap.toLocaleString()} clicks were exported ` +
+          `(you have ${totalAvailable.toLocaleString()} total). ` +
+          `Narrow the date range to export older data.`,
+          { duration: 8000 }
+        );
+      }
     } catch (error) {
       console.error("Export error:", error);
       toast.error("Export failed");
@@ -895,7 +906,7 @@ export default function ClicksPage() {
                         />
                       </TableCell>
                       <TableCell className="p-2 font-mono text-xs">
-                        {click.ipv4 || click.ip_address || "-"}
+                        {click.ipv4 || (click.ipv6 ? "-" : (click.ip_address || "-"))}
                       </TableCell>
                       <TableCell className="p-2 font-mono text-xs text-muted-foreground">
                         {click.ipv6 ? (
