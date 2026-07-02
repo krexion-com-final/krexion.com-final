@@ -5,7 +5,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Set
 from datetime import datetime, timezone, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -75,6 +75,24 @@ _link_cache = {}
 _link_cache_ttl = 30  # Reduced to 30 seconds for more accurate status checking
 
 # NO VPN cache - check fresh every time for accuracy
+
+# ─── 2026-07 VPS load-reduction caches ─────────────────────────────────
+# Tracks which user_ids are ACTIVELY viewing the cloud UI (populated by
+# /api/bridge/me/local-status which the frontend polls on every page).
+# Value = unix ts of last UI hit. Consumed by the bridge cache pre-warmer
+# so we only pre-warm caches for users who'd actually SEE the benefit,
+# instead of every online-heartbeat user (huge VPS win when many
+# customers keep PC on but browser closed).
+_CLOUD_UI_ACTIVE_USERS: Dict[str, float] = {}
+
+# Short-TTL cache for /api/bridge/me/local-status. The frontend polls
+# this every few seconds on the RUT / Bridge / Dashboard pages, and each
+# call used to hit MongoDB (find_one on sync_heartbeats + users). At
+# ~30 online customers that alone was ~360 DB reads/min for a value
+# that only changes when the customer's PC status flips (rare event).
+# 5 s TTL keeps the UI feeling live while cutting DB load ~30×.
+_LOCAL_STATUS_CACHE: Dict[str, tuple] = {}  # user_id -> (expires_ts, status_dict)
+_LOCAL_STATUS_CACHE_TTL = 5  # seconds
 
 async def get_cached_link(short_code: str):
     """Get link from cache or database - cache is short-lived for accuracy"""
@@ -2108,6 +2126,7 @@ class ClickResponse(BaseModel):
     link_id: str = ""
     ip_address: str = ""
     ipv4: Optional[str] = None
+    ipv6: Optional[str] = None  # 2026-07: IPv6-only visitors (mobile carriers)
     all_ips: Optional[List[str]] = None
     proxy_ips: Optional[List[str]] = None
     country: str = ""
@@ -2464,13 +2483,26 @@ def normalize_ipv6(ip: str) -> str:
         return ip
 
 def get_all_client_ips(request: Request) -> dict:
-    """Get all possible client IPs (IPv4 ONLY) from request headers.
-    
-    IMPORTANT: Only returns the REAL client IP, ignores infrastructure/proxy IPs
-    to prevent false duplicate detection.
+    """Get all possible client IPs (IPv4 + IPv6) from request headers.
+
+    2026-07 UPDATE — IPv6 SUPPORT
+    ─────────────────────────────
+    Legacy behaviour was IPv4-only which lost the IP entirely for
+    visitors from IPv6-only mobile carriers (Jio, T-Mobile, Zong, Ufone,
+    Airtel — Cloudflare passes their real address in CF-Connecting-IP
+    as an IPv6 string). Result: Clicks page showed `-` for the IP,
+    country / analytics / duplicate-IP checks all silently failed.
+
+    We now ALSO extract IPv6 (into its own `ipv6` field). Callers that
+    still want IPv4-only behaviour (e.g. legacy duplicate matching)
+    keep using `ipv4`. Callers that need "the real client IP whatever
+    it is" now use `primary` (falls back IPv4 → IPv6 → "unknown").
+
+    IMPORTANT: We still ignore known infrastructure/proxy IP prefixes
+    to prevent false-duplicate detection.
     """
-    ips = {"primary": None, "ipv4": None, "all": [], "proxy_ips": []}
-    
+    ips = {"primary": None, "ipv4": None, "ipv6": None, "all": [], "proxy_ips": []}
+
     # Known infrastructure IP prefixes to IGNORE
     # These are ONLY load balancers/CDN proxies - NOT private network IPs
     # Private IPs (10.x, 172.x, 192.168.x) are ALLOWED for local testing
@@ -2480,65 +2512,80 @@ def get_all_client_ips(request: Request) -> dict:
         "35.191.", "35.186.",  # Google Cloud health checks
         "130.211.",  # Google Cloud
     )
-    
+
     def is_infra_ip(ip: str) -> bool:
         """Check if IP is an infrastructure/proxy IP that should be ignored"""
         if not ip:
             return True
         return ip.startswith(INFRA_IP_PREFIXES)
-    
+
     def is_private_ip(ip: str) -> bool:
         """We ALLOW private IPs for local/Docker testing"""
         # Return False to allow ALL IPs including 172.25.160.1
         return False
-    
-    # Get all IPs from X-Forwarded-For
+
+    def _accept(ip: str) -> None:
+        """Route a single IP into ipv4 / ipv6 buckets. Skips infra prefixes
+        and blank strings, keeps `all` de-duplicated."""
+        if not ip:
+            return
+        ip = ip.strip()
+        if not ip or is_infra_ip(ip) or is_private_ip(ip):
+            return
+        if is_ipv4(ip):
+            if not ips["ipv4"]:
+                ips["ipv4"] = ip
+            if ip not in ips["all"]:
+                ips["all"].append(ip)
+        elif is_ipv6(ip):
+            # Normalize IPv6 so identical addresses in different notations
+            # compare equal for duplicate detection.
+            try:
+                ip = normalize_ipv6(ip)
+            except Exception:
+                pass
+            if not ips["ipv6"]:
+                ips["ipv6"] = ip
+            if ip not in ips["all"]:
+                ips["all"].append(ip)
+
+    # 1. X-Forwarded-For — first IP is the original client
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
-        all_forwarded_ips = [ip.strip() for ip in forwarded.split(",")]
-        
-        # First IP is the original client - ONLY IPv4, skip private IPs
-        if all_forwarded_ips:
-            first_ip = all_forwarded_ips[0]
-            if first_ip and is_ipv4(first_ip) and not is_private_ip(first_ip):
-                ips["all"].append(first_ip)
-                ips["ipv4"] = first_ip
-        
-        # We NO LONGER store proxy/intermediate IPs as they cause false duplicates
-    
-    # Check CF-Connecting-IP (Cloudflare real IP) - this is more reliable
+        for _ip in [x.strip() for x in forwarded.split(",")]:
+            _accept(_ip)
+            # Original client (first token) is enough — later tokens are
+            # proxy hops that we deliberately no longer store.
+            break
+
+    # 2. CF-Connecting-IP (Cloudflare real IP — most reliable, may be IPv6)
     cf_ip = request.headers.get("CF-Connecting-IP")
     if cf_ip:
-        ip = cf_ip.strip()
-        if ip and is_ipv4(ip) and not is_private_ip(ip):
-            if not ips["ipv4"]:
-                ips["all"].append(ip)
-                ips["ipv4"] = ip
-            elif ip not in ips["all"]:
-                # CF IP might be different, use it as primary if we don't have one
-                pass
-    
-    # Fallback if no client IP found - ONLY IPv4
-    if not ips["all"]:
-        real_ip = request.headers.get("X-Real-IP")
-        if real_ip:
-            ip = real_ip.strip()
-            if ip and is_ipv4(ip) and not is_private_ip(ip):
-                ips["all"].append(ip)
-                ips["ipv4"] = ip
-    
+        _accept(cf_ip)
+
+    # 3. X-Real-IP (nginx / other reverse proxies)
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        _accept(real_ip)
+
+    # 4. True-Client-IP (Akamai / some CDNs)
+    tc_ip = request.headers.get("True-Client-IP")
+    if tc_ip:
+        _accept(tc_ip)
+
+    # 5. Fallback: direct TCP peer
     if not ips["all"] and request.client and request.client.host:
-        ip = request.client.host
-        if is_ipv4(ip) and not is_private_ip(ip):
-            ips["all"].append(ip)
-            ips["ipv4"] = ip
-    
-    # Set primary IP - ONLY IPv4
-    ips["primary"] = ips["ipv4"] or (ips["all"][0] if ips["all"] else "unknown")
-    
-    # proxy_ips is now empty - we don't track infrastructure IPs anymore
+        _accept(request.client.host)
+
+    # Primary IP: prefer IPv4 (for legacy duplicate matching), else IPv6,
+    # else "unknown". Never returns None so downstream `.get("primary")`
+    # callers stay backwards-compatible.
+    ips["primary"] = ips["ipv4"] or ips["ipv6"] or (ips["all"][0] if ips["all"] else "unknown")
+
+    # proxy_ips stays empty — infrastructure hops are intentionally skipped
+    # to avoid false duplicate matches.
     ips["proxy_ips"] = []
-    
+
     return ips
 
 # Referrer Source Categorization
@@ -16250,6 +16297,7 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     client_ips = get_all_client_ips(request)
     client_ip = client_ips["primary"]
     ipv4 = client_ips["ipv4"]
+    ipv6 = client_ips.get("ipv6")  # 2026-07: IPv6-only visitors (mobile carriers)
     all_ips = client_ips["all"]
     proxy_ips = client_ips.get("proxy_ips", [])
 
@@ -16337,7 +16385,7 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     # detection failed, this caused the "Duplicate IP — IP: unknown"
     # false-positive block on RUT traffic. We now strictly require a
     # real IPv4 string before adding any condition.
-    _INVALID_DUP_IPS = {"unknown", "Unknown", "no-ipv4-detected", ""}
+    _INVALID_DUP_IPS = {"unknown", "Unknown", "no-ipv4-detected", "no-ip-detected", ""}
 
     def _is_valid_dup_ipv4(_ip):
         return (
@@ -16347,10 +16395,26 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
             and ":" not in _ip  # exclude IPv6
         )
 
-    # Check primary IP (IPv4 only)
-    if _is_valid_dup_ipv4(client_ip):
+    def _is_valid_dup_ipv6(_ip):
+        """2026-07: IPv6 duplicate matching. Same visitor from IPv6-only
+        mobile network must be blocked on repeat visits. Any string
+        containing ':' that is not a placeholder counts."""
+        return (
+            isinstance(_ip, str)
+            and _ip
+            and _ip not in _INVALID_DUP_IPS
+            and ":" in _ip
+        )
+
+    def _is_valid_dup_ip(_ip):
+        """Either IPv4 or IPv6 is a valid duplicate-check signal."""
+        return _is_valid_dup_ipv4(_ip) or _is_valid_dup_ipv6(_ip)
+
+    # Check primary IP (IPv4 or IPv6 — 2026-07)
+    if _is_valid_dup_ip(client_ip):
         ip_conditions.append({"ip_address": client_ip})
         ip_conditions.append({"ipv4": client_ip})
+        ip_conditions.append({"ipv6": client_ip})
         ip_conditions.append({"detected_ip": client_ip})
         ip_conditions.append({"all_ips": client_ip})
         ip_conditions.append({"proxy_ips": client_ip})
@@ -16363,20 +16427,29 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         ip_conditions.append({"all_ips": ipv4})
         ip_conditions.append({"proxy_ips": ipv4})
 
-    # SKIP IPv6 completely
+    # 2026-07: Check IPv6 specifically — legacy code SKIPPED IPv6 which
+    # meant IPv6-only visitors could click the same link infinite times
+    # without triggering duplicate detection. Now equal-weight with v4.
+    if _is_valid_dup_ipv6(ipv6) and ipv6 != client_ip:
+        ip_conditions.append({"ip_address": ipv6})
+        ip_conditions.append({"ipv6": ipv6})
+        ip_conditions.append({"detected_ip": ipv6})
+        ip_conditions.append({"all_ips": ipv6})
+        ip_conditions.append({"proxy_ips": ipv6})
 
-    # Check all proxy IPs from headers (only IPv4)
+    # Check all proxy IPs from headers (IPv4 or IPv6)
     for pip in proxy_ips:
-        if _is_valid_dup_ipv4(pip) and pip not in [client_ip, ipv4]:
+        if _is_valid_dup_ip(pip) and pip not in [client_ip, ipv4, ipv6]:
             ip_conditions.append({"ip_address": pip})
             ip_conditions.append({"ipv4": pip})
+            ip_conditions.append({"ipv6": pip})
             ip_conditions.append({"detected_ip": pip})
             ip_conditions.append({"all_ips": pip})
             ip_conditions.append({"proxy_ips": pip})
 
-    # Check all_ips array (only IPv4)
+    # Check all_ips array (IPv4 or IPv6)
     for ip in all_ips:
-        if _is_valid_dup_ipv4(ip) and ip not in [client_ip, ipv4]:
+        if _is_valid_dup_ip(ip) and ip not in [client_ip, ipv4, ipv6]:
             ip_conditions.append({"ip_address": ip})
             ip_conditions.append({"all_ips": ip})
 
@@ -16405,16 +16478,16 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         # The visitor previously clicked this exact short_code (cookie
         # was set on the first visit's redirect response). This catches
         # the "same browser, rotated IP" case our IP-only check missed.
-        # 2026-02 — never store the placeholder "unknown" here. Pick
-        # the FIRST real IPv4 we can see from the current request so
-        # the customer-facing block page shows something useful.
+        # 2026-07 — accept IPv4 OR IPv6 as the reported blocked-IP so
+        # IPv6-only visitors no longer see "IP: unknown" on the block
+        # page.
         _cookie_ip = None
-        for _cand in [client_ip, ipv4] + list(all_ips or []) + list(proxy_ips or []):
-            if _is_valid_dup_ipv4(_cand):
+        for _cand in [client_ip, ipv4, ipv6] + list(all_ips or []) + list(proxy_ips or []):
+            if _is_valid_dup_ip(_cand):
                 _cookie_ip = _cand
                 break
         existing_click = {
-            "ip_address": _cookie_ip or client_ip or ipv4 or "unknown",
+            "ip_address": _cookie_ip or client_ip or ipv4 or ipv6 or "unknown",
             "link_id": link.get("id"),
             "matched_via": "cookie",
         }
@@ -16467,6 +16540,7 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
             "_id": 0,
             "ip_address": 1,
             "ipv4": 1,
+            "ipv6": 1,  # 2026-07: return v6 too so error page can show it
             "detected_ip": 1,
             "all_ips": 1,
             "proxy_ips": 1,
@@ -16541,6 +16615,7 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         matched_ip = _first_valid_ip(
             existing_click.get("ip_address"),
             existing_click.get("ipv4"),
+            existing_click.get("ipv6"),
             existing_click.get("detected_ip"),
             existing_click.get("all_ips"),
             existing_click.get("proxy_ips"),
@@ -16550,17 +16625,18 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         # IPs we can see on THIS request. That's still the visitor's
         # real IP — we just couldn't pull a historical one.
         if not matched_ip:
-            matched_ip = _first_valid_ip(client_ip, ipv4, all_ips, proxy_ips)
+            matched_ip = _first_valid_ip(client_ip, ipv4, ipv6, all_ips, proxy_ips)
         # 2026-06 LAST-RESORT — accept IPv6 / any non-sentinel string
         # for display so we never fall to the literal word "unknown".
         if not matched_ip:
             matched_ip = _first_displayable_ip(
                 existing_click.get("ip_address"),
                 existing_click.get("ipv4"),
+                existing_click.get("ipv6"),
                 existing_click.get("detected_ip"),
                 existing_click.get("all_ips"),
                 existing_click.get("proxy_ips"),
-                client_ip, ipv4, all_ips, proxy_ips,
+                client_ip, ipv4, ipv6, all_ips, proxy_ips,
             )
         if not matched_ip:
             matched_ip = "unknown"
@@ -17102,21 +17178,21 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     
     click_id = str(uuid.uuid4())
     
-    # For storing clicks, use IPv4 as the primary IP address
-    # This ensures consistency with duplicate checking which ignores IPv6
-    # 2026-05 BUGFIX — when no IPv4 could be detected `client_ip` is the
-    # literal string "unknown" (see get_all_client_ips). Storing
-    # "unknown" in `ip_address` used to poison the duplicate-IP check
-    # for every subsequent visitor whose IPv4 also failed to detect
-    # (they'd all match each other on the literal "unknown" string and
-    # get the false "Duplicate IP — IP: unknown" block). We now store
-    # `None` in that case — frontend display already falls back to
-    # "Unknown" via `.get("ip_address", "unknown")` so the UX is
-    # unchanged, and the duplicate check (also fixed above) skips
-    # placeholder strings.
-    _PLACEHOLDER_IPS = ("unknown", "Unknown", "no-ipv4-detected", "")
+    # For storing clicks, prefer IPv4 as the primary IP for backward
+    # compatibility with legacy dup-check queries; but if the visitor
+    # came in over IPv6-only (mobile carrier, Cloudflare CF-Connecting-
+    # IP was IPv6), we fall back to IPv6 so the Clicks page never shows
+    # "-" for a real visitor. Duplicate detection above already accepts
+    # BOTH IPv4 and IPv6 so this fallback is safe.
+    # 2026-05 BUGFIX — never persist placeholders like "unknown" as
+    # the ip_address (poisons the duplicate index).
+    _PLACEHOLDER_IPS = ("unknown", "Unknown", "no-ipv4-detected", "no-ip-detected", "")
     if ipv4 and ipv4 not in _PLACEHOLDER_IPS:
         primary_ip_for_storage = ipv4
+    elif ipv6 and ipv6 not in _PLACEHOLDER_IPS:
+        # 2026-07: IPv6 fallback so IPv6-only visitors get a real IP
+        # in the Clicks table instead of the dash placeholder.
+        primary_ip_for_storage = ipv6
     elif client_ip and client_ip not in _PLACEHOLDER_IPS:
         primary_ip_for_storage = client_ip
     else:
@@ -17143,8 +17219,9 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         "link_id": link["id"],
         "user_id": main_user_id,
         "created_by": link_created_by,
-        "ip_address": primary_ip_for_storage,  # Store IPv4 as primary
+        "ip_address": primary_ip_for_storage,  # Store IPv4 as primary (IPv6 fallback for v6-only visitors)
         "ipv4": ipv4,
+        "ipv6": ipv6,  # 2026-07: NEW — store IPv6 so Clicks UI can show real IP for v6-only visitors
         "all_ips": all_ips,
         "proxy_ips": proxy_ips,
         "country": country,
@@ -20969,7 +21046,25 @@ try:
     # Register frontend-facing bridge endpoints with proper JWT auth
     @_bridge_router.get("/me/local-status")
     async def _bridge_my_local_status(user: dict = Depends(get_current_user)):
-        return await get_my_local_status_for(user["id"])
+        # 2026-07: mark this user as ACTIVELY using the cloud UI so the
+        # bridge-cache pre-warmer knows to keep their /jobs cache hot.
+        # Also short-cache the response itself — UI polls this every few
+        # seconds and the underlying value (PC online / offline) rarely
+        # flips within a 5 s window.
+        uid = user["id"]
+        _CLOUD_UI_ACTIVE_USERS[uid] = time.time()
+        cached = _LOCAL_STATUS_CACHE.get(uid)
+        now = time.time()
+        if cached and cached[0] > now:
+            return cached[1]
+        status = await get_my_local_status_for(uid)
+        _LOCAL_STATUS_CACHE[uid] = (now + _LOCAL_STATUS_CACHE_TTL, status)
+        # Bound the cache size so it can't grow unbounded from many users.
+        if len(_LOCAL_STATUS_CACHE) > 1000:
+            for _k, (_exp, _) in list(_LOCAL_STATUS_CACHE.items()):
+                if _exp <= now:
+                    _LOCAL_STATUS_CACHE.pop(_k, None)
+        return status
 
     @_bridge_router.get("/jobs/{job_id}")
     async def _bridge_get_job(job_id: str, user: dict = Depends(get_current_user)):
@@ -22921,8 +23016,32 @@ async def _krexion_customer_startup_tasks():
     # /jobs + /pending-candidates cache every ~25 s so the UI lands
     # on an instant cached hit. Also auto-prunes old cache rows via
     # TTL index on stale_until.
+    #
+    # 2026-07 THROTTLE — customer report "VPS stuck ho jata hai even
+    # though heavy jobs PC pe hain". Old pre-warmer fired one bridge
+    # job PER online-heartbeat user PER 25 s with wait_timeout=55s.
+    # With 50 online customers that's ~100 outstanding long-poll
+    # bridge tasks at any moment + ~5500 DB polls / 25 s just for
+    # pre-warming. It DOES help mobile UI UX, but it hammers VPS for
+    # customers who aren't currently looking at their cloud UI.
+    #
+    # New behaviour:
+    #   1. Only pre-warm for users whose FRONTEND has hit us in the
+    #      last 3 minutes (real UI activity, not just PC heartbeat)
+    #      — tracked via _CLOUD_UI_ACTIVE_USERS which is populated by
+    #      the bridge/local-status endpoint (the UI polls this on
+    #      every page).
+    #   2. Global cap of MAX_PARALLEL_PREWARMS (default 10) outstanding
+    #      pre-warm tasks. If we're already at the cap we skip this
+    #      cycle entirely — no accumulation.
+    #   3. Cycle bumped from 25 s → 30 s (still well inside cache
+    #      fresh_until window, just 20% less load).
     try:
         import asyncio as _aio_pw
+        _PREWARM_MAX_PARALLEL = int(os.environ.get("BRIDGE_PREWARM_MAX_PARALLEL", "10") or 10)
+        _PREWARM_UI_ACTIVE_WINDOW_SEC = int(os.environ.get("BRIDGE_PREWARM_UI_WINDOW_SEC", "180") or 180)
+        _prewarm_inflight: Set[str] = set()
+
         async def _kx_bridge_cache_prewarmer():
             # Wait a bit for app to fully boot
             await _aio_pw.sleep(45)
@@ -22935,11 +23054,41 @@ async def _krexion_customer_startup_tasks():
                 logger.debug(f"[prewarm] TTL index err (already exists?): {_ie}")
             while True:
                 try:
-                    # Find users with fresh heartbeat (< 60 s) — these are
-                    # the active RUT-page viewers whose cache we want hot.
+                    # 2026-07 — only warm caches for users who are ALSO
+                    # actively viewing the cloud UI (their frontend
+                    # called /api/bridge/me/local-status within the
+                    # last 3 min). If the customer is offline from the
+                    # UI, warming their cache is pure VPS waste — the
+                    # cache will just expire before they see it.
+                    ui_cutoff_ts = time.time() - _PREWARM_UI_ACTIVE_WINDOW_SEC
+                    ui_active_uids = {
+                        _uid for _uid, _ts in list(_CLOUD_UI_ACTIVE_USERS.items())
+                        if _ts >= ui_cutoff_ts
+                    }
+                    # Also GC the tracking dict so it doesn't grow forever
+                    if len(_CLOUD_UI_ACTIVE_USERS) > 500:
+                        for _uid, _ts in list(_CLOUD_UI_ACTIVE_USERS.items()):
+                            if _ts < ui_cutoff_ts:
+                                _CLOUD_UI_ACTIVE_USERS.pop(_uid, None)
+
+                    if not ui_active_uids:
+                        await _aio_pw.sleep(30)
+                        continue
+
+                    # Global inflight cap — never fire more than N
+                    # pre-warm bridge tasks concurrently no matter how
+                    # many users are online.
+                    if len(_prewarm_inflight) >= _PREWARM_MAX_PARALLEL:
+                        logger.debug(
+                            f"[prewarm] at cap ({len(_prewarm_inflight)}/{_PREWARM_MAX_PARALLEL}) — skipping cycle"
+                        )
+                        await _aio_pw.sleep(30)
+                        continue
+
+                    # Find users with fresh heartbeat AND UI activity.
                     cutoff = datetime.now(timezone.utc) - timedelta(seconds=60)
                     online = await db.sync_heartbeats.find(
-                        {"last_seen": {"$gte": cutoff}},
+                        {"last_seen": {"$gte": cutoff}, "user_id": {"$in": list(ui_active_uids)}},
                         {"user_id": 1, "_id": 0},
                     ).to_list(length=50)
                     seen_uids = set()
@@ -22948,6 +23097,12 @@ async def _krexion_customer_startup_tasks():
                         if not uid or uid in seen_uids:
                             continue
                         seen_uids.add(uid)
+                        # Room in the global inflight cap?
+                        if len(_prewarm_inflight) >= _PREWARM_MAX_PARALLEL:
+                            break
+                        # Skip if we already have a pre-warm running for this user
+                        if uid in _prewarm_inflight:
+                            continue
                         # Skip if cache for /jobs is still fresh
                         try:
                             user_doc = await db.users.find_one({"id": uid}, {"email": 1, "_id": 0})
@@ -22962,30 +23117,42 @@ async def _krexion_customer_startup_tasks():
                             )
                             if fresh:
                                 continue  # already warm
-                            # Fire bridge in background (don't block loop)
-                            _aio_pw.create_task(
-                                enqueue_bridge_job(
-                                    {"id": uid, "email": user_doc.get("email")},
-                                    "real-user-traffic/jobs",
-                                    {
-                                        "method": "GET",
-                                        "path": "/api/real-user-traffic/jobs",
-                                        "body": None,
-                                        "query": {},
-                                        "content_type": "application/json",
-                                    },
-                                    wait_for_result=True,
-                                    wait_timeout=55,
-                                )
-                            )
+
+                            # Fire bridge in background with inflight tracking
+                            async def _one_prewarm(_uid, _email):
+                                _prewarm_inflight.add(_uid)
+                                try:
+                                    await enqueue_bridge_job(
+                                        {"id": _uid, "email": _email},
+                                        "real-user-traffic/jobs",
+                                        {
+                                            "method": "GET",
+                                            "path": "/api/real-user-traffic/jobs",
+                                            "body": None,
+                                            "query": {},
+                                            "content_type": "application/json",
+                                        },
+                                        wait_for_result=True,
+                                        wait_timeout=55,
+                                    )
+                                except Exception as _pe:
+                                    logger.debug(f"[prewarm] job err for {_uid[:8]}: {_pe}")
+                                finally:
+                                    _prewarm_inflight.discard(_uid)
+
+                            _aio_pw.create_task(_one_prewarm(uid, user_doc.get("email")))
                         except Exception as _ue:
                             logger.debug(f"[prewarm] user {uid[:8]} err: {_ue}")
                 except Exception as _le:
                     logger.debug(f"[prewarm] loop iter err: {_le}")
-                await _aio_pw.sleep(25)
+                await _aio_pw.sleep(30)
 
         _aio_pw.create_task(_kx_bridge_cache_prewarmer())
-        logger.info("[startup] bridge-cache pre-warmer scheduled (25 s loop)")
+        logger.info(
+            f"[startup] bridge-cache pre-warmer scheduled (30 s loop, "
+            f"max {_PREWARM_MAX_PARALLEL} inflight, UI-active only, "
+            f"UI window {_PREWARM_UI_ACTIVE_WINDOW_SEC}s)"
+        )
     except Exception as _pwe:
         logger.debug(f"could not start bridge-cache pre-warmer: {_pwe}")
 
