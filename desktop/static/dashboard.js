@@ -24,6 +24,14 @@ const POLL_CLOUD_MS = 15 * 60 * 1000;
 const BACKEND_WARN_MS = 8000;     // 8 s → "not responding yet"
 const BACKEND_ESCALATE_MS = 20000; // 20 s → open Diagnose panel
 const BACKEND_FATAL_MS = 60000;   // 60 s → red status + urgent copy
+// v2.1.81 — When the Diagnose panel first opens (t≥20 s of downtime)
+// silently fire one restart-services attempt through the JS bridge.
+// Most customer PCs recover from this alone: the KrexionBackend NSSM
+// service just needed a manual `sc start` because MongoDB wasn't up
+// yet when it first tried to boot at Windows login. Zero clicks for
+// the customer if we succeed; if we fail the panel still shows the
+// manual "Retry Now" + Services.msc guidance.
+const AUTO_REPAIR_ONCE_MS = 20000;
 
 const $ = (id) => document.getElementById(id);
 
@@ -36,7 +44,20 @@ const _diag = {
   lastError: "",           // one-line error summary
   everSucceeded: false,    // has ANY poll ever succeeded this run?
   lastSuccessAt: 0,        // unix ms of most recent success (for uptime label)
+  autoRepairAttempted: false,  // v2.1.81 — one silent restart per session
+  autoRepairResult: null,      // last restart_services() payload
 };
+
+// v2.1.81 — Access the PyWebView JS bridge safely. Returns null when
+// the dashboard is opened as a plain file:// page (dev / repair mode)
+// so every caller can gracefully degrade to the manual instructions.
+function _pyapi() {
+  try {
+    return (typeof window !== "undefined"
+            && window.pywebview
+            && window.pywebview.api) ? window.pywebview.api : null;
+  } catch (_) { return null; }
+}
 
 function fmtBytes(gb) {
   if (gb >= 100) return Math.round(gb) + " GB";
@@ -83,6 +104,8 @@ async function pollLocal() {
     _diag.lastError = "";
     _diag.everSucceeded = true;
     _diag.lastSuccessAt = Date.now();
+    _diag.autoRepairAttempted = false;
+    _diag.autoRepairResult = null;
     hideDiagnosePanel();
 
     setPill("connection-pill", "Backend Online", "ok");
@@ -306,6 +329,19 @@ function showDiagnosePanel(downMs) {
       ? "Backend was responding earlier and then stopped — the KrexionBackend Windows service may have crashed."
       : "Backend has never responded since Krexion started — the KrexionBackend Windows service may not have started at all."
   );
+
+  // v2.1.81 — Fire ONE silent auto-repair per outage on first panel
+  // open. Most customer PCs recover here: the service just needs a
+  // `sc start` because MongoDB wasn't up when it first tried to boot.
+  // Zero click for the customer if it works; UI still shows manual
+  // options if it fails.
+  if (!_diag.autoRepairAttempted && downMs >= AUTO_REPAIR_ONCE_MS) {
+    _diag.autoRepairAttempted = true;
+    tryAutoRepair();
+  }
+  // Refresh the service-state badges so the customer sees what's
+  // actually going on with the NSSM services on their PC.
+  refreshServiceState();
 }
 function hideDiagnosePanel() {
   const panel = $("diagnose-panel");
@@ -323,8 +359,19 @@ async function diagnoseRetryNow() {
   if (btn) {
     btn.disabled = true;
     const original = btn.textContent;
-    btn.textContent = "Checking…";
-    try { await pollLocal(); } catch (_) {}
+    btn.textContent = "Repairing…";
+    try {
+      // v2.1.81 — Manual Retry ALWAYS tries a fresh restart-services
+      // attempt first (unlike the auto-repair which only fires once
+      // per outage). If the JS bridge isn't available we just fall
+      // through to the poll, matching v2.1.79 behaviour.
+      await tryAutoRepair(true);
+      // Give NSSM ~2 s for the service to reach LISTEN state before
+      // we retry the HTTP fetch; otherwise "Retry Now" always shows
+      // one more failure even when the repair actually worked.
+      await new Promise((r) => setTimeout(r, 2000));
+      await pollLocal();
+    } catch (_) {}
     setTimeout(() => {
       btn.disabled = false;
       btn.textContent = original;
@@ -332,6 +379,124 @@ async function diagnoseRetryNow() {
   } else {
     await pollLocal();
   }
+}
+
+/* v2.1.81 — Silent (or explicit) auto-repair through the pywebview
+ * bridge. Runs `sc start KrexionDatabase` then `sc start KrexionBackend`
+ * on the customer's PC. Gracefully no-ops when opened outside PyWebView
+ * (dev / repair mode via file://). */
+async function tryAutoRepair(explicit) {
+  const api = _pyapi();
+  if (!api || !api.restart_services) {
+    if (explicit) {
+      // Only surface the "no bridge" message on manual clicks so the
+      // customer knows why the button appears to do nothing when the
+      // dashboard is opened via file:// instead of the tray launcher.
+      const el = $("diag-repair-result");
+      if (el) {
+        el.textContent = "Auto-repair unavailable in this window mode. Use the manual steps below.";
+        el.classList.remove("hidden");
+      }
+    }
+    return { ok: false, error: "no bridge" };
+  }
+  try {
+    const res = await api.restart_services();
+    _diag.autoRepairResult = res || {};
+    const el = $("diag-repair-result");
+    if (el) {
+      el.classList.remove("hidden");
+      const svcs = (res && res.services) || {};
+      const parts = [];
+      for (const name of ["KrexionDatabase", "KrexionBackend"]) {
+        const s = svcs[name] || {};
+        if (s.already_running) {
+          parts.push(`${name}: already running`);
+        } else if (s.not_installed) {
+          parts.push(`${name}: NOT INSTALLED (reinstall required)`);
+        } else if (s.ok) {
+          parts.push(`${name}: started ✓`);
+        } else {
+          parts.push(`${name}: start failed (${s.state_after || "?"})`);
+        }
+      }
+      el.textContent = parts.join("  ·  ");
+    }
+    return res;
+  } catch (err) {
+    _diag.autoRepairResult = { ok: false, error: String(err) };
+    return _diag.autoRepairResult;
+  }
+}
+
+/* Populate the service-state pills so the customer sees whether
+ * KrexionBackend / KrexionDatabase are RUNNING / STOPPED / NOT_INSTALLED
+ * without leaving the dashboard. Called when the Diagnose panel opens. */
+async function refreshServiceState() {
+  const api = _pyapi();
+  const bBadge = $("diag-svc-backend");
+  const dBadge = $("diag-svc-database");
+  if (!api || !api.check_services) {
+    if (bBadge) bBadge.textContent = "(open dashboard via tray icon to enable auto-diagnose)";
+    if (dBadge) dBadge.textContent = "";
+    return;
+  }
+  try {
+    const res = await api.check_services();
+    if (bBadge) {
+      const st = (res.backend && res.backend.state) || "UNKNOWN";
+      bBadge.textContent = `KrexionBackend: ${st}`;
+      bBadge.className = "diag-svc-badge " + _svcClass(st);
+    }
+    if (dBadge) {
+      const st = (res.database && res.database.state) || "UNKNOWN";
+      dBadge.textContent = `KrexionDatabase: ${st}`;
+      dBadge.className = "diag-svc-badge " + _svcClass(st);
+    }
+  } catch (err) {
+    if (bBadge) bBadge.textContent = "service state check failed";
+  }
+}
+function _svcClass(state) {
+  if (state === "RUNNING") return "diag-svc-ok";
+  if (state === "STOPPED" || state === "NOT_INSTALLED") return "diag-svc-danger";
+  return "diag-svc-warn";
+}
+
+/* Toggle the "Show Backend Log" panel — reads the last 30 lines of
+ * backend.stderr.log through the JS bridge. Lets the customer (or
+ * support) see WHY the service crashed on boot without leaving the
+ * app. Falls back to just showing the log file path if the bridge
+ * isn't available. */
+async function showBackendLogTail() {
+  const wrap = $("diag-log-tail-wrap");
+  const pre = $("diag-log-tail");
+  if (!wrap || !pre) return;
+  wrap.classList.remove("hidden");
+  pre.textContent = "Loading last 30 lines…";
+  const api = _pyapi();
+  if (!api || !api.read_backend_log_tail) {
+    pre.textContent = "Log preview needs the tray-launched dashboard. Open the log file at the path above instead.";
+    return;
+  }
+  try {
+    const res = await api.read_backend_log_tail(30);
+    if (res && res.ok && res.tail) {
+      pre.textContent = res.tail;
+    } else {
+      pre.textContent = (res && res.error) || "Could not read backend.stderr.log — check the path shown above.";
+    }
+  } catch (err) {
+    pre.textContent = String(err);
+  }
+}
+
+/* Open the logs folder in Explorer via the JS bridge (falls back
+ * to a message if opened outside PyWebView). */
+async function openLogsFolder() {
+  const api = _pyapi();
+  if (!api || !api.open_logs_folder) return;
+  try { await api.open_logs_folder(); } catch (_) {}
 }
 
 /* ── Auto-update banner ─────────────────────────────────────────── */
@@ -418,6 +583,11 @@ function init() {
       }
     });
   }
+  // v2.1.81 — Open logs folder (Explorer) + Show last 30 lines of backend.stderr.log.
+  const openLogsBtn = $("diag-open-logs-btn");
+  if (openLogsBtn) openLogsBtn.addEventListener("click", openLogsFolder);
+  const showLogBtn = $("diag-show-log-btn");
+  if (showLogBtn) showLogBtn.addEventListener("click", showBackendLogTail);
 
   pollLocal();
   pollUpdate();

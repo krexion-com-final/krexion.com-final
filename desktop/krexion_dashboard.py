@@ -224,6 +224,185 @@ def _on_window_closing():
     return False
 
 
+# ── v2.1.81 — JS-to-Python bridge for auto-repair ─────────────────
+# Exposed to dashboard.js via `window.pywebview.api.*`. Every method
+# is wrapped so an internal failure NEVER crashes the webview — it
+# just returns a structured `{ok: False, error: "..."}` payload that
+# the JS can surface in the Diagnose panel. Keeps the customer in
+# control while making the "Retry Now" button actually able to fix
+# the underlying "KrexionBackend service is dead" problem instead of
+# just re-polling a still-dead port for another 2 hours.
+class DashboardApi:
+    """Public surface exposed to the dashboard's JavaScript.
+
+    All methods return JSON-serialisable dicts and NEVER raise. The
+    dashboard is a customer-facing UI — a stray exception here would
+    silently kill JS-to-Python calls for the rest of the session.
+    """
+
+    _SERVICE_BACKEND = "KrexionBackend"
+    _SERVICE_DATABASE = "KrexionDatabase"
+
+    def _run(self, args: list, timeout: int = 30) -> dict:
+        """Run a subprocess quietly and return a structured result."""
+        import subprocess
+        try:
+            # CREATE_NO_WINDOW keeps a black cmd flash from popping up
+            # over the dashboard on every service call (Windows only).
+            creationflags = 0
+            if os.name == "nt":
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            proc = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                creationflags=creationflags,
+            )
+            return {
+                "ok": proc.returncode == 0,
+                "rc": proc.returncode,
+                "stdout": (proc.stdout or "").strip()[:4000],
+                "stderr": (proc.stderr or "").strip()[:4000],
+            }
+        except FileNotFoundError as exc:
+            return {"ok": False, "rc": -1, "error": f"command not found: {exc}"}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "rc": -1, "error": str(exc)[:500]}
+
+    def _query_service(self, name: str) -> dict:
+        """Wraps `sc query <name>` — returns state ("RUNNING", "STOPPED",
+        "PAUSED", "START_PENDING", "STOP_PENDING", "NOT_INSTALLED")."""
+        if os.name != "nt":
+            return {"ok": False, "state": "NOT_WINDOWS", "error": "sc query only works on Windows"}
+        res = self._run(["sc", "query", name], timeout=8)
+        out = (res.get("stdout") or "") + "\n" + (res.get("stderr") or "")
+        # `sc query` prints: STATE     : 4  RUNNING     etc.
+        state = "UNKNOWN"
+        for token in ("RUNNING", "STOPPED", "PAUSED", "START_PENDING", "STOP_PENDING"):
+            if token in out:
+                state = token
+                break
+        # Common "not installed" markers so the UI can suggest a repair-install.
+        if "does not exist as an installed service" in out.lower() or res.get("rc") == 1060:
+            state = "NOT_INSTALLED"
+        return {"ok": True, "state": state, "raw": out[:800]}
+
+    # ── Public JS-callable methods ──────────────────────────────────
+    def check_services(self) -> dict:
+        """Snapshot of both service states — called by dashboard.js
+        when the Diagnose panel opens."""
+        try:
+            return {
+                "ok": True,
+                "backend": self._query_service(self._SERVICE_BACKEND),
+                "database": self._query_service(self._SERVICE_DATABASE),
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("check_services failed")
+            return {"ok": False, "error": str(exc)[:500]}
+
+    def restart_services(self) -> dict:
+        """Try to start both KrexionDatabase and KrexionBackend. Order
+        matters: MongoDB must be running before the backend can boot.
+        Non-fatal — returns per-service result so the JS can decide
+        what to say."""
+        try:
+            if os.name != "nt":
+                return {"ok": False, "error": "restart_services only runs on Windows"}
+            results = {}
+            for svc in (self._SERVICE_DATABASE, self._SERVICE_BACKEND):
+                current = self._query_service(svc)
+                if current.get("state") == "RUNNING":
+                    results[svc] = {"ok": True, "already_running": True, "state": "RUNNING"}
+                    continue
+                if current.get("state") == "NOT_INSTALLED":
+                    results[svc] = {
+                        "ok": False,
+                        "not_installed": True,
+                        "hint": f"{svc} service isn't installed — re-run the Krexion installer as Administrator.",
+                    }
+                    continue
+                # Give a stuck service a moment to unwind before starting.
+                if current.get("state") in ("STOP_PENDING", "START_PENDING"):
+                    import time
+                    time.sleep(2)
+                res = self._run(["sc", "start", svc], timeout=20)
+                # Recheck after start attempt.
+                post = self._query_service(svc)
+                results[svc] = {
+                    "ok": res.get("ok") or post.get("state") == "RUNNING",
+                    "rc": res.get("rc"),
+                    "state_after": post.get("state"),
+                    "stderr": res.get("stderr") or res.get("error") or "",
+                }
+                # Give MongoDB a moment to accept connections before we try
+                # starting the backend that depends on it.
+                if svc == self._SERVICE_DATABASE and results[svc]["ok"]:
+                    import time
+                    time.sleep(2)
+            return {"ok": True, "services": results}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("restart_services failed")
+            return {"ok": False, "error": str(exc)[:500]}
+
+    def open_logs_folder(self) -> dict:
+        """Opens Explorer at {app}\\logs (or the fallback log dir)."""
+        try:
+            target = LOG_DIR if LOG_DIR.exists() else HERE
+            _open_in_explorer(target)
+            return {"ok": True, "path": str(target)}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("open_logs_folder failed")
+            return {"ok": False, "error": str(exc)[:500]}
+
+    def read_backend_log_tail(self, n: int = 30) -> dict:
+        """Return the last N lines of backend.stderr.log so the customer
+        (or support) can see WHY the service crashed on boot without
+        leaving the dashboard."""
+        try:
+            n = max(1, min(int(n or 30), 500))
+            # Search a few candidate locations — the install path can
+            # differ between the NSSM native install ({app}\logs) and
+            # dev-mode runs.
+            candidates = [
+                LOG_DIR / "backend.stderr.log",
+                LOG_DIR / "backend.stdout.log",
+                HERE.parent.parent.parent / "logs" / "backend.stderr.log",
+                Path("C:/Program Files/Krexion/logs/backend.stderr.log"),
+            ]
+            for p in candidates:
+                try:
+                    if not p or not p.exists():
+                        continue
+                    with open(p, "r", encoding="utf-8", errors="replace") as fh:
+                        lines = fh.readlines()
+                    tail = "".join(lines[-n:])
+                    return {
+                        "ok": True,
+                        "path": str(p),
+                        "line_count": len(lines),
+                        "tail": tail[-16000:],  # cap payload size
+                    }
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"read_backend_log_tail: could not read {p}: {exc}")
+                    continue
+            return {"ok": False, "error": "backend.stderr.log not found in any expected location"}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("read_backend_log_tail failed")
+            return {"ok": False, "error": str(exc)[:500]}
+
+    def open_krexion_com(self) -> dict:
+        try:
+            webbrowser.open("https://krexion.com/login")
+            return {"ok": True}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)[:500]}
+
+
+_dashboard_api: "DashboardApi | None" = None
+
+
 def _launch_pywebview_window() -> bool:
     """Try the normal PyWebView+WebView2 path. Returns True on success,
     False if any import / runtime error indicates the runtime is missing
@@ -238,8 +417,9 @@ def _launch_pywebview_window() -> bool:
         logger.error(f"PyWebView import failed: {exc}", exc_info=True)
         return False
 
-    global _window
+    global _window, _dashboard_api
     try:
+        _dashboard_api = DashboardApi()
         _window = webview.create_window(
             title="Krexion — Local PC Dashboard",
             url=INDEX_FILE.as_uri(),
@@ -249,6 +429,7 @@ def _launch_pywebview_window() -> bool:
             background_color="#0a0e1a",
             easy_drag=False,
             confirm_close=False,
+            js_api=_dashboard_api,
         )
         try:
             _window.events.closing += _on_window_closing

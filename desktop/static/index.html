@@ -57,18 +57,30 @@
       <div><span class="muted">Failed checks</span><strong id="diag-retries">0</strong></div>
       <div class="diag-error-cell"><span class="muted">Last error</span><strong id="diag-error">—</strong></div>
     </div>
+    <!-- v2.1.81 — Windows service state badges + auto-repair result -->
+    <div class="diag-svc-row">
+      <span id="diag-svc-database" class="diag-svc-badge diag-svc-warn">checking KrexionDatabase…</span>
+      <span id="diag-svc-backend" class="diag-svc-badge diag-svc-warn">checking KrexionBackend…</span>
+    </div>
+    <div id="diag-repair-result" class="diag-repair-result hidden"></div>
     <div class="diagnose-actions">
       <div class="diagnose-hint">
         Try these steps (in order):
         <ol>
-          <li>Open <b>Services.msc</b> → find <b>KrexionBackend</b> → right-click → Start (or Restart)</li>
+          <li>Click <b>Retry Now</b> above — Krexion will attempt to auto-start both services for you</li>
+          <li>Still stuck? Open <b>Services.msc</b> → find <b>KrexionBackend</b> → right-click → Start (or Restart)</li>
           <li>Also start <b>KrexionDatabase</b> if it's stopped</li>
-          <li>Still stuck? Open the log file at the path below and share the last 30 lines with support</li>
+          <li>Read the last 30 lines of the log below to see WHY the service crashed on boot</li>
         </ol>
       </div>
       <div class="diagnose-log-row">
         <code class="diag-logpath">C:\Program Files\Krexion\logs\backend.stderr.log</code>
+        <button id="diag-show-log-btn" class="btn-ghost" data-testid="diag-show-log-btn">Show Last 30 Lines</button>
+        <button id="diag-open-logs-btn" class="btn-ghost" data-testid="diag-open-logs-btn">Open Logs Folder</button>
         <button id="diag-copy-path-btn" class="btn-ghost" data-testid="diag-copy-path-btn">Copy Logs Path</button>
+      </div>
+      <div id="diag-log-tail-wrap" class="diag-log-tail-wrap hidden">
+        <pre id="diag-log-tail" class="diag-log-tail">Loading…</pre>
       </div>
     </div>
   </section>

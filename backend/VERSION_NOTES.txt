@@ -1,3 +1,95 @@
+# Force redeploy trigger 1782600000
+# v2.1.81 — 2026-07-03 — Native Dashboard auto-repair + service dependency
+#   Customer report addressed:
+#     Screenshot showed the v2.1.79 Diagnose panel working correctly
+#     ("Backend has never responded since Krexion started",
+#      "cannot reach 127.0.0.1:8001 (service not running?)",
+#      41 failed checks in 1m 16s) — but the customer still had no
+#     ONE-CLICK way to actually recover. They had to manually open
+#     Services.msc and start each service.
+#
+#   Root cause of the underlying "Backend never responds after fresh
+#   install" state:
+#     The installer did NOT declare `KrexionBackend depend=
+#     KrexionDatabase`. At Windows boot the two auto-start services
+#     race — uvicorn imports and tries to connect ~5 s before mongod
+#     opens its data files. Backend crashes on refused DB connect,
+#     NSSM restarts after AppRestartDelay=5000, occasionally NSSM's
+#     throttle kicks in and the service ends up STOPPED. From that
+#     point on the customer's PC never recovers on its own.
+#
+#   Three-layer fix:
+#
+#   1) INSTALLER — installer/krexion-setup.iss
+#      - New `sc config KrexionBackend depend= KrexionDatabase` step
+#        after the NSSM installation. Windows Service Control Manager
+#        now waits for KrexionDatabase to reach RUNNING before it
+#        starts KrexionBackend, killing the boot race for good.
+#      - Applies on fresh installs and re-installs. Existing installs
+#        get the fix the next time the customer runs the installer OR
+#        via the auto-repair path in (2)+(3).
+#
+#   2) DESKTOP — desktop/krexion_dashboard.py
+#      - New DashboardApi class exposed to the dashboard's JavaScript
+#        via `window.pywebview.api.*`:
+#          - check_services()          -> {backend:{state}, database:{state}}
+#          - restart_services()        -> runs `sc start KrexionDatabase`
+#                                         then `sc start KrexionBackend`,
+#                                         returns per-service result
+#          - open_logs_folder()        -> Explorer at {app}\logs
+#          - read_backend_log_tail(n)  -> last N lines of backend.stderr.log
+#          - open_krexion_com()        -> shell-open the cloud UI
+#      - Every method wrapped so an internal exception NEVER crashes
+#        the webview — it returns a structured {ok:False, error:"..."}
+#        payload that the JS can surface in the Diagnose panel.
+#      - `js_api=_dashboard_api` passed to webview.create_window() so
+#        the bridge is live from the moment the window opens.
+#      - CREATE_NO_WINDOW flag on every subprocess so `sc start`
+#        doesn't flash a black cmd popup over the dashboard.
+#
+#   3) DESKTOP — static/dashboard.js + index.html + style.css
+#      - AUTO-REPAIR: when the Diagnose panel first opens at t>=20s of
+#        backend downtime, the JS bridge silently fires ONE
+#        restart_services() attempt. Most customer PCs recover here.
+#      - RETRY NOW button: now ALWAYS tries a fresh restart_services()
+#        + waits 2s + re-polls, instead of just re-polling a still-
+#        dead port. Button label changes to "Repairing..." during
+#        the attempt so the customer sees something happening.
+#      - NEW UI in the Diagnose panel:
+#          - Service state badges (KrexionDatabase / KrexionBackend
+#            colour-coded RUNNING / STOPPED / NOT_INSTALLED / etc.)
+#          - Repair result line under the badges showing what
+#            restart_services() reported per service.
+#          - "Show Last 30 Lines" button that reads
+#            backend.stderr.log through the bridge and displays a
+#            scrollable log tail INSIDE the dashboard — customer
+#            can share the actual crash reason with support without
+#            leaving the app.
+#          - "Open Logs Folder" button that opens Explorer at
+#            {app}\logs so the customer doesn't have to type the
+#            path.
+#          - Instructions list rewritten to lead with "Click Retry
+#            Now" (the one-click fix) before falling back to the
+#            manual Services.msc steps.
+#      - Auto-repair state (autoRepairAttempted, autoRepairResult)
+#        added to _diag; resets on any successful poll so future
+#        outages get another silent attempt.
+#      - Graceful degradation: when the dashboard is opened outside
+#        PyWebView (file:// dev mode / repair mode), `_pyapi()`
+#        returns null and every bridge caller shows a friendly
+#        "auto-repair unavailable in this window mode" message
+#        instead of silently doing nothing.
+#
+#   Backward-compatibility:
+#     - All new bridge methods are additive. Existing dashboard.js
+#       behaviour on success + on early failure (<20 s) is bit-
+#       identical to v2.1.80.
+#     - Backend /api/desktop/stats untouched — no risk to VPS mode
+#       or dev-mode running.
+#     - Installer step is idempotent: `sc config ... depend= ...` is
+#       safe to re-run on an already-configured service.
+#
+
 # Force redeploy trigger 1782500000
 # v2.1.80 — 2026-07-03 — Link-level Pro-Referrer (RUT-style, per-click)
 #   Customer request addressed:

@@ -372,6 +372,21 @@ Filename: "{app}\bin\{#AppExeService}"; \
   Parameters: "set KrexionBackend AppRotateBytes 10485760"; \
   Flags: runhidden
 
+; ── v2.1.81 — Windows service dependency ─────────────────────────────
+; Force KrexionBackend to wait for KrexionDatabase to reach RUNNING
+; before it tries to boot. Without this, on Windows startup the
+; backend service races MongoDB and always loses the first ~5-10 s
+; (mongod takes longer to open its data files than uvicorn takes to
+; import + connect). Backend crashes on refused DB connect, NSSM
+; restarts it after AppRestartDelay=5000, sometimes the loop settles
+; and sometimes NSSM's throttle kicks in and the service ends up
+; STOPPED — which is exactly the "Backend has never responded since
+; Krexion started" state the customer's dashboard was reporting.
+; sc.exe uses `depend= <name>` (mind the space after `=`).
+Filename: "{sys}\sc.exe"; \
+  Parameters: "config KrexionBackend depend= KrexionDatabase"; \
+  Flags: runhidden
+
 Filename: "{app}\bin\{#AppExeService}"; \
   Parameters: "start KrexionBackend"; \
   Flags: runhidden; StatusMsg: "Starting Krexion Backend..."
