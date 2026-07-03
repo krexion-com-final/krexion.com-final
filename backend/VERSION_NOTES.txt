@@ -1,3 +1,127 @@
+# Force redeploy trigger 1782500000
+# v2.1.80 — 2026-07-03 — Link-level Pro-Referrer (RUT-style, per-click)
+#   Customer request addressed:
+#     "reffer system rut job hain wo sab jab link banaai wahan bhi
+#      use kar sakein taakay link banane ke baad customer link
+#      kahin bhi paste kare aur referrer system perfect kaam kare
+#      beshak wo rut job na chalaen — manual click par bhi kaam kare."
+#
+#   The full RUT referrer engine now runs at CLICK time on any tracking
+#   link that opts in via the new `referrer_pro_enabled` toggle. Every
+#   click on a saved link produces a fresh weighted-random platform
+#   pick, brand-tagged UTM campaign, real click-ID (fbclid/gclid/ttclid/
+#   msclkid/etc.), sec-fetch-* headers matching that platform, and
+#   optionally a Referer-Wrapper bounce (l.facebook.com/l.php?u=...,
+#   www.google.com/url?q=..., t.co/... etc.) so the offer network sees
+#   a REAL platform domain as the incoming Referer header.
+#
+#   1) BACKEND — server.py
+#      - LinkCreate / LinkUpdate / LinkResponse: 13 new pro-referrer
+#        fields, all optional with backend-safe defaults. Existing
+#        callers that omit them behave IDENTICALLY.
+#      - create_link persists the new fields into the link doc.
+#      - update_link needs no code change — its generic
+#        model_dump(exclude_unset=True) loop already picks up any
+#        new optional fields for partial-update calls.
+#      - Click handler (`/r/{short_code}` redirect): the new
+#        pro-referrer block runs AFTER the signed _kx_src handshake
+#        (so RUT-driven visits still win) and BEFORE the classic
+#        simulate_platform param generator. It calls
+#        referrer_pro.resolve_pro_visit() with the link's saved
+#        settings and feeds the chosen platform back into the
+#        existing UTM/click-id generator — zero rewrite of the
+#        proven click-decoration code.
+#      - Wrapper-redirect is a separate opt-in field. When enabled,
+#        the final 302 Location is rebuilt from the resolved
+#        wrapper URL with the fully-decorated target embedded in
+#        the wrapper's inner param, and Referrer-Policy is forced
+#        to `unsafe-url` so the wrapper domain is the actual
+#        Referer the offer receives.
+#      - New endpoint: POST /api/links/preview-referrer — runs the
+#        SAME resolve engine N (default 20) times against a mixed
+#        UA pool and returns per-sample platform / referer /
+#        utm_* / esp / click-id so the customer can eyeball the
+#        traffic mix in the UI before publishing the link.
+#
+#   2) BACKEND — referrer_pro.py
+#      - parse_weighted_pool now also accepts the natural
+#        `facebook:50,instagram:30,google:20` colon-format in
+#        addition to the existing JSON and equal-weight comma-list.
+#        Purely additive — every existing caller (RUT jobs,
+#        ReferrerStats, etc.) is untouched.
+#
+#   3) FRONTEND — LinksPage.js
+#      - New collapsible "Advanced Referrer System (RUT-style)" card
+#        under the classic "Referrer Simulation" section on the
+#        link create/edit dialog. Hidden by default; auto-opens
+#        when editing a link that already has it enabled.
+#      - Master toggle + platform pool + brand + search-engine +
+#        country + keywords + optional email_weights JSON + four
+#        boolean toggles (social wrapper / inapp deep path /
+#        strip search path / network click chain) + wrapper-redirect
+#        opt-in. All fields default OFF/EMPTY so the toggle acts
+#        as a hard on-off switch.
+#      - "Preview 20 Sample Clicks" button opens a modal with a
+#        platform-distribution mini-bar-chart + a per-sample table
+#        (UA type, platform, referer, utm_source, utm_medium)
+#        so customer sees exactly what mix their link will send.
+#
+#   Backward-compatibility (verified by testing_agent, 9/9 passed):
+#     - Old links (docs without ANY pro-referrer keys) load cleanly
+#       through LinkResponse defaults; click handler falls into the
+#       untouched legacy simulate_platform branch — zero shift.
+#     - Partial updates via PUT /api/links/{id} touch only the sent
+#       fields; forced_source / referrer_mode / simulate_platform /
+#       url_params / offer_url / name all stay intact.
+#     - RUT-signed visits (`_kx_src` handshake) still take priority
+#       over link-level pro-referrer — RUT jobs unaffected.
+#
+# v2.1.79 — 2026-07-03 — Native Local PC Dashboard "stuck on checking..." fix
+#   Customer report addressed:
+#     "native app run ki 2 hours ho gaye ye checking pe hi hai kuch
+#      bhi chal ni raha." — screenshot showed Backend Engine, Local
+#      Database, and krexion.com link all frozen at "checking..." state
+#      with CPU 0% / RAM 0 GB, license blank.
+#
+#   Root cause: dashboard.js polled /api/desktop/stats every 2 s and
+#   silently swallowed every failure — the initial "checking..." HTML
+#   never got overwritten when the KrexionBackend NSSM service on the
+#   customer's PC failed to come up. No timeout, no retry counter,
+#   no diagnostic surface — the customer had no way to know what
+#   was wrong.
+#
+#   1) DESKTOP — static/dashboard.js
+#      - Per-fetch 4 s AbortController timeout so "connection
+#        refused" and "endpoint hung" are distinguishable in the
+#        surfaced error message instead of the browser's opaque
+#        generic TypeError.
+#      - _diag state tracks firstFailAt / consecutiveFailures /
+#        lastError / everSucceeded / lastSuccessAt across polls.
+#      - Progressive failure copy — no more perpetual "starting up":
+#          8 s   -> yellow "not responding for 8s"
+#         20 s   -> open Diagnose panel with actionable next steps
+#         60 s   -> red "Backend offline for Nm Ns"
+#      - Downstream cards (DB, Cloud) now flip to "waiting for
+#        backend" / "last check failed" on failure so the UI
+#        stops lying with a stale "checking...".
+#      - Success resets all diagnostic state and hides the panel.
+#      - Retry-Now button fires an immediate poll (no 2 s wait).
+#
+#   2) DESKTOP — static/index.html
+#      - New <section id="diagnose-panel"> under the update banner:
+#        header with icon + one-line reason, stat row
+#        (downtime / failed checks / last error), an ordered
+#        instructions list (Services.msc -> KrexionBackend ->
+#        Restart, then also start KrexionDatabase, then check
+#        the log file), and a copy-to-clipboard button for the
+#        log file path.
+#
+#   3) DESKTOP — static/style.css
+#      - .diagnose-panel + .diagnose-danger variants matching the
+#        existing update-banner visual language, warn-orange border
+#        under 60 s -> red-danger border past 60 s.
+#
+
 # Force redeploy trigger 1782418017
 # v2.1.78 — 2026-07-02 — IPv6 support + VPS load-reduction + security hardening
 #   Customer reports addressed:

@@ -38,6 +38,41 @@
     </div>
   </section>
 
+  <!-- v2.1.79 — Diagnose panel: appears when local backend hasn't
+       answered for >20 s. Prevents the silent "checking… forever"
+       failure mode the customer hit on their fresh install. -->
+  <section id="diagnose-panel" class="diagnose-panel hidden" data-testid="diagnose-panel">
+    <div class="diagnose-head">
+      <div class="diagnose-title">
+        <span class="diagnose-icon">!</span>
+        <div>
+          <strong>Krexion Backend is not responding</strong>
+          <div class="diagnose-sub" id="diag-history">The KrexionBackend Windows service may not be running.</div>
+        </div>
+      </div>
+      <button id="diag-retry-btn" class="btn-primary" data-testid="diag-retry-btn">Retry Now</button>
+    </div>
+    <div class="diagnose-stats">
+      <div><span class="muted">Downtime</span><strong id="diag-downtime">—</strong></div>
+      <div><span class="muted">Failed checks</span><strong id="diag-retries">0</strong></div>
+      <div class="diag-error-cell"><span class="muted">Last error</span><strong id="diag-error">—</strong></div>
+    </div>
+    <div class="diagnose-actions">
+      <div class="diagnose-hint">
+        Try these steps (in order):
+        <ol>
+          <li>Open <b>Services.msc</b> → find <b>KrexionBackend</b> → right-click → Start (or Restart)</li>
+          <li>Also start <b>KrexionDatabase</b> if it's stopped</li>
+          <li>Still stuck? Open the log file at the path below and share the last 30 lines with support</li>
+        </ol>
+      </div>
+      <div class="diagnose-log-row">
+        <code class="diag-logpath">C:\Program Files\Krexion\logs\backend.stderr.log</code>
+        <button id="diag-copy-path-btn" class="btn-ghost" data-testid="diag-copy-path-btn">Copy Logs Path</button>
+      </div>
+    </div>
+  </section>
+
   <main class="grid">
     <!-- Service status -->
     <section class="card span-2" data-testid="services-card">

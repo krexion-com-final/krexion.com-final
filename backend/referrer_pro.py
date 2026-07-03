@@ -997,11 +997,36 @@ def parse_weighted_pool(value: str) -> List[Tuple[str, float]]:
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # Legacy comma-list — equal weight
+    # v2.1.80 — Support colon-separated `key:weight` pairs in addition
+    # to the legacy equal-weight comma-list. Additive change: JSON
+    # parsing above is untouched, and pure comma-lists without any `:`
+    # still fall through to the equal-weight branch unchanged (so
+    # nothing calling this with the OLD format sees any behaviour shift).
+    # Accepted formats now:
+    #   • "facebook:50,instagram:30,google:20"   ← weighted (new)
+    #   • "facebook,instagram,google"            ← equal-weight (legacy)
+    #   • "facebook: 50, instagram : 30"         ← tolerant to whitespace
+    has_colon = ":" in v
     for part in v.split(","):
-        key = part.strip().lower()
-        if key in VALID_PLATFORM_KEYS:
-            out.append((key, 1.0))
+        piece = part.strip()
+        if not piece:
+            continue
+        if has_colon and ":" in piece:
+            key, _, w = piece.partition(":")
+            key = key.strip().lower()
+            if key in VALID_PLATFORM_KEYS:
+                try:
+                    wf = float(w.strip())
+                    if wf > 0:
+                        out.append((key, wf))
+                except (TypeError, ValueError):
+                    # Malformed weight — fall back to equal-weight for
+                    # this one entry rather than dropping it silently.
+                    out.append((key, 1.0))
+        else:
+            key = piece.strip().lower()
+            if key in VALID_PLATFORM_KEYS:
+                out.append((key, 1.0))
     return out
 
 

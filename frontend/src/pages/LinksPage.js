@@ -8,7 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Badge } from "../components/ui/badge";
 import { toast } from "sonner";
-import { Plus, Copy, Pencil, Trash2, TrendingUp, Globe, Shield, Monitor, Smartphone, ExternalLink } from "lucide-react";
+import { Plus, Copy, Pencil, Trash2, TrendingUp, Globe, Shield, Monitor, Smartphone, ExternalLink, Sparkles, Eye, ChevronDown, ChevronUp } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -131,6 +131,11 @@ export default function LinksPage() {
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingLink, setEditingLink] = useState(null);
+  // v2.1.80 — Pro-Referrer collapsible section state
+  const [proReferrerOpen, setProReferrerOpen] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewData, setPreviewData] = useState(null);
   const [formData, setFormData] = useState({ 
     offer_url: "", 
     status: "active",
@@ -148,7 +153,23 @@ export default function LinksPage() {
     forced_source_name: "",
     referrer_mode: "normal",
     simulate_platform: "",
-    url_params: {}
+    url_params: {},
+    // v2.1.80 — Pro-Referrer defaults (all match backend defaults so
+    // creating a link with the section untouched behaves identically
+    // to before this feature landed).
+    referrer_pro_enabled: false,
+    referrer_pro_platform_pool: "",
+    referrer_pro_email_weights: "",
+    referrer_pro_brand: "",
+    referrer_pro_country: "",
+    referrer_pro_search_engine: "google",
+    referrer_pro_search_keywords: "",
+    referrer_pro_social_wrapper: true,
+    referrer_pro_inapp_deep_path: true,
+    referrer_pro_strip_search_path: true,
+    referrer_pro_network_click_chain: false,
+    referrer_pro_network_click_host: "",
+    referrer_pro_wrapper_redirect: false
   });
 
   useEffect(() => {
@@ -220,8 +241,22 @@ export default function LinksPage() {
       forced_source_name: "",
       referrer_mode: "normal",
       simulate_platform: "",
-      url_params: {}
+      url_params: {},
+      referrer_pro_enabled: false,
+      referrer_pro_platform_pool: "",
+      referrer_pro_email_weights: "",
+      referrer_pro_brand: "",
+      referrer_pro_country: "",
+      referrer_pro_search_engine: "google",
+      referrer_pro_search_keywords: "",
+      referrer_pro_social_wrapper: true,
+      referrer_pro_inapp_deep_path: true,
+      referrer_pro_strip_search_path: true,
+      referrer_pro_network_click_chain: false,
+      referrer_pro_network_click_host: "",
+      referrer_pro_wrapper_redirect: false
     });
+    setProReferrerOpen(false);
   };
 
   const handleDelete = async (id) => {
@@ -243,6 +278,44 @@ export default function LinksPage() {
     const trackingLink = `${PUBLIC_HOST}/api/t/${shortCode}`;
     copyToClipboard(trackingLink);
     toast.success("Tracking link copied to clipboard");
+  };
+
+  // v2.1.80 — Pro-Referrer preview. Calls the backend to generate N
+  // sample visits using the CURRENT form settings (without saving the
+  // link) so the customer can eyeball the mix before they publish.
+  const runReferrerPreview = async () => {
+    if (!formData.referrer_pro_platform_pool && !formData.referrer_pro_email_weights) {
+      toast.error("Add a platform pool (e.g. facebook:50,instagram:30,google:20) before previewing.");
+      return;
+    }
+    setPreviewLoading(true);
+    setPreviewOpen(true);
+    setPreviewData(null);
+    try {
+      const token = localStorage.getItem("token");
+      const res = await axios.post(`${API}/links/preview-referrer`, {
+        offer_url: formData.offer_url || "https://example.com/offer",
+        referrer_pro_platform_pool: formData.referrer_pro_platform_pool,
+        referrer_pro_email_weights: formData.referrer_pro_email_weights,
+        referrer_pro_brand: formData.referrer_pro_brand,
+        referrer_pro_country: formData.referrer_pro_country,
+        referrer_pro_search_engine: formData.referrer_pro_search_engine,
+        referrer_pro_search_keywords: formData.referrer_pro_search_keywords,
+        referrer_pro_social_wrapper: formData.referrer_pro_social_wrapper,
+        referrer_pro_inapp_deep_path: formData.referrer_pro_inapp_deep_path,
+        referrer_pro_strip_search_path: formData.referrer_pro_strip_search_path,
+        referrer_pro_network_click_chain: formData.referrer_pro_network_click_chain,
+        referrer_pro_network_click_host: formData.referrer_pro_network_click_host,
+        referrer_pro_wrapper_redirect: formData.referrer_pro_wrapper_redirect,
+        sample_count: 20
+      }, { headers: { Authorization: `Bearer ${token}` } });
+      setPreviewData(res.data);
+    } catch (err) {
+      toast.error(err.response?.data?.detail || "Preview failed");
+      setPreviewOpen(false);
+    } finally {
+      setPreviewLoading(false);
+    }
   };
 
   const openEditDialog = (link) => {
@@ -267,8 +340,27 @@ export default function LinksPage() {
       forced_source_name: link.forced_source_name || "",
       referrer_mode: link.referrer_mode || "normal",
       simulate_platform: link.simulate_platform || "",
-      url_params: link.url_params || {}
+      url_params: link.url_params || {},
+      // v2.1.80 — Pro-Referrer fields (safe defaults for OLD docs that
+      // don't have these keys — LinkResponse fills defaults server-side
+      // but we defensively fall back here too).
+      referrer_pro_enabled: link.referrer_pro_enabled || false,
+      referrer_pro_platform_pool: link.referrer_pro_platform_pool || "",
+      referrer_pro_email_weights: link.referrer_pro_email_weights || "",
+      referrer_pro_brand: link.referrer_pro_brand || "",
+      referrer_pro_country: link.referrer_pro_country || "",
+      referrer_pro_search_engine: link.referrer_pro_search_engine || "google",
+      referrer_pro_search_keywords: link.referrer_pro_search_keywords || "",
+      referrer_pro_social_wrapper: link.referrer_pro_social_wrapper !== undefined ? link.referrer_pro_social_wrapper : true,
+      referrer_pro_inapp_deep_path: link.referrer_pro_inapp_deep_path !== undefined ? link.referrer_pro_inapp_deep_path : true,
+      referrer_pro_strip_search_path: link.referrer_pro_strip_search_path !== undefined ? link.referrer_pro_strip_search_path : true,
+      referrer_pro_network_click_chain: link.referrer_pro_network_click_chain || false,
+      referrer_pro_network_click_host: link.referrer_pro_network_click_host || "",
+      referrer_pro_wrapper_redirect: link.referrer_pro_wrapper_redirect || false
     });
+    // Auto-expand the Pro-Referrer section when editing a link that
+    // already has it enabled — customer immediately sees their settings.
+    setProReferrerOpen(!!link.referrer_pro_enabled);
     setDialogOpen(true);
   };
 
@@ -663,6 +755,218 @@ export default function LinksPage() {
                 </div>
               </div>
 
+              {/* v2.1.80 — Advanced Referrer System (RUT-style, applied per-click) */}
+              <div className="p-4 bg-[var(--brand-card)] rounded-lg border border-[var(--brand-border)]">
+                <button
+                  type="button"
+                  onClick={() => setProReferrerOpen(!proReferrerOpen)}
+                  className="w-full flex items-center justify-between gap-2 text-left"
+                  data-testid="pro-referrer-toggle"
+                >
+                  <div className="flex items-center gap-2">
+                    <Sparkles size={18} className="text-[#F59E0B]" />
+                    <div>
+                      <Label className="text-base font-medium cursor-pointer">
+                        Advanced Referrer System (RUT-style)
+                      </Label>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Per-click platform rotation, real referer wrappers, brand-tagged UTMs — same engine as RUT jobs, applied automatically when anyone clicks this link
+                      </p>
+                    </div>
+                  </div>
+                  {proReferrerOpen ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+                </button>
+
+                {proReferrerOpen && (
+                  <div className="mt-4 space-y-4 pt-4 border-t border-[var(--brand-border)]">
+                    {/* Master toggle */}
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={formData.referrer_pro_enabled}
+                        onChange={(e) => setFormData({ ...formData, referrer_pro_enabled: e.target.checked })}
+                        className="w-4 h-4"
+                        data-testid="pro-referrer-enabled"
+                      />
+                      <span className="text-sm font-medium">
+                        Enable Pro-Referrer for this link
+                      </span>
+                    </label>
+                    <p className="text-xs text-[#F59E0B] -mt-2">
+                      When OFF, this link uses the classic Traffic Source + Referrer Mode fields above (safe / unchanged behavior). When ON, every click resolves fresh from the pool below.
+                    </p>
+
+                    {formData.referrer_pro_enabled && (
+                      <>
+                        {/* Platform Pool (weighted) */}
+                        <div>
+                          <Label className="text-xs text-[#A1A1AA]">Platform Pool (weighted)</Label>
+                          <Input
+                            value={formData.referrer_pro_platform_pool}
+                            onChange={(e) => setFormData({ ...formData, referrer_pro_platform_pool: e.target.value })}
+                            placeholder="facebook:50,instagram:30,google:15,email:5"
+                            className="mt-1"
+                            data-testid="pro-platform-pool"
+                          />
+                          <p className="text-xs text-[#52525B] mt-1">
+                            Comma-separated <code>platform:weight</code> pairs. Supported: facebook, instagram, tiktok, twitter, snapchat, pinterest, reddit, linkedin, youtube, whatsapp, telegram, google, bing, duckduckgo, yahoo, yandex, email
+                          </p>
+                        </div>
+
+                        {/* Brand */}
+                        <div>
+                          <Label className="text-xs text-[#A1A1AA]">Brand Tag (for UTM campaigns)</Label>
+                          <Input
+                            value={formData.referrer_pro_brand}
+                            onChange={(e) => setFormData({ ...formData, referrer_pro_brand: e.target.value })}
+                            placeholder="acme, mybrand, offer42..."
+                            className="mt-1"
+                          />
+                          <p className="text-xs text-[#52525B] mt-1">Feeds into utm_campaign naming (e.g. <code>acme_lookalike_m35_video_a</code>)</p>
+                        </div>
+
+                        {/* Search Engine + Keywords */}
+                        <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <Label className="text-xs text-[#A1A1AA]">Search Engine</Label>
+                            <select
+                              value={formData.referrer_pro_search_engine}
+                              onChange={(e) => setFormData({ ...formData, referrer_pro_search_engine: e.target.value })}
+                              className="w-full p-2 rounded-md bg-[var(--brand-card)] border border-[var(--brand-border)] text-white mt-1"
+                            >
+                              <option value="google">Google</option>
+                              <option value="bing">Bing</option>
+                              <option value="duckduckgo">DuckDuckGo</option>
+                              <option value="yahoo">Yahoo</option>
+                              <option value="yandex">Yandex</option>
+                            </select>
+                          </div>
+                          <div>
+                            <Label className="text-xs text-[#A1A1AA]">Country (ISO code)</Label>
+                            <Input
+                              value={formData.referrer_pro_country}
+                              onChange={(e) => setFormData({ ...formData, referrer_pro_country: e.target.value })}
+                              placeholder="us, uk, pk, in..."
+                              className="mt-1"
+                            />
+                          </div>
+                        </div>
+
+                        <div>
+                          <Label className="text-xs text-[#A1A1AA]">Search Keywords (one per line)</Label>
+                          <textarea
+                            value={formData.referrer_pro_search_keywords}
+                            onChange={(e) => setFormData({ ...formData, referrer_pro_search_keywords: e.target.value })}
+                            rows={3}
+                            placeholder="best diet plan 2026&#10;keto meals for beginners&#10;gluten free recipes"
+                            className="w-full p-2 rounded-md bg-[var(--brand-card)] border border-[var(--brand-border)] text-white mt-1 text-sm"
+                          />
+                          <p className="text-xs text-[#52525B] mt-1">Used when the pool picks a search engine (google, bing, etc.)</p>
+                        </div>
+
+                        {/* Email Weights */}
+                        <div>
+                          <Label className="text-xs text-[#A1A1AA]">Email Weights (JSON, optional)</Label>
+                          <Input
+                            value={formData.referrer_pro_email_weights}
+                            onChange={(e) => setFormData({ ...formData, referrer_pro_email_weights: e.target.value })}
+                            placeholder='{"gmail":40,"yahoo":25,"outlook":15,"empty":20}'
+                            className="mt-1 font-mono text-xs"
+                          />
+                          <p className="text-xs text-[#52525B] mt-1">ESP mix used when pool picks <code>email</code></p>
+                        </div>
+
+                        {/* Toggles */}
+                        <div className="grid grid-cols-2 gap-2">
+                          <label className="flex items-center gap-2 cursor-pointer p-2 rounded border border-[var(--brand-border)]">
+                            <input
+                              type="checkbox"
+                              checked={formData.referrer_pro_social_wrapper}
+                              onChange={(e) => setFormData({ ...formData, referrer_pro_social_wrapper: e.target.checked })}
+                              className="w-4 h-4"
+                            />
+                            <span className="text-xs">Social wrappers (l.fb.com, etc.)</span>
+                          </label>
+                          <label className="flex items-center gap-2 cursor-pointer p-2 rounded border border-[var(--brand-border)]">
+                            <input
+                              type="checkbox"
+                              checked={formData.referrer_pro_inapp_deep_path}
+                              onChange={(e) => setFormData({ ...formData, referrer_pro_inapp_deep_path: e.target.checked })}
+                              className="w-4 h-4"
+                            />
+                            <span className="text-xs">In-app deep paths (FB/IG webview)</span>
+                          </label>
+                          <label className="flex items-center gap-2 cursor-pointer p-2 rounded border border-[var(--brand-border)]">
+                            <input
+                              type="checkbox"
+                              checked={formData.referrer_pro_strip_search_path}
+                              onChange={(e) => setFormData({ ...formData, referrer_pro_strip_search_path: e.target.checked })}
+                              className="w-4 h-4"
+                            />
+                            <span className="text-xs">Strip search-engine paths</span>
+                          </label>
+                          <label className="flex items-center gap-2 cursor-pointer p-2 rounded border border-[var(--brand-border)]">
+                            <input
+                              type="checkbox"
+                              checked={formData.referrer_pro_network_click_chain}
+                              onChange={(e) => setFormData({ ...formData, referrer_pro_network_click_chain: e.target.checked })}
+                              className="w-4 h-4"
+                            />
+                            <span className="text-xs">Network-click chain</span>
+                          </label>
+                        </div>
+
+                        {formData.referrer_pro_network_click_chain && (
+                          <div>
+                            <Label className="text-xs text-[#A1A1AA]">Network Click Host</Label>
+                            <Input
+                              value={formData.referrer_pro_network_click_host}
+                              onChange={(e) => setFormData({ ...formData, referrer_pro_network_click_host: e.target.value })}
+                              placeholder="tracker.example.com"
+                              className="mt-1"
+                            />
+                          </div>
+                        )}
+
+                        {/* Wrapper redirect — the powerful one */}
+                        <label className="flex items-start gap-2 cursor-pointer p-3 rounded border-2 border-[#F59E0B] bg-[#F59E0B08]">
+                          <input
+                            type="checkbox"
+                            checked={formData.referrer_pro_wrapper_redirect}
+                            onChange={(e) => setFormData({ ...formData, referrer_pro_wrapper_redirect: e.target.checked })}
+                            className="w-4 h-4 mt-0.5"
+                            data-testid="pro-wrapper-redirect"
+                          />
+                          <div>
+                            <span className="text-sm font-medium">Wrapper redirect chain (recommended)</span>
+                            <p className="text-xs text-[#A1A1AA] mt-1">
+                              Bounces every click through the real platform wrapper (<code>l.facebook.com/l.php?u=...</code>, <code>google.com/url?q=...</code>, <code>t.co/...</code> etc.). The offer sees a REAL platform domain as Referer — most powerful anti-detect. Adds ~50ms per click.
+                            </p>
+                          </div>
+                        </label>
+
+                        {/* Preview button */}
+                        <div className="flex items-center gap-2 pt-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            onClick={runReferrerPreview}
+                            disabled={previewLoading}
+                            className="gap-2"
+                            data-testid="preview-referrer-btn"
+                          >
+                            <Eye size={16} />
+                            {previewLoading ? "Generating…" : "Preview 20 Sample Clicks"}
+                          </Button>
+                          <span className="text-xs text-[#52525B]">See exactly what traffic mix your link will produce</span>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+
+
               <Button type="submit" data-testid="submit-link-button" className="w-full">
                 {editingLink ? "Update Link" : "Create Link"}
               </Button>
@@ -826,6 +1130,90 @@ export default function LinksPage() {
           </CardContent>
         </Card>
       )}
+
+      {/* v2.1.80 — Pro-Referrer Preview Modal (20 sample clicks) */}
+      <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
+        <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto bg-[var(--brand-bg)] border-[var(--brand-border)]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Eye size={18} className="text-[#F59E0B]" />
+              Pro-Referrer Preview — {previewData?.sample_count || 0} sample clicks
+            </DialogTitle>
+            <DialogDescription>
+              What each click on this link will look like to the offer network, based on your current settings.
+            </DialogDescription>
+          </DialogHeader>
+
+          {previewLoading && (
+            <div className="py-8 text-center text-muted-foreground text-sm">Generating samples…</div>
+          )}
+
+          {previewData && !previewLoading && (
+            <div className="space-y-4">
+              {/* Distribution bar */}
+              <div className="p-3 bg-[var(--brand-card)] rounded-lg border border-[var(--brand-border)]">
+                <p className="text-xs font-medium text-[#A1A1AA] mb-2">Platform distribution</p>
+                <div className="space-y-1">
+                  {(previewData.distribution || []).map((d) => (
+                    <div key={d.platform} className="flex items-center gap-2 text-xs">
+                      <span className="w-24 truncate font-medium">{d.platform}</span>
+                      <div className="flex-1 h-4 bg-[var(--brand-bg)] rounded overflow-hidden relative">
+                        <div
+                          className="h-full bg-[#F59E0B] transition-all"
+                          style={{ width: `${d.pct}%` }}
+                        />
+                      </div>
+                      <span className="w-16 text-right text-[#A1A1AA]">{d.count} ({d.pct}%)</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {previewData.wrapper_redirect && (
+                <div className="p-2 bg-[#F59E0B15] border border-[#F59E0B] rounded text-xs text-[#F59E0B]">
+                  Wrapper redirect is ON — every click will bounce through the referer URL below so the offer sees a real platform domain.
+                </div>
+              )}
+
+              {/* Sample list */}
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="border-[var(--brand-border)] hover:bg-transparent">
+                      <TableHead className="w-8">#</TableHead>
+                      <TableHead>UA</TableHead>
+                      <TableHead>Platform</TableHead>
+                      <TableHead>Referer</TableHead>
+                      <TableHead>UTM Source</TableHead>
+                      <TableHead>UTM Medium</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {(previewData.samples || []).map((s) => (
+                      <TableRow key={s.index} className="border-[var(--brand-border)] text-xs">
+                        <TableCell className="font-mono text-[#52525B]">{s.index}</TableCell>
+                        <TableCell>
+                          <Badge variant="outline" className="text-[10px]">
+                            {s.ua_type === "mobile" ? <Smartphone size={10} className="inline mr-1" /> : <Monitor size={10} className="inline mr-1" />}
+                            {s.ua_type}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="font-medium">{s.platform || <span className="text-[#52525B]">—</span>}</TableCell>
+                        <TableCell className="font-mono text-[10px] max-w-[280px] truncate" title={s.referer}>
+                          {s.referer || <span className="text-[#52525B]">(direct)</span>}
+                        </TableCell>
+                        <TableCell className="text-[10px]">{s.utm_source || "—"}</TableCell>
+                        <TableCell className="text-[10px]">{s.utm_medium || "—"}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
     </div>
   );
 }

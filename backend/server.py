@@ -2177,6 +2177,24 @@ class LinkCreate(BaseModel):
     referrer_mode: str = "normal"  # normal, no_referrer, with_params
     url_params: Optional[dict] = None  # Custom URL parameters to add to offer URL
     simulate_platform: Optional[str] = None  # facebook, tiktok, instagram, google, etc.
+    # ── 2026-07 v2.1.80: Pro-Referrer link settings (RUT-style, applied
+    # at click time). All optional + default to inactive so every
+    # existing link continues to behave EXACTLY as before. The click
+    # handler only takes the pro-referrer path when
+    # `referrer_pro_enabled` is True.
+    referrer_pro_enabled: bool = False
+    referrer_pro_platform_pool: Optional[str] = None       # e.g. "facebook:50,instagram:30,google:20"
+    referrer_pro_email_weights: Optional[str] = None       # JSON string {"gmail":20,"yahoo":15,...}
+    referrer_pro_brand: Optional[str] = None               # UTM branding tag
+    referrer_pro_country: Optional[str] = None             # ISO code for search-engine locale
+    referrer_pro_search_engine: str = "google"             # google | bing | duckduckgo | yahoo | yandex
+    referrer_pro_search_keywords: Optional[str] = None     # newline-separated
+    referrer_pro_social_wrapper: bool = True
+    referrer_pro_inapp_deep_path: bool = True
+    referrer_pro_strip_search_path: bool = True
+    referrer_pro_network_click_chain: bool = False
+    referrer_pro_network_click_host: Optional[str] = None
+    referrer_pro_wrapper_redirect: bool = False            # OFF by default — safer. When ON, bounces through l.facebook.com / google.com/url etc. so the final target sees a real wrapper Referer.
 
 class LinkUpdate(BaseModel):
     offer_url: Optional[str] = None
@@ -2194,6 +2212,20 @@ class LinkUpdate(BaseModel):
     referrer_mode: Optional[str] = None
     url_params: Optional[dict] = None
     simulate_platform: Optional[str] = None
+    # v2.1.80 — Pro-Referrer (all optional so partial updates work)
+    referrer_pro_enabled: Optional[bool] = None
+    referrer_pro_platform_pool: Optional[str] = None
+    referrer_pro_email_weights: Optional[str] = None
+    referrer_pro_brand: Optional[str] = None
+    referrer_pro_country: Optional[str] = None
+    referrer_pro_search_engine: Optional[str] = None
+    referrer_pro_search_keywords: Optional[str] = None
+    referrer_pro_social_wrapper: Optional[bool] = None
+    referrer_pro_inapp_deep_path: Optional[bool] = None
+    referrer_pro_strip_search_path: Optional[bool] = None
+    referrer_pro_network_click_chain: Optional[bool] = None
+    referrer_pro_network_click_host: Optional[str] = None
+    referrer_pro_wrapper_redirect: Optional[bool] = None
 
 class LinkResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -2213,6 +2245,21 @@ class LinkResponse(BaseModel):
     referrer_mode: str = "normal"
     url_params: Optional[dict] = None
     simulate_platform: Optional[str] = None
+    # v2.1.80 — Pro-Referrer echo. Defaults keep OLD docs (that don't
+    # have any of these keys) valid — Pydantic just fills defaults.
+    referrer_pro_enabled: bool = False
+    referrer_pro_platform_pool: Optional[str] = None
+    referrer_pro_email_weights: Optional[str] = None
+    referrer_pro_brand: Optional[str] = None
+    referrer_pro_country: Optional[str] = None
+    referrer_pro_search_engine: str = "google"
+    referrer_pro_search_keywords: Optional[str] = None
+    referrer_pro_social_wrapper: bool = True
+    referrer_pro_inapp_deep_path: bool = True
+    referrer_pro_strip_search_path: bool = True
+    referrer_pro_network_click_chain: bool = False
+    referrer_pro_network_click_host: Optional[str] = None
+    referrer_pro_wrapper_redirect: bool = False
     clicks: int = 0
     conversions: int = 0
     revenue: float = 0.0
@@ -14155,6 +14202,22 @@ async def create_link(link: LinkCreate, user: dict = Depends(get_current_user_wi
         "referrer_mode": link.referrer_mode or "normal",
         "url_params": link.url_params,
         "simulate_platform": link.simulate_platform,
+        # v2.1.80 — Pro-Referrer settings persisted on link (all optional;
+        # click handler ignores everything when referrer_pro_enabled=False,
+        # so pre-existing links continue to behave identically).
+        "referrer_pro_enabled": bool(link.referrer_pro_enabled),
+        "referrer_pro_platform_pool": link.referrer_pro_platform_pool,
+        "referrer_pro_email_weights": link.referrer_pro_email_weights,
+        "referrer_pro_brand": link.referrer_pro_brand,
+        "referrer_pro_country": link.referrer_pro_country,
+        "referrer_pro_search_engine": link.referrer_pro_search_engine or "google",
+        "referrer_pro_search_keywords": link.referrer_pro_search_keywords,
+        "referrer_pro_social_wrapper": bool(link.referrer_pro_social_wrapper),
+        "referrer_pro_inapp_deep_path": bool(link.referrer_pro_inapp_deep_path),
+        "referrer_pro_strip_search_path": bool(link.referrer_pro_strip_search_path),
+        "referrer_pro_network_click_chain": bool(link.referrer_pro_network_click_chain),
+        "referrer_pro_network_click_host": link.referrer_pro_network_click_host,
+        "referrer_pro_wrapper_redirect": bool(link.referrer_pro_wrapper_redirect),
         "clicks": 0,
         "conversions": 0,
         "revenue": 0.0,
@@ -14218,6 +14281,111 @@ async def update_link(link_id: str, link_update: LinkUpdate, user: dict = Depend
         link.update(update_data)
     
     return LinkResponse(**link)
+
+
+# v2.1.80 — Pro-Referrer preview endpoint. Runs resolve_pro_visit N times
+# with the SAME settings the click handler will use, so the customer can
+# see EXACTLY what per-click platform / UTM / referer / click-id rotation
+# their link will produce, BEFORE they publish it. Called from the Links
+# page's "Preview 20 Visits" button.
+class LinkPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    # All fields optional so the UI can call preview even for a link
+    # that hasn't been saved yet (real-time preview while editing).
+    offer_url: Optional[str] = "https://example.com/offer"
+    referrer_pro_platform_pool: Optional[str] = None
+    referrer_pro_email_weights: Optional[str] = None
+    referrer_pro_brand: Optional[str] = None
+    referrer_pro_country: Optional[str] = None
+    referrer_pro_search_engine: str = "google"
+    referrer_pro_search_keywords: Optional[str] = None
+    referrer_pro_social_wrapper: bool = True
+    referrer_pro_inapp_deep_path: bool = True
+    referrer_pro_strip_search_path: bool = True
+    referrer_pro_network_click_chain: bool = False
+    referrer_pro_network_click_host: Optional[str] = None
+    referrer_pro_wrapper_redirect: bool = False
+    sample_count: int = 20
+
+
+@api_router.post("/links/preview-referrer")
+async def preview_referrer_settings(
+    req: LinkPreviewRequest,
+    user: dict = Depends(get_current_user_with_fresh_data)
+):
+    """Return N sample visits so the customer sees the traffic mix their
+    Pro-Referrer settings will produce. Purely a read-only preview — no
+    DB writes, no cookies, no side effects."""
+    check_user_feature(user, "links")
+    try:
+        from referrer_pro import resolve_pro_visit as _rpv
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Referrer engine unavailable: {e}")
+
+    # A small pool of realistic UAs so the preview reflects the actual
+    # mix (desktop + mobile) the customer's audience will click from.
+    _SAMPLE_UAS = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+        "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+    ]
+
+    n = max(1, min(int(req.sample_count or 20), 100))
+    samples: List[Dict[str, Any]] = []
+    platform_counts: Dict[str, int] = {}
+    for i in range(n):
+        ua = _SAMPLE_UAS[i % len(_SAMPLE_UAS)]
+        try:
+            pro = _rpv(
+                ua=ua,
+                platform_pool_value=str(req.referrer_pro_platform_pool or ""),
+                email_weights_value=str(req.referrer_pro_email_weights or ""),
+                brand=str(req.referrer_pro_brand or ""),
+                target_url=str(req.offer_url or "https://example.com/offer"),
+                country=req.referrer_pro_country or None,
+                search_engine=str(req.referrer_pro_search_engine or "google"),
+                search_keywords=str(req.referrer_pro_search_keywords or ""),
+                social_wrapper_enabled=bool(req.referrer_pro_social_wrapper),
+                inapp_deep_path_enabled=bool(req.referrer_pro_inapp_deep_path),
+                strip_search_path=bool(req.referrer_pro_strip_search_path),
+                network_click_chain_enabled=bool(req.referrer_pro_network_click_chain),
+                network_click_host=req.referrer_pro_network_click_host or None,
+            )
+        except Exception as e:
+            samples.append({"index": i + 1, "error": str(e)})
+            continue
+
+        plat = pro.get("platform") or "unknown"
+        platform_counts[plat] = platform_counts.get(plat, 0) + 1
+        samples.append({
+            "index": i + 1,
+            "ua_type": "mobile" if ("Mobile" in ua or "iPhone" in ua) else "desktop",
+            "platform": plat,
+            "esp": pro.get("esp") or "",
+            "referer": pro.get("referer") or "",
+            "utm_source": pro.get("utm_source") or "",
+            "utm_medium": pro.get("utm_medium") or "",
+            "utm_campaign": pro.get("utm_campaign") or "",
+            "network_click_referer": pro.get("network_click_referer") or "",
+            "wrapper_will_bounce": bool(req.referrer_pro_wrapper_redirect and pro.get("referer")),
+        })
+
+    # Distribution summary the UI can show as a mini bar chart.
+    dist = [
+        {"platform": p, "count": c, "pct": round(c * 100.0 / n, 1)}
+        for p, c in sorted(platform_counts.items(), key=lambda kv: -kv[1])
+    ]
+    return {
+        "ok": True,
+        "sample_count": n,
+        "samples": samples,
+        "distribution": dist,
+        "wrapper_redirect": bool(req.referrer_pro_wrapper_redirect),
+    }
+
+
 
 @api_router.delete("/links/{link_id}")
 async def delete_link(link_id: str, user: dict = Depends(get_current_user_with_fresh_data)):
@@ -17534,6 +17702,9 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     #     worst-case impact is cosmetic.
     # We strip all five params from `url_params` so the offer never
     # sees the handshake tokens.
+    _kx_src_was_verified = False  # v2.1.80: gate so link-level pro-referrer
+                                  # only fires for MANUAL clicks (RUT already
+                                  # did its own resolve_pro_visit for signed visits).
     try:
         _kx_src     = (url_params or {}).pop("_kx_src",     None) if isinstance(url_params, dict) else None
         _kx_sig     = (url_params or {}).pop("_kx_sig",     None) if isinstance(url_params, dict) else None
@@ -17542,6 +17713,7 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         _kx_brand   = (url_params or {}).pop("_kx_brand",   None) if isinstance(url_params, dict) else None
         if _kx_src and _kx_sig and _kx_src_verify(_kx_src, _kx_sig):
             simulate_platform = _kx_src
+            _kx_src_was_verified = True
             # Also drop them from custom_params if echoed there.
             if isinstance(custom_params, dict):
                 for _k in ("_kx_src", "_kx_sig", "_kx_esp", "_kx_esp_sig", "_kx_brand"):
@@ -17560,6 +17732,71 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     except Exception:
         # Defensive: never let signal handshake bugs break the redirect.
         pass
+
+    # ── v2.1.80 — Link-level Pro-Referrer (RUT-style, MANUAL clicks) ──
+    # When the link has `referrer_pro_enabled=True` AND this visit is a
+    # MANUAL click (not a RUT-signed visit that already resolved its
+    # own platform), we run the FULL RUT referrer engine here so the
+    # same link, pasted anywhere by the customer (WhatsApp, IG bio,
+    # email, whatever), produces per-click platform/UTM/click-id
+    # rotation identical to what a RUT job would send.
+    #
+    # Backward compatibility: this whole block is a no-op unless the
+    # customer explicitly enables the toggle on their link. Every
+    # existing link stays on the classic `forced_source`/`simulate_platform`
+    # code path unchanged.
+    pro_wrapper_target = ""  # set below when wrapper_redirect is enabled
+    if (not _kx_src_was_verified) and bool(link.get("referrer_pro_enabled")):
+        try:
+            from referrer_pro import resolve_pro_visit as _rpv, is_inapp_browser_ua as _iiba
+            _pro = _rpv(
+                ua=user_agent or "",
+                platform_pool_value=str(link.get("referrer_pro_platform_pool") or ""),
+                email_weights_value=str(link.get("referrer_pro_email_weights") or ""),
+                brand=str(link.get("referrer_pro_brand") or ""),
+                target_url=destination_url,
+                country=(link.get("referrer_pro_country") or country or None),
+                search_engine=str(link.get("referrer_pro_search_engine") or "google"),
+                search_keywords=str(link.get("referrer_pro_search_keywords") or ""),
+                social_wrapper_enabled=bool(link.get("referrer_pro_social_wrapper", True)),
+                inapp_deep_path_enabled=bool(link.get("referrer_pro_inapp_deep_path", True)),
+                strip_search_path=bool(link.get("referrer_pro_strip_search_path", True)),
+                network_click_chain_enabled=bool(link.get("referrer_pro_network_click_chain", False)),
+                network_click_host=(link.get("referrer_pro_network_click_host") or None),
+            )
+            _pro_platform = _pro.get("platform", "")
+            _pro_referer  = _pro.get("referer", "")
+            if _pro_platform:
+                # Feed the picked platform into the existing UTM / click-id
+                # generator (fbclid / gclid / ttclid / utm_* etc.) — the
+                # same code the manual `simulate_platform` toggle uses.
+                simulate_platform = _pro_platform
+                # Preserve brand so generate_platform_params can produce
+                # branded UTM campaigns.
+                _brand_val = link.get("referrer_pro_brand") or ""
+                if _brand_val:
+                    if not isinstance(custom_params, dict):
+                        custom_params = {}
+                    custom_params.setdefault("__brand", str(_brand_val)[:64])
+                # Email path — forward chosen ESP so URL params (mc_cid,
+                # _kx, _hsenc, ...) match the referer host generate_platform_params picks.
+                _pro_esp = _pro.get("esp", "")
+                if _pro_platform == "email" and _pro_esp:
+                    if not isinstance(custom_params, dict):
+                        custom_params = {}
+                    custom_params.setdefault("__force_esp", _pro_esp)
+            # Wrapper-redirect: instead of a bare 302 to the target, bounce
+            # through the wrapper referer URL (l.facebook.com / google.com/url
+            # / t.co / etc.) so the offer sees a REAL platform Referer header.
+            # The wrapper URL from resolve_pro_visit already embeds the
+            # final target in its `u=` / `q=` param, so the user lands on
+            # the actual offer after one extra hop (~50 ms).
+            if bool(link.get("referrer_pro_wrapper_redirect")) and _pro_referer:
+                pro_wrapper_target = _pro_referer
+        except Exception as _pro_err:
+            # Defensive: never let a bad platform_pool string break the
+            # redirect. Fall through to legacy behaviour silently.
+            logger.debug(f"[link-pro-referrer] resolve failed (safe fallback): {_pro_err}")
 
     if simulate_platform:
         # 2026-06-14: forward the brand (from _kx_brand handshake) so the
@@ -17617,7 +17854,35 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     elif referrer_mode == "origin":
         headers["Referrer-Policy"] = "origin"
 
-    resp = RedirectResponse(url=destination_url, status_code=302, headers=headers)
+    # v2.1.80 — Pro-Referrer wrapper redirect. When the link enables
+    # `referrer_pro_wrapper_redirect` AND resolve_pro_visit produced a
+    # wrapper URL (l.facebook.com/l.php?u=..., google.com/url?q=...,
+    # t.co/... etc.), bounce the user through the wrapper first. The
+    # wrapper embeds `destination_url` inside its own `u=` / `q=` /
+    # `url=` parameter, and the wrapping platform (FB/Google/Twitter)
+    # forwards the user with THEIR domain as the Referer — which is
+    # exactly what the offer network wants to see. One extra hop of
+    # ~50 ms; ~zero anti-detect surface exposed.
+    _final_redirect_url = destination_url
+    if pro_wrapper_target:
+        try:
+            # Re-write the wrapper's inner target to the FULLY
+            # decorated destination_url (with fbclid/gclid/utm_* etc.
+            # already merged in above) so the offer sees params AND a
+            # real wrapper Referer.
+            from referrer_pro import rebuild_referer_with_target as _rrwt
+            _rebuilt = _rrwt(pro_wrapper_target, destination_url)
+            if _rebuilt:
+                _final_redirect_url = _rebuilt
+            # Wrapper flow must NOT strip the referrer — the whole point
+            # is the wrapper domain becomes the Referer.
+            headers.pop("Referrer-Policy", None)
+            headers["Referrer-Policy"] = "unsafe-url"
+        except Exception as _wrap_err:
+            logger.debug(f"[link-pro-referrer] wrapper rebuild failed (safe fallback to direct 302): {_wrap_err}")
+            _final_redirect_url = destination_url
+
+    resp = RedirectResponse(url=_final_redirect_url, status_code=302, headers=headers)
 
     # ──────────────────────────────────────────────────────────────────
     # 2026-01: Set the signed duplicate-protection cookie. On every

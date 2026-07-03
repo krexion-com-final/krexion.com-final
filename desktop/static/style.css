@@ -133,6 +133,94 @@ html, body {
 .update-banner-text span { font-size: 12px; color: var(--text-2); }
 .update-banner-actions { display: flex; gap: 8px; }
 
+/* ── Diagnose panel (v2.1.79) ──────────────────────────────────
+   Appears when the local backend hasn't responded for >20 s so
+   the customer sees actionable info instead of a silent
+   "checking…" for hours. */
+.diagnose-panel {
+  margin: 14px 22px 0 22px;
+  border-radius: var(--radius);
+  background: linear-gradient(90deg, rgba(247, 185, 85, 0.10), rgba(247, 185, 85, 0.04));
+  border: 1px solid rgba(247, 185, 85, 0.40);
+  padding: 16px 18px;
+  box-shadow: var(--shadow);
+}
+.diagnose-panel.hidden { display: none; }
+.diagnose-panel.diagnose-danger {
+  background: linear-gradient(90deg, rgba(239, 77, 94, 0.12), rgba(239, 77, 94, 0.05));
+  border-color: rgba(239, 77, 94, 0.45);
+}
+.diagnose-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.diagnose-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex: 1;
+}
+.diagnose-icon {
+  width: 32px; height: 32px;
+  border-radius: 8px;
+  background: var(--warn);
+  color: var(--bg-0);
+  display: grid; place-items: center;
+  font-weight: 700; font-size: 18px;
+  flex-shrink: 0;
+}
+.diagnose-panel.diagnose-danger .diagnose-icon { background: var(--danger); color: #fff; }
+.diagnose-title strong { display: block; font-size: 14px; color: var(--text-1); }
+.diagnose-sub { font-size: 12px; color: var(--text-2); margin-top: 2px; }
+.diagnose-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr 2fr;
+  gap: 16px;
+  margin-top: 14px;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.20);
+  border-radius: 10px;
+}
+.diagnose-stats > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.diagnose-stats span.muted { font-size: 11px; }
+.diagnose-stats strong { font-size: 13px; color: var(--text-1); font-weight: 600; }
+.diag-error-cell strong {
+  font-family: "Consolas", "Fira Mono", monospace;
+  font-size: 12px;
+  color: var(--warn);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.diagnose-panel.diagnose-danger .diag-error-cell strong { color: var(--danger); }
+.diagnose-actions { margin-top: 14px; }
+.diagnose-hint { font-size: 12px; color: var(--text-2); }
+.diagnose-hint b { color: var(--text-1); }
+.diagnose-hint ol { margin: 6px 0 0 0; padding-left: 20px; }
+.diagnose-hint li { margin: 3px 0; }
+.diagnose-log-row {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.diag-logpath {
+  flex: 1;
+  min-width: 200px;
+  font-size: 12px;
+  padding: 6px 10px;
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-2);
+  font-family: "Consolas", "Fira Mono", monospace;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
 /* ── Grid layout ───────────────────────────────────────────────── */
 .grid {
   flex: 1;
