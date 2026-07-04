@@ -1,4 +1,61 @@
 # Force redeploy trigger 1782600000
+# v2.1.82 — 2026-01 — Windows Service UTF-8 stdout hotfix (CRITICAL)
+#   Customer report addressed:
+#     Fresh v2.1.81 native install shows "Backend offline · KrexionBackend
+#     PAUSED · start failed" immediately after installation. Diagnose panel
+#     runs auto-repair, still fails. Manual `sc start KrexionBackend` fails
+#     the same way. `backend.stderr.log` shows:
+#
+#       Traceback (most recent call last):
+#         ...
+#         File "C:\Program Files\Krexion\bin\app\server.py", line 1619, in <module>
+#           print(
+#         File "encodings\cp1252.py", line 19, in encode
+#       UnicodeEncodeError: 'charmap' codec can't encode characters
+#                           in position 0-1: character maps to <undefined>
+#
+#   Root cause:
+#     NSSM launches the KrexionBackend Windows Service with NO console
+#     attached, so Python's sys.stdout falls back to the legacy system
+#     codepage (cp1252 on English/Western Windows). The moment server.py
+#     hits the JWT_SECRET_KEY / ADMIN_PASSWORD default-warning `print()`
+#     block (which starts with the "⚠️" emoji), the encoder blows up and
+#     the whole service crash-loops. The v2.1.81 auto-repair only
+#     RESTARTS the service — it can't help because the very first line
+#     the fresh process runs re-triggers the same encode error.
+#
+#     Cloud VPS (Linux, UTF-8 default) and the Electron desktop app
+#     (spawn env sets PYTHONIOENCODING=utf-8) are unaffected. This bug
+#     is native-Windows-service ONLY.
+#
+#   Two-layer fix:
+#
+#   1) SERVER — backend/server.py (top of file, before ANY other import)
+#      - Reconfigure sys.stdout / sys.stderr to UTF-8 with errors="replace"
+#        the moment the module loads. Uses getattr(...) + try/except so
+#        the reconfigure never itself crashes the boot on exotic stream
+#        types. This is the same technique the Electron backend already
+#        relies on via PYTHONIOENCODING; we're just doing it in-process
+#        so it also protects the native NSSM service where the env var
+#        was missing.
+#      - THIS is what unblocks every customer already stuck on a crash-
+#        looping v2.1.81 install the moment they auto-update.
+#
+#   2) INSTALLER — installer/krexion-setup.iss
+#      - Extends NSSM `AppEnvironmentExtra` with `PYTHONIOENCODING=utf-8`
+#        and `PYTHONUTF8=1` so fresh installs get the safe environment
+#        from the very first byte of stdout, matching Electron's
+#        spawn env. Belt-and-suspenders with (1).
+#      - Applies on fresh installs and installer-based updates. Existing
+#        crashed installs get unblocked by (1) alone, no re-install needed.
+#
+#   Verified:
+#     - Simulated Windows cp1252 stdout locally, ran the exact ⚠️
+#       print from server.py:1619 — passes cleanly after the fix.
+#     - Cloud (Linux) backend restart: all 15+ modules still load,
+#       admin login + /api/site-content + /api/banners/active all
+#       return 200. Zero behavioural change on Linux/Docker.
+#
 # v2.1.81 — 2026-07-03 — Native Dashboard auto-repair + service dependency
 #   Customer report addressed:
 #     Screenshot showed the v2.1.79 Diagnose panel working correctly

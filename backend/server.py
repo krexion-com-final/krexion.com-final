@@ -1,3 +1,41 @@
+# ─────────────────────────────────────────────────────────────────────
+# 2026-01 — Windows Service UTF-8 stdout/stderr fix (v2.1.82 hotfix)
+# ─────────────────────────────────────────────────────────────────────
+# On Windows native installs the KrexionBackend service is launched by
+# NSSM WITHOUT a console attached, so Python falls back to the legacy
+# system codepage (cp1252 on English Windows). The moment any print()
+# or logging call emits a non-ASCII character (e.g. the "⚠️" emoji in
+# the JWT_SECRET_KEY / ADMIN_PASSWORD warnings around line ~1620), the
+# whole service crashes on boot with:
+#
+#   UnicodeEncodeError: 'charmap' codec can't encode characters
+#                       in position 0-1: character maps to <undefined>
+#
+# Symptom customers see: "Backend offline · KrexionBackend PAUSED ·
+# start failed" in the Krexion Local PC Dashboard. Cloud (Linux) and
+# the Electron desktop app are unaffected because Linux defaults to
+# UTF-8 and Electron spawns Python with PYTHONIOENCODING=utf-8.
+#
+# The bulletproof fix is to reconfigure sys.stdout / sys.stderr to
+# UTF-8 as the very first thing server.py does — before ANY import
+# or line that might print. errors='replace' guarantees we never
+# crash even on exotic bytes in future logs. The installer .iss now
+# also sets PYTHONIOENCODING=utf-8 on the service env (belt-and-
+# suspenders for fresh installs), but THIS block is what unblocks
+# every customer already stuck on a crash-looping v2.1.81 install
+# the moment they auto-update.
+import sys as _krexion_sys_utf8_bootstrap
+for _stream_name in ("stdout", "stderr"):
+    _stream = getattr(_krexion_sys_utf8_bootstrap, _stream_name, None)
+    _reconfigure = getattr(_stream, "reconfigure", None) if _stream is not None else None
+    if _reconfigure is not None:
+        try:
+            _reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            # Never let the encoding fix itself crash the service.
+            pass
+# ─────────────────────────────────────────────────────────────────────
+
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Form, BackgroundTasks, Body
 from fastapi.responses import RedirectResponse, Response, FileResponse
 from dotenv import load_dotenv

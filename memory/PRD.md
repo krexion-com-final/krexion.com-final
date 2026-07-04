@@ -38,6 +38,48 @@ Releases page (customer sees "Update Available" notification).
   * Build Native Windows Release ✅ (Krexion-Setup-v2.1.76.exe)
   * Build Electron Desktop ✅ (Krexion-Desktop-Setup-2.1.76.exe)
 
+### 2026-01 — Preview Workspace Rehydrated (this session)
+- Fresh clone of krexion.com-final into /app; git history + origin/main intact
+- GitHub PAT stored in credentials + remote URL (Save-to-Github ready)
+- backend/.env + frontend/.env created locally (gitignored)
+- All backend deps installed, frontend yarn install completed
+- Services running: backend (8001), frontend (3000), mongodb — all healthy
+- Preview URL live at https://3e063bef-799f-49f2-bf16-a2b74f5ee6df.preview.emergentagent.com
+- Admin login verified: `admin@krexion.local` / `Krexion@Preview2026`
+
+### 2026-01 — v2.1.82 Windows Service UTF-8 Crash Hotfix (this session)
+Customer report: Fresh v2.1.81 native install → "Backend offline · KrexionBackend
+PAUSED · start failed" from the very first boot. backend.stderr.log shows:
+
+```
+File "C:\Program Files\Krexion\bin\app\server.py", line 1619, in <module>
+    print(...)
+  File "encodings\cp1252.py", line 19, in encode
+UnicodeEncodeError: 'charmap' codec can't encode characters in position 0-1
+```
+
+Root cause: NSSM runs the KrexionBackend service without a console attached,
+so Python's sys.stdout falls back to cp1252 (legacy Windows codepage). The
+"⚠️" emoji in the JWT_SECRET_KEY / ADMIN_PASSWORD default warnings blows up
+the encoder → the whole service crash-loops. Auto-repair can't recover
+because every fresh boot re-hits the same encode error. Cloud (Linux, UTF-8
+default) and Electron (spawn env sets PYTHONIOENCODING=utf-8) are unaffected.
+
+Fix (two layers):
+1. **backend/server.py** — reconfigure sys.stdout/stderr to UTF-8 (errors=replace)
+   as the very first thing the module does, before ANY other import. Uses
+   getattr + try/except so it never itself crashes boot. Self-heals every
+   existing crashed customer install on next auto-update. Zero behavioural
+   change on Linux.
+2. **installer/krexion-setup.iss** — extend NSSM `AppEnvironmentExtra` with
+   `PYTHONIOENCODING=utf-8` and `PYTHONUTF8=1` so fresh installs get the safe
+   environment from byte 1 of stdout (matching Electron's spawn env).
+
+Verified locally by simulating cp1252 stdout and running the exact ⚠️ print
+from server.py:1619 — passes cleanly. Cloud backend restart: all modules
+load, admin login + /api/site-content all HTTP 200. VERSION bumped 2.1.81→2.1.82,
+VERSION_NOTES.txt updated. Waiting for user's "deploy karo" to push.
+
 ## Architecture Decisions
 - KREXION_MODE=cloud (VPS): serves frontend via dedicated container
 - KREXION_MODE=native/local (customer PC): serves frontend from
@@ -60,3 +102,8 @@ Customer clicks update → new installer downloaded + run silently.
 - Browser Profile launch: 30 s → 2 s
 - RUT job start latency: 30-60 s → < 500 ms (60× faster)
 - Cloud UI (mobile) job list: 60 s → < 2 s (30× faster)
+
+## Effect on Reported Issues (v2.1.82)
+- KrexionBackend Windows service: crash-loop on boot → clean start
+- Fresh native installs: works on first boot (no manual sc restart needed)
+- Existing crashed v2.1.81 installs: self-heal on next update (no re-install)

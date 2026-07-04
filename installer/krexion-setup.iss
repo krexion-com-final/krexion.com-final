@@ -338,8 +338,18 @@ Filename: "{app}\bin\{#AppExeService}"; \
 ; state. We wrap EVERY "NAME=VALUE" pair in literal quotes (Inno Setup
 ; doubles "" -> ") so each one arrives at NSSM as a single argv entry,
 ; regardless of the install path the customer picks.
+;
+; 2026-01 (v2.1.82) — PYTHONIOENCODING=utf-8 + PYTHONUTF8=1 added.
+; Without these two the Windows Service has no console attached and
+; Python's sys.stdout falls back to cp1252, so the FIRST print() with
+; a non-ASCII char (the "⚠️" warning around server.py:~1620 for the
+; JWT_SECRET_KEY / ADMIN_PASSWORD defaults) crashes the backend on
+; boot → "KrexionBackend PAUSED / start failed" in the dashboard.
+; server.py also self-heals via sys.stdout.reconfigure(), but setting
+; these here means the very first byte written to stdout is already
+; UTF-8, which is how the Electron build already runs the backend.
 Filename: "{app}\bin\{#AppExeService}"; \
-  Parameters: "set KrexionBackend AppEnvironmentExtra ""MONGO_URL=mongodb://127.0.0.1:27017"" ""DB_NAME=krexion"" ""KREXION_MODE=native"" ""KREXION_BUILD_TYPE=binary"" ""KREXION_CLOUD_URL={#AppURL}"" ""KREXION_SYNC_STATUS_FILE={commonappdata}\Krexion\sync-status.json"" ""PLAYWRIGHT_BROWSERS_PATH={app}\browser-engine"" ""STRICT_CLOUD_HEAVY_BLOCK=false"" ""LICENSE_KEY_FILE={commonappdata}\Krexion\license-key.txt"""; \
+  Parameters: "set KrexionBackend AppEnvironmentExtra ""MONGO_URL=mongodb://127.0.0.1:27017"" ""DB_NAME=krexion"" ""KREXION_MODE=native"" ""KREXION_BUILD_TYPE=binary"" ""KREXION_CLOUD_URL={#AppURL}"" ""KREXION_SYNC_STATUS_FILE={commonappdata}\Krexion\sync-status.json"" ""PLAYWRIGHT_BROWSERS_PATH={app}\browser-engine"" ""STRICT_CLOUD_HEAVY_BLOCK=false"" ""LICENSE_KEY_FILE={commonappdata}\Krexion\license-key.txt"" ""PYTHONIOENCODING=utf-8"" ""PYTHONUTF8=1"""; \
   Flags: runhidden
 
 Filename: "{app}\bin\{#AppExeService}"; \
