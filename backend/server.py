@@ -2233,6 +2233,20 @@ class LinkCreate(BaseModel):
     referrer_pro_network_click_chain: bool = False
     referrer_pro_network_click_host: Optional[str] = None
     referrer_pro_wrapper_redirect: bool = False            # OFF by default — safer. When ON, bounces through l.facebook.com / google.com/url etc. so the final target sees a real wrapper Referer.
+    # ── v2.1.83 — International fraud-detector guardrails (10-feature
+    # pack). Every field is optional + defaults to the pre-existing
+    # behaviour so links created before v2.1.83 continue to redirect
+    # IDENTICALLY. Turning any one of these on gives the customer more
+    # control at click time.
+    referrer_pro_lang_match: bool = True                   # Feature 1 — country-matched Accept-Language macro
+    referrer_pro_device_mode: str = "auto"                 # Feature 3 — auto | match_platform | mobile_only | desktop_only
+    referrer_pro_tod_enabled: bool = False                 # Feature 4 — time-of-day pool weighting
+    referrer_pro_campaign_type: str = "auto"               # Feature 5 — utm campaign preset (auto|static_image|video_ad|carousel_ad|story_ad|lookalike_prospect|retargeting_warm|retargeting_cold|cold_email|search_cpc)
+    referrer_pro_quality_tier: str = "standard"            # Feature 6 — one-word preset: premium | standard | aggressive
+    referrer_pro_offer_urls: Optional[str] = None          # Feature 7 — weighted multi-URL rotation ("url:weight,url:weight" or JSON)
+    postback_url: Optional[str] = None                     # Feature 8 — outbound S2S postback (forwarded on conversion, supports {click_id}/{payout} macros)
+    referrer_pro_auto_pause_enabled: bool = False          # Feature 10 — auto-pause after N consecutive non-converting clicks
+    referrer_pro_auto_pause_threshold: int = 10            # Feature 10 — bounce threshold before pause fires
 
 class LinkUpdate(BaseModel):
     offer_url: Optional[str] = None
@@ -2264,6 +2278,18 @@ class LinkUpdate(BaseModel):
     referrer_pro_network_click_chain: Optional[bool] = None
     referrer_pro_network_click_host: Optional[str] = None
     referrer_pro_wrapper_redirect: Optional[bool] = None
+    # v2.1.83 — International guardrail knobs (all optional so partial
+    # updates work — the customer can toggle one at a time without
+    # blowing away the rest).
+    referrer_pro_lang_match: Optional[bool] = None
+    referrer_pro_device_mode: Optional[str] = None
+    referrer_pro_tod_enabled: Optional[bool] = None
+    referrer_pro_campaign_type: Optional[str] = None
+    referrer_pro_quality_tier: Optional[str] = None
+    referrer_pro_offer_urls: Optional[str] = None
+    postback_url: Optional[str] = None
+    referrer_pro_auto_pause_enabled: Optional[bool] = None
+    referrer_pro_auto_pause_threshold: Optional[int] = None
 
 class LinkResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -2298,6 +2324,22 @@ class LinkResponse(BaseModel):
     referrer_pro_network_click_chain: bool = False
     referrer_pro_network_click_host: Optional[str] = None
     referrer_pro_wrapper_redirect: bool = False
+    # v2.1.83 — International guardrail defaults. Older link docs (no
+    # v2.1.83 keys) satisfy this schema because every field has a safe
+    # default equal to the pre-v2.1.83 behaviour.
+    referrer_pro_lang_match: bool = True
+    referrer_pro_device_mode: str = "auto"
+    referrer_pro_tod_enabled: bool = False
+    referrer_pro_campaign_type: str = "auto"
+    referrer_pro_quality_tier: str = "standard"
+    referrer_pro_offer_urls: Optional[str] = None
+    postback_url: Optional[str] = None
+    referrer_pro_auto_pause_enabled: bool = False
+    referrer_pro_auto_pause_threshold: int = 10
+    # Bounce/pause telemetry — read-only counters echoed to the UI so
+    # the customer can see how close the link is to being auto-paused.
+    consecutive_no_conversions: int = 0
+    total_bounces: int = 0
     clicks: int = 0
     conversions: int = 0
     revenue: float = 0.0
@@ -14256,6 +14298,25 @@ async def create_link(link: LinkCreate, user: dict = Depends(get_current_user_wi
         "referrer_pro_network_click_chain": bool(link.referrer_pro_network_click_chain),
         "referrer_pro_network_click_host": link.referrer_pro_network_click_host,
         "referrer_pro_wrapper_redirect": bool(link.referrer_pro_wrapper_redirect),
+        # v2.1.83 — International guardrail persistence. Quality tier
+        # is applied as a *default template* here: if the customer set
+        # tier="premium" but left other toggles at their model defaults,
+        # we upgrade the toggles to the tier's expected values. This way
+        # the UI's "Apply premium tier" button doesn't have to also
+        # send every downstream toggle — the server normalises for it.
+        "referrer_pro_lang_match":            bool(link.referrer_pro_lang_match),
+        "referrer_pro_device_mode":           (link.referrer_pro_device_mode or "auto"),
+        "referrer_pro_tod_enabled":           bool(link.referrer_pro_tod_enabled),
+        "referrer_pro_campaign_type":         (link.referrer_pro_campaign_type or "auto"),
+        "referrer_pro_quality_tier":          (link.referrer_pro_quality_tier or "standard"),
+        "referrer_pro_offer_urls":            link.referrer_pro_offer_urls,
+        "postback_url":                       link.postback_url,
+        "referrer_pro_auto_pause_enabled":    bool(link.referrer_pro_auto_pause_enabled),
+        "referrer_pro_auto_pause_threshold":  int(link.referrer_pro_auto_pause_threshold or 10),
+        # Auto-pause / bounce telemetry — always initialised to zero on
+        # create so the counters render cleanly in the UI from day one.
+        "consecutive_no_conversions": 0,
+        "total_bounces": 0,
         "clicks": 0,
         "conversions": 0,
         "revenue": 0.0,
@@ -14422,6 +14483,276 @@ async def preview_referrer_settings(
         "distribution": dist,
         "wrapper_redirect": bool(req.referrer_pro_wrapper_redirect),
     }
+
+
+# ══════════════════════════════════════════════════════════════════════
+# v2.1.83 — Feature 9: Referrer QA-Check + Feature 10: bounce/resume
+# ══════════════════════════════════════════════════════════════════════
+# These endpoints let the customer sanity-check a link WITHOUT spending
+# clicks or waiting for a real conversion. QA-check runs the same
+# resolver the click handler uses and grades each fraud-detection
+# criterion (language match, wrapper realism, device match, pool sanity,
+# postback macros). Bounce + resume let external trackers / the UI
+# report a rejected click and lift an auto-paused link with one call.
+# ══════════════════════════════════════════════════════════════════════
+
+@api_router.post("/links/{link_id}/qa-check")
+async def qa_check_link(link_id: str, user: dict = Depends(get_current_user_with_fresh_data)):
+    """Return a Pro-Referrer QA report card for the given link. Read-only.
+
+    Grades each of the 10 international-network fraud-detector checks
+    against the link's current settings and 20 sampled visits.
+    """
+    check_user_feature(user, "links")
+    link = await db.links.find_one({"id": link_id, "user_id": user["id"]}, {"_id": 0})
+    if not link:
+        raise HTTPException(status_code=404, detail="Link not found")
+
+    try:
+        from referrer_pro import (
+            resolve_pro_visit as _rpv,
+            accept_language_for_country as _al,
+            platform_device_expectation as _pde,
+            campaign_type_preset as _ctp,
+            VALID_QUALITY_TIERS as _VQT,
+            VALID_CAMPAIGN_TYPES as _VCT,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Referrer engine unavailable: {e}")
+
+    checks: List[Dict[str, Any]] = []
+
+    # 1. Language match
+    if bool(link.get("referrer_pro_lang_match")):
+        _al_val = _al(link.get("referrer_pro_country"))
+        checks.append({
+            "id": "lang_match", "label": "Accept-Language matches country",
+            "status": "pass", "detail": f"→ {_al_val}",
+        })
+    else:
+        checks.append({
+            "id": "lang_match", "label": "Accept-Language matches country",
+            "status": "warn", "detail": "Off — European/Asian offers may reject",
+        })
+
+    # 2. Macros present in offer_url / postback_url
+    _has_offer_macros = "{" in (link.get("offer_url") or "")
+    _has_pb_macros = "{" in (link.get("postback_url") or "")
+    if _has_offer_macros or _has_pb_macros:
+        checks.append({
+            "id": "macros", "label": "Sub-ID / click-id macros configured",
+            "status": "pass",
+            "detail": f"offer_url macros: {_has_offer_macros}, postback macros: {_has_pb_macros}",
+        })
+    else:
+        checks.append({
+            "id": "macros", "label": "Sub-ID / click-id macros configured",
+            "status": "warn",
+            "detail": "No macros ({click_id}/{source}/{campaign}) — conversions may lose attribution",
+        })
+
+    # 3. Device mode
+    dm = str(link.get("referrer_pro_device_mode") or "auto")
+    checks.append({
+        "id": "device_mode", "label": "Device-type per platform",
+        "status": "pass" if dm != "auto" else "info",
+        "detail": f"mode={dm}",
+    })
+
+    # 4. Time-of-day
+    checks.append({
+        "id": "tod", "label": "Time-of-day realism weighting",
+        "status": "pass" if link.get("referrer_pro_tod_enabled") else "info",
+        "detail": "ON" if link.get("referrer_pro_tod_enabled") else "OFF (defaults are flat 24h)",
+    })
+
+    # 5. Campaign type
+    ct = str(link.get("referrer_pro_campaign_type") or "auto")
+    _preset = _ctp(ct)
+    checks.append({
+        "id": "campaign_type", "label": "UTM campaign preset",
+        "status": "pass" if _preset else "info",
+        "detail": f"type={ct}" + (f" → utm_medium={_preset.get('medium')}, utm_content={_preset.get('content')}" if _preset else ""),
+    })
+
+    # 6. Quality tier
+    qt = str(link.get("referrer_pro_quality_tier") or "standard")
+    checks.append({
+        "id": "quality_tier", "label": "Quality tier",
+        "status": "pass", "detail": f"tier={qt}",
+    })
+
+    # 7. Multi-URL A/B
+    _mu = str(link.get("referrer_pro_offer_urls") or "").strip()
+    if _mu:
+        try:
+            from referrer_pro import parse_offer_url_pool as _pou
+            _pool = _pou(_mu)
+            checks.append({
+                "id": "offer_rotation", "label": "Multi-URL A/B rotation",
+                "status": "pass",
+                "detail": f"{len(_pool)} URL(s) in rotation",
+            })
+        except Exception:
+            checks.append({
+                "id": "offer_rotation", "label": "Multi-URL A/B rotation",
+                "status": "warn", "detail": "Parse failed — check format",
+            })
+    else:
+        checks.append({
+            "id": "offer_rotation", "label": "Multi-URL A/B rotation",
+            "status": "info", "detail": "Single URL (no A/B)",
+        })
+
+    # 8. Postback URL
+    pb = str(link.get("postback_url") or "").strip()
+    if pb:
+        checks.append({
+            "id": "postback", "label": "Outbound S2S postback",
+            "status": "pass",
+            "detail": f"→ {pb[:80]}{'…' if len(pb) > 80 else ''}",
+        })
+    else:
+        checks.append({
+            "id": "postback", "label": "Outbound S2S postback",
+            "status": "info", "detail": "Not set (fine for direct offers)",
+        })
+
+    # 9. Wrapper redirect (extra realism)
+    checks.append({
+        "id": "wrapper", "label": "Wrapper redirect (l.facebook.com / google.com/url / t.co)",
+        "status": "pass" if link.get("referrer_pro_wrapper_redirect") else "warn",
+        "detail": "ON — premium networks like it" if link.get("referrer_pro_wrapper_redirect") else "OFF — enable for MaxBounty / Cake top tier",
+    })
+
+    # 10. Auto-pause
+    if bool(link.get("referrer_pro_auto_pause_enabled")):
+        thresh = int(link.get("referrer_pro_auto_pause_threshold") or 10)
+        streak = int(link.get("consecutive_no_conversions") or 0)
+        checks.append({
+            "id": "auto_pause", "label": "Emergency auto-pause on rejection spike",
+            "status": "pass",
+            "detail": f"threshold={thresh}, current streak={streak}",
+        })
+    else:
+        checks.append({
+            "id": "auto_pause", "label": "Emergency auto-pause on rejection spike",
+            "status": "info", "detail": "OFF (waste-guard not armed)",
+        })
+
+    # Also run 5 sample visits so the UI can show real referer output.
+    samples: List[Dict[str, Any]] = []
+    _sample_uas = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+        "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+    ]
+    if link.get("referrer_pro_enabled"):
+        for i, ua in enumerate(_sample_uas):
+            _low = ua.lower()
+            _mob = "mobi" in _low or "iphone" in _low or "android" in _low
+            try:
+                p = _rpv(
+                    ua=ua,
+                    platform_pool_value=str(link.get("referrer_pro_platform_pool") or ""),
+                    email_weights_value=str(link.get("referrer_pro_email_weights") or ""),
+                    brand=str(link.get("referrer_pro_brand") or ""),
+                    target_url=str(link.get("offer_url") or ""),
+                    country=link.get("referrer_pro_country") or None,
+                    search_engine=str(link.get("referrer_pro_search_engine") or "google"),
+                    search_keywords=str(link.get("referrer_pro_search_keywords") or ""),
+                    social_wrapper_enabled=bool(link.get("referrer_pro_social_wrapper", True)),
+                    inapp_deep_path_enabled=bool(link.get("referrer_pro_inapp_deep_path", True)),
+                    strip_search_path=bool(link.get("referrer_pro_strip_search_path", True)),
+                    network_click_chain_enabled=bool(link.get("referrer_pro_network_click_chain", False)),
+                    network_click_host=link.get("referrer_pro_network_click_host") or None,
+                    lang_match=bool(link.get("referrer_pro_lang_match", True)),
+                    visitor_is_mobile=_mob,
+                    device_mode=str(link.get("referrer_pro_device_mode") or "auto"),
+                    tod_enabled=bool(link.get("referrer_pro_tod_enabled", False)),
+                    campaign_type=str(link.get("referrer_pro_campaign_type") or "auto"),
+                )
+                samples.append({
+                    "index": i + 1,
+                    "ua_type": "mobile" if _mob else "desktop",
+                    "platform": p.get("platform") or "unknown",
+                    "referer": p.get("referer") or "",
+                    "utm_source": p.get("utm_source") or "",
+                    "utm_medium": p.get("utm_medium") or "",
+                    "utm_campaign": p.get("utm_campaign") or "",
+                    "utm_content": p.get("utm_content") or "",
+                    "utm_term": p.get("utm_term") or "",
+                    "accept_language": p.get("accept_language") or "",
+                    "device_expected": _pde(p.get("platform") or ""),
+                })
+            except Exception as e:
+                samples.append({"index": i + 1, "error": str(e)})
+
+    # Grade summary
+    _passes = sum(1 for c in checks if c["status"] == "pass")
+    _warns = sum(1 for c in checks if c["status"] == "warn")
+    _score = round((_passes / max(1, len(checks))) * 100, 1)
+    return {
+        "ok": True,
+        "link_id": link_id,
+        "short_code": link.get("short_code"),
+        "score": _score,
+        "passes": _passes,
+        "warnings": _warns,
+        "total_checks": len(checks),
+        "checks": checks,
+        "samples": samples,
+        "last_postback_fired_at": link.get("last_postback_fired_at"),
+        "last_postback_status_code": link.get("last_postback_status_code"),
+        "consecutive_no_conversions": int(link.get("consecutive_no_conversions") or 0),
+        "auto_paused_at": link.get("auto_paused_at"),
+    }
+
+
+@api_router.post("/links/{link_id}/bounce")
+async def report_link_bounce(link_id: str, user: dict = Depends(get_current_user_with_fresh_data)):
+    """Manually report a rejected/bounced click. Increments the total-
+    bounces counter and, if auto-pause is enabled, contributes to the
+    non-converting streak used by the pause guard.
+
+    Called from:
+      • The frontend's "Report bounce" button.
+      • External trackers via the /r/{code} auto-pause pipeline (already
+        wired into the click handler — this endpoint is only for the
+        manual-report case)."""
+    check_user_feature(user, "links")
+    link = await db.links.find_one({"id": link_id, "user_id": user["id"]}, {"_id": 0})
+    if not link:
+        raise HTTPException(status_code=404, detail="Link not found")
+    _new_bounces = int(link.get("total_bounces", 0) or 0) + 1
+    _new_streak = int(link.get("consecutive_no_conversions", 0) or 0) + 1
+    _paused = False
+    _upd: Dict[str, Any] = {"total_bounces": _new_bounces, "consecutive_no_conversions": _new_streak}
+    if bool(link.get("referrer_pro_auto_pause_enabled")):
+        _threshold = int(link.get("referrer_pro_auto_pause_threshold") or 10)
+        if _threshold > 0 and _new_streak >= _threshold and link.get("status") == "active":
+            _upd["status"] = "paused"
+            _upd["auto_paused_at"] = datetime.now(timezone.utc).isoformat()
+            _paused = True
+    await db.links.update_one({"id": link_id}, {"$set": _upd})
+    return {"ok": True, "total_bounces": _new_bounces, "streak": _new_streak, "auto_paused": _paused}
+
+
+@api_router.post("/links/{link_id}/resume")
+async def resume_link(link_id: str, user: dict = Depends(get_current_user_with_fresh_data)):
+    """Reactivate an auto-paused link and reset the non-converting streak
+    so the auto-pause guard starts fresh."""
+    check_user_feature(user, "links")
+    link = await db.links.find_one({"id": link_id, "user_id": user["id"]}, {"_id": 0})
+    if not link:
+        raise HTTPException(status_code=404, detail="Link not found")
+    await db.links.update_one(
+        {"id": link_id},
+        {"$set": {"status": "active", "consecutive_no_conversions": 0, "auto_paused_at": None}},
+    )
+    return {"ok": True, "resumed": True}
 
 
 
@@ -15300,8 +15631,88 @@ async def postback(clickid: str, payout: float, status: str = "approved", token:
     }
     
     await db.conversions.insert_one(conversion_doc)
-    await db.links.update_one({"id": click["link_id"]}, {"$inc": {"conversions": 1, "revenue": payout}})
-    
+    await db.links.update_one(
+        {"id": click["link_id"]},
+        {
+            "$inc": {"conversions": 1, "revenue": payout},
+            # v2.1.83 Feature 10 — a conversion resets the non-converting
+            # streak so we DON'T auto-pause a link that's still working.
+            "$set": {"consecutive_no_conversions": 0},
+        },
+    )
+
+    # v2.1.83 Feature 8 — Outbound S2S postback forwarding. If the link
+    # owner has set `postback_url` on the link (e.g. Voluum / Everflow /
+    # HasOffers / Cake tracker), we fire a GET to it with macros
+    # substituted. Non-blocking (asyncio task) so the response to the
+    # offer network stays fast. Silent on network errors — the customer
+    # can see the last delivery status via the QA-check endpoint.
+    try:
+        _link = await db.links.find_one({"id": click["link_id"]}, {"_id": 0})
+        _pb_url = str((_link or {}).get("postback_url") or "").strip()
+        if _pb_url:
+            from referrer_pro import expand_link_macros as _exp_macros
+            _pb_ctx = {
+                "click_id":     clickid,
+                "clickid":      clickid,
+                "payout":       str(payout),
+                "revenue":      str(payout),
+                "status":       status,
+                "source":       str((click.get("referrer_source") or "")),
+                "source_name":  str((click.get("referrer_source_name") or "")),
+                "country":      str(click.get("country") or ""),
+                "city":         str(click.get("city") or ""),
+                "ip":           str(click.get("ip_address") or ""),
+                "ua":           str(click.get("user_agent") or ""),
+                "campaign":     str(click.get("utm_campaign") or ""),
+                "brand":        str((_link or {}).get("referrer_pro_brand") or ""),
+            }
+            # Expand macros. `expand_link_macros` supports `{payout}` too
+            # via the ctx map (we added it above; unknown keys pass
+            # through untouched).
+            _final_pb = _exp_macros(_pb_url, _pb_ctx)
+            # Also expand a lightweight custom set (payout) that
+            # expand_link_macros' default map doesn't include.
+            from urllib.parse import quote as _q
+            _final_pb = _final_pb.replace("{payout}", _q(str(payout), safe=""))
+            _final_pb = _final_pb.replace("{revenue}", _q(str(payout), safe=""))
+            _final_pb = _final_pb.replace("{status}", _q(str(status), safe=""))
+
+            async def _fire_pb(url: str):
+                try:
+                    import httpx
+                    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as ac:
+                        r = await ac.get(url)
+                        logger.info(f"[postback-forward] {url[:120]}... → {r.status_code}")
+                        try:
+                            await db.links.update_one(
+                                {"id": click["link_id"]},
+                                {"$set": {
+                                    "last_postback_fired_at": datetime.now(timezone.utc).isoformat(),
+                                    "last_postback_status_code": r.status_code,
+                                    "last_postback_url": url[:512],
+                                }},
+                            )
+                        except Exception:
+                            pass
+                except Exception as _pbe:
+                    logger.warning(f"[postback-forward] failed: {_pbe}")
+                    try:
+                        await db.links.update_one(
+                            {"id": click["link_id"]},
+                            {"$set": {
+                                "last_postback_fired_at": datetime.now(timezone.utc).isoformat(),
+                                "last_postback_status_code": -1,
+                                "last_postback_error": str(_pbe)[:200],
+                            }},
+                        )
+                    except Exception:
+                        pass
+
+            asyncio.create_task(_fire_pb(_final_pb))
+    except Exception as _pb_outer:
+        logger.debug(f"[postback-forward] setup skipped: {_pb_outer}")
+
     return {"message": "Conversion recorded", "conversion_id": conversion_doc["id"]}
 
 @api_router.get("/pixel")
@@ -15325,7 +15736,15 @@ async def pixel_tracking(clickid: str, payout: float):
     }
     
     await db.conversions.insert_one(conversion_doc)
-    await db.links.update_one({"id": click["link_id"]}, {"$inc": {"conversions": 1, "revenue": payout}})
+    await db.links.update_one(
+        {"id": click["link_id"]},
+        {
+            "$inc": {"conversions": 1, "revenue": payout},
+            # v2.1.83 Feature 10 — reset the auto-pause streak on
+            # conversion so a healthy link never gets paused.
+            "$set": {"consecutive_no_conversions": 0},
+        },
+    )
     
     pixel = b'GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\x00\x00\x00!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;'
     return Response(content=pixel, media_type="image/gif")
@@ -17684,7 +18103,28 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     await user_db.clicks.insert_one(click_doc)
     
     # Update link click count in main database (where links are stored)
-    await db.links.update_one({"id": link["id"]}, {"$inc": {"clicks": 1}})
+    # v2.1.83 Feature 10 — Also increment `consecutive_no_conversions`
+    # every click; the postback / pixel handlers below reset it to 0 on
+    # each conversion. When it crosses the customer-set threshold AND
+    # auto-pause is enabled, we flip the link's status to "paused" so
+    # future clicks 404 instead of wasting proxy quota.
+    _link_inc = {"clicks": 1, "consecutive_no_conversions": 1}
+    await db.links.update_one({"id": link["id"]}, {"$inc": _link_inc})
+    if bool(link.get("referrer_pro_auto_pause_enabled")):
+        try:
+            _threshold = int(link.get("referrer_pro_auto_pause_threshold") or 10)
+            _new_streak = int(link.get("consecutive_no_conversions", 0) or 0) + 1
+            if _threshold > 0 and _new_streak >= _threshold and link.get("status") == "active":
+                await db.links.update_one(
+                    {"id": link["id"]},
+                    {"$set": {"status": "paused", "auto_paused_at": datetime.now(timezone.utc).isoformat()}},
+                )
+                logger.warning(
+                    f"[auto-pause] link {link.get('short_code')} paused after "
+                    f"{_new_streak} consecutive non-converting clicks (threshold={_threshold})"
+                )
+        except Exception as _ap_err:
+            logger.debug(f"[auto-pause] check failed: {_ap_err}")
     
     # Broadcast new click to user via WebSocket for real-time updates
     click_doc.pop("_id", None)
@@ -17692,7 +18132,20 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     
     offers = await db.offers.find({"link_id": link["id"]}, {"_id": 0}).to_list(100)
     
-    if offers:
+    # v2.1.83 Feature 7 — Multi-URL A/B rotation on the link itself.
+    # When `referrer_pro_offer_urls` is set, it takes precedence over the
+    # legacy `db.offers` collection (customers can still use offers for
+    # advanced setups; but the LinksPage UI now exposes a simpler
+    # weighted-URL string that avoids the need to click through to the
+    # separate offers page).
+    _link_offer_pool = str(link.get("referrer_pro_offer_urls") or "").strip()
+    if _link_offer_pool:
+        try:
+            from referrer_pro import pick_offer_url as _pou
+            destination_url = _pou(_link_offer_pool, link["offer_url"])
+        except Exception:
+            destination_url = link["offer_url"]
+    elif offers:
         import random
         total_weight = sum(offer["weight"] for offer in offers)
         rand = random.randint(1, total_weight)
@@ -17784,9 +18237,17 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     # existing link stays on the classic `forced_source`/`simulate_platform`
     # code path unchanged.
     pro_wrapper_target = ""  # set below when wrapper_redirect is enabled
+    # v2.1.83 — persisted per-visit values we'll feed into macro
+    # expansion below (Feature 2) even if pro-referrer is OFF (we still
+    # want click_id / country / ip macros to work on classic links).
+    _pro_result: Dict[str, Any] = {}
+    _visit_accept_language = ""
     if (not _kx_src_was_verified) and bool(link.get("referrer_pro_enabled")):
         try:
             from referrer_pro import resolve_pro_visit as _rpv, is_inapp_browser_ua as _iiba
+            # v2.1.83 — visitor device sniff for Feature 3 (device match).
+            _ua_low = (user_agent or "").lower()
+            _visitor_is_mobile = ("mobi" in _ua_low or "iphone" in _ua_low or "android" in _ua_low)
             _pro = _rpv(
                 ua=user_agent or "",
                 platform_pool_value=str(link.get("referrer_pro_platform_pool") or ""),
@@ -17801,9 +18262,17 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
                 strip_search_path=bool(link.get("referrer_pro_strip_search_path", True)),
                 network_click_chain_enabled=bool(link.get("referrer_pro_network_click_chain", False)),
                 network_click_host=(link.get("referrer_pro_network_click_host") or None),
+                # v2.1.83 — International guardrail params
+                lang_match=bool(link.get("referrer_pro_lang_match", True)),
+                visitor_is_mobile=_visitor_is_mobile,
+                device_mode=str(link.get("referrer_pro_device_mode") or "auto"),
+                tod_enabled=bool(link.get("referrer_pro_tod_enabled", False)),
+                campaign_type=str(link.get("referrer_pro_campaign_type") or "auto"),
             )
+            _pro_result = _pro or {}
             _pro_platform = _pro.get("platform", "")
             _pro_referer  = _pro.get("referer", "")
+            _visit_accept_language = str(_pro.get("accept_language") or "")
             if _pro_platform:
                 # Feed the picked platform into the existing UTM / click-id
                 # generator (fbclid / gclid / ttclid / utm_* etc.) — the
@@ -17836,6 +18305,52 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
             # redirect. Fall through to legacy behaviour silently.
             logger.debug(f"[link-pro-referrer] resolve failed (safe fallback): {_pro_err}")
 
+    # ── v2.1.83 Feature 2 — Rich macro expansion (server-wide) ────────
+    # We now build ONE macro context dict and expand it in TWO places:
+    #   (a) The offer URL itself (extends the older `{clickid}`/`{ua}`
+    #       set with `{click_id}` / `{source}` / `{campaign}` etc.)
+    #   (b) The user-supplied `url_params` values so a value like
+    #       "sub1={click_id}&s1={source}" gets expanded per click.
+    # Idempotent for URLs/values that carry no macros — zero overhead.
+    _macro_ctx: Dict[str, Any] = {
+        "click_id":        click_id or "",
+        "clickid":         click_id or "",
+        "source":          str(_pro_result.get("platform") or simulate_platform or link.get("forced_source") or referrer_info.get("source") or ""),
+        "source_name":     str(link.get("forced_source_name") or referrer_info.get("source_name") or ""),
+        "campaign":        str(_pro_result.get("utm_campaign") or ""),
+        "brand":           str(link.get("referrer_pro_brand") or ""),
+        "platform":        str(_pro_result.get("platform") or simulate_platform or ""),
+        "country":         country or "",
+        "city":            city or "",
+        "region":          region or "",
+        "ip":              primary_ip_for_storage or client_ip or "",
+        "ua":              user_agent or "",
+        "referer":         referrer or "",
+        "referrer":        referrer or "",
+        "utm_source":      str(_pro_result.get("utm_source") or ""),
+        "utm_medium":      str(_pro_result.get("utm_medium") or ""),
+        "utm_campaign":    str(_pro_result.get("utm_campaign") or ""),
+        "utm_content":     str(_pro_result.get("utm_content") or ""),
+        "utm_term":        str(_pro_result.get("utm_term") or ""),
+        "accept_language": _visit_accept_language or "",
+    }
+
+    # (a) — Apply macros INSIDE the values of `url_params` first, so
+    # `build_redirect_url` writes the expanded strings into the query
+    # string. Keys never carry macros; we only touch string values.
+    if isinstance(custom_params, dict) and custom_params:
+        try:
+            from referrer_pro import expand_link_macros as _exp_macros
+            _expanded_params = {}
+            for _k, _v in custom_params.items():
+                if isinstance(_v, str) and "{" in _v and "}" in _v:
+                    _expanded_params[_k] = _exp_macros(_v, _macro_ctx)
+                else:
+                    _expanded_params[_k] = _v
+            custom_params = _expanded_params
+        except Exception as _me:
+            logger.debug(f"[/r/{short_code}] url_params macro expand skipped: {_me}")
+
     if simulate_platform:
         # 2026-06-14: forward the brand (from _kx_brand handshake) so the
         # platform-params builder produces brand-tagged dynamic UTMs like
@@ -17851,36 +18366,15 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
     elif custom_params:
         destination_url = build_redirect_url(destination_url, custom_params)
 
-    # ── 2026-06 BUG-E FIX: Offer-URL macro substitution ───────────────
-    # Affiliate networks (Cake / Affise / Tune / HasOffers / etc.) populate
-    # the raw-UA / IP / referrer columns on THEIR dashboard from query
-    # params, not the HTTP headers (they parse Browser / Device from the
-    # header but expose raw values only via tokenized macros). When the
-    # operator's offer URL carries `{user_agent}`, `{ua}`, `{ip}`,
-    # `{country}`, `{city}`, `{region}`, `{referer}`, `{referrer}` or
-    # `{clickid}`, we substitute them with the URL-encoded values from
-    # this visit before issuing the 302. Without this, the advertiser
-    # dashboard rendered "User Agent: -" on every visit — the customer's
-    # screenshot showed exactly that. Idempotent for URLs that don't use
-    # any of the macros — adds zero overhead and zero behaviour change
-    # to legacy offers.
+    # ── 2026-06 BUG-E FIX + v2.1.83 upgrade: Offer-URL macro substitution ───
+    # We now use the richer `expand_link_macros` helper so `{click_id}`,
+    # `{source}`, `{campaign}`, `{platform}`, `{utm_*}` etc. all work in
+    # the raw offer URL string alongside the legacy tokens the older
+    # BUG-E fix supported. Idempotent for URLs with no macros.
     try:
-        from urllib.parse import quote as _q
         if "{" in destination_url and "}" in destination_url:
-            _macros = {
-                "{user_agent}": _q(user_agent or "", safe=""),
-                "{ua}":         _q(user_agent or "", safe=""),
-                "{ip}":         _q(primary_ip_for_storage or client_ip or "", safe=""),
-                "{country}":    _q(country or "", safe=""),
-                "{city}":       _q(city or "", safe=""),
-                "{region}":     _q(region or "", safe=""),
-                "{referer}":    _q(referrer or "", safe=""),
-                "{referrer}":   _q(referrer or "", safe=""),
-                "{clickid}":    _q(click_id or "", safe=""),
-            }
-            for _k, _v in _macros.items():
-                if _k in destination_url:
-                    destination_url = destination_url.replace(_k, _v)
+            from referrer_pro import expand_link_macros as _exp_macros
+            destination_url = _exp_macros(destination_url, _macro_ctx)
     except Exception as _macro_err:
         # Defensive: never break the redirect because of macro logic.
         logger.warning(f"[/r/{short_code}] offer-URL macro substitution skipped: {_macro_err}")

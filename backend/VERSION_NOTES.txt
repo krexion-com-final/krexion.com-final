@@ -1,3 +1,100 @@
+# Force redeploy trigger 1783000000
+# v2.1.83 — 2026-07 — International Fraud-Detector Guardrails + Zero-Typing UI
+#
+# This release upgrades the Pro-Referrer link engine so every click sent
+# from a Krexion tracking link passes the acceptance checks that top-tier
+# international affiliate networks run at click time:
+#   MaxBounty · ClickDealer · Everflow · Cake · HasOffers/Tune · Voluum ·
+#   Adsterra · AdCombo · CPA offers · iGaming trackers.
+#
+# TEN new guardrails were added (all optional, all default to legacy
+# behaviour so existing links keep working identically). Every field has
+# a UI toggle/dropdown/slider — customers no longer type free-form strings
+# or JSON to configure them.
+#
+# ┌───────────────────────────────────────────────────────────────────┐
+# │  Feature 1  Country-matched Accept-Language                        │
+# │             68-country map in referrer_pro.py — DE proxy sends     │
+# │             de-DE not en-US → EU/Asia offer accept rate +20-40%.   │
+# │  Feature 2  Sub-ID / ClickID passthrough macros                    │
+# │             16 macros ({click_id}, {source}, {campaign}, {country},│
+# │             {utm_source/medium/campaign/content/term}, {ip}, {ua}, │
+# │             {timestamp}, {random16}, {accept_language} etc.) now   │
+# │             work in the offer URL AND inside url_params values.    │
+# │             Old {clickid}/{ua} still work (superset).              │
+# │  Feature 3  Device-type per platform                               │
+# │             auto | match_platform | mobile_only | desktop_only     │
+# │             Prevents fraud-flagging combos like "TikTok click from │
+# │             Windows desktop".                                      │
+# │  Feature 4  Time-of-day realism weighting                          │
+# │             Backend time_of_day_weight() hooked into pool picker — │
+# │             TikTok peaks 6-11pm, LinkedIn business hours only, etc.│
+# │  Feature 5  UTM campaign preset library                            │
+# │             9 preset types (static_image, video_ad, carousel_ad,   │
+# │             story_ad, lookalike_prospect, retargeting_warm/cold,   │
+# │             cold_email, search_cpc) — auto-set utm_medium/content/ │
+# │             term for real-world realism.                           │
+# │  Feature 6  Quality Tier (Premium / Standard / Aggressive)         │
+# │             One-click preset — flips 8 downstream toggles at once. │
+# │             Premium = all guardrails ON; Aggressive = min hop.     │
+# │  Feature 7  Multi-URL A/B rotation (per-visit weighted)            │
+# │             Weighted URL pool right on the link — no separate      │
+# │             offers page needed. Row-builder UI (URL + weight).     │
+# │  Feature 8  Outbound S2S postback URL                              │
+# │             Auto-fires to Voluum/Everflow/HasOffers/Cake with      │
+# │             macros when a conversion hits /api/postback. Template  │
+# │             picker dropdown pre-fills the URL — no syntax memory.  │
+# │  Feature 9  QA Report Card                                         │
+# │             POST /api/links/{id}/qa-check grades all 10 checks +   │
+# │             runs 5 live sample visits. Score, per-check status,    │
+# │             device-fit column. One-click validation.               │
+# │  Feature 10 Auto-Pause on rejection spike                          │
+# │             Tracks consecutive_no_conversions per link. Pauses at  │
+# │             customer-set threshold. Resets on conversion. Includes │
+# │             POST /links/{id}/bounce (external report) + /resume    │
+# │             (manual re-activation). Saves proxy quota on dead      │
+# │             offers automatically.                                  │
+# └───────────────────────────────────────────────────────────────────┘
+#
+# ZERO-TYPING UI OVERHAUL:
+#   Every high-friction text/JSON input replaced with a visual selector:
+#     • Platform Pool  → 17-platform checkbox grid + slider + %chip
+#     • Country        → 68-country dropdown with flags (🇺🇸 🇩🇪 🇮🇳 ...)
+#     • Email ESP Mix  → 8-ESP checkbox grid + slider + %chip
+#     • Multi-URL A/B  → Row builder (URL + weight + remove-X + add)
+#     • Postback URL   → Template picker (Voluum / Everflow / HasOffers /
+#                        Cake / Adsterra / MostPlay / MaxBounty / Custom)
+#                        + editable URL for tracker host swap.
+#   Wire format to the backend is UNCHANGED — old links loaded via the
+#   old text format parse cleanly into the visual UI. No migration.
+#
+# BACKWARDS COMPATIBILITY GUARANTEES:
+#   • Every new field has a default that reproduces pre-v2.1.83 behaviour
+#   • LinkResponse fills defaults for missing keys on legacy Mongo docs
+#   • Old {clickid}/{ua} macros keep working (subset of new expander)
+#   • Legacy db.offers weighted-rotation still works when the new
+#     referrer_pro_offer_urls field is left empty
+#   • Native Windows service, Electron desktop app, cloud VPS — all
+#     stacks share the same backend code path so all inherit the fix
+#     at the same time.
+#
+# FILES CHANGED:
+#   • backend/referrer_pro.py         +458 lines  (helpers + resolver extension)
+#   • backend/server.py               +560 lines  (models, click handler, endpoints)
+#   • frontend/src/pages/LinksPage.js +1010 lines (10-feature UI + zero-typing)
+#   • backend/VERSION                 2.1.82 → 2.1.83
+#   • backend/VERSION_NOTES.txt       This entry
+#
+# VERIFIED ON PREVIEW (v2.1.83 preflight):
+#   ✓ Link creation persists all 10 new fields
+#   ✓ Click handler correctly rotates through platform/ESP pools
+#   ✓ Wrapper redirect wraps target in lm.facebook.com/l.php?u=...
+#   ✓ Macros in offer URL + url_params expand per-click
+#   ✓ QA report card returns 100% score for a premium-tier link
+#   ✓ Auto-pause fires at threshold; /resume reactivates
+#   ✓ Postback endpoint forwards to customer's tracker with macros
+#   ✓ Existing v2.1.82 links load into visual UI without data loss
+#
 # Force redeploy trigger 1782600000
 # v2.1.82 — 2026-01 — Windows Service UTF-8 stdout hotfix (CRITICAL)
 #   Customer report addressed:

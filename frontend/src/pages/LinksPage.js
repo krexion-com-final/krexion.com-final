@@ -8,10 +8,241 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Badge } from "../components/ui/badge";
 import { toast } from "sonner";
-import { Plus, Copy, Pencil, Trash2, TrendingUp, Globe, Shield, Monitor, Smartphone, ExternalLink, Sparkles, Eye, ChevronDown, ChevronUp } from "lucide-react";
+import { Plus, Copy, Pencil, Trash2, TrendingUp, Globe, Shield, Monitor, Smartphone, ExternalLink, Sparkles, Eye, ChevronDown, ChevronUp, X, Search } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
+
+// ══════════════════════════════════════════════════════════════════════
+// v2.1.83 — Zero-typing helper constants for visual selectors.
+// Customers now pick from dropdowns / sliders / row-builders instead of
+// hand-crafting weighted strings + JSON. Every visual selector still
+// serialises back to the SAME wire format the backend already accepts,
+// so no server-side schema change is needed.
+// ══════════════════════════════════════════════════════════════════════
+
+// Supported platforms for the visual "Platform Pool" builder. Order = UI
+// order (most-used first). `mobile` field feeds the sanity chip that
+// tells the customer "TikTok is mobile-first, LinkedIn is desktop-first".
+const PLATFORM_OPTIONS = [
+  { key: "facebook",   label: "Facebook",     emoji: "📘", mobile: "any" },
+  { key: "instagram",  label: "Instagram",    emoji: "📷", mobile: "mobile" },
+  { key: "tiktok",     label: "TikTok",       emoji: "🎵", mobile: "mobile" },
+  { key: "twitter",    label: "X / Twitter",  emoji: "𝕏",  mobile: "any" },
+  { key: "snapchat",   label: "Snapchat",     emoji: "👻", mobile: "mobile" },
+  { key: "pinterest",  label: "Pinterest",    emoji: "📌", mobile: "any" },
+  { key: "reddit",     label: "Reddit",       emoji: "🤖", mobile: "any" },
+  { key: "linkedin",   label: "LinkedIn",     emoji: "💼", mobile: "desktop" },
+  { key: "youtube",    label: "YouTube",      emoji: "▶️", mobile: "any" },
+  { key: "whatsapp",   label: "WhatsApp",     emoji: "💬", mobile: "mobile" },
+  { key: "telegram",   label: "Telegram",     emoji: "✈️", mobile: "any" },
+  { key: "google",     label: "Google Search",emoji: "🔍", mobile: "any" },
+  { key: "bing",       label: "Bing",         emoji: "🅱️", mobile: "desktop" },
+  { key: "duckduckgo", label: "DuckDuckGo",   emoji: "🦆", mobile: "any" },
+  { key: "yahoo",      label: "Yahoo",        emoji: "🅨",  mobile: "any" },
+  { key: "yandex",     label: "Yandex",       emoji: "🅨",  mobile: "any" },
+  { key: "email",      label: "Email (ESP)",  emoji: "📧", mobile: "any" },
+];
+
+// 68 countries — matches _COUNTRY_LANG_MAP in referrer_pro.py so
+// Accept-Language auto-match works for every option.
+const PRO_COUNTRY_OPTIONS = [
+  { code: "us", name: "United States", flag: "🇺🇸" },
+  { code: "gb", name: "United Kingdom", flag: "🇬🇧" },
+  { code: "ca", name: "Canada", flag: "🇨🇦" },
+  { code: "au", name: "Australia", flag: "🇦🇺" },
+  { code: "nz", name: "New Zealand", flag: "🇳🇿" },
+  { code: "ie", name: "Ireland", flag: "🇮🇪" },
+  { code: "de", name: "Germany", flag: "🇩🇪" },
+  { code: "fr", name: "France", flag: "🇫🇷" },
+  { code: "es", name: "Spain", flag: "🇪🇸" },
+  { code: "it", name: "Italy", flag: "🇮🇹" },
+  { code: "nl", name: "Netherlands", flag: "🇳🇱" },
+  { code: "be", name: "Belgium", flag: "🇧🇪" },
+  { code: "at", name: "Austria", flag: "🇦🇹" },
+  { code: "ch", name: "Switzerland", flag: "🇨🇭" },
+  { code: "pt", name: "Portugal", flag: "🇵🇹" },
+  { code: "gr", name: "Greece", flag: "🇬🇷" },
+  { code: "pl", name: "Poland", flag: "🇵🇱" },
+  { code: "cz", name: "Czech Republic", flag: "🇨🇿" },
+  { code: "sk", name: "Slovakia", flag: "🇸🇰" },
+  { code: "hu", name: "Hungary", flag: "🇭🇺" },
+  { code: "ro", name: "Romania", flag: "🇷🇴" },
+  { code: "bg", name: "Bulgaria", flag: "🇧🇬" },
+  { code: "hr", name: "Croatia", flag: "🇭🇷" },
+  { code: "rs", name: "Serbia", flag: "🇷🇸" },
+  { code: "si", name: "Slovenia", flag: "🇸🇮" },
+  { code: "no", name: "Norway", flag: "🇳🇴" },
+  { code: "se", name: "Sweden", flag: "🇸🇪" },
+  { code: "fi", name: "Finland", flag: "🇫🇮" },
+  { code: "dk", name: "Denmark", flag: "🇩🇰" },
+  { code: "is", name: "Iceland", flag: "🇮🇸" },
+  { code: "ru", name: "Russia", flag: "🇷🇺" },
+  { code: "ua", name: "Ukraine", flag: "🇺🇦" },
+  { code: "by", name: "Belarus", flag: "🇧🇾" },
+  { code: "kz", name: "Kazakhstan", flag: "🇰🇿" },
+  { code: "tr", name: "Turkey", flag: "🇹🇷" },
+  { code: "sa", name: "Saudi Arabia", flag: "🇸🇦" },
+  { code: "ae", name: "UAE", flag: "🇦🇪" },
+  { code: "eg", name: "Egypt", flag: "🇪🇬" },
+  { code: "il", name: "Israel", flag: "🇮🇱" },
+  { code: "ir", name: "Iran", flag: "🇮🇷" },
+  { code: "in", name: "India", flag: "🇮🇳" },
+  { code: "pk", name: "Pakistan", flag: "🇵🇰" },
+  { code: "bd", name: "Bangladesh", flag: "🇧🇩" },
+  { code: "lk", name: "Sri Lanka", flag: "🇱🇰" },
+  { code: "np", name: "Nepal", flag: "🇳🇵" },
+  { code: "cn", name: "China", flag: "🇨🇳" },
+  { code: "hk", name: "Hong Kong", flag: "🇭🇰" },
+  { code: "tw", name: "Taiwan", flag: "🇹🇼" },
+  { code: "jp", name: "Japan", flag: "🇯🇵" },
+  { code: "kr", name: "South Korea", flag: "🇰🇷" },
+  { code: "sg", name: "Singapore", flag: "🇸🇬" },
+  { code: "my", name: "Malaysia", flag: "🇲🇾" },
+  { code: "th", name: "Thailand", flag: "🇹🇭" },
+  { code: "id", name: "Indonesia", flag: "🇮🇩" },
+  { code: "ph", name: "Philippines", flag: "🇵🇭" },
+  { code: "vn", name: "Vietnam", flag: "🇻🇳" },
+  { code: "br", name: "Brazil", flag: "🇧🇷" },
+  { code: "mx", name: "Mexico", flag: "🇲🇽" },
+  { code: "ar", name: "Argentina", flag: "🇦🇷" },
+  { code: "cl", name: "Chile", flag: "🇨🇱" },
+  { code: "co", name: "Colombia", flag: "🇨🇴" },
+  { code: "pe", name: "Peru", flag: "🇵🇪" },
+  { code: "za", name: "South Africa", flag: "🇿🇦" },
+  { code: "ng", name: "Nigeria", flag: "🇳🇬" },
+  { code: "ke", name: "Kenya", flag: "🇰🇪" },
+  { code: "gh", name: "Ghana", flag: "🇬🇭" },
+];
+
+// Email service providers for the visual ESP-weight builder.
+const ESP_OPTIONS = [
+  { key: "gmail",      label: "Gmail",       emoji: "📮" },
+  { key: "yahoo",      label: "Yahoo Mail",  emoji: "💜" },
+  { key: "outlook",    label: "Outlook",     emoji: "📧" },
+  { key: "hotmail",    label: "Hotmail",     emoji: "🔥" },
+  { key: "protonmail", label: "ProtonMail",  emoji: "🔒" },
+  { key: "icloud",     label: "iCloud Mail", emoji: "☁️" },
+  { key: "yandex",     label: "Yandex Mail", emoji: "🅨" },
+  { key: "empty",      label: "No referer (direct)", emoji: "◯" },
+];
+
+// Postback URL templates for major affiliate/tracker platforms.
+// Placeholders are Krexion macros — customer just replaces the tracker
+// host part.
+const POSTBACK_TEMPLATES = [
+  {
+    key: "custom",
+    label: "— Custom (I'll paste my own URL) —",
+    url: "",
+    hint: "",
+  },
+  {
+    key: "voluum",
+    label: "Voluum",
+    url: "https://YOUR-DOMAIN.voluumtrk.com/postback?cid={click_id}&payout={payout}",
+    hint: "Replace YOUR-DOMAIN with your Voluum tracker subdomain.",
+  },
+  {
+    key: "everflow",
+    label: "Everflow",
+    url: "https://YOUR-NETWORK.evyy.net/postback/?transaction_id={click_id}&adv1={payout}",
+    hint: "Replace YOUR-NETWORK with your Everflow network slug.",
+  },
+  {
+    key: "hasoffers",
+    label: "HasOffers / Tune",
+    url: "https://YOUR-NETWORK.go2cloud.org/aff_lsr?transaction_id={click_id}&amount={payout}",
+    hint: "Replace YOUR-NETWORK with your HasOffers subdomain.",
+  },
+  {
+    key: "cake",
+    label: "Cake",
+    url: "https://YOUR-NETWORK.cakelog.com/track_conversion.php?requestid={click_id}&price={payout}",
+    hint: "Replace YOUR-NETWORK with your Cake subdomain.",
+  },
+  {
+    key: "adsterra",
+    label: "Adsterra",
+    url: "https://api.adsterra.com/postback?cnv_id={click_id}&sum={payout}",
+    hint: "Add your API key parameter to the end (&api_key=…).",
+  },
+  {
+    key: "mostplay",
+    label: "Mostplay / iGaming",
+    url: "https://YOUR-TRACKER.com/pb?click_id={click_id}&payout={payout}&status={status}",
+    hint: "Replace YOUR-TRACKER with your gambling network's tracker host.",
+  },
+  {
+    key: "maxbounty",
+    label: "MaxBounty",
+    url: "https://www.maxbounty.com/postback.asp?adv=YOUR_ADV_ID&cd={click_id}&sale={payout}",
+    hint: "Replace YOUR_ADV_ID with your MaxBounty advertiser ID.",
+  },
+];
+
+// ─────────────────────────────────────────────────────────────
+// Serialiser helpers — convert visual UI state ↔ wire-format
+// strings the backend already understands. Callers keep passing
+// the same string fields to the API; the UI just becomes visual.
+// ─────────────────────────────────────────────────────────────
+
+// "facebook:50,instagram:30" → [{key:"facebook",weight:50}, ...]
+const parsePlatformPool = (str) => {
+  if (!str) return [];
+  return str.split(",").map(s => s.trim()).filter(Boolean).map(chunk => {
+    const [k, w] = chunk.split(":");
+    return { key: (k || "").trim().toLowerCase(), weight: parseInt(w) || 1 };
+  }).filter(x => x.key);
+};
+
+// [{key,weight}] → "facebook:50,instagram:30"
+const stringifyPlatformPool = (arr) => {
+  if (!Array.isArray(arr)) return "";
+  return arr.filter(x => x.key && x.weight > 0)
+    .map(x => `${x.key}:${x.weight}`).join(",");
+};
+
+// '{"gmail":40,"yahoo":25}' → {gmail:40, yahoo:25}
+const parseEmailWeights = (str) => {
+  if (!str) return {};
+  try { return JSON.parse(str) || {}; } catch { return {}; }
+};
+
+// {gmail:40} → '{"gmail":40}'
+const stringifyEmailWeights = (obj) => {
+  if (!obj || !Object.keys(obj).length) return "";
+  return JSON.stringify(obj);
+};
+
+// "url:60,url:40" or JSON → [{url,weight}]
+const parseOfferUrls = (str) => {
+  if (!str) return [];
+  const raw = str.trim();
+  if (raw.startsWith("[")) {
+    try {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) {
+        return arr.filter(x => x && x.url).map(x => ({ url: x.url, weight: parseInt(x.weight) || 1 }));
+      }
+    } catch { /* fall through to compact */ }
+  }
+  // Compact "url:weight,url:weight" — split each on LAST ":<n>" to preserve https:// colons.
+  return raw.split(",").map(s => s.trim()).filter(Boolean).map(chunk => {
+    const m = chunk.match(/:(\d+(?:\.\d+)?)\s*$/);
+    if (m) {
+      return { url: chunk.slice(0, m.index).trim(), weight: parseInt(m[1]) || 1 };
+    }
+    return { url: chunk, weight: 1 };
+  }).filter(x => x.url);
+};
+
+// [{url,weight}] → "url:60,url:40"
+const stringifyOfferUrls = (arr) => {
+  if (!Array.isArray(arr)) return "";
+  return arr.filter(x => x.url && x.weight > 0)
+    .map(x => `${x.url}:${x.weight}`).join(",");
+};
 
 // Host for user-facing tracking links. If REACT_APP_BACKEND_URL is empty
 // (nginx-same-origin deployments like local Docker), fall back to the
@@ -136,6 +367,10 @@ export default function LinksPage() {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewData, setPreviewData] = useState(null);
+  // v2.1.83 — QA-check modal state + auto-pause telemetry from GET /links
+  const [qaOpen, setQaOpen] = useState(false);
+  const [qaLoading, setQaLoading] = useState(false);
+  const [qaData, setQaData] = useState(null);
   const [formData, setFormData] = useState({ 
     offer_url: "", 
     status: "active",
@@ -169,7 +404,19 @@ export default function LinksPage() {
     referrer_pro_strip_search_path: true,
     referrer_pro_network_click_chain: false,
     referrer_pro_network_click_host: "",
-    referrer_pro_wrapper_redirect: false
+    referrer_pro_wrapper_redirect: false,
+    // v2.1.83 — International guardrails (10-feature pack). Defaults
+    // match the server-side defaults so pre-existing links keep
+    // behaving IDENTICALLY when the customer opens them for edit.
+    referrer_pro_lang_match: true,
+    referrer_pro_device_mode: "auto",
+    referrer_pro_tod_enabled: false,
+    referrer_pro_campaign_type: "auto",
+    referrer_pro_quality_tier: "standard",
+    referrer_pro_offer_urls: "",
+    postback_url: "",
+    referrer_pro_auto_pause_enabled: false,
+    referrer_pro_auto_pause_threshold: 10
   });
 
   useEffect(() => {
@@ -254,7 +501,16 @@ export default function LinksPage() {
       referrer_pro_strip_search_path: true,
       referrer_pro_network_click_chain: false,
       referrer_pro_network_click_host: "",
-      referrer_pro_wrapper_redirect: false
+      referrer_pro_wrapper_redirect: false,
+      referrer_pro_lang_match: true,
+      referrer_pro_device_mode: "auto",
+      referrer_pro_tod_enabled: false,
+      referrer_pro_campaign_type: "auto",
+      referrer_pro_quality_tier: "standard",
+      referrer_pro_offer_urls: "",
+      postback_url: "",
+      referrer_pro_auto_pause_enabled: false,
+      referrer_pro_auto_pause_threshold: 10
     });
     setProReferrerOpen(false);
   };
@@ -318,6 +574,79 @@ export default function LinksPage() {
     }
   };
 
+  // v2.1.83 Feature 9 — Run the QA-check report against an existing link.
+  // Grades all 10 international fraud-detector guardrails and shows a
+  // report card. Only available for saved links (needs a link_id).
+  const runQaCheck = async (linkId) => {
+    setQaOpen(true);
+    setQaLoading(true);
+    setQaData(null);
+    try {
+      const token = localStorage.getItem("token");
+      const res = await axios.post(`${API}/links/${linkId}/qa-check`, {}, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setQaData(res.data);
+    } catch (err) {
+      toast.error(err.response?.data?.detail || "QA check failed");
+      setQaOpen(false);
+    } finally {
+      setQaLoading(false);
+    }
+  };
+
+  // v2.1.83 Feature 6 — Apply Quality Tier preset locally. When the user
+  // picks a tier, we flip the downstream toggles to the recommended
+  // combo so they don't have to tune 8 knobs by hand.
+  const applyQualityTier = (tier) => {
+    const presets = {
+      premium: {
+        referrer_pro_lang_match: true,
+        referrer_pro_social_wrapper: true,
+        referrer_pro_inapp_deep_path: true,
+        referrer_pro_strip_search_path: true,
+        referrer_pro_wrapper_redirect: true,
+        referrer_pro_tod_enabled: true,
+        referrer_pro_device_mode: "match_platform",
+      },
+      standard: {
+        referrer_pro_lang_match: true,
+        referrer_pro_social_wrapper: true,
+        referrer_pro_inapp_deep_path: true,
+        referrer_pro_strip_search_path: true,
+        referrer_pro_wrapper_redirect: false,
+        referrer_pro_tod_enabled: false,
+        referrer_pro_device_mode: "auto",
+      },
+      aggressive: {
+        referrer_pro_lang_match: false,
+        referrer_pro_social_wrapper: false,
+        referrer_pro_inapp_deep_path: false,
+        referrer_pro_strip_search_path: true,
+        referrer_pro_wrapper_redirect: false,
+        referrer_pro_tod_enabled: false,
+        referrer_pro_device_mode: "auto",
+      },
+    };
+    const p = presets[tier] || presets.standard;
+    setFormData((prev) => ({ ...prev, referrer_pro_quality_tier: tier, ...p }));
+    toast.success(`Quality tier: ${tier}`);
+  };
+
+  // v2.1.83 Feature 10 — Resume an auto-paused link.
+  const resumeLink = async (linkId) => {
+    try {
+      const token = localStorage.getItem("token");
+      await axios.post(`${API}/links/${linkId}/resume`, {}, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      toast.success("Link resumed");
+      fetchLinks();
+    } catch (err) {
+      toast.error(err.response?.data?.detail || "Resume failed");
+    }
+  };
+
   const openEditDialog = (link) => {
     setEditingLink(link);
     const hasCountryRestriction = link.allowed_countries && link.allowed_countries.length > 0;
@@ -356,7 +685,17 @@ export default function LinksPage() {
       referrer_pro_strip_search_path: link.referrer_pro_strip_search_path !== undefined ? link.referrer_pro_strip_search_path : true,
       referrer_pro_network_click_chain: link.referrer_pro_network_click_chain || false,
       referrer_pro_network_click_host: link.referrer_pro_network_click_host || "",
-      referrer_pro_wrapper_redirect: link.referrer_pro_wrapper_redirect || false
+      referrer_pro_wrapper_redirect: link.referrer_pro_wrapper_redirect || false,
+      // v2.1.83 fields
+      referrer_pro_lang_match: link.referrer_pro_lang_match !== undefined ? link.referrer_pro_lang_match : true,
+      referrer_pro_device_mode: link.referrer_pro_device_mode || "auto",
+      referrer_pro_tod_enabled: link.referrer_pro_tod_enabled || false,
+      referrer_pro_campaign_type: link.referrer_pro_campaign_type || "auto",
+      referrer_pro_quality_tier: link.referrer_pro_quality_tier || "standard",
+      referrer_pro_offer_urls: link.referrer_pro_offer_urls || "",
+      postback_url: link.postback_url || "",
+      referrer_pro_auto_pause_enabled: link.referrer_pro_auto_pause_enabled || false,
+      referrer_pro_auto_pause_threshold: link.referrer_pro_auto_pause_threshold || 10
     });
     // Auto-expand the Pro-Referrer section when editing a link that
     // already has it enabled — customer immediately sees their settings.
@@ -798,19 +1137,111 @@ export default function LinksPage() {
 
                     {formData.referrer_pro_enabled && (
                       <>
-                        {/* Platform Pool (weighted) */}
+                        {/* Platform Pool (weighted) — v2.1.83: visual builder replaces the raw text field */}
                         <div>
                           <Label className="text-xs text-[#A1A1AA]">Platform Pool (weighted)</Label>
-                          <Input
-                            value={formData.referrer_pro_platform_pool}
-                            onChange={(e) => setFormData({ ...formData, referrer_pro_platform_pool: e.target.value })}
-                            placeholder="facebook:50,instagram:30,google:15,email:5"
-                            className="mt-1"
-                            data-testid="pro-platform-pool"
-                          />
-                          <p className="text-xs text-[#52525B] mt-1">
-                            Comma-separated <code>platform:weight</code> pairs. Supported: facebook, instagram, tiktok, twitter, snapchat, pinterest, reddit, linkedin, youtube, whatsapp, telegram, google, bing, duckduckgo, yahoo, yandex, email
-                          </p>
+                          <div className="mt-1 p-2 rounded border border-[var(--brand-border)] bg-[var(--brand-bg)]">
+                            {(() => {
+                              const pool = parsePlatformPool(formData.referrer_pro_platform_pool || "");
+                              const poolMap = Object.fromEntries(pool.map(p => [p.key, p.weight]));
+                              const totalWeight = pool.reduce((s, p) => s + (p.weight || 0), 0) || 0;
+                              const togglePlatform = (key) => {
+                                const next = { ...poolMap };
+                                if (next[key] !== undefined) delete next[key];
+                                else next[key] = 20;
+                                setFormData({
+                                  ...formData,
+                                  referrer_pro_platform_pool: stringifyPlatformPool(
+                                    Object.entries(next).map(([k, w]) => ({ key: k, weight: w }))
+                                  )
+                                });
+                              };
+                              const setWeight = (key, w) => {
+                                const next = { ...poolMap, [key]: Math.max(1, parseInt(w) || 1) };
+                                setFormData({
+                                  ...formData,
+                                  referrer_pro_platform_pool: stringifyPlatformPool(
+                                    Object.entries(next).map(([k, w2]) => ({ key: k, weight: w2 }))
+                                  )
+                                });
+                              };
+                              return (
+                                <>
+                                  <div className="grid grid-cols-2 md:grid-cols-3 gap-1.5">
+                                    {PLATFORM_OPTIONS.map((p) => {
+                                      const selected = poolMap[p.key] !== undefined;
+                                      const w = poolMap[p.key] || 0;
+                                      const pct = totalWeight > 0 && selected ? Math.round((w / totalWeight) * 100) : 0;
+                                      return (
+                                        <div
+                                          key={p.key}
+                                          className={`p-1.5 rounded border text-xs transition-all ${
+                                            selected
+                                              ? "border-[#F59E0B] bg-[#F59E0B10]"
+                                              : "border-[var(--brand-border)] hover:border-[#F59E0B60] opacity-70"
+                                          }`}
+                                        >
+                                          <label className="flex items-center gap-1.5 cursor-pointer">
+                                            <input
+                                              type="checkbox"
+                                              checked={selected}
+                                              onChange={() => togglePlatform(p.key)}
+                                              className="w-3.5 h-3.5"
+                                              data-testid={`platform-toggle-${p.key}`}
+                                            />
+                                            <span className="text-sm">{p.emoji}</span>
+                                            <span className="flex-1 truncate font-medium">{p.label}</span>
+                                            {selected && (
+                                              <span className="text-[10px] text-[#F59E0B] font-mono">
+                                                {pct}%
+                                              </span>
+                                            )}
+                                          </label>
+                                          {selected && (
+                                            <div className="mt-1 flex items-center gap-1.5">
+                                              <input
+                                                type="range"
+                                                min={1}
+                                                max={100}
+                                                value={w}
+                                                onChange={(e) => setWeight(p.key, e.target.value)}
+                                                className="flex-1 h-1.5"
+                                                data-testid={`platform-weight-${p.key}`}
+                                              />
+                                              <input
+                                                type="number"
+                                                min={1}
+                                                max={100}
+                                                value={w}
+                                                onChange={(e) => setWeight(p.key, e.target.value)}
+                                                className="w-12 px-1 py-0 text-[10px] rounded bg-[var(--brand-card)] border border-[var(--brand-border)] text-white"
+                                              />
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                  <div className="mt-2 flex items-center justify-between text-[10px] text-[#52525B]">
+                                    <span>
+                                      {pool.length === 0
+                                        ? "Tick platforms above — set weight for each"
+                                        : `${pool.length} platform(s) selected · Total weight: ${totalWeight}`}
+                                    </span>
+                                    {pool.length > 0 && (
+                                      <button
+                                        type="button"
+                                        onClick={() => setFormData({ ...formData, referrer_pro_platform_pool: "" })}
+                                        className="text-[#EF4444] hover:underline"
+                                      >
+                                        Clear all
+                                      </button>
+                                    )}
+                                  </div>
+                                </>
+                              );
+                            })()}
+                          </div>
                         </div>
 
                         {/* Brand */}
@@ -842,13 +1273,20 @@ export default function LinksPage() {
                             </select>
                           </div>
                           <div>
-                            <Label className="text-xs text-[#A1A1AA]">Country (ISO code)</Label>
-                            <Input
-                              value={formData.referrer_pro_country}
+                            <Label className="text-xs text-[#A1A1AA]">Country (auto-matches language)</Label>
+                            <select
+                              value={formData.referrer_pro_country || ""}
                               onChange={(e) => setFormData({ ...formData, referrer_pro_country: e.target.value })}
-                              placeholder="us, uk, pk, in..."
-                              className="mt-1"
-                            />
+                              className="w-full p-2 rounded-md bg-[var(--brand-card)] border border-[var(--brand-border)] text-white mt-1 text-sm"
+                              data-testid="pro-country"
+                            >
+                              <option value="">— Any country (no geo-lock) —</option>
+                              {PRO_COUNTRY_OPTIONS.map((c) => (
+                                <option key={c.code} value={c.code}>
+                                  {c.flag} {c.name} ({c.code.toUpperCase()})
+                                </option>
+                              ))}
+                            </select>
                           </div>
                         </div>
 
@@ -858,22 +1296,88 @@ export default function LinksPage() {
                             value={formData.referrer_pro_search_keywords}
                             onChange={(e) => setFormData({ ...formData, referrer_pro_search_keywords: e.target.value })}
                             rows={3}
-                            placeholder="best diet plan 2026&#10;keto meals for beginners&#10;gluten free recipes"
+                            placeholder={"best diet plan 2026\nketo meals for beginners\ngluten free recipes"}
                             className="w-full p-2 rounded-md bg-[var(--brand-card)] border border-[var(--brand-border)] text-white mt-1 text-sm"
                           />
                           <p className="text-xs text-[#52525B] mt-1">Used when the pool picks a search engine (google, bing, etc.)</p>
                         </div>
 
-                        {/* Email Weights */}
+                        {/* Email Weights (visual sliders replace raw JSON) */}
                         <div>
-                          <Label className="text-xs text-[#A1A1AA]">Email Weights (JSON, optional)</Label>
-                          <Input
-                            value={formData.referrer_pro_email_weights}
-                            onChange={(e) => setFormData({ ...formData, referrer_pro_email_weights: e.target.value })}
-                            placeholder='{"gmail":40,"yahoo":25,"outlook":15,"empty":20}'
-                            className="mt-1 font-mono text-xs"
-                          />
-                          <p className="text-xs text-[#52525B] mt-1">ESP mix used when pool picks <code>email</code></p>
+                          <Label className="text-xs text-[#A1A1AA]">Email ESP Mix (used when pool picks &quot;email&quot;)</Label>
+                          <div className="mt-1 p-2 rounded border border-[var(--brand-border)] bg-[var(--brand-bg)]">
+                            {(() => {
+                              const espMap = parseEmailWeights(formData.referrer_pro_email_weights || "");
+                              const totalW = Object.values(espMap).reduce((s, v) => s + (parseFloat(v) || 0), 0) || 0;
+                              const toggleEsp = (key) => {
+                                const next = { ...espMap };
+                                if (next[key] !== undefined) delete next[key];
+                                else next[key] = 20;
+                                setFormData({ ...formData, referrer_pro_email_weights: stringifyEmailWeights(next) });
+                              };
+                              const setEspW = (key, w) => {
+                                const next = { ...espMap, [key]: Math.max(1, parseInt(w) || 1) };
+                                setFormData({ ...formData, referrer_pro_email_weights: stringifyEmailWeights(next) });
+                              };
+                              return (
+                                <>
+                                  <div className="grid grid-cols-2 gap-1.5">
+                                    {ESP_OPTIONS.map((e) => {
+                                      const selected = espMap[e.key] !== undefined;
+                                      const w = espMap[e.key] || 0;
+                                      const pct = totalW > 0 && selected ? Math.round((w / totalW) * 100) : 0;
+                                      return (
+                                        <div
+                                          key={e.key}
+                                          className={`p-1.5 rounded border text-xs transition-all ${
+                                            selected
+                                              ? "border-[#F59E0B] bg-[#F59E0B10]"
+                                              : "border-[var(--brand-border)] hover:border-[#F59E0B60] opacity-70"
+                                          }`}
+                                        >
+                                          <label className="flex items-center gap-1.5 cursor-pointer">
+                                            <input
+                                              type="checkbox"
+                                              checked={selected}
+                                              onChange={() => toggleEsp(e.key)}
+                                              className="w-3.5 h-3.5"
+                                              data-testid={`esp-toggle-${e.key}`}
+                                            />
+                                            <span className="text-sm">{e.emoji}</span>
+                                            <span className="flex-1 truncate font-medium">{e.label}</span>
+                                            {selected && (
+                                              <span className="text-[10px] text-[#F59E0B] font-mono">{pct}%</span>
+                                            )}
+                                          </label>
+                                          {selected && (
+                                            <div className="mt-1 flex items-center gap-1.5">
+                                              <input
+                                                type="range"
+                                                min={1}
+                                                max={100}
+                                                value={w}
+                                                onChange={(ev) => setEspW(e.key, ev.target.value)}
+                                                className="flex-1 h-1.5"
+                                              />
+                                              <input
+                                                type="number"
+                                                min={1}
+                                                max={100}
+                                                value={w}
+                                                onChange={(ev) => setEspW(e.key, ev.target.value)}
+                                                className="w-12 px-1 py-0 text-[10px] rounded bg-[var(--brand-card)] border border-[var(--brand-border)] text-white"
+                                              />
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                  <p className="text-[10px] text-[#52525B] mt-2">Tick ESPs above · rotates them on email visits with these weights</p>
+                                </>
+                              );
+                            })()}
+                          </div>
                         </div>
 
                         {/* Toggles */}
@@ -945,8 +1449,294 @@ export default function LinksPage() {
                           </div>
                         </label>
 
+                        {/* ─────────────────────────────────────────────────
+                            v2.1.83 — International Fraud-Detector Guardrails
+                            (10-feature pack, network-agnostic MaxBounty /
+                             ClickDealer / Everflow / Cake / Voluum ready)
+                           ───────────────────────────────────────────────── */}
+                        <div className="pt-2 mt-2 border-t border-[var(--brand-border)]">
+                          <p className="text-xs font-medium text-[#F59E0B] mb-3 flex items-center gap-1.5">
+                            <Sparkles size={12} /> International Guardrails
+                          </p>
+
+                          {/* Feature 6 — Quality Tier one-click preset */}
+                          <div className="mb-4">
+                            <Label className="text-xs text-[#A1A1AA]">Quality Tier (Feature 6 — one-click preset)</Label>
+                            <div className="grid grid-cols-3 gap-2 mt-1">
+                              {[
+                                { v: "premium",    l: "🟢 Premium",    d: "MaxBounty / Cake top tier" },
+                                { v: "standard",   l: "🟡 Standard",   d: "Balanced (default)" },
+                                { v: "aggressive", l: "🔴 Aggressive", d: "Gambling / adult / crypto" },
+                              ].map((t) => (
+                                <button
+                                  key={t.v}
+                                  type="button"
+                                  onClick={() => applyQualityTier(t.v)}
+                                  className={`p-2 rounded border text-left text-xs transition-all ${
+                                    formData.referrer_pro_quality_tier === t.v
+                                      ? "border-[#F59E0B] bg-[#F59E0B15] text-[#F59E0B]"
+                                      : "border-[var(--brand-border)] hover:border-[#F59E0B60]"
+                                  }`}
+                                  data-testid={`quality-tier-${t.v}`}
+                                >
+                                  <div className="font-medium">{t.l}</div>
+                                  <div className="text-[10px] text-[#A1A1AA] mt-0.5">{t.d}</div>
+                                </button>
+                              ))}
+                            </div>
+                            <p className="text-[10px] text-[#52525B] mt-1">
+                              One-click preset for the 8 realism toggles below. Overrides current values.
+                            </p>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-3">
+                            {/* Feature 1 — Accept-Language country match */}
+                            <label className="flex items-start gap-2 cursor-pointer p-2 rounded border border-[var(--brand-border)]">
+                              <input
+                                type="checkbox"
+                                checked={formData.referrer_pro_lang_match}
+                                onChange={(e) => setFormData({ ...formData, referrer_pro_lang_match: e.target.checked })}
+                                className="w-4 h-4 mt-0.5"
+                                data-testid="pro-lang-match"
+                              />
+                              <div>
+                                <div className="text-xs font-medium">🌍 Match Accept-Language to country</div>
+                                <p className="text-[10px] text-[#52525B] mt-0.5">
+                                  Feature 1 — Germany proxy sends <code>de-DE,de;q=0.9</code> not <code>en-US</code>. Boosts EU/Asia offer accept rate 20-40%.
+                                </p>
+                              </div>
+                            </label>
+
+                            {/* Feature 4 — Time-of-day realism */}
+                            <label className="flex items-start gap-2 cursor-pointer p-2 rounded border border-[var(--brand-border)]">
+                              <input
+                                type="checkbox"
+                                checked={formData.referrer_pro_tod_enabled}
+                                onChange={(e) => setFormData({ ...formData, referrer_pro_tod_enabled: e.target.checked })}
+                                className="w-4 h-4 mt-0.5"
+                                data-testid="pro-tod-enabled"
+                              />
+                              <div>
+                                <div className="text-xs font-medium">🕒 Time-of-day realism weighting</div>
+                                <p className="text-[10px] text-[#52525B] mt-0.5">
+                                  Feature 4 — FB peaks 7-9am / 7-10pm, TikTok 6-11pm, LinkedIn business hours. Avoids &quot;suspicious 3am spike&quot; flags.
+                                </p>
+                              </div>
+                            </label>
+                          </div>
+
+                          {/* Feature 3 — Device Type per Platform */}
+                          <div className="mt-3">
+                            <Label className="text-xs text-[#A1A1AA]">📱 Device Distribution (Feature 3)</Label>
+                            <select
+                              value={formData.referrer_pro_device_mode}
+                              onChange={(e) => setFormData({ ...formData, referrer_pro_device_mode: e.target.value })}
+                              className="w-full p-2 rounded-md bg-[var(--brand-card)] border border-[var(--brand-border)] text-white mt-1 text-sm"
+                              data-testid="pro-device-mode"
+                            >
+                              <option value="auto">Auto — any device fits any platform (legacy)</option>
+                              <option value="match_platform">Strict — TikTok/IG only on mobile UA, LinkedIn on desktop UA</option>
+                              <option value="mobile_only">Mobile-only pool (drop desktop-leaning platforms)</option>
+                              <option value="desktop_only">Desktop-only pool (drop mobile-only platforms)</option>
+                            </select>
+                            <p className="text-[10px] text-[#52525B] mt-1">
+                              Prevents red-flag combinations like &quot;TikTok click from Windows desktop&quot; that fraud detectors instantly reject.
+                            </p>
+                          </div>
+
+                          {/* Feature 5 — Campaign Type Preset */}
+                          <div className="mt-3">
+                            <Label className="text-xs text-[#A1A1AA]">🎯 Campaign Type / UTM Preset (Feature 5)</Label>
+                            <select
+                              value={formData.referrer_pro_campaign_type}
+                              onChange={(e) => setFormData({ ...formData, referrer_pro_campaign_type: e.target.value })}
+                              className="w-full p-2 rounded-md bg-[var(--brand-card)] border border-[var(--brand-border)] text-white mt-1 text-sm"
+                              data-testid="pro-campaign-type"
+                            >
+                              <option value="auto">Auto — random per-visit rotation (legacy)</option>
+                              <option value="static_image">Static Image Ad — utm_content=static_image</option>
+                              <option value="video_ad">Video Ad — utm_content=video_a</option>
+                              <option value="carousel_ad">Carousel Ad — utm_content=carousel_v2</option>
+                              <option value="story_ad">Story Ad — utm_content=story_9x16</option>
+                              <option value="lookalike_prospect">Lookalike Prospecting — utm_term=lookalike_m35</option>
+                              <option value="retargeting_warm">Retargeting (Warm Audience)</option>
+                              <option value="retargeting_cold">Retargeting (Cold Audience)</option>
+                              <option value="cold_email">Cold Email Outreach</option>
+                              <option value="search_cpc">Search / CPC (Google Ads)</option>
+                            </select>
+                            <p className="text-[10px] text-[#52525B] mt-1">
+                              Sets utm_medium / utm_content / utm_term to a realistic campaign combo — Meta / Google / Voluum dashboards render properly.
+                            </p>
+                          </div>
+
+                          {/* Feature 7 — Multi-URL A/B Rotation (visual row-builder) */}
+                          <div className="mt-3">
+                            <Label className="text-xs text-[#A1A1AA]">🔀 Multi-URL A/B Rotation (Feature 7)</Label>
+                            <div className="mt-1 p-2 rounded border border-[var(--brand-border)] bg-[var(--brand-bg)]">
+                              {(() => {
+                                const rows = parseOfferUrls(formData.referrer_pro_offer_urls || "");
+                                const totalW = rows.reduce((s, r) => s + (r.weight || 0), 0) || 0;
+                                const setRows = (next) => {
+                                  setFormData({ ...formData, referrer_pro_offer_urls: stringifyOfferUrls(next) });
+                                };
+                                const addRow = () => setRows([...rows, { url: "", weight: 20 }]);
+                                const updateRow = (i, patch) => {
+                                  const next = rows.slice();
+                                  next[i] = { ...next[i], ...patch };
+                                  setRows(next);
+                                };
+                                const removeRow = (i) => setRows(rows.filter((_, idx) => idx !== i));
+                                return (
+                                  <>
+                                    {rows.length === 0 && (
+                                      <p className="text-[11px] text-[#52525B] py-1">
+                                        Leave empty to use the single &quot;Offer URL&quot; above.
+                                      </p>
+                                    )}
+                                    {rows.map((r, i) => {
+                                      const pct = totalW > 0 ? Math.round((r.weight / totalW) * 100) : 0;
+                                      return (
+                                        <div key={i} className="flex items-center gap-1.5 mb-1.5" data-testid={`offer-row-${i}`}>
+                                          <span className="text-[10px] text-[#52525B] w-4 text-right">{i + 1}.</span>
+                                          <Input
+                                            value={r.url}
+                                            onChange={(e) => updateRow(i, { url: e.target.value })}
+                                            placeholder="https://offer.com/landing-a"
+                                            className="flex-1 font-mono text-[11px] h-8"
+                                            data-testid={`offer-url-${i}`}
+                                          />
+                                          <input
+                                            type="number"
+                                            min={1}
+                                            max={100}
+                                            value={r.weight}
+                                            onChange={(e) => updateRow(i, { weight: parseInt(e.target.value) || 1 })}
+                                            className="w-14 h-8 px-2 text-xs rounded bg-[var(--brand-card)] border border-[var(--brand-border)] text-white"
+                                            data-testid={`offer-weight-${i}`}
+                                          />
+                                          <span className="w-10 text-[10px] text-[#F59E0B] font-mono text-right">{pct}%</span>
+                                          <button
+                                            type="button"
+                                            onClick={() => removeRow(i)}
+                                            className="p-1 text-[#EF4444] hover:bg-[#EF444415] rounded"
+                                            title="Remove URL"
+                                            data-testid={`offer-remove-${i}`}
+                                          >
+                                            <X size={14} />
+                                          </button>
+                                        </div>
+                                      );
+                                    })}
+                                    <button
+                                      type="button"
+                                      onClick={addRow}
+                                      className="mt-1 w-full py-1.5 text-[11px] text-[#F59E0B] border border-dashed border-[#F59E0B60] rounded hover:bg-[#F59E0B08] flex items-center justify-center gap-1"
+                                      data-testid="offer-add-row"
+                                    >
+                                      <Plus size={12} /> Add landing page
+                                    </button>
+                                  </>
+                                );
+                              })()}
+                            </div>
+                            <p className="text-[10px] text-[#52525B] mt-1">
+                              Weighted A/B/C landing page test. Higher weight = more traffic. Krexion auto-rotates on each click.
+                            </p>
+                          </div>
+
+                          {/* Feature 2 — Sub-ID / ClickID passthrough via url_params (macro info card) */}
+                          <div className="mt-3 p-3 rounded border border-[#3B82F6] bg-[#3B82F615]">
+                            <div className="text-xs font-medium text-[#3B82F6] mb-1">
+                              💡 Feature 2 — Custom URL Params with Macros
+                            </div>
+                            <p className="text-[11px] text-[#A1A1AA] mb-2">
+                              Add these directly to your <strong>Offer URL</strong> above, OR to the URL Params field.
+                              Each per-click value is auto-substituted:
+                            </p>
+                            <div className="grid grid-cols-2 gap-1 text-[10px] font-mono text-[#A1A1AA]">
+                              <div><code className="text-[#3B82F6]">{"{click_id}"}</code> — unique per click</div>
+                              <div><code className="text-[#3B82F6]">{"{source}"}</code> — picked platform</div>
+                              <div><code className="text-[#3B82F6]">{"{campaign}"}</code> — utm_campaign</div>
+                              <div><code className="text-[#3B82F6]">{"{country}"}</code> — geo</div>
+                              <div><code className="text-[#3B82F6]">{"{utm_source}"}</code></div>
+                              <div><code className="text-[#3B82F6]">{"{utm_medium}"}</code></div>
+                              <div><code className="text-[#3B82F6]">{"{ip}"}</code>, <code className="text-[#3B82F6]">{"{ua}"}</code></div>
+                              <div><code className="text-[#3B82F6]">{"{timestamp}"}</code>, <code className="text-[#3B82F6]">{"{random16}"}</code></div>
+                            </div>
+                            <p className="text-[10px] text-[#52525B] mt-2">
+                              Example: <code className="text-[#A1A1AA]">https://offer.com/click?sub1={"{click_id}"}&s1={"{source}"}&aff_sub={"{campaign}"}</code>
+                            </p>
+                          </div>
+
+                          {/* Feature 8 — Postback / S2S URL with template picker */}
+                          <div className="mt-3">
+                            <Label className="text-xs text-[#A1A1AA]">📤 Outbound S2S Postback URL (Feature 8)</Label>
+                            <select
+                              onChange={(e) => {
+                                const tpl = POSTBACK_TEMPLATES.find(t => t.key === e.target.value);
+                                if (tpl && tpl.url) {
+                                  setFormData({ ...formData, postback_url: tpl.url });
+                                  toast.success(`${tpl.label} template loaded — edit the tracker host + save`);
+                                } else if (tpl && tpl.key === "custom") {
+                                  setFormData({ ...formData, postback_url: "" });
+                                }
+                              }}
+                              value="custom"
+                              className="w-full p-2 rounded-md bg-[var(--brand-card)] border border-[var(--brand-border)] text-white mt-1 text-xs"
+                              data-testid="pro-postback-template"
+                            >
+                              <option value="custom">— Pick a tracker template… —</option>
+                              {POSTBACK_TEMPLATES.filter(t => t.key !== "custom").map(t => (
+                                <option key={t.key} value={t.key}>{t.label}</option>
+                              ))}
+                            </select>
+                            <Input
+                              value={formData.postback_url}
+                              onChange={(e) => setFormData({ ...formData, postback_url: e.target.value })}
+                              placeholder={"https://YOUR-TRACKER.com/pb?cid={click_id}&payout={payout}"}
+                              className="mt-1 font-mono text-xs"
+                              data-testid="pro-postback-url"
+                            />
+                            <p className="text-[10px] text-[#52525B] mt-1">
+                              When a conversion hits Krexion&apos;s /postback endpoint, we forward it to this URL (Voluum / Everflow / HasOffers / Cake). Macros: <code>{"{click_id}"}, {"{payout}"}, {"{status}"}, {"{source}"}</code>.
+                            </p>
+                          </div>
+
+                          {/* Feature 10 — Auto-Pause on Rejection Spike */}
+                          <div className="mt-3 grid grid-cols-3 gap-2 items-start">
+                            <label className="col-span-2 flex items-start gap-2 cursor-pointer p-2 rounded border border-[var(--brand-border)]">
+                              <input
+                                type="checkbox"
+                                checked={formData.referrer_pro_auto_pause_enabled}
+                                onChange={(e) => setFormData({ ...formData, referrer_pro_auto_pause_enabled: e.target.checked })}
+                                className="w-4 h-4 mt-0.5"
+                                data-testid="pro-auto-pause"
+                              />
+                              <div>
+                                <div className="text-xs font-medium">🛑 Auto-Pause on Rejection Spike (Feature 10)</div>
+                                <p className="text-[10px] text-[#52525B] mt-0.5">
+                                  Pauses this link automatically after N consecutive non-converting clicks. Saves proxy quota when an offer gets IP-banned / budget-capped. Resets on any conversion.
+                                </p>
+                              </div>
+                            </label>
+                            <div>
+                              <Label className="text-[10px] text-[#A1A1AA]">Threshold</Label>
+                              <Input
+                                type="number"
+                                min={1}
+                                max={10000}
+                                value={formData.referrer_pro_auto_pause_threshold}
+                                onChange={(e) => setFormData({ ...formData, referrer_pro_auto_pause_threshold: parseInt(e.target.value) || 10 })}
+                                className="mt-1 text-sm"
+                                disabled={!formData.referrer_pro_auto_pause_enabled}
+                                data-testid="pro-auto-pause-threshold"
+                              />
+                            </div>
+                          </div>
+                        </div>
+
                         {/* Preview button */}
-                        <div className="flex items-center gap-2 pt-2">
+                        <div className="flex flex-wrap items-center gap-2 pt-2">
                           <Button
                             type="button"
                             variant="outline"
@@ -958,6 +1748,19 @@ export default function LinksPage() {
                             <Eye size={16} />
                             {previewLoading ? "Generating…" : "Preview 20 Sample Clicks"}
                           </Button>
+                          {editingLink && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              onClick={() => runQaCheck(editingLink.id)}
+                              disabled={qaLoading}
+                              className="gap-2 border-[#22C55E] text-[#22C55E] hover:bg-[#22C55E15]"
+                              data-testid="qa-check-btn"
+                            >
+                              <Shield size={16} />
+                              {qaLoading ? "Checking…" : "QA Report Card"}
+                            </Button>
+                          )}
                           <span className="text-xs text-[#52525B]">See exactly what traffic mix your link will produce</span>
                         </div>
                       </>
@@ -1025,10 +1828,22 @@ export default function LinksPage() {
                       <TableCell>
                         <Badge
                           variant={link.status === "active" ? "default" : "secondary"}
-                          className={link.status === "active" ? "bg-[#22C55E]" : "bg-[#F59E0B]"}
+                          className={
+                            link.status === "active"
+                              ? "bg-[#22C55E]"
+                              : link.status === "paused"
+                              ? "bg-[#EF4444]"
+                              : "bg-[#F59E0B]"
+                          }
                         >
-                          {link.status}
+                          {link.status === "paused" && link.auto_paused_at ? "auto-paused" : link.status}
                         </Badge>
+                        {/* v2.1.83 — auto-pause telemetry chip */}
+                        {link.referrer_pro_auto_pause_enabled && link.status === "active" && (link.consecutive_no_conversions || 0) > 0 && (
+                          <div className="mt-1 text-[10px] text-[#F59E0B]" title={`${link.consecutive_no_conversions} clicks since last conversion (pause at ${link.referrer_pro_auto_pause_threshold || 10})`}>
+                            streak {link.consecutive_no_conversions}/{link.referrer_pro_auto_pause_threshold || 10}
+                          </div>
+                        )}
                       </TableCell>
                       <TableCell>
                         <div className="flex flex-col gap-1">
@@ -1080,6 +1895,30 @@ export default function LinksPage() {
                           >
                             <Pencil size={16} />
                           </Button>
+                          {/* v2.1.83 Feature 9 — QA report card shortcut */}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => runQaCheck(link.id)}
+                            title="Run Pro-Referrer QA report card"
+                            data-testid={`qa-link-${link.id}`}
+                            className="text-[#22C55E] hover:text-[#16A34A]"
+                          >
+                            <Shield size={16} />
+                          </Button>
+                          {/* v2.1.83 Feature 10 — Resume auto-paused link */}
+                          {link.status === "paused" && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => resumeLink(link.id)}
+                              title="Resume auto-paused link"
+                              data-testid={`resume-link-${link.id}`}
+                              className="text-[#F59E0B] hover:text-[#D97706]"
+                            >
+                              <TrendingUp size={16} />
+                            </Button>
+                          )}
                           <Button
                             variant="ghost"
                             size="icon"
@@ -1209,6 +2048,124 @@ export default function LinksPage() {
                   </TableBody>
                 </Table>
               </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* v2.1.83 — QA Report Card modal (Feature 9) */}
+      <Dialog open={qaOpen} onOpenChange={setQaOpen}>
+        <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto bg-[var(--brand-bg)] border-[var(--brand-border)]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Shield size={18} className="text-[#22C55E]" />
+              QA Report Card — 10-check international fraud-detector audit
+            </DialogTitle>
+            <DialogDescription>
+              Grades your link against MaxBounty / ClickDealer / Everflow / Cake / Voluum acceptance criteria.
+            </DialogDescription>
+          </DialogHeader>
+
+          {qaLoading && (
+            <div className="py-8 text-center text-muted-foreground text-sm">Running 10 checks + 5 sample visits…</div>
+          )}
+
+          {qaData && !qaLoading && (
+            <div className="space-y-4">
+              {/* Score summary */}
+              <div className="flex items-center gap-4 p-3 bg-[var(--brand-card)] rounded-lg border border-[var(--brand-border)]">
+                <div className="flex-1">
+                  <p className="text-xs text-[#A1A1AA]">Overall Score</p>
+                  <p className={`text-3xl font-bold ${qaData.score >= 80 ? "text-[#22C55E]" : qaData.score >= 50 ? "text-[#F59E0B]" : "text-[#EF4444]"}`}>
+                    {qaData.score}%
+                  </p>
+                </div>
+                <div className="text-right">
+                  <p className="text-xs text-[#A1A1AA]">Passes / Warnings</p>
+                  <p className="text-sm">
+                    <span className="text-[#22C55E] font-bold">{qaData.passes}</span>
+                    {" / "}
+                    <span className="text-[#F59E0B] font-bold">{qaData.warnings}</span>
+                    {" out of "}
+                    <span className="font-bold">{qaData.total_checks}</span>
+                  </p>
+                </div>
+                <div className="text-right">
+                  <p className="text-xs text-[#A1A1AA]">No-conv streak</p>
+                  <p className="text-sm font-bold">{qaData.consecutive_no_conversions}</p>
+                  {qaData.auto_paused_at && (
+                    <p className="text-[10px] text-[#EF4444]">⏸ auto-paused</p>
+                  )}
+                </div>
+              </div>
+
+              {/* Checks list */}
+              <div className="space-y-1.5">
+                {qaData.checks.map((c) => (
+                  <div
+                    key={c.id}
+                    className={`flex items-start gap-2 p-2 rounded border ${
+                      c.status === "pass"
+                        ? "border-[#22C55E30] bg-[#22C55E08]"
+                        : c.status === "warn"
+                        ? "border-[#F59E0B30] bg-[#F59E0B08]"
+                        : "border-[var(--brand-border)] bg-[var(--brand-card)]"
+                    }`}
+                  >
+                    <div className="text-lg leading-none mt-0.5">
+                      {c.status === "pass" ? "✅" : c.status === "warn" ? "⚠️" : "ℹ️"}
+                    </div>
+                    <div className="flex-1">
+                      <div className="text-xs font-medium">{c.label}</div>
+                      <div className="text-[11px] text-[#A1A1AA] mt-0.5 font-mono">{c.detail}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {qaData.samples?.length > 0 && (
+                <div>
+                  <p className="text-xs font-medium text-[#A1A1AA] mb-2">5 sample visits</p>
+                  <div className="overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="border-[var(--brand-border)] hover:bg-transparent">
+                          <TableHead className="text-[10px]">UA</TableHead>
+                          <TableHead className="text-[10px]">Platform</TableHead>
+                          <TableHead className="text-[10px]">Accept-Lang</TableHead>
+                          <TableHead className="text-[10px]">utm_medium</TableHead>
+                          <TableHead className="text-[10px]">utm_content</TableHead>
+                          <TableHead className="text-[10px]">Device fit</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {qaData.samples.map((s) => (
+                          <TableRow key={s.index} className="border-[var(--brand-border)] text-[11px]">
+                            <TableCell>{s.ua_type === "mobile" ? <Smartphone size={12} className="inline" /> : <Monitor size={12} className="inline" />}</TableCell>
+                            <TableCell className="font-medium">{s.platform || "—"}</TableCell>
+                            <TableCell className="font-mono text-[10px]">{s.accept_language || "—"}</TableCell>
+                            <TableCell>{s.utm_medium || "—"}</TableCell>
+                            <TableCell>{s.utm_content || "—"}</TableCell>
+                            <TableCell className="text-[10px]">{s.device_expected || "any"}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </div>
+              )}
+
+              {qaData.last_postback_fired_at && (
+                <div className="p-2 bg-[var(--brand-card)] rounded border border-[var(--brand-border)] text-[11px]">
+                  <p className="text-[#A1A1AA]">
+                    Last outbound postback: <span className="font-mono">{qaData.last_postback_fired_at}</span>
+                    {" · status "}
+                    <span className={qaData.last_postback_status_code >= 200 && qaData.last_postback_status_code < 300 ? "text-[#22C55E]" : "text-[#EF4444]"}>
+                      {qaData.last_postback_status_code}
+                    </span>
+                  </p>
+                </div>
+              )}
             </div>
           )}
         </DialogContent>

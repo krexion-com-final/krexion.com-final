@@ -1231,6 +1231,13 @@ def resolve_pro_visit(
     strip_search_path: bool = True,
     network_click_chain_enabled: bool = False,
     network_click_host: Optional[str] = None,
+    # v2.1.83 — International guardrail knobs (all optional, defaults
+    # preserve pre-existing behaviour so any older caller keeps working).
+    lang_match: bool = False,
+    visitor_is_mobile: Optional[bool] = None,
+    device_mode: str = "auto",
+    tod_enabled: bool = False,
+    campaign_type: str = "auto",
 ) -> Dict[str, Any]:
     """Top-level pro-mode resolver — returns a dict with everything the
     engine needs for ONE visit:
@@ -1241,18 +1248,67 @@ def resolve_pro_visit(
           "sec_fetch": {...},
           "utm_source": "...",
           "utm_medium": "...",
+          "utm_campaign": "...",
+          "utm_content": "...",  (v2.1.83 — campaign_type presets)
+          "utm_term": "...",     (v2.1.83)
+          "accept_language": "...", (v2.1.83 — feature 1)
+          "device_type": "mobile|desktop", (v2.1.83 — feature 3)
           "network_click_referer": "..." (when chain enabled),
         }
     """
     out: Dict[str, Any] = {
         "referer": "", "platform": "", "esp": "",
         "sec_fetch": {}, "utm_source": "", "utm_medium": "", "utm_campaign": "",
+        "utm_content": "", "utm_term": "",
+        "accept_language": "", "device_type": "",
         "network_click_referer": "",
     }
+
+    # Feature 1 — always compute the country-matched accept_language so
+    # server-side macro expansion has it available even for pools that
+    # don't run through the platform filter (email, unknown platform).
+    if lang_match:
+        out["accept_language"] = accept_language_for_country(country)
+
+    # Feature 3 — visitor device detection. If the caller didn't pass an
+    # explicit flag, sniff it from the UA (mobile substring is enough
+    # here — the caller can pass `_is_mobile_ua(ua)!=""` for the strict
+    # detection used elsewhere in this module).
+    if visitor_is_mobile is None:
+        vlow = (ua or "").lower()
+        visitor_is_mobile = ("mobi" in vlow or "iphone" in vlow or "android" in vlow)
+    out["device_type"] = "mobile" if visitor_is_mobile else "desktop"
 
     pool = parse_weighted_pool(platform_pool_value)
     if not pool:
         return out
+
+    # Feature 3 — filter pool by device match (only when explicitly asked
+    # so legacy callers stay unaffected).
+    if (device_mode or "auto").lower() == "match_platform":
+        filtered = [(p, w) for (p, w) in pool if platform_matches_device(p, bool(visitor_is_mobile))]
+        if filtered:
+            pool = filtered
+    elif (device_mode or "auto").lower() == "mobile_only":
+        # Force-drop desktop-only platforms.
+        pool = [(p, w) for (p, w) in pool if platform_device_expectation(p) != "desktop_leaning"] or pool
+    elif (device_mode or "auto").lower() == "desktop_only":
+        pool = [(p, w) for (p, w) in pool if platform_device_expectation(p) != "mobile_only"] or pool
+
+    # Feature 4 — time-of-day weighting. Multiply each pool entry by its
+    # realism weight at the current UTC hour so evening TikTok clicks
+    # outweigh 3am TikTok clicks, LinkedIn skews to business hours, etc.
+    if tod_enabled and pool:
+        try:
+            hour = datetime.now(timezone.utc).hour
+            adj: List[Tuple[str, float]] = []
+            for p, w in pool:
+                tw = time_of_day_weight(p, hour)
+                # Never zero-out — keep a floor so rare pools still pick.
+                adj.append((p, max(0.05, float(w) * float(tw))))
+            pool = adj
+        except Exception:
+            pass  # never break the pick on a math error
 
     chosen = pick_weighted(pool)
     if not chosen:
@@ -1260,6 +1316,11 @@ def resolve_pro_visit(
 
     # Normalise "x" → "twitter" for downstream signal matching
     signal = "twitter" if chosen == "x" else chosen
+
+    # Feature 5 — resolve UTM preset override (used for BOTH email and
+    # non-email paths below). Falls back to None so pick_utm_variation /
+    # pick_utm_campaign use their legacy random rotation.
+    _preset = campaign_type_preset(campaign_type)
 
     # Email path: use weighted ESP/webmail resolver
     if chosen == "email":
@@ -1270,6 +1331,10 @@ def resolve_pro_visit(
         out["esp"] = esp
         out["utm_source"], out["utm_medium"] = pick_utm_variation("email", brand)
         out["utm_campaign"] = pick_utm_campaign("email", brand)
+        if _preset:
+            out["utm_medium"]  = _preset.get("medium", out["utm_medium"])
+            out["utm_content"] = _preset.get("content", "")
+            out["utm_term"]    = _preset.get("term", "")
         out["sec_fetch"] = build_sec_fetch_headers(ref, is_navigation=True)
         return out
 
@@ -1286,6 +1351,10 @@ def resolve_pro_visit(
         out["platform"] = signal
         out["utm_source"], out["utm_medium"] = pick_utm_variation(signal, brand)
         out["utm_campaign"] = pick_utm_campaign(signal, brand)
+        if _preset:
+            out["utm_medium"]  = _preset.get("medium", out["utm_medium"])
+            out["utm_content"] = _preset.get("content", "")
+            out["utm_term"]    = _preset.get("term", "")
         out["sec_fetch"] = build_sec_fetch_headers(ref, is_navigation=True)
         return out
 
@@ -1326,6 +1395,10 @@ def resolve_pro_visit(
     out["platform"] = signal
     out["utm_source"], out["utm_medium"] = pick_utm_variation(signal, brand)
     out["utm_campaign"] = pick_utm_campaign(signal, brand)
+    if _preset:
+        out["utm_medium"]  = _preset.get("medium", out["utm_medium"])
+        out["utm_content"] = _preset.get("content", "")
+        out["utm_term"]    = _preset.get("term", "")
     out["sec_fetch"] = build_sec_fetch_headers(ref, is_navigation=True)
 
     # Network click chain (one optional 302 hop)
@@ -1902,6 +1975,380 @@ def platform_needs_ua_match(platform: str) -> bool:
     return (platform or "").lower() in _INAPP_CAPABLE_PLATFORMS
 
 
+# ──────────────────────────────────────────────────────────────────────
+# v2.1.83 — International Fraud-Detector Guardrails (10-feature pack)
+# ──────────────────────────────────────────────────────────────────────
+# These helpers extend the pro-referrer engine with the checks fraud
+# detectors on international affiliate networks (MaxBounty, ClickDealer,
+# Everflow, Cake, HasOffers, AdCombo, Voluum, etc.) run at click time.
+# Every helper is a pure function — safe to call from server.py, RUT,
+# preview endpoint, or QA-check endpoint. All are OFF-by-default at the
+# link level, so pre-existing links keep behaving IDENTICALLY.
+# ──────────────────────────────────────────────────────────────────────
+
+# Feature 1 — Country-matched Accept-Language.
+# Maps ISO-3166 alpha-2 country code (lowercase) to a realistic
+# Accept-Language header value that a browser physically located in
+# that country would send. Used both by the click handler (macro
+# expansion) and by RUT so all channels stay consistent.
+_COUNTRY_LANG_MAP: Dict[str, str] = {
+    "us": "en-US,en;q=0.9",
+    "gb": "en-GB,en;q=0.9",
+    "uk": "en-GB,en;q=0.9",
+    "ca": "en-CA,en;q=0.9,fr-CA;q=0.7",
+    "au": "en-AU,en;q=0.9",
+    "nz": "en-NZ,en;q=0.9",
+    "ie": "en-IE,en;q=0.9",
+    "in": "en-IN,en;q=0.9,hi-IN;q=0.7,hi;q=0.5",
+    "pk": "en-PK,en;q=0.9,ur-PK;q=0.7,ur;q=0.5",
+    "bd": "bn-BD,bn;q=0.9,en;q=0.7",
+    "lk": "en-LK,en;q=0.9,si-LK;q=0.7,ta-LK;q=0.5",
+    "np": "ne-NP,ne;q=0.9,en;q=0.7",
+    "sg": "en-SG,en;q=0.9,zh-SG;q=0.7",
+    "my": "ms-MY,ms;q=0.9,en;q=0.7",
+    "ph": "en-PH,en;q=0.9,tl-PH;q=0.7",
+    "id": "id-ID,id;q=0.9,en;q=0.7",
+    "th": "th-TH,th;q=0.9,en;q=0.7",
+    "vn": "vi-VN,vi;q=0.9,en;q=0.7",
+    "jp": "ja-JP,ja;q=0.9,en;q=0.6",
+    "kr": "ko-KR,ko;q=0.9,en;q=0.6",
+    "cn": "zh-CN,zh;q=0.9,en;q=0.6",
+    "hk": "zh-HK,zh;q=0.9,en;q=0.7",
+    "tw": "zh-TW,zh;q=0.9,en;q=0.6",
+    "de": "de-DE,de;q=0.9,en-US;q=0.7,en;q=0.6",
+    "at": "de-AT,de;q=0.9,en;q=0.7",
+    "ch": "de-CH,de;q=0.9,fr-CH;q=0.7,en;q=0.5",
+    "fr": "fr-FR,fr;q=0.9,en-US;q=0.7,en;q=0.6",
+    "be": "nl-BE,nl;q=0.9,fr-BE;q=0.7,en;q=0.5",
+    "nl": "nl-NL,nl;q=0.9,en;q=0.7",
+    "es": "es-ES,es;q=0.9,en;q=0.7",
+    "pt": "pt-PT,pt;q=0.9,en;q=0.7",
+    "br": "pt-BR,pt;q=0.9,en-US;q=0.7,en;q=0.6",
+    "mx": "es-MX,es;q=0.9,en-US;q=0.7,en;q=0.6",
+    "ar": "es-AR,es;q=0.9,en;q=0.6",
+    "cl": "es-CL,es;q=0.9,en;q=0.6",
+    "co": "es-CO,es;q=0.9,en;q=0.6",
+    "pe": "es-PE,es;q=0.9,en;q=0.6",
+    "it": "it-IT,it;q=0.9,en;q=0.7",
+    "gr": "el-GR,el;q=0.9,en;q=0.7",
+    "pl": "pl-PL,pl;q=0.9,en;q=0.7",
+    "cz": "cs-CZ,cs;q=0.9,en;q=0.7",
+    "sk": "sk-SK,sk;q=0.9,en;q=0.7",
+    "hu": "hu-HU,hu;q=0.9,en;q=0.7",
+    "ro": "ro-RO,ro;q=0.9,en;q=0.7",
+    "bg": "bg-BG,bg;q=0.9,en;q=0.7",
+    "hr": "hr-HR,hr;q=0.9,en;q=0.7",
+    "rs": "sr-RS,sr;q=0.9,en;q=0.7",
+    "si": "sl-SI,sl;q=0.9,en;q=0.7",
+    "ru": "ru-RU,ru;q=0.9,en;q=0.6",
+    "ua": "uk-UA,uk;q=0.9,ru;q=0.7,en;q=0.5",
+    "by": "be-BY,be;q=0.9,ru;q=0.7,en;q=0.5",
+    "kz": "kk-KZ,kk;q=0.9,ru;q=0.7,en;q=0.5",
+    "tr": "tr-TR,tr;q=0.9,en;q=0.7",
+    "sa": "ar-SA,ar;q=0.9,en;q=0.7",
+    "ae": "ar-AE,ar;q=0.9,en;q=0.8",
+    "eg": "ar-EG,ar;q=0.9,en;q=0.7",
+    "il": "he-IL,he;q=0.9,en;q=0.7",
+    "ir": "fa-IR,fa;q=0.9,en;q=0.5",
+    "za": "en-ZA,en;q=0.9",
+    "ng": "en-NG,en;q=0.9",
+    "ke": "en-KE,en;q=0.9,sw-KE;q=0.7",
+    "gh": "en-GH,en;q=0.9",
+    "no": "no,nb;q=0.9,en;q=0.7",
+    "se": "sv-SE,sv;q=0.9,en;q=0.7",
+    "fi": "fi-FI,fi;q=0.9,en;q=0.7",
+    "dk": "da-DK,da;q=0.9,en;q=0.7",
+    "is": "is-IS,is;q=0.9,en;q=0.7",
+}
+
+
+def accept_language_for_country(cc: Optional[str], fallback: str = "en-US,en;q=0.9") -> str:
+    """Return a realistic Accept-Language header for the given country
+    code. Falls back to English if the country is unknown. Case- and
+    whitespace-insensitive.
+    """
+    key = (cc or "").strip().lower()
+    if not key:
+        return fallback
+    return _COUNTRY_LANG_MAP.get(key, fallback)
+
+
+# Feature 3 — Platform → device-type expectation.
+# Real-world traffic distribution for each platform. Used by the visit
+# resolver to reject platform picks that don't match the visitor's UA
+# (e.g. TikTok click with desktop UA = red flag → re-pick from mobile-
+# friendly platforms).
+#   "mobile_only"     : 90%+ mobile in the wild
+#   "desktop_leaning" : 60%+ desktop
+#   "any"             : balanced (Google, YouTube, email — either device
+#                        looks natural)
+_PLATFORM_DEVICE_EXPECTATION: Dict[str, str] = {
+    "tiktok":      "mobile_only",
+    "instagram":   "mobile_only",
+    "snapchat":    "mobile_only",
+    "whatsapp":    "mobile_only",
+    "telegram":    "any",
+    "messenger":   "mobile_only",
+    "facebook":    "any",
+    "twitter":     "any",
+    "x":           "any",
+    "reddit":      "any",
+    "pinterest":   "any",
+    "linkedin":    "desktop_leaning",
+    "youtube":     "any",
+    "google":      "any",
+    "bing":        "desktop_leaning",
+    "duckduckgo":  "any",
+    "yahoo":       "any",
+    "yandex":      "any",
+    "email":       "any",
+}
+
+
+def platform_device_expectation(platform: str) -> str:
+    """Return "mobile_only" | "desktop_leaning" | "any" for the platform."""
+    return _PLATFORM_DEVICE_EXPECTATION.get((platform or "").lower(), "any")
+
+
+def platform_matches_device(platform: str, is_mobile: bool) -> bool:
+    """True iff a click from an <is_mobile> device is plausible for this
+    platform. Used to filter the platform pool so TikTok/Instagram
+    picks never land on a desktop visitor and vice-versa."""
+    exp = platform_device_expectation(platform)
+    if exp == "any":
+        return True
+    if exp == "mobile_only":
+        return bool(is_mobile)
+    if exp == "desktop_leaning":
+        # Desktop-leaning platforms still get SOME mobile traffic in
+        # the real world — LinkedIn mobile app is huge. So we allow
+        # both but weight desktop heavier upstream.
+        return True
+    return True
+
+
+# Feature 5 — Campaign-type UTM presets.
+# Maps a customer-picked campaign_type to (utm_medium, utm_content prefix,
+# optional utm_term). Extends what pick_utm_variation / pick_utm_campaign
+# already do, WITHOUT breaking either — when campaign_type=="auto" (the
+# default), the legacy random pick is used.
+_CAMPAIGN_TYPE_PRESETS: Dict[str, Dict[str, str]] = {
+    "static_image":       {"medium": "paid_social", "content": "static_image", "term": "img_ad"},
+    "video_ad":           {"medium": "paid_social", "content": "video_a",      "term": "video_ad"},
+    "carousel_ad":        {"medium": "paid_social", "content": "carousel_v2",  "term": "carousel"},
+    "story_ad":           {"medium": "paid_social", "content": "story_9x16",   "term": "story"},
+    "lookalike_prospect": {"medium": "paid_social", "content": "lookalike_1p", "term": "lookalike_m35"},
+    "retargeting_warm":   {"medium": "retargeting", "content": "warm_audience","term": "rt_warm"},
+    "retargeting_cold":   {"medium": "retargeting", "content": "cold_audience","term": "rt_cold"},
+    "cold_email":         {"medium": "email",       "content": "outreach_v3",  "term": "cold_email"},
+    "search_cpc":         {"medium": "cpc",         "content": "search_ad",    "term": "keyword"},
+}
+
+VALID_CAMPAIGN_TYPES: Tuple[str, ...] = ("auto",) + tuple(_CAMPAIGN_TYPE_PRESETS.keys())
+
+
+def campaign_type_preset(campaign_type: str) -> Optional[Dict[str, str]]:
+    """Return the utm preset dict for a campaign_type, or None if the
+    caller passed "auto" / an unknown value (legacy random path)."""
+    key = (campaign_type or "").strip().lower()
+    if not key or key == "auto":
+        return None
+    return _CAMPAIGN_TYPE_PRESETS.get(key)
+
+
+# Feature 6 — Quality-tier preset. UI/UX shortcut: customer picks one
+# word ("Premium" / "Standard" / "Aggressive"), server-side normaliser
+# applies sensible defaults for the other 8 toggles. Legacy links keep
+# tier="standard" so nothing changes for them.
+_QUALITY_TIER_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "premium": {
+        # Every fraud check ON — matched language, wrapper redirect,
+        # time-of-day realism, strict device match, in-app deep paths.
+        "referrer_pro_lang_match":            True,
+        "referrer_pro_social_wrapper":        True,
+        "referrer_pro_inapp_deep_path":       True,
+        "referrer_pro_strip_search_path":     True,
+        "referrer_pro_wrapper_redirect":      True,
+        "referrer_pro_tod_enabled":           True,
+        "referrer_pro_device_mode":           "match_platform",
+    },
+    "standard": {
+        # Balanced defaults — same as pre-v2.1.83 behaviour so existing
+        # links stay identical.
+        "referrer_pro_lang_match":            True,
+        "referrer_pro_social_wrapper":        True,
+        "referrer_pro_inapp_deep_path":       True,
+        "referrer_pro_strip_search_path":     True,
+        "referrer_pro_wrapper_redirect":      False,
+        "referrer_pro_tod_enabled":           False,
+        "referrer_pro_device_mode":           "auto",
+    },
+    "aggressive": {
+        # Max throughput — for lenient networks (gambling / adult / crypto).
+        # Skip the expensive wrapper hop and disable strict filtering.
+        "referrer_pro_lang_match":            False,
+        "referrer_pro_social_wrapper":        False,
+        "referrer_pro_inapp_deep_path":       False,
+        "referrer_pro_strip_search_path":     True,
+        "referrer_pro_wrapper_redirect":      False,
+        "referrer_pro_tod_enabled":           False,
+        "referrer_pro_device_mode":           "auto",
+    },
+}
+
+VALID_QUALITY_TIERS: Tuple[str, ...] = tuple(_QUALITY_TIER_DEFAULTS.keys())
+
+
+def quality_tier_defaults(tier: str) -> Dict[str, Any]:
+    """Return the settings dict for a quality tier. Falls back to
+    "standard" for unknown values — callers can safely spread this into
+    their link doc when the customer picks a tier from the UI."""
+    key = (tier or "standard").strip().lower()
+    return dict(_QUALITY_TIER_DEFAULTS.get(key, _QUALITY_TIER_DEFAULTS["standard"]))
+
+
+# Feature 7 — Weighted multi-URL A/B rotation (per-visit).
+# `offer_urls_value` accepts either:
+#   - JSON: [{"url":"https://a", "weight":50}, {"url":"https://b", "weight":30}]
+#   - Compact: "https://a:50,https://b:30,https://c:20"
+# Falls back cleanly to [] on any parse error. Weights normalise to 1.
+def parse_offer_url_pool(offer_urls_value: str) -> List[Tuple[str, float]]:
+    """Parse the multi-URL rotation string into [(url, weight), ...].
+    Empty/invalid input → []. Duplicate URLs collapse to summed weight.
+    """
+    raw = (offer_urls_value or "").strip()
+    if not raw:
+        return []
+    pool: List[Tuple[str, float]] = []
+    # Try JSON first
+    if raw.startswith("["):
+        try:
+            arr = json.loads(raw)
+            for item in arr:
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("url") or "").strip()
+                if not url:
+                    continue
+                try:
+                    w = float(item.get("weight", 1))
+                except Exception:
+                    w = 1.0
+                if w > 0:
+                    pool.append((url, w))
+        except Exception:
+            pass
+    else:
+        # Compact format: "url:weight,url:weight" — split on the LAST
+        # ":<number>" so URLs containing colons (https://) stay intact.
+        for chunk in raw.split(","):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            # Rightmost ":" preceded by a numeric weight is the split
+            m = re.search(r":(\d+(?:\.\d+)?)\s*$", chunk)
+            if m:
+                url = chunk[: m.start()].strip()
+                try:
+                    w = float(m.group(1))
+                except Exception:
+                    w = 1.0
+            else:
+                url = chunk
+                w = 1.0
+            if url:
+                pool.append((url, w))
+    # Collapse duplicate URLs
+    if not pool:
+        return []
+    coalesced: Dict[str, float] = {}
+    for url, w in pool:
+        coalesced[url] = coalesced.get(url, 0.0) + w
+    return [(u, w) for u, w in coalesced.items()]
+
+
+def pick_offer_url(offer_urls_value: str, fallback: str) -> str:
+    """Pick one URL from the weighted pool. Returns `fallback` if the
+    pool is empty. Uses the same weighted-pick primitive as the platform
+    pool so behaviour is consistent across features."""
+    pool = parse_offer_url_pool(offer_urls_value)
+    if not pool:
+        return fallback
+    total = sum(w for _, w in pool)
+    if total <= 0:
+        return fallback
+    r = random.uniform(0, total)
+    cum = 0.0
+    for url, w in pool:
+        cum += w
+        if r <= cum:
+            return url
+    return pool[-1][0]
+
+
+# Feature 2 — Macro expansion for offer-URL params (server-side).
+# Extends the existing single-URL macro substitution (server.py already
+# handles {clickid}/{ua}/{ip}) to a richer set that customers commonly
+# pass through to networks. Idempotent for strings that contain no
+# macros — safe to call on every click.
+def _random_hex_token(n: int = 16) -> str:
+    return "".join(random.choices("abcdef0123456789", k=max(1, n)))
+
+
+def expand_link_macros(text: str, ctx: Dict[str, Any]) -> str:
+    """Replace `{macro}` tokens inside `text` with URL-encoded values
+    from `ctx`. Unknown macros pass through untouched so raw offer-URL
+    literals like `{customer_supplied_id}` never break.
+
+    Supported ctx keys (all optional — missing → empty string):
+      click_id, clickid, source, source_name, campaign, brand, platform,
+      country, city, region, ip, ua, referer, referrer, utm_source,
+      utm_medium, utm_campaign, utm_content, utm_term, accept_language,
+      timestamp, timestamp_ms, random, random16, random32
+    """
+    if not text or "{" not in text:
+        return text
+    # Auto-generated macros
+    now = datetime.now(timezone.utc)
+    macros: Dict[str, str] = {
+        "click_id":        str(ctx.get("click_id") or ctx.get("clickid") or ""),
+        "clickid":         str(ctx.get("clickid") or ctx.get("click_id") or ""),
+        "source":          str(ctx.get("source") or ""),
+        "source_name":     str(ctx.get("source_name") or ""),
+        "campaign":        str(ctx.get("campaign") or ctx.get("utm_campaign") or ""),
+        "brand":           str(ctx.get("brand") or ""),
+        "platform":        str(ctx.get("platform") or ""),
+        "country":         str(ctx.get("country") or ""),
+        "city":            str(ctx.get("city") or ""),
+        "region":          str(ctx.get("region") or ""),
+        "ip":              str(ctx.get("ip") or ""),
+        "ua":              str(ctx.get("ua") or ""),
+        "user_agent":      str(ctx.get("ua") or ctx.get("user_agent") or ""),
+        "referer":         str(ctx.get("referer") or ctx.get("referrer") or ""),
+        "referrer":        str(ctx.get("referrer") or ctx.get("referer") or ""),
+        "utm_source":      str(ctx.get("utm_source") or ""),
+        "utm_medium":      str(ctx.get("utm_medium") or ""),
+        "utm_campaign":    str(ctx.get("utm_campaign") or ""),
+        "utm_content":     str(ctx.get("utm_content") or ""),
+        "utm_term":        str(ctx.get("utm_term") or ""),
+        "accept_language": str(ctx.get("accept_language") or ""),
+        "timestamp":       str(int(now.timestamp())),
+        "timestamp_ms":    str(int(now.timestamp() * 1000)),
+        "random":          _random_hex_token(8),
+        "random16":        _random_hex_token(16),
+        "random32":        _random_hex_token(32),
+    }
+    # Do a per-key encoded replace so callers get URL-safe substitution
+    # regardless of where in the URL the macro sits (path / query / frag).
+    from urllib.parse import quote as _q
+    out = text
+    for k, v in macros.items():
+        token = "{" + k + "}"
+        if token in out:
+            out = out.replace(token, _q(v, safe=""))
+    return out
+
+
 __all__ = [
     # Resolvers
     "resolve_pro_visit",
@@ -1928,6 +2375,17 @@ __all__ = [
     "fbclid_with_realistic_timestamp",
     "gclid_with_realistic_timestamp",
     "is_inapp_browser_ua",
+    # v2.1.83 — International guardrails
+    "accept_language_for_country",
+    "platform_device_expectation",
+    "platform_matches_device",
+    "campaign_type_preset",
+    "quality_tier_defaults",
+    "parse_offer_url_pool",
+    "pick_offer_url",
+    "expand_link_macros",
+    "VALID_CAMPAIGN_TYPES",
+    "VALID_QUALITY_TIERS",
     # Constants
     "VALID_PLATFORM_KEYS",
     "VALID_EMAIL_KEYS",
