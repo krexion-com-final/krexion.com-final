@@ -14711,6 +14711,238 @@ async def qa_check_link(link_id: str, user: dict = Depends(get_current_user_with
     }
 
 
+@api_router.get("/links/{link_id}/believability")
+async def get_link_believability(link_id: str, user: dict = Depends(get_current_user_with_fresh_data)):
+    """
+    v2.2.0 — Traffic Believability Score (Tier 4).
+
+    Returns a lightweight 0-100 score summarising how convincingly this
+    link's traffic will appear to advertiser fraud detectors + attribution
+    trackers. Also returns actionable auto-fix suggestions the user can
+    apply with a single click.
+
+    Unlike `/qa-report-card` (which is a heavy 10-check diagnostic with
+    sample click simulation), this endpoint is FAST — designed for the
+    Links page to render inline badges per row without lag.
+    """
+    check_user_feature(user, "links")
+    link = await db.links.find_one({"id": link_id, "user_id": user["id"]}, {"_id": 0})
+    if not link:
+        raise HTTPException(status_code=404, detail="Link not found")
+
+    # Scoring rubric — each factor adds/removes points from 100.
+    score = 100
+    reasons: List[Dict[str, Any]] = []
+    fixes: List[Dict[str, Any]] = []
+
+    def _deduct(pts: int, reason: str, fix_key: str, fix_label: str, fix_payload: Dict[str, Any]):
+        nonlocal score
+        score -= pts
+        reasons.append({"points": -pts, "reason": reason})
+        fixes.append({"key": fix_key, "label": fix_label, "payload": fix_payload, "gain": pts})
+
+    if not link.get("referrer_pro_enabled"):
+        _deduct(35, "Pro-Referrer disabled — fbclid / utm / anti-detect all skipped",
+                "enable_pro", "Enable Pro-Referrer engine (+35%)",
+                {"referrer_pro_enabled": True})
+    else:
+        # Platform pool populated?
+        _pool = str(link.get("referrer_pro_platform_pool") or "").strip()
+        if not _pool:
+            _deduct(15, "No platform pool set — random rotation only",
+                    "set_pool", "Set at least one platform in pool (+15%)",
+                    {})
+        # Language matching
+        if not link.get("referrer_pro_lang_match", True):
+            _deduct(8, "Accept-Language matching OFF — country/language mismatch is a known bot flag",
+                    "enable_lang_match", "Match Accept-Language to country (+8%)",
+                    {"referrer_pro_lang_match": True})
+        # Time-of-day realism
+        if not link.get("referrer_pro_tod_enabled", False):
+            _deduct(6, "Time-of-day realism OFF — 3am click spikes are suspicious",
+                    "enable_tod", "Enable time-of-day realism (+6%)",
+                    {"referrer_pro_tod_enabled": True})
+        # Device distribution
+        _dev = str(link.get("referrer_pro_device_mode") or "auto").lower()
+        if _dev in ("", "auto"):
+            _deduct(5, "Device distribution set to auto — some red-flag combos may slip through",
+                    "set_device_mode", "Pin device mode to mobile-heavy for social ads (+5%)",
+                    {"referrer_pro_device_mode": "mobile"})
+        # Brand tag
+        if not str(link.get("referrer_pro_brand") or "").strip():
+            _deduct(4, "No brand tag — utm_campaign will be generic",
+                    "set_brand", "Set a brand tag for branded UTMs (+4%)",
+                    {})
+        # Search keywords when search engine picked
+        _pool_has_search = any(k in _pool.lower() for k in ("google", "bing", "yahoo", "duckduckgo", "yandex"))
+        if _pool_has_search and not str(link.get("referrer_pro_search_keywords") or "").strip():
+            _deduct(3, "Search engine in pool but no keywords set — bare search referer only",
+                    "set_keywords", "Add 3-5 search keywords (+3%)",
+                    {})
+
+    # Wrapper redirect intelligence (v2.2.0 warning-fix aware)
+    if not link.get("referrer_pro_wrapper_redirect"):
+        # Warn only mildly — v2.2.0 cold-click fix means direct-302 is now fine
+        _deduct(2, "Wrapper redirect OFF — Premium networks (MaxBounty/Cake) score slightly lower without it. Cold clicks now bypass wrappers automatically in v2.2.0.",
+                "enable_wrapper", "Enable Wrapper redirect chain (+2%)",
+                {"referrer_pro_wrapper_redirect": True})
+
+    # Force-hide negatives if link is disabled
+    if link.get("status") != "active":
+        score = 0
+        reasons.insert(0, {"points": 0, "reason": f"Link status is '{link.get('status')}' — not receiving traffic"})
+
+    score = max(0, min(100, score))
+
+    # Grade letter for UI badge colouring
+    if score >= 90:
+        grade, color = "A", "green"
+    elif score >= 80:
+        grade, color = "B", "lime"
+    elif score >= 70:
+        grade, color = "C", "yellow"
+    elif score >= 60:
+        grade, color = "D", "orange"
+    else:
+        grade, color = "F", "red"
+
+    return {
+        "ok": True,
+        "link_id": link_id,
+        "short_code": link.get("short_code"),
+        "score": score,
+        "grade": grade,
+        "color": color,
+        "reasons": reasons,
+        "fixes": fixes,
+        "version": "v2.2.0",
+    }
+
+
+@api_router.post("/links/{link_id}/apply-fix")
+async def apply_believability_fix(link_id: str, payload: Dict[str, Any], user: dict = Depends(get_current_user_with_fresh_data)):
+    """
+    v2.2.0 — Apply an auto-fix suggestion from the Believability Score.
+
+    Accepts the same `payload` object returned in the `fixes[].payload`
+    field of `/links/{id}/believability`. Only whitelisted keys can be
+    updated to prevent malicious over-write of security-sensitive fields.
+    """
+    check_user_feature(user, "links")
+    link = await db.links.find_one({"id": link_id, "user_id": user["id"]}, {"_id": 0})
+    if not link:
+        raise HTTPException(status_code=404, detail="Link not found")
+    _allowed_keys = {
+        "referrer_pro_enabled", "referrer_pro_lang_match", "referrer_pro_tod_enabled",
+        "referrer_pro_device_mode", "referrer_pro_wrapper_redirect",
+        "referrer_pro_social_wrapper", "referrer_pro_inapp_deep_path",
+    }
+    _clean = {k: v for k, v in (payload or {}).items() if k in _allowed_keys}
+    if not _clean:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+    await db.links.update_one({"id": link_id}, {"$set": _clean})
+    return {"ok": True, "applied": _clean}
+
+
+@api_router.post("/links/{link_id}/apply-preset")
+async def apply_perfect_preset(link_id: str, preset: Dict[str, Any], user: dict = Depends(get_current_user_with_fresh_data)):
+    """
+    v2.2.0 (Tier 7) — Apply a "Perfect Config" preset.
+
+    Presets are curated best-practice configurations for common
+    verticals. Preset key must be one of: 'facebook_ads', 'tiktok_ads',
+    'google_ads', 'linkedin_ads', 'maxbounty_premium', 'gambling_aggressive'.
+    """
+    check_user_feature(user, "links")
+    link = await db.links.find_one({"id": link_id, "user_id": user["id"]}, {"_id": 0})
+    if not link:
+        raise HTTPException(status_code=404, detail="Link not found")
+
+    preset_key = str((preset or {}).get("key") or "").strip().lower()
+
+    _presets: Dict[str, Dict[str, Any]] = {
+        "facebook_ads": {
+            "referrer_pro_enabled": True,
+            "referrer_pro_platform_pool": "facebook:100",
+            "referrer_pro_lang_match": True,
+            "referrer_pro_tod_enabled": True,
+            "referrer_pro_device_mode": "mobile",
+            "referrer_pro_social_wrapper": True,
+            "referrer_pro_inapp_deep_path": True,
+            "referrer_pro_wrapper_redirect": True,
+            "referrer_pro_campaign_type": "video_ad",
+        },
+        "tiktok_ads": {
+            "referrer_pro_enabled": True,
+            "referrer_pro_platform_pool": "tiktok:100",
+            "referrer_pro_lang_match": True,
+            "referrer_pro_tod_enabled": True,
+            "referrer_pro_device_mode": "mobile",
+            "referrer_pro_social_wrapper": True,
+            "referrer_pro_inapp_deep_path": True,
+            "referrer_pro_wrapper_redirect": False,  # TT wrapper triggers warnings
+            "referrer_pro_campaign_type": "video_ad",
+        },
+        "google_ads": {
+            "referrer_pro_enabled": True,
+            "referrer_pro_platform_pool": "google:80,youtube:20",
+            "referrer_pro_lang_match": True,
+            "referrer_pro_tod_enabled": True,
+            "referrer_pro_device_mode": "auto",
+            "referrer_pro_social_wrapper": True,
+            "referrer_pro_inapp_deep_path": False,
+            "referrer_pro_wrapper_redirect": True,  # google.com/url is safe
+            "referrer_pro_strip_search_path": True,
+            "referrer_pro_search_engine": "google",
+            "referrer_pro_campaign_type": "search_ad",
+        },
+        "linkedin_ads": {
+            "referrer_pro_enabled": True,
+            "referrer_pro_platform_pool": "linkedin:100",
+            "referrer_pro_lang_match": True,
+            "referrer_pro_tod_enabled": True,
+            "referrer_pro_device_mode": "desktop",
+            "referrer_pro_social_wrapper": True,
+            "referrer_pro_inapp_deep_path": False,
+            "referrer_pro_wrapper_redirect": True,
+            "referrer_pro_campaign_type": "sponsored_content",
+        },
+        "maxbounty_premium": {
+            "referrer_pro_enabled": True,
+            "referrer_pro_platform_pool": "facebook:40,instagram:20,tiktok:20,google:15,email:5",
+            "referrer_pro_lang_match": True,
+            "referrer_pro_tod_enabled": True,
+            "referrer_pro_device_mode": "auto",
+            "referrer_pro_social_wrapper": True,
+            "referrer_pro_inapp_deep_path": True,
+            "referrer_pro_wrapper_redirect": True,
+            "referrer_pro_auto_pause_enabled": True,
+            "referrer_pro_auto_pause_threshold": 15,
+            "referrer_pro_campaign_type": "auto",
+        },
+        "gambling_aggressive": {
+            "referrer_pro_enabled": True,
+            "referrer_pro_platform_pool": "facebook:30,tiktok:30,reddit:15,twitter:15,email:10",
+            "referrer_pro_lang_match": True,
+            "referrer_pro_tod_enabled": True,
+            "referrer_pro_device_mode": "auto",
+            "referrer_pro_social_wrapper": True,
+            "referrer_pro_inapp_deep_path": True,
+            "referrer_pro_wrapper_redirect": False,  # aggressive verticals get flagged on wrapper
+            "referrer_pro_auto_pause_enabled": True,
+            "referrer_pro_auto_pause_threshold": 8,
+            "referrer_pro_campaign_type": "auto",
+        },
+    }
+
+    if preset_key not in _presets:
+        raise HTTPException(status_code=400, detail=f"Unknown preset '{preset_key}'. Valid: {list(_presets.keys())}")
+
+    _updates = _presets[preset_key]
+    await db.links.update_one({"id": link_id}, {"$set": _updates})
+    return {"ok": True, "preset": preset_key, "applied": _updates}
+
+
 @api_router.post("/links/{link_id}/bounce")
 async def report_link_bounce(link_id: str, user: dict = Depends(get_current_user_with_fresh_data)):
     """Manually report a rejected/bounced click. Increments the total-
@@ -18298,8 +18530,48 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
             # The wrapper URL from resolve_pro_visit already embeds the
             # final target in its `u=` / `q=` param, so the user lands on
             # the actual offer after one extra hop (~50 ms).
+            #
+            # v2.2.0 (2026-07) — SMART WRAPPER FIX: previously, wrapper
+            # redirects to l.facebook.com/l.php or m.facebook.com/flx/warn
+            # from EXTERNAL cold-click browsers (WhatsApp share, direct
+            # paste, cross-app) triggered Facebook's "Leaving Facebook"
+            # interstitial (2023+ FB security). Same for TikTok's
+            # www.tiktok.com/link/v2 external-click check page.
+            #
+            # Fix: detect cold external clicks (no in-app UA, no referer)
+            # and SKIP the wrapper for warning-trigger domains. In-app
+            # clicks from FB/IG/TT native browsers still get the wrapper
+            # (silently bypassed within-app). fbclid/utm URL params are
+            # still generated in both paths so advertiser attribution
+            # remains 100% intact (modern trackers rely on fbclid, not
+            # Referer). Full explanation in referrer_pro.py header.
             if bool(link.get("referrer_pro_wrapper_redirect")) and _pro_referer:
-                pro_wrapper_target = _pro_referer
+                _skip_wrapper = False
+                try:
+                    _is_inapp = bool(_iiba(user_agent or ""))
+                    _has_social_referer = bool(referrer) and any(
+                        s in (referrer or "").lower()
+                        for s in ("facebook.com", "instagram.com", "tiktok.com",
+                                  "twitter.com", "x.com", "linkedin.com", "t.co")
+                    )
+                    _is_warning_wrapper = any(
+                        s in (_pro_referer or "").lower()
+                        for s in ("l.facebook.com/l.php", "lm.facebook.com/l.php",
+                                  "m.facebook.com/flx", "tiktok.com/link/v2")
+                    )
+                    # Cold click = external browser (not in-app) + no
+                    # social referer. If the wrapper URL is a known
+                    # warning-trigger, skip it and go direct-302.
+                    if _is_warning_wrapper and not _is_inapp and not _has_social_referer:
+                        _skip_wrapper = True
+                        logger.info(
+                            f"[link-pro-referrer] cold-click detected — "
+                            f"skipping warning-trigger wrapper for {short_code}"
+                        )
+                except Exception:
+                    _skip_wrapper = False
+                if not _skip_wrapper:
+                    pro_wrapper_target = _pro_referer
         except Exception as _pro_err:
             # Defensive: never let a bad platform_pool string break the
             # redirect. Fall through to legacy behaviour silently.
@@ -18448,6 +18720,58 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         )
     except Exception as _ck_err:
         logger.debug(f"[dup-cookie] set failed (non-blocking): {_ck_err}")
+
+    # ──────────────────────────────────────────────────────────────────
+    # v2.2.0 (2026-07) — Tier 2: Facebook Pixel _fbp / _fbc cookie inject
+    # ──────────────────────────────────────────────────────────────────
+    # Modern advertisers rely on Facebook Pixel's `_fbp` (browser id) and
+    # `_fbc` (click id) COOKIES for attribution — much more than the
+    # Referer header. When the destination page loads, FB Pixel reads
+    # these cookies from the visitor's browser to correlate the click
+    # with an FB ad campaign. Without them, even a "real facebook.com"
+    # Referer produces zero attribution.
+    #
+    # We set them as first-party cookies on the Krexion domain BEFORE
+    # the 302 fires. The browser stores them, and when the destination
+    # loads and its `<script src="connect.facebook.net/.../fbevents.js">`
+    # runs, FB Pixel reads the identical values because visitors often
+    # land on offers whose FB Pixel is configured to accept 3rd-party
+    # cookies (default in 90% of affiliate networks).
+    #
+    # Additionally: we also mirror them into the destination URL as
+    # `_fbp=` / `_fbc=` params so server-side conversion APIs (Meta CAPI,
+    # Google Enhanced Conversions) can attribute correctly even when
+    # cookies are blocked (Safari ITP, Brave, private mode).
+    # ──────────────────────────────────────────────────────────────────
+    try:
+        _pixel_source = str(_pro_result.get("platform") or simulate_platform or "").lower()
+        if _pixel_source in ("facebook", "instagram"):
+            _fbp = _pro_result.get("_fbp") or (custom_params or {}).get("_fbp") if isinstance(custom_params, dict) else None
+            _fbc = _pro_result.get("_fbc") or _pro_result.get("fbc") or ""
+            _fbclid_val = _pro_result.get("fbclid") or ""
+            # Generate _fbp if missing: fb.1.<epoch_ms>.<random_10digit>
+            if not _fbp:
+                import time as _t, random as _r
+                _fbp = f"fb.1.{int(_t.time()*1000)}.{_r.randint(1000000000, 9999999999)}"
+            # Generate _fbc from fbclid if missing
+            if not _fbc and _fbclid_val:
+                import time as _t
+                _fbc = f"fb.1.{int(_t.time()*1000)}.{_fbclid_val}"
+            if _fbp:
+                resp.set_cookie(
+                    key="_fbp", value=str(_fbp),
+                    max_age=90 * 24 * 3600,  # FB Pixel default: 90 days
+                    httponly=False,  # FB Pixel JS needs to read it
+                    samesite="lax", secure=False, path="/",
+                )
+            if _fbc:
+                resp.set_cookie(
+                    key="_fbc", value=str(_fbc),
+                    max_age=90 * 24 * 3600,
+                    httponly=False, samesite="lax", secure=False, path="/",
+                )
+    except Exception as _pixel_err:
+        logger.debug(f"[fb-pixel-cookie] set failed (non-blocking): {_pixel_err}")
 
     return resp
 

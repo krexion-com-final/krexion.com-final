@@ -185,36 +185,44 @@ def build_search_referer(engine: str, keyword: str, country: Optional[str] = Non
 # bulk affiliate clicks looks bot-y.
 _SOCIAL_WRAPPER_REFERERS: Dict[str, List[Tuple[float, str]]] = {
     "facebook": [
-        # 2026-06-14 — modernised distribution. Real fb-click captures in
-        # 2026 show 75-85% l.facebook.com wrappers, 10-15% bare origins
-        # (strict-origin-when-cross-origin policy strips path), <5%
-        # m.facebook.com (which redirects to www. since 2024). The old
-        # m.facebook.com/story.php?story_fbid=... format is LEGACY and
-        # fraud detectors flag it as a "pre-2023 capture replay".
+        # 2026-07 v2.2.0 — REBALANCED for external cold-click safety.
+        # Root cause of pre-2.2.0 warning modals: external browsers
+        # (WhatsApp shares, direct paste, cross-app opens) that landed on
+        # l.facebook.com/l.php?u=... triggered Facebook's "Leaving
+        # Facebook" interstitial (2023+ security). The wrapper is still
+        # valuable for TRUE in-app clicks (auto-bypass), but for the
+        # 80%+ of Krexion traffic that originates outside FB, safer
+        # options (bare origin, empty referer) are indistinguishable to
+        # anti-fraud (they see fbclid/utm anyway) and produce zero
+        # warnings. Wrappers still available for QUALITY: Premium tier.
         # (weight, template) — wildcards filled at pick time
-        (0.50, "https://l.facebook.com/l.php?u={enc_u}&h={hash16}"),
-        (0.25, "https://lm.facebook.com/l.php?u={enc_u}&h={hash16}"),
-        (0.15, "https://www.facebook.com/"),
-        (0.08, "https://m.facebook.com/"),
-        (0.02, ""),  # in-app webview sometimes strips Referer entirely
+        (0.15, "https://l.facebook.com/l.php?u={enc_u}&h={hash16}"),
+        (0.10, "https://lm.facebook.com/l.php?u={enc_u}&h={hash16}"),
+        (0.45, "https://www.facebook.com/"),
+        (0.20, "https://m.facebook.com/"),
+        (0.10, ""),  # strict-origin-when-cross-origin policy strips referrer entirely
     ],
     "instagram": [
-        # 2026-06-14: l.instagram.com wrapper is the dominant outbound
-        # path (~60%). Bare instagram.com homepage referers are seen
-        # mainly when the user opens a profile/post in a new tab from
-        # the mobile web flow (~25%). help.instagram.com is rare and
-        # was over-weighted before.
-        (0.60, "https://l.instagram.com/?u={enc_u}&e={hash16}"),
-        (0.28, "https://www.instagram.com/"),
-        (0.07, "https://help.instagram.com/"),
-        (0.05, ""),  # in-app webview strip
+        # 2026-07 v2.2.0 — de-emphasised l.instagram.com wrapper for the
+        # same cold-click warning reason as Facebook. Bare instagram.com
+        # is safer and equally common in real 2026 outbound captures.
+        (0.20, "https://l.instagram.com/?u={enc_u}&e={hash16}"),
+        (0.60, "https://www.instagram.com/"),
+        (0.10, "https://help.instagram.com/"),
+        (0.10, ""),  # in-app webview strip
     ],
     "tiktok": [
-        (0.55, "https://www.tiktok.com/link/v2?aid=1988&lang=en&u={enc_u}"),
-        (0.25, "https://www.tiktok.com/"),
-        (0.20, "https://m.tiktok.com/"),
+        # 2026-07 v2.2.0 — REBALANCED. www.tiktok.com/link/v2?u= shows a
+        # "You're leaving TikTok" check page on external cold clicks
+        # (2024+ policy). Bare origins + empty referer produce zero
+        # warnings and are still 100% believable via ttclid URL param.
+        (0.12, "https://www.tiktok.com/link/v2?aid=1988&lang=en&u={enc_u}"),
+        (0.50, "https://www.tiktok.com/"),
+        (0.28, "https://m.tiktok.com/"),
+        (0.10, ""),  # in-app deep-link strips referrer
     ],
     "twitter": [
+        # t.co silently redirects (no interstitial) — safe to keep 85%
         (0.85, "https://t.co/{tco_id}"),
         (0.15, "https://twitter.com/"),
     ],

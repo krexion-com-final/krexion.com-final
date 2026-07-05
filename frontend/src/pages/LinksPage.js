@@ -371,6 +371,11 @@ export default function LinksPage() {
   const [qaOpen, setQaOpen] = useState(false);
   const [qaLoading, setQaLoading] = useState(false);
   const [qaData, setQaData] = useState(null);
+  // v2.2.0 (Tier 4) — Traffic Believability Score per link
+  const [believability, setBelievability] = useState({}); // { link_id: {score, grade, color, fixes} }
+  const [believabilityLoading, setBelievabilityLoading] = useState({});
+  // v2.2.0 (Tier 7) — Perfect Config preset picker per link
+  const [presetPickerFor, setPresetPickerFor] = useState(null);
   // v2.1.83 — Beginner guide toggle (defaults to OPEN so first-time
   // users see the step-by-step walkthrough right when they enable
   // Referrer Mode; they can collapse it once they know the flow).
@@ -434,10 +439,58 @@ export default function LinksPage() {
         headers: { Authorization: `Bearer ${token}` },
       });
       setLinks(response.data);
+      // v2.2.0 — auto-fetch believability score for each link (async, non-blocking)
+      (response.data || []).forEach((lnk) => {
+        fetchBelievability(lnk.id).catch(() => {});
+      });
     } catch (error) {
       toast.error("Failed to fetch links");
     } finally {
       setLoading(false);
+    }
+  };
+
+  // v2.2.0 (Tier 4) — Believability Score per link
+  const fetchBelievability = async (linkId) => {
+    setBelievabilityLoading((s) => ({ ...s, [linkId]: true }));
+    try {
+      const token = localStorage.getItem("token");
+      const r = await axios.get(`${API}/links/${linkId}/believability`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setBelievability((s) => ({ ...s, [linkId]: r.data }));
+    } catch (e) {
+      // Silent — believability is a UX enhancement, not critical
+    } finally {
+      setBelievabilityLoading((s) => ({ ...s, [linkId]: false }));
+    }
+  };
+
+  const applyBelievabilityFix = async (linkId, fix) => {
+    try {
+      const token = localStorage.getItem("token");
+      await axios.post(`${API}/links/${linkId}/apply-fix`, fix.payload, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      toast.success(`Applied: ${fix.label}`);
+      fetchLinks();
+    } catch (e) {
+      toast.error("Failed to apply fix");
+    }
+  };
+
+  // v2.2.0 (Tier 7) — Apply Perfect Config preset
+  const applyPreset = async (linkId, presetKey) => {
+    try {
+      const token = localStorage.getItem("token");
+      await axios.post(`${API}/links/${linkId}/apply-preset`, { key: presetKey }, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      toast.success(`Applied "${presetKey.replace(/_/g, ' ')}" preset ✨`);
+      setPresetPickerFor(null);
+      fetchLinks();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Failed to apply preset");
     }
   };
 
@@ -1696,6 +1749,9 @@ export default function LinksPage() {
                             <p className="text-xs text-[#A1A1AA] mt-1">
                               Bounces every click through the real platform wrapper (<code>l.facebook.com/l.php?u=...</code>, <code>google.com/url?q=...</code>, <code>t.co/...</code> etc.). The offer sees a REAL platform domain as Referer — most powerful anti-detect. Adds ~50ms per click.
                             </p>
+                            <p className="text-[10px] text-[#22C55E] mt-1.5 font-medium">
+                              ✨ v2.2.0 Smart Wrapper — Cold external clicks (WhatsApp share, direct paste) automatically SKIP warning-trigger wrappers. In-app FB/IG/TT clicks still use the wrapper (silently bypassed). No more &quot;Leaving Facebook&quot; warnings for end users.
+                            </p>
                           </div>
                         </label>
 
@@ -2094,6 +2150,29 @@ export default function LinksPage() {
                             streak {link.consecutive_no_conversions}/{link.referrer_pro_auto_pause_threshold || 10}
                           </div>
                         )}
+                        {/* v2.2.0 (Tier 4) — Believability Score badge */}
+                        {believability[link.id] && link.status === "active" && (
+                          <div
+                            className="mt-1.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold cursor-help"
+                            style={{
+                              backgroundColor: believability[link.id].color === "green" ? "rgba(34,197,94,0.15)"
+                                : believability[link.id].color === "lime" ? "rgba(132,204,22,0.15)"
+                                : believability[link.id].color === "yellow" ? "rgba(234,179,8,0.15)"
+                                : believability[link.id].color === "orange" ? "rgba(249,115,22,0.15)"
+                                : "rgba(239,68,68,0.15)",
+                              color: believability[link.id].color === "green" ? "#22C55E"
+                                : believability[link.id].color === "lime" ? "#84CC16"
+                                : believability[link.id].color === "yellow" ? "#EAB308"
+                                : believability[link.id].color === "orange" ? "#F97316"
+                                : "#EF4444",
+                            }}
+                            title={`Believability ${believability[link.id].score}% (Grade ${believability[link.id].grade}). ${(believability[link.id].fixes || []).length} suggestion(s) available.`}
+                            data-testid={`believability-badge-${link.id}`}
+                          >
+                            <Sparkles size={10} />
+                            {believability[link.id].score}% {believability[link.id].grade}
+                          </div>
+                        )}
                       </TableCell>
                       <TableCell>
                         <div className="flex flex-col gap-1">
@@ -2155,6 +2234,17 @@ export default function LinksPage() {
                             className="text-[#22C55E] hover:text-[#16A34A]"
                           >
                             <Shield size={16} />
+                          </Button>
+                          {/* v2.2.0 (Tier 7) — Apply Perfect Config preset */}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => setPresetPickerFor(link.id)}
+                            title="Apply Perfect Config preset (Facebook / TikTok / Google / LinkedIn / MaxBounty)"
+                            data-testid={`preset-link-${link.id}`}
+                            className="text-[#8B5CF6] hover:text-[#7C3AED]"
+                          >
+                            <Sparkles size={16} />
                           </Button>
                           {/* v2.1.83 Feature 10 — Resume auto-paused link */}
                           {link.status === "paused" && (
@@ -2418,6 +2508,47 @@ export default function LinksPage() {
               )}
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* v2.2.0 (Tier 7) — Perfect Config Preset Picker Dialog */}
+      <Dialog open={!!presetPickerFor} onOpenChange={(open) => !open && setPresetPickerFor(null)}>
+        <DialogContent className="max-w-2xl bg-[var(--brand-bg)] border-[var(--brand-border)]" data-testid="preset-picker-dialog">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Sparkles size={18} className="text-[#8B5CF6]" />
+              Apply Perfect Config Preset
+            </DialogTitle>
+            <DialogDescription>
+              One-click best-practice configuration. Overwrites Pro-Referrer settings on this link only.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+            {[
+              { key: "facebook_ads",      label: "Facebook Ads",       emoji: "📘", tint: "border-[#1877F2] hover:bg-[#1877F2]/10", desc: "Mobile-first, in-app deep paths, video ad UTMs" },
+              { key: "tiktok_ads",        label: "TikTok Ads",         emoji: "🎵", tint: "border-[#FE2C55] hover:bg-[#FE2C55]/10", desc: "Mobile-only, silent redirect (bypass warnings)" },
+              { key: "google_ads",        label: "Google Ads",         emoji: "🔍", tint: "border-[#34A853] hover:bg-[#34A853]/10", desc: "Search + YouTube split, google.com/url wrapper" },
+              { key: "linkedin_ads",      label: "LinkedIn Ads",       emoji: "💼", tint: "border-[#0A66C2] hover:bg-[#0A66C2]/10", desc: "Desktop-first, business hours, sponsored UTMs" },
+              { key: "maxbounty_premium", label: "MaxBounty Premium",  emoji: "⭐", tint: "border-[#FFD700] hover:bg-[#FFD700]/10", desc: "Multi-platform mix, wrapper ON, auto-pause 15" },
+              { key: "gambling_aggressive", label: "Gambling / Adult / Crypto", emoji: "🎰", tint: "border-[#EF4444] hover:bg-[#EF4444]/10", desc: "Aggressive rotation, wrapper OFF, auto-pause 8" },
+            ].map((p) => (
+              <button
+                key={p.key}
+                onClick={() => applyPreset(presetPickerFor, p.key)}
+                className={`text-left p-3 rounded-lg border ${p.tint} bg-[var(--brand-card)] transition-colors`}
+                data-testid={`preset-${p.key}`}
+              >
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-lg">{p.emoji}</span>
+                  <span className="font-semibold text-sm text-white">{p.label}</span>
+                </div>
+                <p className="text-xs text-[#A1A1AA]">{p.desc}</p>
+              </button>
+            ))}
+          </div>
+          <p className="text-[10px] text-[#71717A] pt-2">
+            💡 Presets are curated for v2.2.0 cold-click safety. All warning-trigger wrappers auto-bypass on external clicks.
+          </p>
         </DialogContent>
       </Dialog>
 
