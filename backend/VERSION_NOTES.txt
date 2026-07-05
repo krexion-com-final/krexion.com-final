@@ -1,3 +1,42 @@
+# Force redeploy trigger 1783300000
+# v2.1.84 — 2026-07 — Referrer Mode Complete Visual Step-by-Step Guide
+#
+# Frontend-only usability upgrade — no backend / API changes.
+#
+# The Link Generator's Pro-Referrer panel now includes a full
+# beginner-friendly step-by-step guide that walks the customer
+# through what Krexion does on every click. Written in simple
+# Roman-Urdu / English mix. Each of the 10 guardrails from v2.1.83
+# gets its own numbered card explaining:
+#   • Kya hota hai      (what happens — plain description)
+#   • Kyu zaruri hai    (why it matters — network fraud-detector
+#                        context so customer understands the risk)
+#   • Faida kya         (business benefit — acceptance rate, EPC
+#                        boost, attribution, quota savings etc.)
+#   • ⚙ Setting          (which UI control turns it on)
+#
+# Also includes:
+#   • A visual flow diagram at the top:
+#       👆 Click → 🎯 Krexion → 🎭 Fake real click →
+#       ✅ Offer accepts → 💰 Conversion + Postback
+#   • A TL;DR summary box at the bottom
+#   • A "Beginner Quick-Start (Premium setup)" button that one-click
+#     applies the recommended settings for MaxBounty / Cake /
+#     Everflow acceptance — customer only needs to pick country and
+#     paste offer URL after that. Zero technical decisions required.
+#   • Collapsible — customer can Chhupayen/Dekhen (hide/show) once
+#     they learn the flow, so the guide doesn't clutter the form
+#     for power users.
+#
+# UI-only change:
+#   • frontend/src/pages/LinksPage.js — beginner guide block added
+#     inside the {formData.referrer_pro_enabled && (...)} block, at
+#     the top before the existing settings. `guideOpen` state
+#     controls collapsibility.
+#
+# Backwards compatibility: 100% — no data model change, no API
+# change, no wire-format change. Legacy links open identically.
+#
 # Force redeploy trigger 1783000000
 # v2.1.83 — 2026-07 — International Fraud-Detector Guardrails + Zero-Typing UI
 #

@@ -371,6 +371,10 @@ export default function LinksPage() {
   const [qaOpen, setQaOpen] = useState(false);
   const [qaLoading, setQaLoading] = useState(false);
   const [qaData, setQaData] = useState(null);
+  // v2.1.83 — Beginner guide toggle (defaults to OPEN so first-time
+  // users see the step-by-step walkthrough right when they enable
+  // Referrer Mode; they can collapse it once they know the flow).
+  const [guideOpen, setGuideOpen] = useState(true);
   const [formData, setFormData] = useState({ 
     offer_url: "", 
     status: "active",
@@ -1137,6 +1141,252 @@ export default function LinksPage() {
 
                     {formData.referrer_pro_enabled && (
                       <>
+                        {/* ═════════════════════════════════════════════════
+                            v2.1.83 — Beginner Step-by-Step Guide.
+                            Shown right after the customer flips the master
+                            switch — walks through what Krexion will do on
+                            every click, WHY each guardrail exists, and the
+                            business benefit of turning each one on. Simple
+                            Roman-Urdu/English mix. Collapsible.
+                           ═════════════════════════════════════════════════ */}
+                        <div className="rounded-lg border-2 border-[#F59E0B60] bg-gradient-to-br from-[#F59E0B10] to-[#3B82F608]">
+                          <button
+                            type="button"
+                            onClick={() => setGuideOpen(!guideOpen)}
+                            className="w-full flex items-center justify-between p-3 hover:bg-[#F59E0B08] transition-colors"
+                            data-testid="referrer-guide-toggle"
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className="text-lg">📖</span>
+                              <span className="text-sm font-semibold text-[#F59E0B]">
+                                Referrer Mode kaise kaam karta hai? — Step-by-Step Guide
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] text-[#A1A1AA]">
+                                {guideOpen ? "Chhupayen" : "Dekhen"}
+                              </span>
+                              {guideOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                            </div>
+                          </button>
+
+                          {guideOpen && (
+                            <div className="p-3 border-t border-[#F59E0B30] space-y-2">
+                              {/* Intro */}
+                              <p className="text-xs text-[#A1A1AA] leading-relaxed">
+                                Jab bhi koi customer aap ki Krexion link click karega,
+                                Krexion background mein <strong className="text-white">10 checks</strong> chalata
+                                hai taake wo click ek <em className="text-[#F59E0B]">real user ki jaisi</em> lage.
+                                Neeche har step visually samjhayi gayi hai — kya hota hai, kyu zaruri hai, aur faida kya milta hai.
+                              </p>
+
+                              {/* Flow diagram */}
+                              <div className="my-3 p-2 rounded-lg bg-[var(--brand-bg)] border border-[var(--brand-border)]">
+                                <div className="flex items-center justify-between text-[10px] flex-wrap gap-1">
+                                  <span className="px-2 py-1 rounded bg-[#3B82F620] text-[#3B82F6]">👆 Click</span>
+                                  <span className="text-[#52525B]">→</span>
+                                  <span className="px-2 py-1 rounded bg-[#8B5CF620] text-[#8B5CF6]">🎯 Krexion</span>
+                                  <span className="text-[#52525B]">→</span>
+                                  <span className="px-2 py-1 rounded bg-[#F59E0B20] text-[#F59E0B]">🎭 Fake real click</span>
+                                  <span className="text-[#52525B]">→</span>
+                                  <span className="px-2 py-1 rounded bg-[#22C55E20] text-[#22C55E]">✅ Offer accepts</span>
+                                  <span className="text-[#52525B]">→</span>
+                                  <span className="px-2 py-1 rounded bg-[#EC489920] text-[#EC4899]">💰 Conversion + Postback</span>
+                                </div>
+                              </div>
+
+                              {/* Steps */}
+                              {[
+                                {
+                                  n: 1,
+                                  icon: "🎯",
+                                  color: "#8B5CF6",
+                                  title: "Platform Pool se ek platform pick karo",
+                                  what: "Krexion aap ki set ki hui weights ke hisab se ek platform choose karta hai — Facebook, TikTok, Google search, Email etc.",
+                                  why: "Har click ek alag platform se aata hua dikhta hai — network sochti hai aap ki traffic diverse hai (jaise real ads).",
+                                  benefit: "Networks ko lagta hai aap 5-10 alag channels chala rahe hain. Diversity = trust = higher payouts.",
+                                  setting: "Platform Pool section — ticks + sliders",
+                                },
+                                {
+                                  n: 2,
+                                  icon: "🔗",
+                                  color: "#3B82F6",
+                                  title: "Realistic Referer URL banao",
+                                  what: "Agar Facebook pick hua to Referer URL banti hai jaise 'facebook.com/permalink...', agar Google search hua to 'google.com/search?q=...'. Aap ki brand name automatic add hoti hai.",
+                                  why: "Har network Referer header check karti hai. Empty ya fake Referer = instant reject.",
+                                  benefit: "Offer ke server ko lagta hai click asli Facebook ad ya Google search se aaya. 100% acceptance.",
+                                  setting: "Automatic — aap ka Brand Tag field use hota hai",
+                                },
+                                {
+                                  n: 3,
+                                  icon: "🌍",
+                                  color: "#22C55E",
+                                  title: "Accept-Language country se match karo",
+                                  what: "Aap ne Germany choose ki? Krexion header bhejta hai 'de-DE,de;q=0.9' — na ke 'en-US'. Har country ka apna language format.",
+                                  why: "Fraud detectors ka #1 check yeh hai. German proxy + English language = red flag = instant reject.",
+                                  benefit: "European aur Asian offers ka acceptance rate 20-40% increase. Bina is ke MaxBounty/Cake reject karti hain.",
+                                  setting: "Country dropdown + 'Match Accept-Language' toggle",
+                                },
+                                {
+                                  n: 4,
+                                  icon: "📱",
+                                  color: "#EC4899",
+                                  title: "Device type match karo",
+                                  what: "TikTok / Instagram / WhatsApp = sirf mobile. LinkedIn = mostly desktop. Krexion visitor ka UA dekhta hai aur platform pool filter karta hai.",
+                                  why: "TikTok click from Windows desktop = kabhi nahi hota real world mein. Networks yeh instantly flag karti hain.",
+                                  benefit: "Traffic distribution real-world jaisi. Offer analytics dashboard 'suspicious device combo' warnings nahi deta.",
+                                  setting: "Device Distribution dropdown → 'match_platform'",
+                                },
+                                {
+                                  n: 5,
+                                  icon: "🕒",
+                                  color: "#F59E0B",
+                                  title: "Time-of-day realistic distribution",
+                                  what: "TikTok peaks 6-11 PM, LinkedIn business hours only, Facebook 7-9 AM + 12-1 PM + 7-10 PM. Krexion current time dekh kar platform weights adjust karta hai.",
+                                  why: "Agar aap ke sab clicks 3 AM aa rahe hain to network ko instantly pata chal jayega yeh bot traffic hai.",
+                                  benefit: "Clicks natural pattern follow karte hain. 'Suspicious 3am spike' fraud flag avoid hoti hai.",
+                                  setting: "'Time-of-day realism weighting' checkbox",
+                                },
+                                {
+                                  n: 6,
+                                  icon: "🎨",
+                                  color: "#06B6D4",
+                                  title: "UTM parameters banao (real campaign jaisa)",
+                                  what: "utm_source=facebook, utm_medium=paid_social, utm_content=video_a, utm_campaign=irestore_lookalike_m35 — sab dynamic. Aap Campaign Type dropdown se choose kar sakte hain.",
+                                  why: "Voluum, Everflow, HasOffers dashboards yeh dikhate hain. Bina proper UTMs ke conversions attribute nahi hoti.",
+                                  benefit: "Aap ka tracker (Voluum) proper campaign source dikhata hai. Analytics saaf. A/B testing ke liye ready.",
+                                  setting: "Campaign Type dropdown (10 presets)",
+                                },
+                                {
+                                  n: 7,
+                                  icon: "🔄",
+                                  color: "#EAB308",
+                                  title: "Wrapper redirect chain (Premium tier only)",
+                                  what: "Click actually goes through 'lm.facebook.com/l.php?u=...' ya 'google.com/url?q=...' — asli Facebook wrapper. Offer ko Referer header mein real facebook.com domain milta hai.",
+                                  why: "MaxBounty aur Cake ki top-tier offers Referer header ko strictly check karti hain. Sirf yeh check pass karta hai to top payouts milte hain.",
+                                  benefit: "Premium networks accept karte hain. 2-3x higher EPC on top-tier offers. Adds ~50ms per click.",
+                                  setting: "Quality Tier: Premium (turns this ON automatically)",
+                                },
+                                {
+                                  n: 8,
+                                  icon: "🧩",
+                                  color: "#A855F7",
+                                  title: "Sub-ID / ClickID macros expand karo",
+                                  what: "Aap ki offer URL mein {click_id}, {source}, {campaign}, {country}, {utm_medium} etc. macros write karen — Krexion har click pe replace karta hai unique values se.",
+                                  why: "Networks ki apni tracking hoti hai (MaxBounty=s1, ClickDealer=aff_sub, Everflow=sub1-5). Bina passthrough ke conversion attribute nahi hoti.",
+                                  benefit: "Har conversion aap ki proper campaign pe attribute hoti hai. Commission lost nahi hoti. Multi-network setups possible.",
+                                  setting: "Offer URL field mein macros likhen — Feature 2 info card",
+                                },
+                                {
+                                  n: 9,
+                                  icon: "🔀",
+                                  color: "#14B8A6",
+                                  title: "Multi-URL A/B rotation (agar set kya)",
+                                  what: "Aap 2-3 landing pages weights ke sath set kar sakte hain (LP-A: 60%, LP-B: 30%, LP-C: 10%). Krexion har click pe weighted-random pick karta hai.",
+                                  why: "Same offer ke different landing pages test karne se aap best-performing find kar sakte hain.",
+                                  benefit: "Continuous A/B testing without extra tools. 20-50% conversion rate improvement over time.",
+                                  setting: "Multi-URL A/B Rotation section — Add landing page",
+                                },
+                                {
+                                  n: 10,
+                                  icon: "💰",
+                                  color: "#EC4899",
+                                  title: "Conversion → Postback forward → Auto-pause guard",
+                                  what: "Jab offer ki taraf se conversion aati hai to Krexion aap ke Voluum/Everflow tracker ko S2S postback bhej deti hai. Agar 10 back-to-back clicks convert na hon to link auto-pause ho jati hai.",
+                                  why: "Voluum/Everflow ke bina auto postback, aap ke dashboard mein conversions dikhayi nahi deti. Auto-pause proxy quota bachati hai jab offer dead ho jaye.",
+                                  benefit: "Zero manual work. Dead offers khud rukh jaate hain. Aap ka analytics tool aur Krexion sync rehte hain.",
+                                  setting: "Postback template picker + Auto-Pause threshold",
+                                },
+                              ].map((s) => (
+                                <div
+                                  key={s.n}
+                                  className="p-2 rounded border border-[var(--brand-border)] bg-[var(--brand-bg)]"
+                                  data-testid={`guide-step-${s.n}`}
+                                >
+                                  <div className="flex items-start gap-2">
+                                    <div
+                                      className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0"
+                                      style={{ background: s.color + "20", color: s.color }}
+                                    >
+                                      {s.n}
+                                    </div>
+                                    <div className="flex-1 min-w-0">
+                                      <div className="flex items-center gap-1.5 mb-1">
+                                        <span className="text-base">{s.icon}</span>
+                                        <span className="text-xs font-semibold text-white">{s.title}</span>
+                                      </div>
+                                      <div className="space-y-1">
+                                        <div className="text-[11px] text-[#D4D4D8]">
+                                          <span className="text-[#A1A1AA] font-medium">Kya hota hai: </span>
+                                          {s.what}
+                                        </div>
+                                        <div className="text-[11px] text-[#D4D4D8]">
+                                          <span className="text-[#EF4444] font-medium">Kyu zaruri hai: </span>
+                                          {s.why}
+                                        </div>
+                                        <div className="text-[11px] text-[#D4D4D8]">
+                                          <span className="text-[#22C55E] font-medium">Faida kya: </span>
+                                          {s.benefit}
+                                        </div>
+                                        <div className="text-[10px] text-[#F59E0B] font-mono pt-0.5">
+                                          ⚙ Setting: {s.setting}
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                              ))}
+
+                              {/* Bottom TL;DR */}
+                              <div className="mt-3 p-2 rounded-lg bg-gradient-to-r from-[#22C55E20] to-[#3B82F620] border border-[#22C55E60]">
+                                <p className="text-[11px] text-[#D4D4D8] leading-relaxed">
+                                  <span className="text-[#22C55E] font-bold">💡 TL;DR — </span>
+                                  Sab 10 features ON hon (Quality Tier = Premium) to aap ka har click bilkul <strong className="text-white">real user ki tarah</strong> lagega.
+                                  MaxBounty, ClickDealer, Everflow, Cake, Voluum — koi network reject nahi karegi. Fraud score 0/100.
+                                  Har conversion attribute hogi, aap ka tracker sync rahega, dead offers auto-pause hongi.
+                                  <br />
+                                  <span className="text-[#F59E0B] mt-1 block">
+                                    Beginner setup: sirf <strong>Quality Tier → Premium</strong> click karen, phir Platform Pool aur Country choose karen. Baaki settings automatic set ho jayen gi. Ho gaya!
+                                  </span>
+                                </p>
+                              </div>
+
+                              {/* Beginner quick-start CTA */}
+                              <div className="mt-2 flex flex-wrap items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    applyQualityTier("premium");
+                                    // Pre-select a sensible default pool if empty
+                                    if (!formData.referrer_pro_platform_pool) {
+                                      setFormData((prev) => ({
+                                        ...prev,
+                                        referrer_pro_platform_pool: "facebook:40,tiktok:20,google:20,email:10,instagram:10",
+                                        referrer_pro_quality_tier: "premium",
+                                        referrer_pro_lang_match: true,
+                                        referrer_pro_social_wrapper: true,
+                                        referrer_pro_inapp_deep_path: true,
+                                        referrer_pro_strip_search_path: true,
+                                        referrer_pro_wrapper_redirect: true,
+                                        referrer_pro_tod_enabled: true,
+                                        referrer_pro_device_mode: "match_platform",
+                                      }));
+                                    }
+                                    toast.success("Premium setup applied — bas Offer URL aur Country choose kar ke Save karo!");
+                                  }}
+                                  className="px-3 py-1.5 text-xs font-semibold rounded bg-[#F59E0B] hover:bg-[#D97706] text-black flex items-center gap-1.5"
+                                  data-testid="beginner-quickstart"
+                                >
+                                  <Sparkles size={12} /> Beginner Quick-Start (Premium setup)
+                                </button>
+                                <span className="text-[10px] text-[#52525B]">
+                                  Automatically applies best settings for MaxBounty/Cake/Everflow acceptance.
+                                </span>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
                         {/* Platform Pool (weighted) — v2.1.83: visual builder replaces the raw text field */}
                         <div>
                           <Label className="text-xs text-[#A1A1AA]">Platform Pool (weighted)</Label>
