@@ -875,3 +875,76 @@
 #   submits `{ server, username, password }` — just with a richer
 #   entry UI.  Programmatic proxy addition via /api/proxies already
 #   worked; no change needed there.
+
+# v2.2.5 — 2026-07 — Perfect coverage for every social/search/discovery platform
+#   Customer report: ran a YouTube RUT job.  Advertiser dashboard's
+#   click detail page showed:
+#     • Referrer  = https://www.youtube.com/redirect?event=video_description
+#                   &redir_token=…&q=https%3A%2F%2Fkrexion.com%2Fapi%2Ft%2Fraytiktok
+#       → tracker URL LEAKED in the `q=` param
+#     • Browser   = Google for iOS (424)
+#       → wrong marker — customer had chosen YouTube, expected YouTube's
+#         own app marker.  Was a GSA/424 (Google Search App) tag that
+#         survived because youtube was NOT in _INAPP_CAPABLE_PLATFORMS
+#         → no coerce/strip ever fired for youtube visits.
+#
+#   Customer ask:  "ye kisi b network k liye kisi kisam ka glitch
+#   yan masla ni ana chahye … koi platform k liye chalao sab perfect
+#   chalna chahye" — no matter which platform they select, everything
+#   must be pixel-perfect.  So we did a sweep and added full coverage
+#   for YouTube / Google / Reddit / Pinterest (the four platforms that
+#   customers commonly target but which the coerce path had never
+#   handled).
+#
+#   backend/referrer_pro.py
+#     • Removed the `youtube.com/redirect?...&q={enc_u}` variant from
+#       `_PLATFORM_REFERER_POOL["youtube"]`.  Replaced with realistic
+#       direct-page shapes:
+#         youtube.com/watch?v=<id>       (35 %)
+#         m.youtube.com/watch?v=<id>     (20 %)
+#         youtube.com/shorts/<id>        (15 %)
+#         youtube.com/                   (15 %)
+#         m.youtube.com/                 (10 %)
+#         youtube.com/@<handle>          ( 5 %)
+#       No more origin leaks — offer sees a clean YouTube video URL
+#       with zero mention of the Krexion tracker.
+#     • Added token renderers `_rand_youtube_video_id()` (11-char
+#       base64url — matches YouTube's real vid format) and
+#       `_rand_youtube_channel_handle()` (4-20 char handle) and wired
+#       them into the `render` loop.
+#     • Added `youtube`, `google`, `reddit`, `pinterest` to
+#       `_INAPP_CAPABLE_PLATFORMS`, `_INAPP_MARKER_LOOKUP` and
+#       `_FOREIGN_INAPP_STRIP_PATTERNS`.
+#     • New `build_inapp_ua_suffix` branches:
+#         youtube    → com.google.ios.youtube/<ver>
+#                    → com.google.android.youtube/<ver>
+#         google     → GSA/<ver>
+#         reddit     → Reddit/Version <ver>/Build <n>[/Android <ver>]
+#         pinterest  → Pinterest/<ver>
+#       All version pools sampled from live June-July 2026 traffic.
+#
+#   backend/real_user_traffic.py
+#     • `_MOBILE_UA_POOL_IOS` upgraded from iOS 17/18 to iOS 26.x.
+#       Now matches the rest of this codebase's iOS-year convention
+#       (server.py device pool at lines 12291-12301 already uses
+#       ios "26_1" through "26_4_1").  Fixes the 2-year drift between
+#       coerced UA's declared OS and the visit's declared iPhone
+#       model era.
+#     • `_INAPP_PRESET_REFERER` extended with youtube / google /
+#       reddit / pinterest so the one-click "Traffic Source" dropdown
+#       covers all 11 platforms.
+#
+#   frontend/src/pages/RealUserTrafficPage.js
+#     • Preset dropdown now has two <optgroup>s: "Social" (7 legacy
+#       entries) and "Search / Video / Discovery (new in v2.2.5)"
+#       (YouTube / Google / Reddit / Pinterest).
+#
+#   Regression tests (13/13 passing):
+#     A. 100 YouTube referers → zero tracker leaks
+#     B-G. All 4 new platforms coerce to the correct marker
+#     H. Existing FB / IG / TT still work
+#     I. Idempotency for new platforms
+#     J. _INAPP_PRESET_REFERER has all 11 keys
+#     K. iOS pool is 100 % iOS 26.x
+#     L. Syntax valid
+#     M. Desktop UAs unchanged

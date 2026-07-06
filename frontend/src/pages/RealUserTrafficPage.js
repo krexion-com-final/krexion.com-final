@@ -3094,13 +3094,21 @@ export default function RealUserTrafficPage() {
                   className="w-full px-3 py-2 rounded-md bg-zinc-900 border border-zinc-700 text-zinc-100 text-sm focus:outline-none focus:border-cyan-500"
                 >
                   <option value="none">— None (Advanced / Custom below) —</option>
-                  <option value="facebook">Facebook In-App Browser (FB4A / FBIOS)</option>
-                  <option value="messenger">Messenger In-App Browser</option>
-                  <option value="instagram">Instagram In-App Browser</option>
-                  <option value="tiktok">TikTok In-App Browser (musical_ly)</option>
-                  <option value="snapchat">Snapchat In-App Browser</option>
-                  <option value="linkedin">LinkedIn In-App Browser</option>
-                  <option value="twitter">Twitter / X In-App Browser</option>
+                  <optgroup label="Social">
+                    <option value="facebook">Facebook In-App Browser (FB4A / FBIOS)</option>
+                    <option value="messenger">Messenger In-App Browser</option>
+                    <option value="instagram">Instagram In-App Browser</option>
+                    <option value="tiktok">TikTok In-App Browser (musical_ly)</option>
+                    <option value="snapchat">Snapchat In-App Browser</option>
+                    <option value="linkedin">LinkedIn In-App Browser</option>
+                    <option value="twitter">Twitter / X In-App Browser</option>
+                  </optgroup>
+                  <optgroup label="Search / Video / Discovery (new in v2.2.5)">
+                    <option value="youtube">YouTube In-App Browser (com.google.…youtube)</option>
+                    <option value="google">Google Search In-App Browser (GSA)</option>
+                    <option value="reddit">Reddit In-App Browser</option>
+                    <option value="pinterest">Pinterest In-App Browser</option>
+                  </optgroup>
                 </select>
               </div>
             </div>

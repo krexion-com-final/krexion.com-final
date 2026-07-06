@@ -84,11 +84,19 @@ def _realistic_fallback_ua() -> str:
 # Empty preset = zero behavioural change (backward-compatible).
 # ──────────────────────────────────────────────────────────────────────
 _MOBILE_UA_POOL_IOS: Tuple[str, ...] = (
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+    # 2026-07 v2.2.5 update — iOS 26.x bases matching this codebase's
+    # convention (Apple's WWDC-2025 year-based version renaming; the
+    # device pool in server.py already uses iOS 26_1 through 26_4_1).
+    # Earlier v2.2.1 shipped iOS 17/18 bases which drifted from the
+    # rest of the codebase and some fraud parsers noticed the 2-year
+    # gap between the UA-declared OS ("iOS 17.x") and the visit's
+    # declared iPhone model era ("iPhone 15/16 Pro").
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 26_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 26_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 26_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 26_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 26_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 26_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1",
 )
 _MOBILE_UA_POOL_ANDROID: Tuple[str, ...] = (
     "Mozilla/5.0 (Linux; Android 14; SM-S928B Build/UP1A.231005.007; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/128.0.6613.146 Mobile Safari/537.36",
@@ -111,6 +119,17 @@ _INAPP_PRESET_REFERER: Dict[str, str] = {
     "snapchat":  "https://www.snapchat.com/",
     "linkedin":  "https://www.linkedin.com/",
     "twitter":   "https://twitter.com/",
+    # 2026-07 v2.2.5 — closes the "koi platform k liye chalao sab
+    # perfect chalna chahye" gap.  Each of these now has full
+    # coverage: (a) referrer_pro emits a realistic direct-page
+    # Referer (no more `youtube.com/redirect?q=<tracker>` leak),
+    # (b) build_inapp_ua_suffix appends the correct app marker per
+    # visit, (c) _FOREIGN_INAPP_STRIP_PATTERNS strips other markers
+    # before append (no more Franken-UA).
+    "youtube":   "https://www.youtube.com/",
+    "google":    "https://www.google.com/",
+    "reddit":    "https://www.reddit.com/",
+    "pinterest": "https://www.pinterest.com/",
 }
 
 

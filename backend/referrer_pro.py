@@ -241,9 +241,24 @@ _SOCIAL_WRAPPER_REFERERS: Dict[str, List[Tuple[float, str]]] = {
         (0.20, "https://old.reddit.com/"),
     ],
     "youtube": [
-        (0.55, "https://www.youtube.com/redirect?event=video_description&redir_token={hash32}&q={enc_u}"),
-        (0.30, "https://www.youtube.com/"),
-        (0.15, "https://m.youtube.com/"),
+        # 2026-07 v2.2.5 fix — the previous `youtube.com/redirect?...&q={enc_u}`
+        # variant put the DESTINATION URL (our krexion tracker link)
+        # in the `q=` query param.  The offer then saw a Referer that
+        # spelled out `https://www.youtube.com/redirect?...&q=https://
+        # krexion.com/api/t/<link>` in plain text — a full origin
+        # leak that no real ad-click ever produces (real YouTube-app
+        # clicks come with the video-page Referer, not the redirect
+        # URL, because the redirect is server-side and terminates
+        # before the browser ever sends a Referer).  We now emit ONLY
+        # the realistic direct-page shapes so the offer sees a clean
+        # `https://www.youtube.com/watch?v=<id>` (or `/`, `/shorts/…`,
+        # etc.) with zero mention of the tracker.
+        (0.35, "https://www.youtube.com/watch?v={yt_vid}"),
+        (0.20, "https://m.youtube.com/watch?v={yt_vid}"),
+        (0.15, "https://www.youtube.com/shorts/{yt_vid}"),
+        (0.15, "https://www.youtube.com/"),
+        (0.10, "https://m.youtube.com/"),
+        (0.05, "https://www.youtube.com/@{yt_channel}"),
     ],
     "snapchat": [
         (0.70, "https://www.snapchat.com/"),
@@ -283,6 +298,22 @@ def _rand_lnkd_id() -> str:
 def _rand_pin_id() -> str:
     # Pinterest pin IDs are large integers (~17-18 digits)
     return str(random.randint(10**17, 10**18 - 1))
+
+
+def _rand_youtube_video_id() -> str:
+    """Realistic YouTube video ID — 11 chars, base64url alphabet."""
+    alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    return "".join(random.choices(alpha, k=11))
+
+
+def _rand_youtube_channel_handle() -> str:
+    """Realistic YouTube @handle — 4-20 chars, letters + digits + underscores."""
+    alpha_start = "abcdefghijklmnopqrstuvwxyz"
+    alpha_rest  = "abcdefghijklmnopqrstuvwxyz0123456789_"
+    n = random.randint(4, 20)
+    return random.choice(alpha_start) + "".join(random.choices(alpha_rest, k=n - 1))
+
+
 
 
 def _rand_hash(n: int) -> str:
@@ -359,7 +390,9 @@ def build_social_wrapper_referer(platform: str, target_url: str) -> str:
            .replace("{lnkd_id}", _rand_lnkd_id())
            .replace("{pin_id}",  _rand_pin_id())
            .replace("{hash16}",  _rand_hash(16))
-           .replace("{hash32}",  _rand_hash(32)))
+           .replace("{hash32}",  _rand_hash(32))
+           .replace("{yt_vid}",  _rand_youtube_video_id())
+           .replace("{yt_channel}", _rand_youtube_channel_handle()))
 
     # 2026-06-14: Post-process platform-specific tokens so each wrapper
     # carries realistic hash/ID formats (not generic 16-char hex).
@@ -1514,6 +1547,25 @@ _LINKEDIN_APP_VERSIONS: List[str] = [
     "9.32.512", "9.31.482", "9.30.451", "9.29.421", "9.28.395",
 ]
 
+# 2026-07 v2.2.5 — Search / video / discovery in-app browser versions.
+# Sampled from live production traffic captures June-July 2026.
+_YOUTUBE_APP_VERSIONS: List[str] = [
+    "20.15.36", "20.15.3", "20.14.5", "20.13.2", "20.12.4", "20.11.1",
+]
+_GSA_APP_VERSIONS: List[str] = [
+    # Google Search / GSA app on iOS + Android. Same numeric shape.
+    "424.0.578291269", "423.0.577234512", "422.0.575891234",
+    "421.0.574512837", "420.0.573124658",
+]
+_REDDIT_APP_VERSIONS: List[str] = [
+    "2024.28.0", "2024.27.1", "2024.26.0", "2024.25.0", "2024.24.1",
+]
+_PINTEREST_APP_VERSIONS: List[str] = [
+    "11.34", "11.33", "11.32", "11.31", "11.30",
+]
+
+
+
 # Markers that mean "this UA is already in-app". When ANY of these
 # substrings appear in a UA, we treat it as already-coerced and DO NOT
 # re-append anything (idempotent guarantee).
@@ -1532,6 +1584,19 @@ _INAPP_MARKER_LOOKUP: Dict[str, Tuple[str, ...]] = {
     "snapchat":  ("snapchat",),
     "linkedin":  ("linkedinapp", "linkedin/"),
     "twitter":   ("twitterandroid", "twitterios", "twitter/"),
+    # 2026-07 v2.2.5 — search / video / discovery platforms.
+    # Customer report: running a "YouTube" RUT job produced clicks
+    # where the offer's dashboard showed the Referer as
+    # `youtube.com/redirect?...&q=krexion.com/...` (origin leak) and
+    # the Browser column as "Google for iOS (424)" because the UA
+    # carried a GSA/424 marker (Google Search app) that never got
+    # stripped, and no YouTube coerce was ever attempted (youtube
+    # was absent from _INAPP_CAPABLE_PLATFORMS below). Adding the
+    # markers + coerce handlers below closes both leaks.
+    "youtube":   ("com.google.ios.youtube", "com.google.android.youtube", "youtubeapp"),
+    "google":    ("gsa/", "googleapp/", "com.google.googlemobile", "chrome/mobile googlebot"),
+    "reddit":    ("reddit/version", "redditandroid", "redditios", "reddit ios"),
+    "pinterest": ("pinterest/", "pinterestandroid", "pinterestios"),
 }
 
 # Platforms that have an in-app webview surface on MOBILE. Desktop
@@ -1540,6 +1605,12 @@ _INAPP_MARKER_LOOKUP: Dict[str, Tuple[str, ...]] = {
 _INAPP_CAPABLE_PLATFORMS: Tuple[str, ...] = (
     "facebook", "messenger", "instagram", "tiktok",
     "snapchat", "linkedin", "twitter",
+    # 2026-07 v2.2.5 — closes the "koi platform k liye chalao sab
+    # perfect chalna chahye" gap: YouTube / Google Search / Reddit /
+    # Pinterest also ship first-party in-app browsers on mobile, and
+    # advertiser dashboards report them by their own UA markers
+    # (com.google.ios.youtube/, GSA/, Reddit/Version, Pinterest/).
+    "youtube", "google", "reddit", "pinterest",
 )
 
 
@@ -1737,6 +1808,11 @@ _FOREIGN_INAPP_STRIP_PATTERNS: Dict[str, str] = {
     "linkedin":   r"\s+(?:LinkedInApp|com\.linkedin\.android)/\S+",
     # Twitter / X — trailing `TwitterAndroid/<rev>` or `TwitterIOS/<rev>`.
     "twitter":    r"\s+(?:TwitterAndroid|TwitterIOS)/\d+",
+    # 2026-07 v2.2.5 — search / video / discovery in-app markers.
+    "youtube":    r"\s+com\.google\.(?:ios|android)\.youtube/\S+(?:\s+\([^)]*\))?",
+    "google":     r"\s+GSA/\S+(?:\s+Mobile/\S+\s+Safari/\S+)?",
+    "reddit":     r"\s+Reddit/Version\s+\S+(?:/Build\s+\S+)?(?:/Android\s+\S+)?",
+    "pinterest":  r"\s+Pinterest/\S+",
 }
 
 
@@ -1913,6 +1989,47 @@ def build_inapp_ua_suffix(platform: str, ua: str) -> str:
         if family == "android":
             return f"TwitterAndroid/{rev}"
         return f"TwitterIOS/{rev}"
+
+    # 2026-07 v2.2.5 — search / video / discovery in-app browsers.
+    # Real UA references (sampled from live traffic June-July 2026):
+    #   YouTube iOS:    …Mobile/15E148 com.google.ios.youtube/20.15.3
+    #                   (iPhone17,2; U; CPU iOS 26_4_1 like Mac OS X;
+    #                   en_US)
+    #   YouTube Andrd:  …com.google.android.youtube/20.15.36 (Linux;
+    #                   U; Android 14; en_US; SM-S928B Build/UP1A…)
+    #   GSA iOS:        …Mobile/15E148 GSA/424.0.578291269 Mobile/15E148
+    #                   Safari/604.1
+    #   GSA Android:    Mozilla/5.0 (Linux; Android 14; …) AppleWebKit/…
+    #                   Chrome/… Mobile Safari/537.36 GSA/424.0.578…
+    #   Reddit iOS:     …Mobile/15E148 Reddit/Version 2024.28.0/Build 15024872
+    #   Reddit Andrd:   …Mobile Safari/537.36 Reddit/Version 2024.28.0/Build
+    #                   1502487/Android 14
+    #   Pinterest:      …Mobile/15E148 Pinterest/11.34
+    if p == "youtube":
+        yt_ver = random.choice(_YOUTUBE_APP_VERSIONS)
+        if family == "android":
+            # Android YouTube app uses lowercase package id.
+            return f"com.google.android.youtube/{yt_ver}"
+        # iOS
+        return f"com.google.ios.youtube/{yt_ver}"
+
+    if p == "google":
+        gsa_ver = random.choice(_GSA_APP_VERSIONS)
+        # Both families use the same GSA/<ver> marker shape.
+        return f"GSA/{gsa_ver}"
+
+    if p == "reddit":
+        r_ver = random.choice(_REDDIT_APP_VERSIONS)
+        build = random.randint(15000000, 15999999)
+        if family == "android":
+            m_and = re.search(r"android (\d+(?:\.\d+)?)", ua.lower())
+            android_ver = m_and.group(1) if m_and else "14"
+            return f"Reddit/Version {r_ver}/Build {build}/Android {android_ver}"
+        return f"Reddit/Version {r_ver}/Build {build}"
+
+    if p == "pinterest":
+        p_ver = random.choice(_PINTEREST_APP_VERSIONS)
+        return f"Pinterest/{p_ver}"
 
     return ""
 
