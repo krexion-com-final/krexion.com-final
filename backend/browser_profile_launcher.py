@@ -420,6 +420,31 @@ async def _launch_profile_session_inner(
             if "://" not in raw_server:
                 # If creds are embedded without scheme (rare): user:pass@host[:port]
                 raw_server = f"http://{raw_server}"
+            # 1.5. 2026-07 v2.2.2 fix — Legacy profiles saved with the
+            # `scheme://host:port:user:pass` format (BestGo / GeoNode
+            # / rotating residentials) confused urlparse into treating
+            # the fourth colon-separated field as a port, or into
+            # exposing "http" as the hostname when everything after
+            # the scheme was mis-tokenised. Result: Chromium's DNS
+            # lookup came back with "ENOTFOUND http" within 10 s.
+            # We strip the extra fields BEFORE urlparse sees them so
+            # every legacy profile now launches cleanly.  Creds are
+            # promoted to the separate username / password fields
+            # that Chromium's proxy launch option expects.
+            try:
+                _proto_head, _proto_rest = raw_server.split("://", 1)
+                if "@" not in _proto_rest:
+                    _cp = _proto_rest.split(":")
+                    if len(_cp) >= 4:
+                        _h, _p, _u = _cp[0], _cp[1], _cp[2]
+                        _pw = ":".join(_cp[3:])
+                        raw_server = f"{_proto_head}://{_h}:{_p}"
+                        if not username:
+                            username = _u
+                        if not password:
+                            password = _pw
+            except Exception:
+                pass  # fall through to urlparse below
             parsed = urlparse(raw_server)
             host = parsed.hostname or ""
             port = parsed.port  # None when not specified

@@ -902,7 +902,32 @@ async def advanced_create(request: Request, body: AdvancedCreateBody):
                         username, _, password = creds.partition(":")
                         server = f"{proto}://{hostpart}"
                     else:
-                        server = line
+                        # 2026-07 v2.2.2 fix — Handle scheme + 4-part
+                        # colon form (BestGo / GeoNode / rotating
+                        # residentials): `http://host:port:user:pass`
+                        # The old branch fell through here, storing
+                        # the malformed URL verbatim in `server`.
+                        # Chromium then tried to resolve "http" as
+                        # the hostname (getaddrinfo ENOTFOUND http)
+                        # and the customer saw the "Proxy could not
+                        # be reached" page on every profile launch.
+                        colon_parts = rest.split(":")
+                        if len(colon_parts) >= 4:
+                            host, port, username = (
+                                colon_parts[0], colon_parts[1], colon_parts[2]
+                            )
+                            password = ":".join(colon_parts[3:])
+                            server = f"{proto}://{host}:{port}"
+                        elif len(colon_parts) == 2:
+                            server = f"{proto}://{colon_parts[0]}:{colon_parts[1]}"
+                        elif len(colon_parts) == 1:
+                            # scheme://host with no port — keep as-is.
+                            server = line
+                        else:
+                            # 3 colon parts is ambiguous but safest is
+                            # to keep host:port and drop the extras
+                            # rather than pass a malformed URL down.
+                            server = f"{proto}://{colon_parts[0]}:{colon_parts[1]}"
                 elif "@" in line:
                     # ProxyJet canonical form: user:pass@host:port
                     creds, hostport = line.rsplit("@", 1)
