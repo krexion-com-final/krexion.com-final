@@ -8141,6 +8141,8 @@ async def _rut_prepare_and_run(
             # jobs; legacy jobs that never set the key also get the
             # safer/realer default via `.get(..., True)`).
             referer_match_ua_to_platform=bool(params.get("referer_match_ua_to_platform", True)),
+            # 2026-07 v2.2.1 — In-App Browser Preset (one-click social preset)
+            inapp_browser_preset=str(params.get("inapp_browser_preset") or ""),
         )
     except Exception as e:  # noqa: BLE001
         logger.exception(f"_rut_prepare_and_run crashed for job {job_id}: {e}")
@@ -8512,6 +8514,16 @@ async def rut_create_job(
     # UAs are left untouched. Eliminates the "Referer=facebook.com +
     # UA=plain Chrome mobile" mismatch that fraud detectors flag.
     referer_match_ua_to_platform: bool = Form(True),
+    # ── 2026-07 v2.2.1 — In-App Browser Preset (one-click "Traffic
+    # Source" selector). Supported values:
+    #   ""/"none"  → advanced/custom (default; backward-compatible)
+    #   "facebook" | "messenger" | "instagram" | "tiktok"
+    #   "snapchat" | "linkedin" | "twitter"
+    # When set, the engine auto-configures Referer + Referer-to-offer
+    # + UA→Referer coercion + mobile UA pool so every visit looks
+    # like real in-app ad-click traffic. See
+    # `run_real_user_traffic_job.inapp_browser_preset` for details.
+    inapp_browser_preset: str = Form(""),
     user: dict = Depends(get_current_user_with_fresh_data),
     _cloud_gate: bool = Depends(require_local_mode),
 ):
@@ -8801,6 +8813,8 @@ async def rut_create_job(
         "referer_pass_to_offer": bool(referer_pass_to_offer),
         # 2026-06-14 — UA ↔ Referer coercion (anti-fraud, default ON).
         "referer_match_ua_to_platform": bool(referer_match_ua_to_platform),
+        # 2026-07 v2.2.1 — In-App Browser Preset (one-click social preset)
+        "inapp_browser_preset": (inapp_browser_preset or "").strip().lower()[:24],
     }
     # A job is auto-resumable on backend restart only if it has no in-memory
     # bytes attached (Mongo can't store huge UploadFile blobs efficiently

@@ -68,6 +68,102 @@ def _realistic_fallback_ua() -> str:
     return random.choice(_REALISTIC_FALLBACK_UAS)
 
 
+# ──────────────────────────────────────────────────────────────────────
+# 2026-07 v2.2.1 — In-App Browser Preset support
+# ──────────────────────────────────────────────────────────────────────
+# One-click "Traffic Source Preset" (Facebook / Instagram / TikTok /
+# Messenger / Snapchat / LinkedIn / Twitter) that forces every visit
+# to look like it came from a real user opening the link inside the
+# platform's in-app WebView. The engine:
+#   1. Forces Referer to https://www.<platform>.com/
+#   2. Turns on UA → Referer coercion (adds FBAN/FBIOS, FB_IAB/FB4A,
+#      Instagram, musical_ly, Snapchat, LinkedInApp, TwitterAndroid …)
+#   3. Replaces every DESKTOP UA in the operator's pool with a fresh
+#      MOBILE base UA. Only then can coerce_ua_for_platform() append
+#      in-app markers (it deliberately leaves desktop UAs unchanged).
+# Empty preset = zero behavioural change (backward-compatible).
+# ──────────────────────────────────────────────────────────────────────
+_MOBILE_UA_POOL_IOS: Tuple[str, ...] = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+)
+_MOBILE_UA_POOL_ANDROID: Tuple[str, ...] = (
+    "Mozilla/5.0 (Linux; Android 14; SM-S928B Build/UP1A.231005.007; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/128.0.6613.146 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 14; SM-A556B Build/UP1A.231005.007; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/127.0.6533.120 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 13; Pixel 7 Build/TQ3A.230901.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/128.0.6613.99 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 14; SM-G998B Build/UP1A.231005.007; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/126.0.6478.183 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro Build/UP1A.231005.007; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/128.0.6613.146 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 13; SM-A536B Build/TP1A.220624.014; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/127.0.6533.99 Mobile Safari/537.36",
+)
+
+# Maps preset value → Referer URL used by the engine.
+# NOTE: keys MUST match the `_INAPP_CAPABLE_PLATFORMS` names in
+# referrer_pro.py so coerce_ua_for_platform() can append the right
+# in-app suffix.
+_INAPP_PRESET_REFERER: Dict[str, str] = {
+    "facebook":  "https://www.facebook.com/",
+    "messenger": "https://www.messenger.com/",
+    "instagram": "https://www.instagram.com/",
+    "tiktok":    "https://www.tiktok.com/",
+    "snapchat":  "https://www.snapchat.com/",
+    "linkedin":  "https://www.linkedin.com/",
+    "twitter":   "https://twitter.com/",
+}
+
+
+def _mobile_ua_for_inapp() -> str:
+    """Return a realistic MOBILE base UA (~70% Android, ~30% iOS —
+    matches real Facebook / Instagram / TikTok in-app user split).
+    Caller must NOT rely on this returning the same value twice."""
+    if random.random() < 0.70:
+        return random.choice(_MOBILE_UA_POOL_ANDROID)
+    return random.choice(_MOBILE_UA_POOL_IOS)
+
+
+def _apply_inapp_preset_to_uas(user_agents: List[str], want_count: int) -> List[str]:
+    """Given the operator's UA pool + how many visits will run, return
+    a MOBILE UA pool suitable for the in-app preset. Rules:
+      • Empty input pool → generate `want_count` fresh mobile UAs.
+      • Every MOBILE UA in input → kept as-is (already good).
+      • Every DESKTOP UA in input → replaced with a mobile UA (a
+        random mobile UA per slot, so the pool stays diverse).
+    Guarantees: returned list is never empty. `coerce_ua_for_platform`
+    will then layer the FB/IG/TT in-app markers on top.
+    Pure function — safe to call from job orchestrator.
+    """
+    try:
+        from referrer_pro import _is_mobile_ua as _is_mob  # type: ignore
+    except Exception:
+        # Fallback (should never happen — referrer_pro ships alongside)
+        def _is_mob(u: str) -> str:  # type: ignore
+            ul = (u or "").lower()
+            if ("iphone" in ul or "ipad" in ul) and "like mac os x" in ul:
+                return "ios"
+            if "android" in ul:
+                return "android"
+            return ""
+
+    if not user_agents:
+        n = max(1, min(int(want_count or 20), 500))
+        return [_mobile_ua_for_inapp() for _ in range(n)]
+    out: List[str] = []
+    for ua in user_agents:
+        u = (ua or "").strip()
+        if not u:
+            continue
+        if _is_mob(u):
+            out.append(u)
+        else:
+            out.append(_mobile_ua_for_inapp())
+    if not out:
+        n = max(1, min(int(want_count or 20), 500))
+        out = [_mobile_ua_for_inapp() for _ in range(n)]
+    return out
+
+
 # v1.0.12 fix: cross-platform helpers for Playwright Chromium paths.
 # Pre-1.0.12 these were hardcoded to Linux conventions (chrome-linux/
 # headless_shell). On native Windows installs (krexion-Setup-v1.0.x.exe
@@ -5904,10 +6000,62 @@ async def run_real_user_traffic_job(
     # AppsFlyer Protect360/Adjust/Forter) flag as bot traffic.
     # See referrer_pro.coerce_ua_for_platform for the full reference.
     referer_match_ua_to_platform: bool = True,
+    # ── 2026-07 v2.2.1 — In-App Browser Preset ──────────────────────
+    # One-click preset that makes every visit look like it came from
+    # a real user opening the link INSIDE a social app's in-app
+    # WebView (Facebook / Messenger / Instagram / TikTok / Snapchat /
+    # LinkedIn / Twitter). Empty string / "none" preserves the
+    # existing referrer-override behaviour exactly. When set to a
+    # supported platform name, the engine automatically:
+    #   1. Forces `referer_override_enabled = True`
+    #   2. Sets `referer_mode = "custom"` + `referer_value = "https://www.{platform}.com/"`
+    #   3. Turns on `referer_match_ua_to_platform` (UA coercion)
+    #   4. Turns on `referer_pass_to_offer` (so the OFFER — not just
+    #      the tracker — sees the chosen Referer instead of leaking
+    #      the Krexion origin through the 302 redirect)
+    #   5. Replaces every DESKTOP UA in the pool with a realistic
+    #      MOBILE base UA (Android + iOS mix, ~70/30 split). Then
+    #      coerce_ua_for_platform() appends the correct in-app
+    #      markers (FBAN/FBIOS, FB_IAB/FB4A, Instagram, musical_ly,
+    #      Snapchat/, LinkedInApp, TwitterAndroid, …) per visit.
+    # Result: the advertiser dashboard / offer network reports
+    # "Facebook In-App Browser" (or IG / TT / etc.) as the browser
+    # for every visit — exactly like real ad-click traffic.
+    inapp_browser_preset: str = "",
 ):
     """
     Main orchestrator. Emits progress into RUT_JOBS[job_id].
     """
+    # ── 2026-07 v2.2.1 — In-App Browser Preset: force referrer + mobile UAs
+    # Applied BEFORE the referer_cfg dict is built so all downstream
+    # logic (referer resolution, UA coercion, pass-to-offer, etc.) sees
+    # the preset values as if the operator had toggled them manually
+    # in the advanced UI. Empty / "none" / unknown preset = no-op
+    # (100 % backward-compatible with older frontends and past jobs).
+    _inapp_preset_key = (inapp_browser_preset or "").strip().lower()
+    if _inapp_preset_key and _inapp_preset_key != "none":
+        _preset_referer_url = _INAPP_PRESET_REFERER.get(_inapp_preset_key, "")
+        if _preset_referer_url:
+            referer_override_enabled = True
+            referer_mode = "custom"
+            referer_value = _preset_referer_url
+            referer_match_ua_to_platform = True
+            referer_pass_to_offer = True
+            # Replace desktop UAs with mobile UAs (only mobile UAs
+            # can be coerced with in-app markers — desktop UAs are
+            # left unchanged by coerce_ua_for_platform by design).
+            _orig_ua_count = len(user_agents or [])
+            user_agents = _apply_inapp_preset_to_uas(user_agents, total_clicks)
+            try:
+                push_live_step(
+                    job_id, 0, "preset", "info",
+                    f"In-App Browser preset ACTIVE · platform={_inapp_preset_key} · "
+                    f"referer={_preset_referer_url} · UA pool: {_orig_ua_count} in → "
+                    f"{len(user_agents)} mobile UAs out (Android+iOS mix)"
+                )
+            except Exception:
+                pass
+
     # ── 2026-06: Build referrer-override cfg ONCE per job ─────────────
     # Closed-over by the inner `process_one` worker → `_resolve_visit_referer`
     # is called per visit with this exact dict. When `enabled=False` the

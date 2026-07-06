@@ -555,6 +555,19 @@ export default function RealUserTrafficPage() {
   // (privacy by design — we don't tell end users what's running).
   const [antiDetectMaster, setAntiDetectMaster] = useState(false);
 
+  // ── 2026-07 v2.2.1 — In-App Browser Preset (one-click "Traffic Source") ──
+  // When set to a platform name (facebook / messenger / instagram / tiktok /
+  // snapchat / linkedin / twitter), the backend engine automatically:
+  //   • Forces Referer = https://www.<platform>.com/
+  //   • Turns on UA→Referer coercion (adds FBAN/FBIOS, FB_IAB/FB4A,
+  //     Instagram, musical_ly, Snapchat/, LinkedInApp, TwitterAndroid …)
+  //   • Turns on pass-referer-to-offer (offer sees the platform Referer)
+  //   • Replaces every desktop UA in the pool with a mobile UA
+  // Result: every RUT visit is reported as "<Platform> In-App Browser"
+  // on the advertiser dashboard — exactly like a real ad click.
+  // Empty / "none" = advanced/custom (backward-compatible legacy path).
+  const [inappBrowserPreset, setInappBrowserPreset] = useState("none");
+
   // ── 2026-06: Referrer Override (OFF by default — customer opt-in) ──
   // When OFF the engine uses the legacy UA-derived referer logic
   // (TikTok UA → tiktok.com, plain Chrome UA → no Referer).
@@ -1759,6 +1772,8 @@ export default function RealUserTrafficPage() {
       fd.append("referer_pass_to_offer", String(!!refererPassToOffer));
       // 2026-06-14 — UA ↔ Referer coercion (anti-fraud, default ON).
       fd.append("referer_match_ua_to_platform", String(!!refererMatchUaToPlatform));
+      // 2026-07 v2.2.1 — In-App Browser Preset (one-click social)
+      fd.append("inapp_browser_preset", (inappBrowserPreset && inappBrowserPreset !== "none") ? inappBrowserPreset : "");
 
       fd.append("form_fill_enabled", String(formFillEnabled));
       if (formFillEnabled) {
@@ -3049,6 +3064,65 @@ export default function RealUserTrafficPage() {
                 ? "✓ Full anti-detect stack active — your traffic is configured with all professional-grade evasion layers."
                 : "Turn ON for professional-grade traffic. Recommended for all paid campaigns and CPL / SOI offers."}
             </p>
+          </div>
+
+          {/* ── 2026-07 v2.2.1 — In-App Browser Preset (one-click "Traffic Source") ── */}
+          <div className="mt-6 p-4 rounded-lg border border-cyan-500/40 bg-gradient-to-br from-cyan-950/20 to-blue-950/10">
+            <div className="flex items-center justify-between gap-2 mb-3">
+              <div className="flex items-center gap-2">
+                <span className="text-cyan-300 text-sm font-semibold">📱 In-App Browser Preset</span>
+                <span className="text-[10px] text-zinc-500 px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-800">
+                  One-click · Reports as "Facebook In-App Browser" etc.
+                </span>
+              </div>
+              {inappBrowserPreset && inappBrowserPreset !== "none" && (
+                <span className="text-xs text-cyan-300 font-medium px-2 py-0.5 rounded-full bg-cyan-900/40 border border-cyan-700/50">
+                  ACTIVE
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-zinc-400 mb-3">
+              Select a social platform to make every visit look exactly like a real user opening the link inside that app's <span className="text-cyan-300">in-app browser</span>. Advertiser dashboards will report the browser as (e.g.) <span className="text-cyan-300 font-mono">Facebook In-App Browser</span> — just like real ad-click traffic.
+            </p>
+            <div className="flex flex-col sm:flex-row gap-3">
+              <div className="flex-1">
+                <Label className="text-zinc-300 text-xs mb-1 block">Traffic Source Preset</Label>
+                <select
+                  data-testid="rut-inapp-browser-preset"
+                  value={inappBrowserPreset}
+                  onChange={(e) => setInappBrowserPreset(e.target.value)}
+                  className="w-full px-3 py-2 rounded-md bg-zinc-900 border border-zinc-700 text-zinc-100 text-sm focus:outline-none focus:border-cyan-500"
+                >
+                  <option value="none">— None (Advanced / Custom below) —</option>
+                  <option value="facebook">Facebook In-App Browser (FB4A / FBIOS)</option>
+                  <option value="messenger">Messenger In-App Browser</option>
+                  <option value="instagram">Instagram In-App Browser</option>
+                  <option value="tiktok">TikTok In-App Browser (musical_ly)</option>
+                  <option value="snapchat">Snapchat In-App Browser</option>
+                  <option value="linkedin">LinkedIn In-App Browser</option>
+                  <option value="twitter">Twitter / X In-App Browser</option>
+                </select>
+              </div>
+            </div>
+            {inappBrowserPreset && inappBrowserPreset !== "none" && (
+              <div className="mt-3 p-3 rounded-md bg-cyan-950/40 border border-cyan-700/40 text-xs text-cyan-100 space-y-1">
+                <div className="flex items-start gap-2">
+                  <span className="text-cyan-400 leading-none">✓</span>
+                  <span>
+                    <span className="font-semibold text-cyan-300">Preset active</span> — engine will auto-configure this job:
+                  </span>
+                </div>
+                <ul className="ml-6 list-disc space-y-0.5 text-zinc-300">
+                  <li>Referer forced to <span className="font-mono text-cyan-300">https://www.{inappBrowserPreset === "twitter" ? "twitter" : inappBrowserPreset}.com/</span></li>
+                  <li>UA rotation → realistic mobile UAs (Android + iOS mix)</li>
+                  <li>In-app markers appended per visit (e.g. <span className="font-mono text-cyan-300">{inappBrowserPreset === "facebook" ? "[FB_IAB/FB4A;FBAV/…]" : inappBrowserPreset === "instagram" ? "Instagram 354.0.0.45.81 …" : inappBrowserPreset === "tiktok" ? "musical_ly_… BytedanceWebview/…" : inappBrowserPreset === "messenger" ? "[FB_IAB/MESSENGER;FBAV/…]" : inappBrowserPreset === "snapchat" ? "Snapchat/…" : inappBrowserPreset === "linkedin" ? "LinkedInApp/…" : "TwitterAndroid/…"}</span>)</li>
+                  <li>Referer passed directly to the offer (bypasses Krexion origin leak)</li>
+                </ul>
+                <div className="pt-1 text-[11px] text-zinc-400">
+                  💡 The "Referrer Source" panel below is <span className="text-zinc-300">overridden</span> while a preset is active. Choose "— None —" above if you want full manual control.
+                </div>
+              </div>
+            )}
           </div>
 
           {/* ── 2026-06: Referrer Source (off-by-default, customer opt-in) ── */}
