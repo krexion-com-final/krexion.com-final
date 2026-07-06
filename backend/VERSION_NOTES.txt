@@ -767,3 +767,37 @@
 #      max_attempts budget so a single proxy hiccup mid-flow no longer
 #      burns one of the customer's conversion attempts.
 
+
+# v2.2.2 — 2026-07 — Two customer-visible fixes + one new feature
+#   1. RUT: In-App Browser Preset (one-click "Traffic Source"). A new
+#      dropdown at the top of the Real-User-Traffic job form lets the
+#      operator pick Facebook / Messenger / Instagram / TikTok /
+#      Snapchat / LinkedIn / Twitter and the engine forces every
+#      visit to look like it came from that platform's in-app
+#      WebView. Backend auto-configures:
+#        • Referer = https://www.<platform>.com/
+#        • UA pool → realistic mobile UAs (~70/30 Android/iOS split)
+#        • UA -> Referer coercion (adds FBAN/FBIOS, FB_IAB/FB4A,
+#          Instagram, musical_ly, Snapchat/, LinkedInApp,
+#          TwitterAndroid markers per visit via referrer_pro)
+#        • Pass-referer-to-offer (offer sees platform Referer, not
+#          Krexion origin leaking through the 302)
+#      Empty preset / "none" = 100% backward-compatible (legacy
+#      behaviour preserved). Old frontends that don't send the new
+#      field also see zero change.
+#   2. Browser Profile launch: fix "Proxy could not be reached"
+#      within 10 s on rotating-residential proxies. Root cause: the
+#      scheme://host:port:user:pass 5-field shape (BestGo, GeoNode,
+#      etc.) was stored verbatim; urlparse then returned "http" as
+#      the hostname and Chromium's DNS lookup died with
+#      getaddrinfo ENOTFOUND http. Both the creator
+#      (browser_profile_module.py) and the launcher
+#      (browser_profile_launcher.py) now detect the 4-colon-after-
+#      scheme form, extract host+port cleanly, and promote the
+#      creds to the separate username/password launch fields.
+#      Legacy profiles already saved with the malformed URL launch
+#      cleanly on the next attempt — no need to recreate them.
+#      Existing 4 proxy shapes (scheme://user:pass@host:port,
+#      scheme://host:port, user:pass@host:port,
+#      host:port:user:pass) all continue to hit their pre-existing
+#      branches unchanged.
