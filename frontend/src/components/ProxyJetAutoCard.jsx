@@ -297,6 +297,13 @@ export default function ProxyJetAutoCard() {
               </button>
             </div>
           </div>
+          {/* 2026-07 v2.2.4 — Gateway sub-domain input hidden.
+              Customer feedback: field name was confusing (ProxyJet-
+              specific technical term) and the vast majority of
+              customers never need to change it. Value stays in state
+              so the backend still receives it — just defaulted to
+              "ca" (best-latency North America gateway). Power users
+              can still change it via the /api/proxyjet/settings API.
           <div>
             <Label className="text-xs text-[#A1A1AA]">Gateway sub-domain</Label>
             <Input
@@ -308,6 +315,7 @@ export default function ProxyJetAutoCard() {
             />
             <p className="text-[10px] text-[#71717a] mt-1">e.g. <code>ca</code> → <code>ca.proxy-jet.io</code></p>
           </div>
+          */}
           <div>
             <Label className="text-xs text-[#A1A1AA]">Default Country</Label>
             <select

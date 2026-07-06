@@ -828,3 +828,50 @@
 #   now calls this helper as its first cleanup step. Regression
 #   tests confirmed: TT→TT / FB→FB idempotency preserved, desktop
 #   UAs untouched, target-only markers survive.
+
+# v2.2.4 — 2026-07 — Multi-provider proxy UI (any HTTP/HTTPS/SOCKS proxy)
+#   Customer feedback:
+#     1. The "Gateway sub-domain" field inside the ProxyJet settings
+#        card was confusing (ProxyJet-specific technical term). The
+#        vast majority of customers never touch it.
+#     2. The Browser Profile "Manual" proxy mode only accepted a plain
+#        host:port + optional user/pass — no visible protocol picker,
+#        no paste-and-parse helper for the common 5 proxy string
+#        formats, and no messaging that ANY provider is supported.
+#
+#   Changes (frontend-only, backend already handles all 5 formats
+#   after the v2.2.2 parser fix):
+#
+#   frontend/src/components/ProxyJetAutoCard.jsx
+#     • Gateway sub-domain input HIDDEN from the UI (kept in state so
+#       the /api/proxyjet/settings API contract is unchanged; default
+#       "ca" is applied automatically). Power users can still change
+#       it via the API. Removes the #1 source of new-customer proxy
+#       confusion.
+#
+#   frontend/src/pages/BrowserProfilesPage.js — Manual mode redesigned:
+#     • Provider hint at top: "Works with any proxy provider —
+#       BrightData, SmartProxy, Oxylabs, IPRoyal, GeoNode, BestGo,
+#       DataImpulse, …"
+#     • NEW: paste-and-parse input.  Customer pastes ANY of these five
+#       formats and the "Parse & fill" button extracts host, port,
+#       user, pass, protocol:
+#         - scheme://user:pass@host:port  (canonical URL)
+#         - scheme://host:port:user:pass  (BestGo / GeoNode)
+#         - user:pass@host:port           (bare, no scheme)
+#         - host:port:user:pass           (Krexion shorthand)
+#         - host:port                     (no auth)
+#     • NEW: Protocol dropdown — HTTP / HTTPS / SOCKS5 / SOCKS5H /
+#       SOCKS4.  Was hard-coded to http:// before.
+#     • NEW: Split Host + Port + Username + Password fields, each
+#       validated + labelled clearly.  Every onChange auto-rebuilds
+#       the canonical `server` URL so the submit payload stays
+#       identical to the pre-change contract (backend unchanged).
+#     • NEW: Live preview banner showing the resolved
+#       `<protocol>://<host>:<port>  (auth: <user>)` string so the
+#       operator sees exactly what will be sent.
+#
+#   API compatibility: zero backend changes.  The Manual mode still
+#   submits `{ server, username, password }` — just with a richer
+#   entry UI.  Programmatic proxy addition via /api/proxies already
+#   worked; no change needed there.

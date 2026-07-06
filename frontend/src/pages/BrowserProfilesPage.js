@@ -141,9 +141,14 @@ export default function BrowserProfilesPage() {
     country: "US",
     state: "",
     sticky_minutes: 0,   // 0 = rotating
-    server: "",
+    // Manual mode (any proxy provider):
+    server: "",          // canonical URL: <protocol>://<host>:<port>
+    protocol: "http",    // http | https | socks5 | socks5h | socks4
+    host: "",
+    port: "",
     username: "",
     password: "",
+    paste_input: "",     // one-line paste-and-parse buffer
   });
   const [advAntiDetect, setAdvAntiDetect] = useState(true);
   const [advCreating, setAdvCreating] = useState(false);
@@ -788,17 +793,197 @@ export default function BrowserProfilesPage() {
                     )}
 
                     {advProxy.mode === "manual" && (
-                      <div className="grid grid-cols-2 gap-2">
-                        <Input placeholder="http://host:port" value={advProxy.server}
-                          onChange={(e) => setAdvProxy({ ...advProxy, server: e.target.value })}
-                          className="bg-zinc-900 border-zinc-700 text-zinc-100 text-xs col-span-2" />
-                        <Input placeholder="username (optional)" value={advProxy.username}
-                          onChange={(e) => setAdvProxy({ ...advProxy, username: e.target.value })}
-                          className="bg-zinc-900 border-zinc-700 text-zinc-100 text-xs" />
-                        <Input placeholder="password (optional)" type="password" value={advProxy.password}
-                          onChange={(e) => setAdvProxy({ ...advProxy, password: e.target.value })}
-                          className="bg-zinc-900 border-zinc-700 text-zinc-100 text-xs" />
-                        <p className="col-span-2 text-[10px] text-zinc-500">Same proxy applied to every profile in this batch.</p>
+                      <div className="space-y-3">
+                        {/* Provider hint */}
+                        <div className="p-2.5 rounded-md bg-zinc-900/60 border border-zinc-800 text-[11px] text-zinc-400">
+                          <span className="text-zinc-200 font-semibold">💡 Works with any proxy provider</span> — BrightData, SmartProxy, Oxylabs, IPRoyal, Nimble, Rayobyte, GeoNode, BestGo, DataImpulse, etc.
+                          Paste the proxy string OR fill the fields below.
+                        </div>
+
+                        {/* Paste-and-parse — accepts all 5 common formats */}
+                        <div>
+                          <Label className="text-zinc-300 text-[11px] mb-1 block">
+                            Paste proxy string <span className="text-zinc-500">(auto-detects format)</span>
+                          </Label>
+                          <div className="flex gap-2">
+                            <Input
+                              data-testid="bp-manual-proxy-paste"
+                              placeholder="e.g. http://user:pass@host:port  OR  host:port:user:pass"
+                              value={advProxy.paste_input || ""}
+                              onChange={(e) => setAdvProxy({ ...advProxy, paste_input: e.target.value })}
+                              className="bg-zinc-900 border-zinc-700 text-zinc-100 text-xs flex-1"
+                            />
+                            <Button
+                              type="button"
+                              data-testid="bp-manual-proxy-parse-btn"
+                              variant="secondary"
+                              onClick={() => {
+                                // Parse any of 5 proxy string formats and fill the
+                                // split fields below. Mirrors the backend parser in
+                                // /app/backend/browser_profile_module.py so what the
+                                // customer sees here matches what the engine uses.
+                                const raw = (advProxy.paste_input || "").trim();
+                                if (!raw) return;
+                                let protocol = "http";
+                                let host = "";
+                                let port = "";
+                                let username = "";
+                                let password = "";
+                                try {
+                                  let rest = raw;
+                                  if (rest.includes("://")) {
+                                    const parts = rest.split("://");
+                                    protocol = (parts[0] || "http").toLowerCase();
+                                    rest = parts.slice(1).join("://");
+                                  }
+                                  if (rest.includes("@")) {
+                                    // user:pass@host:port
+                                    const at = rest.lastIndexOf("@");
+                                    const creds = rest.slice(0, at);
+                                    const hp = rest.slice(at + 1);
+                                    const c1 = creds.indexOf(":");
+                                    username = c1 >= 0 ? creds.slice(0, c1) : creds;
+                                    password = c1 >= 0 ? creds.slice(c1 + 1) : "";
+                                    const hpParts = hp.split(":");
+                                    host = hpParts[0] || "";
+                                    port = hpParts[1] || "";
+                                  } else {
+                                    // host:port  OR  host:port:user:pass
+                                    const parts = rest.split(":");
+                                    host = parts[0] || "";
+                                    port = parts[1] || "";
+                                    if (parts.length >= 4) {
+                                      username = parts[2] || "";
+                                      password = parts.slice(3).join(":");
+                                    }
+                                  }
+                                  if (!host || !port) {
+                                    toast.error("Could not extract host or port from that string");
+                                    return;
+                                  }
+                                  setAdvProxy({
+                                    ...advProxy,
+                                    protocol,
+                                    host,
+                                    port,
+                                    username,
+                                    password,
+                                    server: `${protocol}://${host}:${port}`,
+                                  });
+                                  toast.success(`Parsed: ${protocol}://${host}:${port}${username ? " (with auth)" : ""}`);
+                                } catch (e) {
+                                  toast.error("Parse failed: " + (e.message || "unknown"));
+                                }
+                              }}
+                              className="text-xs px-3"
+                            >
+                              Parse & fill
+                            </Button>
+                          </div>
+                        </div>
+
+                        {/* Divider */}
+                        <div className="flex items-center gap-2 text-[10px] text-zinc-600 uppercase tracking-wider">
+                          <div className="flex-1 h-px bg-zinc-800" />
+                          <span>or fill manually</span>
+                          <div className="flex-1 h-px bg-zinc-800" />
+                        </div>
+
+                        {/* Split fields */}
+                        <div className="grid grid-cols-12 gap-2">
+                          <div className="col-span-3">
+                            <Label className="text-zinc-300 text-[11px] mb-1 block">Protocol</Label>
+                            <select
+                              data-testid="bp-manual-proxy-protocol"
+                              value={advProxy.protocol || "http"}
+                              onChange={(e) => {
+                                const p = e.target.value;
+                                const h = advProxy.host || "";
+                                const po = advProxy.port || "";
+                                setAdvProxy({
+                                  ...advProxy,
+                                  protocol: p,
+                                  server: h && po ? `${p}://${h}:${po}` : advProxy.server,
+                                });
+                              }}
+                              className="w-full bg-zinc-900 border border-zinc-700 text-zinc-100 rounded px-2 py-1.5 text-xs"
+                            >
+                              <option value="http">HTTP</option>
+                              <option value="https">HTTPS</option>
+                              <option value="socks5">SOCKS5</option>
+                              <option value="socks5h">SOCKS5H</option>
+                              <option value="socks4">SOCKS4</option>
+                            </select>
+                          </div>
+                          <div className="col-span-6">
+                            <Label className="text-zinc-300 text-[11px] mb-1 block">Host</Label>
+                            <Input
+                              data-testid="bp-manual-proxy-host"
+                              placeholder="e.g. gate.smartproxy.com"
+                              value={advProxy.host || ""}
+                              onChange={(e) => {
+                                const h = e.target.value;
+                                const p = advProxy.protocol || "http";
+                                const po = advProxy.port || "";
+                                setAdvProxy({
+                                  ...advProxy,
+                                  host: h,
+                                  server: h && po ? `${p}://${h}:${po}` : "",
+                                });
+                              }}
+                              className="bg-zinc-900 border-zinc-700 text-zinc-100 text-xs"
+                            />
+                          </div>
+                          <div className="col-span-3">
+                            <Label className="text-zinc-300 text-[11px] mb-1 block">Port</Label>
+                            <Input
+                              data-testid="bp-manual-proxy-port"
+                              placeholder="7000"
+                              inputMode="numeric"
+                              value={advProxy.port || ""}
+                              onChange={(e) => {
+                                const po = e.target.value.replace(/\D+/g, "");
+                                const p = advProxy.protocol || "http";
+                                const h = advProxy.host || "";
+                                setAdvProxy({
+                                  ...advProxy,
+                                  port: po,
+                                  server: h && po ? `${p}://${h}:${po}` : "",
+                                });
+                              }}
+                              className="bg-zinc-900 border-zinc-700 text-zinc-100 text-xs"
+                            />
+                          </div>
+                          <div className="col-span-6">
+                            <Label className="text-zinc-300 text-[11px] mb-1 block">Username <span className="text-zinc-500">(optional)</span></Label>
+                            <Input
+                              data-testid="bp-manual-proxy-user"
+                              placeholder="proxy username"
+                              value={advProxy.username || ""}
+                              onChange={(e) => setAdvProxy({ ...advProxy, username: e.target.value })}
+                              className="bg-zinc-900 border-zinc-700 text-zinc-100 text-xs"
+                            />
+                          </div>
+                          <div className="col-span-6">
+                            <Label className="text-zinc-300 text-[11px] mb-1 block">Password <span className="text-zinc-500">(optional)</span></Label>
+                            <Input
+                              data-testid="bp-manual-proxy-pass"
+                              placeholder="proxy password"
+                              type="password"
+                              value={advProxy.password || ""}
+                              onChange={(e) => setAdvProxy({ ...advProxy, password: e.target.value })}
+                              className="bg-zinc-900 border-zinc-700 text-zinc-100 text-xs"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Resolved preview + apply-to-batch note */}
+                        {advProxy.server && (
+                          <div className="text-[11px] font-mono px-2.5 py-1.5 rounded bg-zinc-950 border border-zinc-800 text-cyan-300 break-all">
+                            ✓ {advProxy.server}{advProxy.username ? `  (auth: ${advProxy.username})` : ""}
+                          </div>
+                        )}
+                        <p className="text-[10px] text-zinc-500">Same proxy applied to every profile in this batch.</p>
                       </div>
                     )}
                   </div>
