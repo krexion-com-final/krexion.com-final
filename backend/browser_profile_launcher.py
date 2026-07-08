@@ -34,7 +34,7 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("browser_profile_launcher")
 
@@ -508,8 +508,20 @@ async def _launch_profile_session_inner(
         # (colored circle with the profile letter in the top-right
         # corner) by passing `--user-data-dir` pointing at a folder
         # named after this Krexion profile.  We also set the window
-        # title prefix + inject a Krexion favicon on every page so the
-        # tab, taskbar text and address-bar badge all read "Krexion".
+        # title prefix so the taskbar entry reads "Krexion".
+        #
+        # 2026-01 v2.4.1 — REVERTED per-tab favicon + per-tab title
+        # override.  Customer feedback:
+        #   "jitne tab kholte sab pr krexion ka logo a raha hai ye
+        #    esa ni hona chahye balke jese orignal hota hai wese
+        #    hona chahye"
+        # We now leave EACH TAB's favicon + title exactly as the site
+        # itself sets them (so myip.com shows the myip.com favicon,
+        # not a Krexion K).  The Krexion identity now lives EXCLUSIVELY
+        # on the Windows taskbar (via WM_SETICON + AppUserModelID) and
+        # on Chromium's own profile-badge chip in the top-right of the
+        # main window — both of which are correct places to brand the
+        # browser instance without touching per-tab UI.
         _profile_label = (
             profile_config.get("name")
             or profile_config.get("id")
@@ -517,6 +529,18 @@ async def _launch_profile_session_inner(
             or "Profile"
         )
         _profile_first_letter = (str(_profile_label)[:1] or "K").upper()
+        # v2.4.1 — Register AppUserModelID BEFORE spawning Chromium so
+        # Windows' shell groups the incoming child under a dedicated
+        # "Krexion" taskbar entry from the very first frame paint,
+        # instead of the generic "Google Chrome" entry (which is how
+        # v2.2.7 was leaking the Chrome logo).
+        try:
+            if sys.platform.startswith("win"):
+                import ctypes as _ctypes_pre
+                _pre_appid = f"Krexion.BrowserProfile.{str(_profile_label)[:60] or 'Profile'}"
+                _ctypes_pre.windll.shell32.SetCurrentProcessExplicitAppUserModelID(_pre_appid)
+        except Exception:
+            pass
         try:
             import tempfile as _tf
             _kx_user_data_root = os.environ.get(
@@ -541,7 +565,9 @@ async def _launch_profile_session_inner(
                 # picks this up as the initial main-frame title until
                 # the page's own <title> loads — the taskbar entry
                 # then reads "Krexion — <label>" instead of the bare
-                # site name, and the browser tab shows the badge.
+                # site name during the split-second before first paint.
+                # Once the site loads, the page's real <title> takes
+                # over (v2.4.1 no longer force-prefixes it).
                 f"--window-name=Krexion \u2014 {_profile_label} ({_profile_first_letter})",
             ],
         }
@@ -560,27 +586,45 @@ async def _launch_profile_session_inner(
             browser = await p.chromium.launch(**launch_kwargs)
 
         # 2026-07 v2.2.7 — Krexion taskbar icon override (Windows only).
-        # Runs in a daemon thread that finds every top-level Chromium
-        # window owned by this browser's PID and calls
-        # SendMessage(WM_SETICON) with the Krexion K-badge ICO. Also
-        # sets AppUserModelID so Windows groups the profile windows
-        # under a dedicated Krexion taskbar entry.  All best-effort —
-        # any failure is swallowed so the browser still launches.
+        # 2026-01 v2.4.1 — Improved reliability: we now walk ALL Chromium
+        # descendants of the Playwright driver PID via psutil (Chromium
+        # spawns 5-10 helper processes; only the main "browser" process
+        # owns the visible top-level window we need to WM_SETICON, and
+        # Playwright's `_impl_obj._process.pid` often points to the
+        # Node driver — NOT the Chromium browser process).
+        # AppUserModelID was already set pre-launch (above); the loop
+        # below just decorates every visible window it can find.
         try:
-            _browser_pid = None
+            _driver_pid = None
             try:
-                # Playwright exposes the underlying subprocess via a
-                # private attribute; fall through silently if missing.
                 _proc = getattr(getattr(browser, "_impl_obj", browser), "_process", None)
                 if _proc is not None:
-                    _browser_pid = getattr(_proc, "pid", None)
+                    _driver_pid = getattr(_proc, "pid", None)
             except Exception:
-                _browser_pid = None
-            if _browser_pid:
-                from krexion_window_icon import apply_krexion_icon_to_pid
-                apply_krexion_icon_to_pid(
-                    _browser_pid,
+                _driver_pid = None
+            # Build the PID set: driver + all descendants (walk on-demand
+            # inside the loop so newly-spawned Chromium helpers are
+            # picked up as tabs open).
+            _target_pids: List[int] = []
+            if _driver_pid:
+                _target_pids.append(int(_driver_pid))
+                try:
+                    import psutil as _psu
+                    for _child in _psu.Process(int(_driver_pid)).children(recursive=True):
+                        try:
+                            _target_pids.append(int(_child.pid))
+                        except Exception:
+                            pass
+                except Exception:
+                    # psutil missing or process gone — driver PID alone
+                    # is still useful for the first WM_SETICON pass.
+                    pass
+            if _target_pids:
+                from krexion_window_icon import apply_krexion_icon_to_pids
+                apply_krexion_icon_to_pids(
+                    _target_pids,
                     profile_label=str(_profile_label)[:60] or "Profile",
+                    parent_pid=int(_driver_pid) if _driver_pid else None,
                 )
         except Exception as _icon_err:
             logger.debug(f"Krexion taskbar-icon override skipped: {_icon_err}")
@@ -600,57 +644,27 @@ async def _launch_profile_session_inner(
 
         context = await browser.new_context(**context_kwargs)
 
-        # ── Inject anti-detect script (only when master toggle is ON) ──
-        # 2026-07 v2.2.6 — Krexion tab-branding init script.
-        # Runs on EVERY page (before any site JS) so the tab favicon +
-        # title carry the Krexion identity even before the site loads.
-        # The taskbar exe icon still comes from chrome.exe / chromium.exe
-        # (bundled resource we can't override at runtime without a
-        # custom binary), but the browser tab and address-bar badge
-        # now clearly read "Krexion — <label>".
-        try:
-            _kx_brand_js = (
-                "(function(){try{"
-                # Inject a Krexion favicon on every page (SVG data URL
-                # so no network fetch, works even offline / on error
-                # pages).  The K glyph is drawn as pure SVG for razor
-                # sharpness on high-DPI monitors.
-                "var _kxIcon='data:image/svg+xml;utf8,'+encodeURIComponent("
-                "'<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\">"
-                "<rect width=\"64\" height=\"64\" rx=\"14\" fill=\"#22d3ee\"/>"
-                "<text x=\"32\" y=\"44\" font-family=\"system-ui,sans-serif\" "
-                "font-size=\"40\" font-weight=\"800\" text-anchor=\"middle\" "
-                "fill=\"#0b1220\">" + _profile_first_letter + "</text></svg>');"
-                "function _kxSetIcon(){"
-                "  document.querySelectorAll('link[rel~=\"icon\"]').forEach(function(l){l.remove()});"
-                "  var l=document.createElement('link');"
-                "  l.rel='icon';l.type='image/svg+xml';l.href=_kxIcon;"
-                "  (document.head||document.documentElement).appendChild(l);"
-                "}"
-                # Prefix the tab title so browser + taskbar shows
-                # "Krexion — <label>: <site title>".  Runs once on
-                # load and again whenever the page mutates <title>.
-                "var _kxLabel=" + json.dumps(f"Krexion — {_profile_label} ({_profile_first_letter})") + ";"
-                "function _kxSetTitle(){"
-                "  var t=document.title||'';"
-                "  if(t.indexOf(_kxLabel)===0)return;"
-                "  document.title=_kxLabel+(t?': '+t:'');"
-                "}"
-                # First-paint hooks
-                "if(document.readyState==='loading'){"
-                "  document.addEventListener('DOMContentLoaded',function(){_kxSetIcon();_kxSetTitle();});"
-                "}else{_kxSetIcon();_kxSetTitle();}"
-                # Keep watching for site scripts that overwrite the
-                # title later — MutationObserver picks it up in real
-                # time.
-                "try{var _mo=new MutationObserver(function(){_kxSetTitle();});"
-                "_mo.observe(document.querySelector('head')||document.documentElement,"
-                "{childList:true,subtree:true,characterData:true});}catch(e){}"
-                "}catch(e){}})();"
-            )
-            await context.add_init_script(_kx_brand_js)
-        except Exception as _brand_err:
-            logger.debug(f"Krexion brand injection failed (non-critical): {_brand_err}")
+        # v2.4.1 — Per-tab Krexion favicon + title-prefix injection has
+        # been INTENTIONALLY REMOVED.  Prior versions (v2.2.6 → v2.4.0)
+        # ran an init script on every page that:
+        #     • deleted every <link rel="icon"> node
+        #     • replaced it with a Krexion K-badge SVG data URL
+        #     • prefixed document.title with "Krexion — <label>: "
+        # Customer feedback (2026-01):
+        #     "jitne tab kholte sab pr krexion ka logo a raha hai ye
+        #      esa ni hona chahye balke jese orignal hota hai wese
+        #      hona chahye"
+        # Krexion branding now lives ONLY on:
+        #     1. The Windows taskbar entry (WM_SETICON above swaps the
+        #        Chrome logo for the Krexion K-badge on the taskbar +
+        #        alt-tab + title-bar chip).
+        #     2. Chromium's own profile badge (colored circle with the
+        #        profile's first-letter in the top-right corner —
+        #        rendered by Chromium when `--user-data-dir` points
+        #        at a per-profile folder, done above).
+        # Each tab now displays its site's REAL favicon and title,
+        # matching how a stock Chrome install behaves — professional
+        # and correct.
 
         # ── 2026-07 v2.3.0 — Apply next-level anti-detect stack ──
         # 15 industry-standard enhancements: HTTP/2 fingerprint, Sec-Fetch-*,

@@ -192,3 +192,73 @@ Customer clicks update → new installer downloaded + run silently.
 - Add "Test single proxy" quick action button to MyProxyProvidersCard
 - Add provider fallback chain (try A, fallback to B on failure)
 - Add per-provider rate-limit warnings when count is very large
+
+## Session 2026-01-08 (continued) — v2.4.1 Browser Profile identity fixes + deploy
+
+### Customer complaints (verbatim, same session)
+1. "browser profile kholte hein to sab kuch perfectly ni chalta" — screenshots
+   show the myip.com page loading correctly (IP 216.67.75.10, Alaska
+   Communications ISP) but every tab in the profile shows the Krexion K
+   as its favicon, and every tab title starts with "Krexio…" (truncated
+   "Krexion — <label>").
+2. "profile mein jitne tab kholte sab pr krexion ka logo a raha hai ye esa
+   ni hona chahye balke jese orignal hota hai wese hona chahye" — each
+   tab should show the site's OWN favicon (like a normal Chrome install).
+3. "jo task bar mein profile kholne pr chrome logo a raha hai wo krexion
+   ka icon hona chahye" — the taskbar should show the Krexion K icon,
+   NOT the Chrome logo, so the customer perceives Krexion as its own
+   browser (professional branding).
+
+### Fixes shipped (v2.4.1 — 2 files, ~340 net lines)
+
+**backend/browser_profile_launcher.py**
+- Removed the per-tab init script (`_kx_brand_js`) that overrode every
+  page's favicon and prefixed every document.title with "Krexion — <label>".
+  Each tab now renders the site's real favicon and title, just like
+  stock Chrome.
+- Moved `SetCurrentProcessExplicitAppUserModelID` to BEFORE
+  `browser.launch(...)` so Windows shell registers the Krexion group
+  BEFORE the Chromium child paints its first taskbar entry — eliminating
+  the flash of Chrome logo during startup.
+- Windows taskbar icon override now uses `psutil` to walk the driver's
+  full descendant tree (browser + renderer + GPU + utility + crashpad
+  helpers) so WM_SETICON lands on the right HWND regardless of which
+  Chromium child owns the top-level window.
+
+**backend/krexion_window_icon.py**
+- New public entry-point `apply_krexion_icon_to_pids(pids, parent_pid=…)`.
+  Refreshes descendant PIDs every 0.8s during a 60s window so any
+  windows that open later (torn-out tabs, DevTools, print preview)
+  also flip to the Krexion K icon.
+- Legacy `apply_krexion_icon_to_pid(pid)` retained as a thin wrapper
+  → 100% backward compatible with any pinned call sites.
+
+**Roll-out**
+- Backend-only change; no frontend / installer / Electron asset changes
+- Customer PC apps reach this code via their local Python runtime
+  invoking `browser_profile_launcher.launch_profile(...)` — so they
+  pick up the fix on their next auto-update from the Releases admin
+  page.
+
+### Version bump
+- backend/VERSION:                 2.4.0 → **2.4.1**
+- backend/VERSION_NOTES.txt:       full customer-facing v2.4.1 block prepended
+- electron-desktop/package.json:   2.4.0 → **2.4.1**
+
+### Deploy (this session)
+- Pushed to origin/main via PAT (customer explicitly said "deploy kar do")
+- VPS auto-deploy triggers on push
+- **Customer action still needed**: admin panel → Releases → publish
+  v2.4.1 so every customer's native / Electron app auto-updates.
+- Also in this push: the v2.5.0 candidate (provider-agnostic Auto Mode +
+  on-demand batch generator from earlier in this session) — bundled
+  together as customer requested "aik he bar sab kr k deploy kr liya jay".
+
+### Files NOT touched (safety)
+- Backend RUT engine (`real_user_traffic.py`), ProxyJet module,
+  Sync, License, CPI, Sites CMS, Fraud, Anti-detect, Releases module,
+  Advanced anti-detect, Bridge, Admin routes
+- Every Electron main / renderer file
+- Every Windows installer script (.iss / .bat / .ps1)
+- Every VPS deployment / docker-compose / nginx config
+- All customer-installer scripts, dashboards, tray-app

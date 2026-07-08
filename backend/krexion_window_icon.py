@@ -160,12 +160,36 @@ def apply_krexion_icon_to_pid(
     silent failure.  Every failure is logged at DEBUG level ONLY;
     callers do not need to handle exceptions.
     """
+    return apply_krexion_icon_to_pids(
+        [pid],
+        profile_label=profile_label,
+        poll_seconds=poll_seconds,
+        poll_interval=poll_interval,
+    )
+
+
+def apply_krexion_icon_to_pids(
+    pids: list,
+    profile_label: str = "Krexion",
+    poll_seconds: float = 60.0,
+    poll_interval: float = 0.8,
+    parent_pid: Optional[int] = None,
+) -> Optional[threading.Thread]:
+    """v2.4.1 — Multi-PID variant. Playwright's Chromium spawns a tree
+    of processes (browser, renderer, GPU, utility, crashpad_handler…)
+    and only the "browser" main process owns the taskbar HWND we need
+    to WM_SETICON.  We accept a LIST of PIDs (already discovered by
+    the caller) AND — if `parent_pid` is provided — the polling thread
+    walks that parent's descendants on every tick, so windows opened
+    later (a new tab that gets torn out into its own window, a print
+    preview, DevTools) are captured too.
+
+    Non-Windows platforms: no-op returning None.  Any Windows-side
+    failure is swallowed so browser launch is never broken.
+    """
     if not _IS_WINDOWS:
         return None
     try:
-        # Also flip the CURRENT python-process AppUserModelID so
-        # Windows' shell knows to group Krexion-spawned Chromiums
-        # under a dedicated taskbar entry.
         try:
             import ctypes
             appid = f"Krexion.BrowserProfile.{profile_label}"
@@ -178,11 +202,14 @@ def apply_krexion_icon_to_pid(
             logger.debug("[krexion-icon] no ICO available — skipping")
             return None
 
+        _clean = sorted({int(p) for p in (pids or []) if p})
+        if not _clean and not parent_pid:
+            return None
         t = threading.Thread(
-            target=_icon_apply_loop,
-            args=(pid, ico_path, poll_seconds, poll_interval),
+            target=_icon_apply_loop_multi,
+            args=(_clean, parent_pid, ico_path, poll_seconds, poll_interval),
             daemon=True,
-            name=f"KrexionIcon-{pid}",
+            name=f"KrexionIcon-{parent_pid or _clean[0]}",
         )
         t.start()
         return t
@@ -191,7 +218,143 @@ def apply_krexion_icon_to_pid(
         return None
 
 
-def _icon_apply_loop(pid: int, ico_path: str, deadline_s: float, interval_s: float) -> None:
+def _walk_descendants(parent_pid: int) -> Set[int]:
+    """Return the set of descendant PIDs of `parent_pid` using psutil.
+    Returns an empty set on any failure so the caller keeps whatever
+    PIDs it already had."""
+    out: Set[int] = set()
+    try:
+        import psutil as _psu
+        try:
+            proc = _psu.Process(parent_pid)
+        except Exception:
+            return out
+        for child in proc.children(recursive=True):
+            try:
+                out.add(int(child.pid))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return out
+
+
+def _icon_apply_loop_multi(
+    seed_pids: list,
+    parent_pid: Optional[int],
+    ico_path: str,
+    deadline_s: float,
+    interval_s: float,
+) -> None:
+    """v2.4.1 — Runs in a daemon thread. Every `interval_s`:
+      1. Refresh the PID set by walking `parent_pid`'s descendants
+         (so newly-spawned Chromium helpers are picked up).
+      2. EnumWindows across the whole desktop; keep any HWND whose
+         owning PID is in the set and IsWindowVisible == True.
+      3. SendMessage(WM_SETICON, small + big) + SetClassLongPtr for
+         inheritance to child windows.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        WM_SETICON = 0x0080
+        ICON_SMALL = 0
+        ICON_BIG = 1
+        IMAGE_ICON = 1
+        LR_LOADFROMFILE = 0x00000010
+
+        hicon_small = user32.LoadImageW(
+            None, ico_path, IMAGE_ICON, 16, 16, LR_LOADFROMFILE
+        )
+        hicon_large = user32.LoadImageW(
+            None, ico_path, IMAGE_ICON, 32, 32, LR_LOADFROMFILE
+        )
+        if not hicon_small and not hicon_large:
+            logger.debug("[krexion-icon] LoadImageW returned 0 for both sizes")
+            return
+
+        EnumWindowsProc = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, wintypes.HWND, wintypes.LPARAM
+        )
+        GetWindowThreadProcessId = user32.GetWindowThreadProcessId
+        GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        GetWindowThreadProcessId.restype = wintypes.DWORD
+
+        deadline = time.time() + deadline_s
+        pid_set: Set[int] = {int(p) for p in seed_pids or []}
+        # Include the parent itself in case it also owns a window.
+        if parent_pid:
+            pid_set.add(int(parent_pid))
+
+        while time.time() < deadline:
+            # Refresh descendants — Chromium spawns helpers over time.
+            if parent_pid:
+                pid_set |= _walk_descendants(int(parent_pid))
+
+            found_hwnds = []
+
+            def _cb(hwnd, _lparam):
+                try:
+                    win_pid = wintypes.DWORD(0)
+                    GetWindowThreadProcessId(hwnd, ctypes.byref(win_pid))
+                    if win_pid.value in pid_set:
+                        if user32.IsWindowVisible(hwnd):
+                            found_hwnds.append(hwnd)
+                except Exception:
+                    pass
+                return True
+
+            user32.EnumWindows(EnumWindowsProc(_cb), 0)
+
+            for hwnd in found_hwnds:
+                with _LOCK:
+                    already = hwnd in _ICONED_HWNDS
+                if already:
+                    continue
+                try:
+                    if hicon_small:
+                        user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon_small)
+                    if hicon_large:
+                        user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon_large)
+                    # Class-icon patch so subsequent child windows
+                    # inherit the Krexion icon at creation time.
+                    GCLP_HICON = -14
+                    GCLP_HICONSM = -34
+                    try:
+                        SetClassLongPtrW = getattr(user32, "SetClassLongPtrW", user32.SetClassLongW)
+                        if hicon_large:
+                            SetClassLongPtrW(hwnd, GCLP_HICON, hicon_large)
+                        if hicon_small:
+                            SetClassLongPtrW(hwnd, GCLP_HICONSM, hicon_small)
+                    except Exception:
+                        pass
+                    with _LOCK:
+                        _ICONED_HWNDS.add(hwnd)
+                    logger.debug(f"[krexion-icon] applied to hwnd={hwnd}")
+                except Exception as se:
+                    logger.debug(f"[krexion-icon] SendMessage failed on hwnd={hwnd}: {se}")
+
+            # Fast-exit if the parent process exited (nothing left to icon).
+            if parent_pid:
+                try:
+                    proc = kernel32.OpenProcess(0x1000, False, int(parent_pid))
+                    if not proc:
+                        return
+                    kernel32.CloseHandle(proc)
+                except Exception:
+                    pass
+
+            time.sleep(interval_s)
+    except Exception as e:
+        logger.debug(f"[krexion-icon] loop crashed: {e}")
+
+
+# ── Legacy single-PID loop (kept for backwards compat with any pinned
+#    call sites; not used by v2.4.1+ paths). ─────────────────────────
+def _icon_apply_loop_LEGACY_do_not_call(pid: int, ico_path: str, deadline_s: float, interval_s: float) -> None:
     """Runs in a daemon thread.  Enumerates windows every `interval_s`
     for `deadline_s` seconds, applying the Krexion ICO to any window
     owned by `pid` that we haven't touched yet."""
@@ -207,7 +370,6 @@ def _icon_apply_loop(pid: int, ico_path: str, deadline_s: float, interval_s: flo
         ICON_BIG = 1
         IMAGE_ICON = 1
         LR_LOADFROMFILE = 0x00000010
-        LR_DEFAULTSIZE = 0x00000040
 
         # Load two icon handles — small (16) + large (32)
         hicon_small = user32.LoadImageW(
