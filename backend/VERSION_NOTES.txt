@@ -1011,3 +1011,54 @@
 #     the taskbar EXE icon still shows chrome.exe's icon; that
 #     will be addressed by a native custom launcher wrapper in
 #     a follow-up.
+
+# v2.2.7 — 2026-07 — Krexion taskbar icon override for Chromium (Windows)
+#   Follow-up to v2.2.6 tab branding.  Customer wanted the taskbar
+#   EXE icon (the little square left of the window title in the
+#   Windows taskbar) to also read Krexion, not Chrome.
+#
+#   Solution: runtime WM_SETICON override — no custom-branded
+#   Chromium binary needed, works with the SAME chrome.exe /
+#   chromium.exe already shipped with Playwright.
+#
+#   New file: backend/krexion_window_icon.py
+#     • Generates a 32×32 Krexion K-badge ICO on first use (cached
+#       in %TEMP%/krexion_taskbar.ico).  Uses Pillow if available
+#       (already in Krexion requirements), falls back to a stdlib-
+#       only 16×16 solid-cyan ICO stub.
+#     • apply_krexion_icon_to_pid(pid, profile_label, ...) spawns
+#       a background DAEMON thread that:
+#         - Calls SetCurrentProcessExplicitAppUserModelID so
+#           Windows groups Krexion profile windows under a
+#           dedicated taskbar entry (not a generic "Chrome" group).
+#         - Enumerates every top-level window every 800 ms for
+#           45 s, filters to windows whose owning PID matches
+#           our Chromium's PID.
+#         - LoadImageW loads the ICO into HICON handles at
+#           16×16 (ICON_SMALL) + 32×32 (ICON_BIG).
+#         - SendMessage(WM_SETICON, ...) sets both sizes on
+#           every matching window.  Result: title-bar chip,
+#           alt-tab icon, taskbar icon all flip to Krexion.
+#         - SetClassLongPtrW patches the window class too so
+#           NEW windows the browser opens later (new-tab
+#           promotion, DevTools, print preview, etc.) inherit
+#           the Krexion icon automatically without a second
+#           SendMessage.
+#     • All operations wrapped in try/except — DEBUG logging
+#       only.  Any failure is invisible to the customer; the
+#       browser still launches perfectly.
+#     • Non-Windows platforms: every public function is a
+#       safe no-op returning None immediately.
+#
+#   Modified: backend/browser_profile_launcher.py
+#     • After chromium.launch() we now fetch the subprocess
+#       PID via browser._impl_obj._process.pid and call
+#       apply_krexion_icon_to_pid(pid, profile_label=…) in a
+#       fire-and-forget try/except.
+#
+#   Result: every visible surface in Windows shell now reads
+#   Krexion — tab favicon, tab title, window title, taskbar
+#   icon, alt-tab preview, top-right Chromium profile chip,
+#   taskbar group name.  No more "Chrome" branding anywhere in
+#   the customer's Windows session while a Krexion profile is
+#   open.

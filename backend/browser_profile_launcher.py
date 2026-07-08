@@ -559,6 +559,32 @@ async def _launch_profile_session_inner(
             # Channel not present → fallback to bundled
             browser = await p.chromium.launch(**launch_kwargs)
 
+        # 2026-07 v2.2.7 — Krexion taskbar icon override (Windows only).
+        # Runs in a daemon thread that finds every top-level Chromium
+        # window owned by this browser's PID and calls
+        # SendMessage(WM_SETICON) with the Krexion K-badge ICO. Also
+        # sets AppUserModelID so Windows groups the profile windows
+        # under a dedicated Krexion taskbar entry.  All best-effort —
+        # any failure is swallowed so the browser still launches.
+        try:
+            _browser_pid = None
+            try:
+                # Playwright exposes the underlying subprocess via a
+                # private attribute; fall through silently if missing.
+                _proc = getattr(getattr(browser, "_impl_obj", browser), "_process", None)
+                if _proc is not None:
+                    _browser_pid = getattr(_proc, "pid", None)
+            except Exception:
+                _browser_pid = None
+            if _browser_pid:
+                from krexion_window_icon import apply_krexion_icon_to_pid
+                apply_krexion_icon_to_pid(
+                    _browser_pid,
+                    profile_label=str(_profile_label)[:60] or "Profile",
+                )
+        except Exception as _icon_err:
+            logger.debug(f"Krexion taskbar-icon override skipped: {_icon_err}")
+
         context_kwargs: Dict[str, Any] = {
             "user_agent": ua,
             "viewport": {"width": int(viewport.get("width", 1920)), "height": int(viewport.get("height", 1080))},
