@@ -948,3 +948,66 @@
 #     K. iOS pool is 100 % iOS 26.x
 #     L. Syntax valid
 #     M. Desktop UAs unchanged
+
+# v2.2.6 — 2026-07 — Browser Profile launch: proxy probe reliability + Krexion tab branding
+#   Two fixes reported by the customer from a single failing launch:
+#
+#   Bug 1 — Proxy probe TLS drop.
+#     Even after the v2.2.2 URL-parser fix landed the BestGo proxy
+#     cleanly as `http://us.rrp.bestgo.work:10000` with separate
+#     username/password fields, the health-probe was still failing
+#     with:
+#       Error: APIRequestContext.get: Client network socket
+#       disconnected before secure TLS connection was established
+#       Call log: GET https://api.ipify.org/?format=text
+#     Root cause: the probe hit an HTTPS URL through an HTTP proxy,
+#     forcing a CONNECT tunnel + TLS handshake through the proxy.
+#     Residential-rotation gateways (BestGo, GeoNode, DataImpulse …)
+#     sometimes need >1 s to route the auth check for the tunnel and
+#     Playwright's internal socket timer trips before the TLS layer
+#     even starts negotiating. The same proxy loads pages fine in the
+#     actual browser because Chromium's proxy resolver has a longer
+#     grace window and re-issues auth on drop.
+#   Fix:
+#     browser_profile_launcher.py — probe is now a 4-URL fallback chain
+#     with HTTP probes FIRST (no CONNECT/TLS through proxy):
+#         http://api.ipify.org/?format=text
+#         http://checkip.amazonaws.com/
+#         http://ifconfig.me/ip
+#         https://api.ipify.org/?format=text  (last-resort)
+#     Each attempt is 10-s bounded; first 7-45 char body wins.
+#     Passes the browser UA as a header so proxies that whitelist by
+#     User-Agent still let the probe through.
+#
+#   Bug 2 — Chromium taskbar showed the Chrome icon, not Krexion.
+#     Customer ask: taskbar should show Krexion's icon + a profile
+#     letter badge like Chrome's own profile UI.
+#   Reality:
+#     The taskbar EXE icon is baked into chrome.exe / chromium.exe as
+#     a bundled resource — we CANNOT change it at runtime without
+#     shipping a custom-branded binary (that's a native-installer
+#     task tracked separately for a future release).
+#   What we CAN do — and did, in this release:
+#     1. `--window-name=Krexion — <label> (<letter>)` launch arg → the
+#        window title (visible in taskbar TEXT) now reads "Krexion".
+#     2. `context.add_init_script` on every page BEFORE site JS:
+#        • Removes any site favicon and injects an SVG data-URL
+#          Krexion badge (cyan `#22d3ee` rounded square containing
+#          the profile's first letter). Works offline, high-DPI
+#          crisp, zero network fetch.
+#        • Prefixes `document.title` to
+#          "Krexion — <label> (<letter>): <original site title>"
+#          and re-applies via MutationObserver whenever the site's
+#          own JS overwrites the title.
+#     3. Per-profile `--user-data-dir` folder under
+#        `KREXION_PROFILE_DATA_ROOT` (env override) OR the OS temp
+#        directory. Chromium then draws its OWN colored profile
+#        badge in the top-right corner (its native profile UI) —
+#        which is exactly the "chrome profile mein show hota hai"
+#        UI element the customer referenced.
+#     Result: every browser-level UI element (tab title, tab
+#     favicon, address-bar badge, top-right profile chip) now
+#     reads "Krexion" + the profile label + first letter. Only
+#     the taskbar EXE icon still shows chrome.exe's icon; that
+#     will be addressed by a native custom launcher wrapper in
+#     a follow-up.

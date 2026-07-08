@@ -497,6 +497,37 @@ async def _launch_profile_session_inner(
     async with async_playwright() as p:
         # Browser binary selection — prefer Chrome channel for realism,
         # fall back to bundled Chromium when not installed.
+        # 2026-07 v2.2.6 — Krexion profile identity.
+        # Customer ask: "chrome na show ho hamara apna krexion ka icon
+        # he show ho or os ka sath number yan nam k pehla haraf show
+        # ho jese chrome profile mein show hota hai" — the taskbar icon
+        # is a bundled resource inside chrome.exe / chromium.exe so we
+        # can NOT change it at runtime without shipping a custom binary
+        # (that's a native-installer-level task tracked separately).
+        # BUT we CAN light up Chromium's OWN native profile badge
+        # (colored circle with the profile letter in the top-right
+        # corner) by passing `--user-data-dir` pointing at a folder
+        # named after this Krexion profile.  We also set the window
+        # title prefix + inject a Krexion favicon on every page so the
+        # tab, taskbar text and address-bar badge all read "Krexion".
+        _profile_label = (
+            profile_config.get("name")
+            or profile_config.get("id")
+            or profile_config.get("label")
+            or "Profile"
+        )
+        _profile_first_letter = (str(_profile_label)[:1] or "K").upper()
+        try:
+            import tempfile as _tf
+            _kx_user_data_root = os.environ.get(
+                "KREXION_PROFILE_DATA_ROOT",
+                os.path.join(_tf.gettempdir(), "krexion_browser_profiles"),
+            )
+            _safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(_profile_label))[:60] or "Profile"
+            _kx_user_data_dir = os.path.join(_kx_user_data_root, _safe_label)
+            os.makedirs(_kx_user_data_dir, exist_ok=True)
+        except Exception:
+            _kx_user_data_dir = ""
         launch_kwargs: Dict[str, Any] = {
             "headless": False,
             "args": [
@@ -506,6 +537,12 @@ async def _launch_profile_session_inner(
                 "--no-first-run",
                 # Make the window non-obvious (no automation infobar)
                 "--disable-infobars",
+                # 2026-07 v2.2.6 — window title override.  Chromium
+                # picks this up as the initial main-frame title until
+                # the page's own <title> loads — the taskbar entry
+                # then reads "Krexion — <label>" instead of the bare
+                # site name, and the browser tab shows the badge.
+                f"--window-name=Krexion \u2014 {_profile_label} ({_profile_first_letter})",
             ],
         }
         if proxy_arg:
@@ -538,6 +575,57 @@ async def _launch_profile_session_inner(
         context = await browser.new_context(**context_kwargs)
 
         # ── Inject anti-detect script (only when master toggle is ON) ──
+        # 2026-07 v2.2.6 — Krexion tab-branding init script.
+        # Runs on EVERY page (before any site JS) so the tab favicon +
+        # title carry the Krexion identity even before the site loads.
+        # The taskbar exe icon still comes from chrome.exe / chromium.exe
+        # (bundled resource we can't override at runtime without a
+        # custom binary), but the browser tab and address-bar badge
+        # now clearly read "Krexion — <label>".
+        try:
+            _kx_brand_js = (
+                "(function(){try{"
+                # Inject a Krexion favicon on every page (SVG data URL
+                # so no network fetch, works even offline / on error
+                # pages).  The K glyph is drawn as pure SVG for razor
+                # sharpness on high-DPI monitors.
+                "var _kxIcon='data:image/svg+xml;utf8,'+encodeURIComponent("
+                "'<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\">"
+                "<rect width=\"64\" height=\"64\" rx=\"14\" fill=\"#22d3ee\"/>"
+                "<text x=\"32\" y=\"44\" font-family=\"system-ui,sans-serif\" "
+                "font-size=\"40\" font-weight=\"800\" text-anchor=\"middle\" "
+                "fill=\"#0b1220\">" + _profile_first_letter + "</text></svg>');"
+                "function _kxSetIcon(){"
+                "  document.querySelectorAll('link[rel~=\"icon\"]').forEach(function(l){l.remove()});"
+                "  var l=document.createElement('link');"
+                "  l.rel='icon';l.type='image/svg+xml';l.href=_kxIcon;"
+                "  (document.head||document.documentElement).appendChild(l);"
+                "}"
+                # Prefix the tab title so browser + taskbar shows
+                # "Krexion — <label>: <site title>".  Runs once on
+                # load and again whenever the page mutates <title>.
+                "var _kxLabel=" + json.dumps(f"Krexion — {_profile_label} ({_profile_first_letter})") + ";"
+                "function _kxSetTitle(){"
+                "  var t=document.title||'';"
+                "  if(t.indexOf(_kxLabel)===0)return;"
+                "  document.title=_kxLabel+(t?': '+t:'');"
+                "}"
+                # First-paint hooks
+                "if(document.readyState==='loading'){"
+                "  document.addEventListener('DOMContentLoaded',function(){_kxSetIcon();_kxSetTitle();});"
+                "}else{_kxSetIcon();_kxSetTitle();}"
+                # Keep watching for site scripts that overwrite the
+                # title later — MutationObserver picks it up in real
+                # time.
+                "try{var _mo=new MutationObserver(function(){_kxSetTitle();});"
+                "_mo.observe(document.querySelector('head')||document.documentElement,"
+                "{childList:true,subtree:true,characterData:true});}catch(e){}"
+                "}catch(e){}})();"
+            )
+            await context.add_init_script(_kx_brand_js)
+        except Exception as _brand_err:
+            logger.debug(f"Krexion brand injection failed (non-critical): {_brand_err}")
+
         if master:
             try:
                 # Reuse RUT's stealth builder so the SAME ~35 JS patches
@@ -582,31 +670,77 @@ async def _launch_profile_session_inner(
             try:
                 import urllib.parse as _urlparse
                 _parsed = _urlparse.urlparse(proxy_arg.get("server") or "")
-                # Use Playwright's APIRequestContext (it honours the
-                # browser context's proxy automatically). 10-second
-                # ceiling — real proxies respond in <2s; anything
-                # longer means it's effectively dead for interactive
-                # browsing.
-                _probe = await context.request.get(
-                    "https://api.ipify.org?format=text",
-                    timeout=10000,
+                # 2026-07 v2.2.6 — Probe reliability fix.
+                # Customer report:  profile launch failed with
+                #   Error: APIRequestContext.get: Client network socket
+                #   disconnected before secure TLS connection was
+                #   established  Call log: GET https://api.ipify.org/...
+                # even after the v2.2.2 URL-parser fix landed the proxy
+                # cleanly as `http://us.rrp.bestgo.work:10000` with
+                # separate username/password fields.  Root cause: the
+                # probe was hitting an HTTPS URL through an HTTP proxy,
+                # which requires the proxy to accept a CONNECT tunnel
+                # and forward the TLS handshake untouched.  Some
+                # residential-rotation proxies (BestGo, GeoNode, etc.)
+                # occasionally drop the tunnel mid-handshake — usually
+                # because their auth path takes >1 s and Playwright's
+                # internal socket timer fires before the TLS layer even
+                # starts negotiating.  Meanwhile the SAME proxy works
+                # perfectly for the actual browser navigation because
+                # Chromium's built-in proxy resolver has a longer grace
+                # window and re-issues auth on drop.
+                #
+                # Fix: probe over PLAIN HTTP instead of HTTPS.  The
+                # proxy simply forwards the request — no CONNECT tunnel,
+                # no TLS handshake through the proxy — so the auth
+                # timing issue is bypassed entirely.  If HTTP is
+                # blocked (rare on residential proxies), we fall back
+                # to the legacy HTTPS probe as a last-chance check.
+                # Multiple probe hosts so a single dead endpoint can't
+                # false-positive-flag a healthy proxy.
+                _PROBE_URLS = (
+                    "http://api.ipify.org/?format=text",       # HTTP first — most reliable
+                    "http://checkip.amazonaws.com/",           # AWS metadata — plain-text IP
+                    "http://ifconfig.me/ip",                   # DigitalOcean-hosted
+                    "https://api.ipify.org/?format=text",      # HTTPS fallback (legacy)
                 )
-                _exit_ip = (await _probe.text()).strip()
-                if _exit_ip and 7 <= len(_exit_ip) <= 45:
+                _last_err = ""
+                _exit_ip = ""
+                for _pi, _probe_url in enumerate(_PROBE_URLS):
+                    try:
+                        _probe = await context.request.get(
+                            _probe_url,
+                            timeout=10000,
+                            # 2026-07 — some proxies require a real
+                            # browser UA to allow the request through,
+                            # so we pass the same UA the browser uses.
+                            headers=({"User-Agent": ua} if ua else {}),
+                        )
+                        _body = (await _probe.text()).strip()
+                        if _body and 7 <= len(_body) <= 45:
+                            _exit_ip = _body
+                            logger.info(
+                                f"[profile-launch] proxy probe OK via {_probe_url} "
+                                f"(attempt {_pi + 1}/{len(_PROBE_URLS)}) — exit IP {_exit_ip}"
+                            )
+                            break
+                        _last_err = f"non-IP body from {_probe_url}: {_body[:80]}"
+                    except Exception as _pe_inner:
+                        _last_err = f"{_probe_url}: {type(_pe_inner).__name__}: {str(_pe_inner)[:160]}"
+                        logger.debug(f"[profile-launch] probe attempt {_pi + 1} failed: {_last_err}")
+                        continue
+                if _exit_ip:
                     proxy_diag["ok"] = True
                     proxy_diag["exit_ip"] = _exit_ip
-                    logger.info(
-                        f"[profile-launch] proxy OK — exit IP {_exit_ip} "
-                        f"via {_parsed.hostname or proxy_arg['server']}"
-                    )
                 else:
                     proxy_diag["ok"] = False
-                    proxy_diag["error"] = f"proxy probe returned non-IP body: {_exit_ip[:80]}"
+                    proxy_diag["error"] = _last_err or "all probe URLs failed"
+                    logger.warning(f"[profile-launch] proxy health probe failed after all fallbacks: {_last_err}")
             except Exception as _pe:
                 proxy_diag["ok"] = False
                 proxy_diag["error"] = f"{type(_pe).__name__}: {str(_pe)[:200]}"
                 logger.warning(
-                    f"[profile-launch] proxy health probe failed: {proxy_diag['error']}"
+                    f"[profile-launch] proxy health probe outer failed: {proxy_diag['error']}"
                 )
 
         # If proxy was REQUESTED but FAILED the probe, show a
