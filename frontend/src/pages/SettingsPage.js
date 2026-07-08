@@ -16,6 +16,8 @@ import {
   Eye, EyeOff, Shield, CheckCircle, XCircle,
   Clock, Save, BarChart3, Link2, MousePointerClick, Server, Bell
 } from "lucide-react";
+import FraudDetectionTab from "./FraudDetectionTab";
+import ProxyProvidersTab from "./ProxyProvidersTab";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -405,6 +407,14 @@ export default function SettingsPage() {
           <TabsTrigger value="notifications" className="data-[state=active]:bg-[#27272A]" data-testid="tab-notifications">
             <Bell size={16} className="mr-2" />
             Notifications
+          </TabsTrigger>
+          <TabsTrigger value="fraud" className="data-[state=active]:bg-[#27272A]" data-testid="tab-fraud">
+            <Shield size={16} className="mr-2" />
+            Fraud Detection
+          </TabsTrigger>
+          <TabsTrigger value="proxy-providers" className="data-[state=active]:bg-[#27272A]" data-testid="tab-proxy-providers">
+            <Server size={16} className="mr-2" />
+            Proxy Providers
           </TabsTrigger>
         </TabsList>
 
@@ -1279,6 +1289,16 @@ export default function SettingsPage() {
               </Button>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        {/* Fraud Detection Tab */}
+        <TabsContent value="fraud" className="space-y-6">
+          <FraudDetectionTab />
+        </TabsContent>
+
+        {/* Proxy Providers Tab */}
+        <TabsContent value="proxy-providers" className="space-y-6">
+          <ProxyProvidersTab />
         </TabsContent>
       </Tabs>
     </div>

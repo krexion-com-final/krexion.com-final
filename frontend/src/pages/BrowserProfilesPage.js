@@ -1,5 +1,6 @@
 /* eslint-disable react-hooks/exhaustive-deps */
 import { useState, useEffect, useMemo } from "react";
+import ProxyProviderSelect from "../components/ProxyProviderSelect";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -90,6 +91,8 @@ const DEFAULT_NEW = {
     use_proxyjet: false,
     proxyjet_country: "US",
     proxyjet_state: "",
+    // v2.4.0 — Selected Proxy Provider (from Settings › Proxy Providers)
+    provider_id: "",
   },
   anti_detect: {
     master: true,
@@ -137,7 +140,7 @@ export default function BrowserProfilesPage() {
     region: "US",
   });
   const [advProxy, setAdvProxy] = useState({
-    mode: "none",        // none | manual | proxyjet
+    mode: "none",        // none | manual | proxyjet | provider
     country: "US",
     state: "",
     sticky_minutes: 0,   // 0 = rotating
@@ -149,6 +152,8 @@ export default function BrowserProfilesPage() {
     username: "",
     password: "",
     paste_input: "",     // one-line paste-and-parse buffer
+    // v2.4.0 — Selected Proxy Provider (from Settings › Proxy Providers)
+    provider_id: "",
   });
   const [advAntiDetect, setAdvAntiDetect] = useState(true);
   const [advCreating, setAdvCreating] = useState(false);
@@ -232,6 +237,12 @@ export default function BrowserProfilesPage() {
           region: advUA.region || (form.country || "US").toUpperCase(),
         },
         proxy: (() => {
+          if (advProxy.mode === "provider" && advProxy.provider_id) {
+            return {
+              mode: "provider",
+              provider_id: advProxy.provider_id,
+            };
+          }
           if (advProxy.mode === "proxyjet") {
             return {
               mode: "proxyjet",
@@ -721,6 +732,16 @@ export default function BrowserProfilesPage() {
                       <span className="text-cyan-300 text-sm font-semibold">🌍 Proxy</span>
                       <span className="text-[10px] text-zinc-500">Same engine as /proxies — every profile gets a unique exit-IP</span>
                     </div>
+                    {/* v2.4.0 — Provider dropdown at the very top of Proxy section */}
+                    <div className="pb-2 border-b border-cyan-500/20">
+                      <ProxyProviderSelect
+                        value={advProxy.provider_id}
+                        onChange={(v) => setAdvProxy({ ...advProxy, provider_id: v, mode: v ? "provider" : "none" })}
+                        label="Proxy provider (from Settings)"
+                        labelDefault="(pick a mode below instead)"
+                        testIdPrefix="bp-adv-proxy-provider"
+                      />
+                    </div>
                     <div className="grid grid-cols-3 gap-2">
                       <label className={`cursor-pointer p-2 rounded border text-center text-xs ${advProxy.mode === "none" ? "border-cyan-400 bg-cyan-500/15 text-cyan-200" : "border-zinc-700 text-zinc-400 hover:bg-zinc-900"}`}>
                         <input type="radio" name="proxy_mode" value="none" className="sr-only"
@@ -1000,6 +1021,14 @@ export default function BrowserProfilesPage() {
                     </label>
                     {form.proxy.enabled && (
                       <div className="space-y-2">
+                        {/* v2.4.0 — Multi-provider dropdown */}
+                        <ProxyProviderSelect
+                          value={form.proxy.provider_id}
+                          onChange={(v) => setForm({ ...form, proxy: { ...form.proxy, provider_id: v } })}
+                          label="Provider (optional)"
+                          labelDefault="(use manual proxy / ProxyJet fields below)"
+                          testIdPrefix="bp-proxy-provider"
+                        />
                         <label className="flex items-center gap-2 text-xs text-zinc-300">
                           <input type="checkbox" checked={form.proxy.use_proxyjet}
                             onChange={(e) => setForm({ ...form, proxy: { ...form.proxy, use_proxyjet: e.target.checked } })}

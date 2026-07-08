@@ -12,6 +12,7 @@ import { Plus, Play, Trash2, RefreshCw, Copy, Square, Clock, ChevronDown, Check,
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import { Checkbox } from "../components/ui/checkbox";
 import ProxyJetAutoCard from "../components/ProxyJetAutoCard";
+import MyProxyProvidersCard from "../components/MyProxyProvidersCard";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -704,6 +705,8 @@ export default function ProxiesPage() {
 
   return (
     <div className="space-y-6" data-testid="proxies-page">
+      {/* v2.4.0 — Customer's own proxy providers (Settings › Proxy Providers) */}
+      <MyProxyProvidersCard />
       {/* ProxyJet Auto Mode — one-time creds for auto-unique-IP RUT runs */}
       <ProxyJetAutoCard />
 

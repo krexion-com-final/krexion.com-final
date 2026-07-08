@@ -14,6 +14,7 @@ import { Badge } from "../components/ui/badge";
 import { Progress } from "../components/ui/progress";
 import { toast } from "sonner";
 import useVisibleInterval from "../hooks/useVisibleInterval";
+import ProxyProviderSelect from "../components/ProxyProviderSelect";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -48,6 +49,8 @@ export default function CPIJobsPage() {
     leadsText: "",
     upload_proxy_id: "",
     upload_ua_id: "",
+    // v2.4.0 — multi-provider proxy dropdown (optional)
+    proxy_provider_id: "",
     auto_consume: true,
     // ── 2026-02 v2.1.31 — Behavior Simulator ──
     behavior_sim_enabled: false,
@@ -120,6 +123,7 @@ export default function CPIJobsPage() {
         proxies, user_agents, leads,
         upload_proxy_id: proxyMode === "uploaded" ? form.upload_proxy_id : null,
         upload_ua_id: uaMode === "uploaded" ? form.upload_ua_id : null,
+        proxy_provider_id: form.proxy_provider_id || null,
         auto_consume: form.auto_consume,
         // 2026-02 v2.1.31 — Behavior Simulator
         behavior_sim_enabled: !!form.behavior_sim_enabled,
@@ -373,6 +377,14 @@ export default function CPIJobsPage() {
 
             <div className="space-y-2">
               <Label>Proxies *</Label>
+              <ProxyProviderSelect
+                value={form.proxy_provider_id}
+                onChange={(v) => setForm({ ...form, proxy_provider_id: v })}
+                label={null}
+                labelDefault="(use paste / uploaded below)"
+                testIdPrefix="cpi-proxy-provider"
+                className="mb-2"
+              />
               <Tabs value={proxyMode} onValueChange={setProxyMode}>
                 <TabsList className="grid w-full grid-cols-2">
                   <TabsTrigger value="paste">Paste</TabsTrigger>

@@ -1,4 +1,116 @@
 # Force redeploy trigger 1783300000
+# v2.4.0 — 2026-01 — Multi-Provider Proxy & Multi-Account Fraud (Customer-Managed)
+#
+# Every customer can now bring their OWN fraud-detection accounts
+# (Scamalytics, IPQualityScore, IPHub, ProxyCheck) — multi-account per
+# service with automatic round-robin on quota / rate-limit — and their
+# OWN proxy providers (4 kinds: rotating gateway, REST API endpoint,
+# manual list, native Krexion ProxyJet with country/state overrides).
+#
+# ══════════════════════════════════════════════════════════════════
+#  TIER 1 — Backend modules (opt-in, 100 % backward compat)
+# ══════════════════════════════════════════════════════════════════
+#
+#  1.1 backend/fraud_provider_module.py (483 lines, new)
+#      • Collections: user_fraud_settings, user_fraud_accounts
+#      • Endpoints:  /api/fraud/settings           GET/PUT
+#                    /api/fraud/accounts           GET/POST/PUT/DELETE
+#                    /api/fraud/accounts/{id}/test POST
+#                    /api/fraud/services           GET (static meta)
+#      • Rotation: sorted by priority, skip quota-exhausted / rate-
+#        limited accounts, exponential-decay on 429, daily quota
+#        auto-resets, last_used_at + quota_used tracked.
+#      • Fallback: if user disabled or all accounts fail →
+#        delegates to existing admin-level check_vpn_detailed().
+#
+#  1.2 backend/proxy_provider_module.py (386 lines, new)
+#      • Collection: user_proxy_providers
+#      • 4 kinds:
+#          - rotating_gateway (Bright Data / Oxylabs / Soax / IPRoyal Gw)
+#          - api_endpoint     (SmartProxy / Webshare / custom REST)
+#          - manual_list      (paste static proxies, one per line)
+#          - native_proxyjet  (Krexion built-in with country/state)
+#      • Endpoints:  /api/proxy-providers            GET/POST
+#                    /api/proxy-providers/{id}       GET/PUT/DELETE
+#                    /api/proxy-providers/{id}/test  POST
+#                    /api/proxy-providers/_meta/kinds GET
+#      • Resolver: get_proxy_from_provider(user_id, provider_id) →
+#        returns a live proxy string (or ProxyJet flag) at call time.
+#
+# ══════════════════════════════════════════════════════════════════
+#  TIER 2 — Wire-up (5 spots requested by ops team)
+# ══════════════════════════════════════════════════════════════════
+#
+#  2.1 check_vpn_detailed(ip, user_id=None) — signature extended.
+#      When user_id supplied AND user has personal fraud filter ON,
+#      delegates to the multi-account rotator. Empty user_id preserves
+#      100 % existing behavior. NO recursion (module's fallback path
+#      calls the function WITHOUT user_id).
+#
+#  2.2 Fraud check now user-aware at 4 call sites in server.py:
+#      • RUT worker (real-user-traffic runtime)
+#      • /api/vpn/check         (single-IP check endpoint)
+#      • /api/vpn/bulk-check    (parallel bulk)
+#      • /api/proxies/{id}/test (per-proxy VPN detection)
+#
+#  2.3 Proxy provider dropdown at 4 job-start endpoints:
+#      • /api/real-user-traffic/jobs — new Form field `proxy_provider_id`,
+#        resolves at job-start and either prepends the resolved line
+#        to `proxies` or activates ProxyJet auto with the provider's
+#        country/state.
+#      • cpi_module.py CPIJobCreate — new field `proxy_provider_id`,
+#        resolved line pushed to the front of the pool.
+#      • browser_profile_module.py ProxyConfig — new field `provider_id`
+#        (per-profile). Resolved at /{profile_id}/launch time so every
+#        launch pulls a fresh proxy from rotating providers.
+#      • browser_profile_module.py AdvProxyCfg — new mode "provider"
+#        for the advanced-create bulk flow, persists provider_id.
+#
+# ══════════════════════════════════════════════════════════════════
+#  TIER 3 — Frontend (Settings has the ONLY add/edit UI)
+# ══════════════════════════════════════════════════════════════════
+#
+#  3.1 Settings › Fraud Detection tab (new, FraudDetectionTab.js)
+#      Master toggle + per-service accordions with add/edit/delete/test.
+#      All existing 4 tabs (Profile / Sub-Users / Subscription /
+#      Notifications) preserved.
+#
+#  3.2 Settings › Proxy Providers tab (new, ProxyProvidersTab.js)
+#      Table of all providers, Add Provider dialog with dynamic
+#      per-kind form fields (metadata comes from /_meta/kinds).
+#
+#  3.3 ProxyProviderSelect.js (new, reusable component)
+#      Dropdown that lists ONLY user's enabled providers with a
+#      "(default — existing proxy flow)" first option so the caller
+#      falls through to legacy behavior on empty selection.
+#
+#  3.4 MyProxyProvidersCard.js (new)
+#      Sits on the top of /proxies page — mirrors ProxyJetAutoCard
+#      but shows a dropdown of user's saved providers plus a
+#      "Generate proxy" button that pulls a fresh proxy from the
+#      selected provider via /api/proxy-providers/{id}/test.
+#
+#  3.5 Dropdown injected on 4 pages (Settings is STILL the only
+#      place to add/edit providers — every other page just picks):
+#      • /real-user-traffic — above the existing ProxyJet block
+#      • /browser-profiles — Custom Profile dialog, top of Proxy
+#      • /cpi-jobs — above Paste / Uploaded tabs
+#      • /proxies — as the new My Proxy Providers card
+#
+# ══════════════════════════════════════════════════════════════════
+#  Backward compat guarantees
+# ══════════════════════════════════════════════════════════════════
+#   • Fraud filter master toggle OFF by default → existing admin-level
+#     Scamalytics + IPQualityScore + fallback chain unchanged.
+#   • Zero providers → every dropdown shows "(default — existing
+#     proxy flow)" and callers use their existing legacy path.
+#   • Any provider failure at runtime → silent fallback to legacy
+#     paste / upload / ProxyJet flow. Never blocks a job.
+#   • No changes to admin API-Keys settings, ProxyJet credentials,
+#     Sync client, Bridge, License, Releases, or any other module.
+#   • All existing 4 Settings tabs and all existing endpoints
+#     preserved. Only additive changes.
+#
 # v2.2.0 — 2026-07 — PERFECT MODE: Zero-Warning Traffic + Attribution Perfection
 #
 # MAJOR release. Fixes the long-standing "Leaving Facebook" / "External

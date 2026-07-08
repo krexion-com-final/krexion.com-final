@@ -225,6 +225,11 @@ class CPIJobIn(BaseModel):
     # Pull from Uploaded Things (Krexion's existing resource pool)
     upload_proxy_id: Optional[str] = None
     upload_ua_id: Optional[str] = None
+    # ── 2026-01 v2.4.0 — Optional multi-provider proxy dropdown ──────
+    # When set (from settings > Proxy Providers), the CPI job start
+    # resolver adds a resolved proxy line into the pool. Empty ⇒ 100 %
+    # legacy behavior.
+    proxy_provider_id: Optional[str] = None
     # Auto-consume used resources after job completes (mirrors RUT behavior)
     auto_consume: bool = True
     # ── 2026-02 v2.1.31 — Mobile CPI Behavior Simulator ──────────────
@@ -669,6 +674,24 @@ async def create_job(payload: CPIJobIn, request: Request):
         user_agents = items
         if items and payload.auto_consume:
             consume_upload_ids.append(payload.upload_ua_id)
+
+    # ── v2.4.0 wire-up (CPI): multi-provider proxy dropdown ──────────
+    # If the customer picked a proxy provider in the job UI, resolve
+    # one proxy line now and prepend it. Silent no-op when the provider
+    # is empty / disabled / errors — legacy paste + upload flow always
+    # wins as a fallback.
+    if getattr(payload, "proxy_provider_id", None):
+        try:
+            import importlib
+            _pp_mod = importlib.import_module("proxy_provider_module")
+            _pp_get = getattr(_pp_mod, "get_proxy_from_provider", None)
+            if _pp_get:
+                _pp_res = await _pp_get(user["id"], payload.proxy_provider_id)
+                _pp_line = _pp_res.get("proxy")
+                if _pp_line:
+                    proxies = [_pp_line, *proxies]
+        except Exception:
+            pass
 
     if not proxies:
         raise HTTPException(status_code=400, detail="At least one proxy is required (paste or pick from Uploaded Things)")

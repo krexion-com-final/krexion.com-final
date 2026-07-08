@@ -157,6 +157,10 @@ class ProxyConfig(BaseModel):
     use_proxyjet: bool = False
     proxyjet_country: str = "US"
     proxyjet_state: str = ""
+    # v2.4.0 — Multi-provider proxy dropdown. When set, the launch flow
+    # resolves this to a live proxy from the user's Proxy Providers.
+    # Empty ⇒ existing enabled/server/proxyjet fields apply.
+    provider_id: str = ""
 
 
 class AntiDetectConfig(BaseModel):
@@ -257,6 +261,9 @@ class AdvProxyCfg(BaseModel):
         "proxyjet" → call ProxyJet generator and assign each profile a
                      UNIQUE exit-IP from the result. Count = number of
                      profiles being created.
+        "provider" → resolve the proxy from a user-configured provider
+                     (see /api/proxy-providers). Falls through to legacy
+                     if the provider fails / is disabled.
     """
     mode: str = "none"
     # Manual proxy
@@ -270,6 +277,8 @@ class AdvProxyCfg(BaseModel):
     states: Optional[List[str]] = None
     # 0 / None = rotating (fresh per request); 1..120 = sticky N min
     sticky_minutes: Optional[int] = None
+    # v2.4.0 — Multi-provider proxy (see settings › Proxy Providers)
+    provider_id: Optional[str] = None
 
 
 class AdvancedCreateBody(BaseModel):
@@ -503,6 +512,32 @@ async def launch_profile(request: Request, profile_id: str,
         "status": "queued",
         "start_url": start_url or doc.get("start_url") or "https://www.google.com/",
     }
+    # v2.4.0 wire-up: resolve provider_id → live proxy just before launch
+    _proxy_cfg = doc.get("proxy") or {}
+    _provider_id = str(_proxy_cfg.get("provider_id") or "").strip()
+    if _provider_id:
+        try:
+            import importlib
+            _pp_mod = importlib.import_module("proxy_provider_module")
+            _pp_get = getattr(_pp_mod, "get_proxy_from_provider", None)
+            if _pp_get:
+                _pp_res = await _pp_get(uid, _provider_id)
+                if _pp_res.get("use_proxyjet"):
+                    _proxy_cfg["use_proxyjet"] = True
+                    if _pp_res.get("country"):
+                        _proxy_cfg["proxyjet_country"] = _pp_res["country"]
+                    if _pp_res.get("state"):
+                        _proxy_cfg["proxyjet_state"] = _pp_res["state"]
+                    _proxy_cfg["enabled"] = True
+                elif _pp_res.get("proxy"):
+                    _proxy_cfg["enabled"] = True
+                    _proxy_cfg["server"] = _pp_res["proxy"]
+                # Persist the resolved snapshot back onto the doc so the
+                # launcher (which reads .proxy) uses the just-picked value.
+                doc["proxy"] = _proxy_cfg
+        except Exception as _pp_err:
+            logger.warning(f"[browser-profile launch] provider resolve failed: {_pp_err}")
+
     await _DB.browser_profile_sessions.insert_one(session)
 
     await _DB.browser_profiles.update_one(
@@ -865,7 +900,16 @@ async def advanced_create(request: Request, body: AdvancedCreateBody):
 
         # Proxy attachment for this profile
         proxy_cfg = ProxyConfig()
-        if proxy_mode == "manual" and body.proxy.server:
+        if proxy_mode == "provider" and body.proxy.provider_id:
+            # v2.4.0 — Multi-provider proxy dropdown. Persist the
+            # provider_id so `/{profile_id}/launch` resolves a fresh
+            # proxy at launch time (per-launch rotation is desirable
+            # for rotating gateway / api endpoint kinds).
+            proxy_cfg = ProxyConfig(
+                enabled=True,
+                provider_id=body.proxy.provider_id,
+            )
+        elif proxy_mode == "manual" and body.proxy.server:
             proxy_cfg = ProxyConfig(
                 enabled=True,
                 server=body.proxy.server.strip(),

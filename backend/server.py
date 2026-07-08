@@ -3641,8 +3641,27 @@ async def check_vpn_with_api(ip: str, api_key: str, config: dict) -> dict:
     
     return None
 
-async def check_vpn_detailed(ip: str) -> dict:
-    """Detailed VPN check using multiple services with automatic fallback"""
+async def check_vpn_detailed(ip: str, user_id: Optional[str] = None) -> dict:
+    """Detailed VPN check using multiple services with automatic fallback.
+
+    v2.4.0 (multi-account fraud): when `user_id` is supplied AND that user
+    has enabled their personal fraud filter (see /api/fraud/settings), we
+    delegate to the multi-account rotator in `fraud_provider_module`. That
+    module itself falls back to THIS admin-level check if the user has no
+    accounts / all their accounts fail (unless the user explicitly disabled
+    fallback). So passing user_id is 100% safe and never regresses.
+    """
+    # Delegate to per-user rotator when user_id is known.  The module
+    # short-circuits to this function when the user hasn't enabled the
+    # personal filter, so recursion is impossible (we pass user_id=None
+    # by omitting the arg on the fallback path).
+    if user_id:
+        _fraud_check = globals().get("check_ip_for_user")
+        if _fraud_check is not None:
+            try:
+                return await _fraud_check(user_id, ip)
+            except Exception as _e:  # noqa: BLE001
+                logger.debug(f"fraud rotator failed, falling back to admin defaults: {_e}")
     if not ip or ip in ["127.0.0.1", "localhost", "unknown", "Unknown", ""] or ip.startswith("10.") or ip.startswith("172.") or ip.startswith("192.168."):
         return {"is_vpn": False, "vpn_score": 0, "risk": "low", "source": "local"}
     
@@ -8524,6 +8543,15 @@ async def rut_create_job(
     # like real in-app ad-click traffic. See
     # `run_real_user_traffic_job.inapp_browser_preset` for details.
     inapp_browser_preset: str = Form(""),
+    # ── 2026-01 v2.4.0 — Multi-Provider Proxy dropdown ──────────────
+    # OPTIONAL user-selected proxy provider (see /api/proxy-providers).
+    # When set, we resolve one proxy from the provider at job-start
+    # time and either PREPEND it to `proxies` (for gateway / api /
+    # manual_list kinds) or activate ProxyJet auto mode with the
+    # provider's country/state (for native_proxyjet kind).
+    # When empty → 100% legacy behavior (existing proxies / uploads /
+    # ProxyJet flow unchanged).
+    proxy_provider_id: str = Form(""),
     user: dict = Depends(get_current_user_with_fresh_data),
     _cloud_gate: bool = Depends(require_local_mode),
 ):
@@ -8540,6 +8568,33 @@ async def rut_create_job(
     user-readable error_message, surfaced via the existing job-status poll.
     """
     check_user_feature(user, "real_user_traffic")
+
+    # ── v2.4.0 wire-up SPOT 5 (RUT proxy source) ──────────────────
+    # If the customer selected a proxy provider from the dropdown,
+    # resolve it now and inject the result into the existing proxy
+    # variables. Legacy flows (proxies/upload_proxy_id/use_proxyjet
+    # _auto) run unchanged when proxy_provider_id == "".
+    if proxy_provider_id:
+        _pp_resolver = globals().get("get_proxy_from_provider")
+        if _pp_resolver is not None:
+            try:
+                _pp_res = await _pp_resolver(user["id"], proxy_provider_id)
+                if _pp_res.get("use_proxyjet"):
+                    use_proxyjet_auto = True
+                    if _pp_res.get("country"):
+                        proxyjet_country = _pp_res["country"]
+                    if _pp_res.get("state"):
+                        proxyjet_state = _pp_res["state"]
+                elif _pp_res.get("proxy"):
+                    _pp_line = _pp_res["proxy"]
+                    if proxies and proxies.strip():
+                        proxies = f"{_pp_line}\n{proxies.strip()}"
+                    else:
+                        proxies = _pp_line
+                elif _pp_res.get("error"):
+                    logger.warning(f"[rut] proxy provider {proxy_provider_id} failed: {_pp_res['error']} — falling back to legacy proxies")
+            except Exception as _pp_err:  # noqa: BLE001
+                logger.warning(f"[rut] proxy provider resolution failed: {_pp_err}")
 
     # 1. Link ownership + target URL (fast).
     #    v2.1.17: Cloud is the source of truth for links (per the
@@ -14144,7 +14199,9 @@ async def send_real_traffic(
                     # Step 5: VPN check
                     if payload.skip_vpn:
                         try:
-                            vpn = await check_vpn_detailed(exit_ip)
+                            # v2.4.0 wire-up SPOT 1 (RUT / real_user_traffic):
+                            # respect the customer's personal fraud accounts.
+                            vpn = await check_vpn_detailed(exit_ip, user_id=user["id"])
                             if vpn.get("is_vpn"):
                                 result["status"] = "blocked_vpn"
                                 result["reason"] = f"Detected as VPN/datacenter ({vpn.get('source')})"
@@ -15129,7 +15186,8 @@ async def check_ip_vpn(data: dict, user: dict = Depends(get_current_user_with_fr
         raise HTTPException(status_code=400, detail="IP address required")
     
     # Use the detailed VPN check with API tracking and fallback
-    result = await check_vpn_detailed(ip)
+    # v2.4.0 wire-up SPOT 2 (VPN /check endpoint): pass user_id.
+    result = await check_vpn_detailed(ip, user_id=user["id"])
     return {
         "ip": ip,
         "is_vpn": result.get("is_vpn", False),
@@ -15151,11 +15209,12 @@ async def bulk_check_vpn(data: dict, user: dict = Depends(get_current_user_with_
     ips_to_check = [ip.strip() for ip in ips[:100] if ip.strip()]
     
     # Run VPN checks in parallel (batches of 10) using check_vpn_detailed
+    # v2.4.0 wire-up SPOT 3 (bulk /vpn/bulk-check): pass user_id to every task.
     results = []
     batch_size = 10
     for i in range(0, len(ips_to_check), batch_size):
         batch = ips_to_check[i:i + batch_size]
-        tasks = [check_vpn_detailed(ip) for ip in batch]
+        tasks = [check_vpn_detailed(ip, user_id=user["id"]) for ip in batch]
         batch_results = await asyncio.gather(*tasks, return_exceptions=True)
         
         for ip, result in zip(batch, batch_results):
@@ -16855,7 +16914,8 @@ async def test_proxy(
     if not skip_vpn and detected_ip and status == "alive":
         logger.info(f"Checking VPN status for proxy IP: {detected_ip}")
         # Use check_vpn_detailed for API tracking and fallback
-        vpn_info = await check_vpn_detailed(detected_ip)
+        # v2.4.0 wire-up SPOT 4 (proxy-test /proxies/{id}/test): pass user_id.
+        vpn_info = await check_vpn_detailed(detected_ip, user_id=user["id"])
         is_vpn = vpn_info.get("is_vpn", False)
         vpn_score = vpn_info.get("vpn_score", 0)
         vpn_source = vpn_info.get("source", "none")
@@ -22923,6 +22983,39 @@ try:
     logger.info("RPA Studio module loaded - /api/rpa/* (visual workflow editor + executor)")
 except Exception as _rpa_err:  # noqa: BLE001
     logger.error(f"RPA Studio module failed to load: {_rpa_err}")
+
+
+# ─── Multi-account Fraud Detection module (2026-01) ───────────────────
+# Lets each customer add multiple api-key accounts per fraud service
+# (Scamalytics, IPQualityScore, IPHub, ProxyCheck). Auto-rotates on
+# quota limit / rate-limit. Backward-compatible: personal filter is
+# OFF by default → falls through to existing admin-level check_vpn_detailed.
+try:
+    from fraud_provider_module import init_router as _fraud_init, check_ip_for_user as _fraud_check_ip
+    _fraud_router = _fraud_init(main_db=main_db,
+                                existing_check_vpn_fn=check_vpn_detailed,
+                                get_current_user_dep=get_current_user)
+    app.include_router(_fraud_router, prefix="/api")
+    # Expose for wire-up spots to call
+    globals()["check_ip_for_user"] = _fraud_check_ip
+    logger.info("Fraud provider module loaded — /api/fraud/* (multi-account fraud services)")
+except Exception as _fp_err:  # noqa: BLE001
+    logger.error(f"Fraud provider module failed to load: {_fp_err}")
+
+
+# ─── Multi-provider Proxy module (2026-01) ────────────────────────────
+# Lets each customer add multiple proxy providers of 4 kinds:
+# rotating_gateway, api_endpoint, manual_list, native_proxyjet.
+# Wherever a proxy is used the frontend can pick a provider from a
+# dropdown. Backward-compatible: no providers = existing behavior.
+try:
+    from proxy_provider_module import init_router as _pp_init, get_proxy_from_provider as _pp_get_proxy
+    _pp_router = _pp_init(main_db=main_db, get_current_user_dep=get_current_user)
+    app.include_router(_pp_router, prefix="/api")
+    globals()["get_proxy_from_provider"] = _pp_get_proxy
+    logger.info("Proxy provider module loaded — /api/proxy-providers/* (multi-provider proxy sources)")
+except Exception as _pp_err:  # noqa: BLE001
+    logger.error(f"Proxy provider module failed to load: {_pp_err}")
 
 
 # ─── Anti-Detect Health Check endpoint (2026-06) ──────────────────────

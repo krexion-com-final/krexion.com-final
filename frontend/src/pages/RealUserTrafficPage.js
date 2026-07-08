@@ -12,6 +12,7 @@ import { Label } from "../components/ui/label";
 import { Badge } from "../components/ui/badge";
 import { Textarea } from "../components/ui/textarea";
 import { toast } from "sonner";
+import ProxyProviderSelect from "../components/ProxyProviderSelect";
 import {
   Fingerprint,
   Play,
@@ -400,8 +401,7 @@ export default function RealUserTrafficPage() {
   // the backend auto-generates a fresh batch of unique residential
   // proxies per job (using ProxyJet credentials saved on the Proxies
   // page). Every exit-IP is guaranteed unused for this user.
-  const [useProxyJetAuto, setUseProxyJetAuto] = useState(false);
-  // 2026-01: per-job stuck-watchdog inactivity threshold (seconds).
+  const [useProxyJetAuto, setUseProxyJetAuto] = useState(false);  // 2026-01: per-job stuck-watchdog inactivity threshold (seconds).
   // Pages where the URL doesn't change for longer than this are
   // force-aborted. Default raised from old hardcoded 25 → 60 → 240
   // (2026-05) → 600 (2026-06-27, user request — survey-heavy multi-
@@ -411,6 +411,9 @@ export default function RealUserTrafficPage() {
   const [stuckWatchdogSeconds, setStuckWatchdogSeconds] = useState(600);
   const [proxyJetCountry, setProxyJetCountry] = useState("US");
   const [proxyJetState, setProxyJetState] = useState("");
+  // v2.4.0 — Selected Proxy Provider (from Settings › Proxy Providers).
+  // Empty ⇒ existing legacy flow (paste / upload / ProxyJet).
+  const [proxyProviderId, setProxyProviderId] = useState("");
   // ── 2026-06-11: ProxyJet Multi-Geo MIX ──────────────────────────
   // When `pjGeoMode === "many"`, the engine picks a random
   // country/state per visit from these pools. Single mode preserves
@@ -1710,6 +1713,8 @@ export default function RealUserTrafficPage() {
       fd.append("use_proxyjet_auto", String(useProxyJetAuto));
       fd.append("proxyjet_country", (proxyJetCountry || "US").toUpperCase());
       fd.append("proxyjet_state", (proxyJetState || "").toUpperCase());
+      // v2.4.0 — Multi-provider proxy dropdown. Empty ⇒ legacy behavior.
+      fd.append("proxy_provider_id", proxyProviderId || "");
       // ── 2026-06-11: Multi-Geo MIX pools (CSV). Backend picks random
       // country/state per visit when 2+ entries. Single mode → empty
       // strings here → backend falls back to scalar fields above.
@@ -2143,6 +2148,21 @@ export default function RealUserTrafficPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
+          {/* v2.4.0 — Multi-provider proxy dropdown */}
+          <div className="rounded-md border border-blue-500/30 bg-blue-950/20 p-3" data-testid="rut-proxy-provider-block">
+            <ProxyProviderSelect
+              value={proxyProviderId}
+              onChange={setProxyProviderId}
+              label="Proxy source (pick from your Settings › Proxy Providers)"
+              testIdPrefix="rut-proxy-provider"
+            />
+            {proxyProviderId && (
+              <p className="text-[10px] text-blue-300 mt-1">
+                ✓ This job will use your selected provider. Paste / upload / ProxyJet fields below are optional and will merge with the provider's output.
+              </p>
+            )}
+          </div>
+
           {/* ── ProxyJet Auto Mode toggle (one-time creds → unique IP per visit) ── */}
           <div
             className={`rounded-md border p-3 transition-colors ${
