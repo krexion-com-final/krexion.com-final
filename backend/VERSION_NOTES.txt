@@ -1139,3 +1139,39 @@
 #   deleted or import fails, the try/except at each call site swallows
 #   the exception and the browser launches with the v2.2.x stack
 #   exactly as before.
+
+# v2.3.1 — 2026-07 — Proxies page multi-provider UI + IP extractor scheme fix
+#   Customer report: on the main Proxies page in the Krexion desktop
+#   app, only the "ProxyJet Auto Mode" card was visible + a bare
+#   "Upload Proxies" dialog with just HTTP/SOCKS5 options.  The
+#   multi-provider paste-and-parse UI added in v2.2.4 was ONLY inside
+#   the Browser Profile creation modal — not on the main /proxies
+#   page.  Customer wanted the same multi-provider experience on both
+#   surfaces so that they (and their customers) can add proxies from
+#   ANY provider (BrightData, SmartProxy, Oxylabs, IPRoyal, etc.)
+#   directly from the Proxies page.
+#
+#   Fix 1 — frontend/src/pages/ProxiesPage.js (Upload dialog rewrite):
+#     * Dialog title  "Upload Proxy List" -> "Add Proxies — Any Provider"
+#     * DialogDescription now lists 11 supported providers.
+#     * Added inline code block showing all 5 accepted proxy string
+#       formats with per-line comments (canonical URL, BestGo/GeoNode,
+#       bare-no-scheme, Krexion shorthand, no-auth).
+#     * Default Protocol dropdown expanded 2 -> 5 options:
+#         HTTP, HTTPS, SOCKS5, SOCKS5H (remote DNS), SOCKS4.
+#     * Textarea placeholder rewritten with real multi-format examples
+#       including a live BestGo pattern.
+#     * Tip note: "Use ProxyJet Auto Mode card above for residential
+#       rotating with unique IP per visit; this page for general pool."
+#     * Submit button: "Add Proxies to Pool" with a Plus icon.
+#
+#   Fix 2 — backend/server.py (extract_ip_from_proxy):
+#     Same v2.2.2 bug pattern spotted while checking the upload path:
+#     for `http://host:port:user:pass` the extractor returned the
+#     literal string "http" as the IP because it didn't strip the
+#     "://" scheme before splitting on ":".  Broke duplicate-IP
+#     detection on /proxies/upload for BestGo/GeoNode format lines.
+#     Fix: strip "://" first, then apply the same @/: splits.
+#   Testing: 8/8 unit tests pass — all 5 formats + SOCKS5 URL + None +
+#     empty input.  Regression check confirms v2.2.2 fixes still intact
+#     in browser_profile_module.py and browser_profile_launcher.py.

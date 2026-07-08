@@ -16076,19 +16076,32 @@ async def get_dashboard_stats(user: dict = Depends(get_current_user)):
     )
 
 def extract_ip_from_proxy(proxy_string: str) -> str:
-    """Extract IP address from proxy string"""
-    proxy_string = proxy_string.strip()
-    
+    """Extract IP address from proxy string. Handles all 5 accepted
+    input shapes (see v2.2.2 / v2.2.6 parser doc-strings):
+        http://user:pass@host:port
+        http://host:port:user:pass       (BestGo / GeoNode)
+        user:pass@host:port
+        host:port:user:pass              (Krexion shorthand)
+        host:port
+    """
+    proxy_string = (proxy_string or "").strip()
+    # 2026-07 v2.3.1 fix — strip scheme first so "http://" doesn't
+    # get parsed as the hostname.  Previous version returned literal
+    # "http" for BestGo-format lines, breaking duplicate-IP detection
+    # on the /proxies/upload endpoint.
+    if "://" in proxy_string:
+        proxy_string = proxy_string.split("://", 1)[1]
+
     if "@" in proxy_string:
         parts = proxy_string.split("@")
         host_port = parts[-1]
     else:
         host_port = proxy_string
-    
+
     if ":" in host_port:
         ip = host_port.split(":")[0]
         return ip.strip()
-    
+
     return host_port.strip()
 
 @api_router.post("/proxies/upload", response_model=List[ProxyResponse])

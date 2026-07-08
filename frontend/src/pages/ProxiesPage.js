@@ -985,16 +985,24 @@ export default function ProxiesPage() {
                 Upload Proxies
               </Button>
             </DialogTrigger>
-            <DialogContent className="bg-[var(--brand-card)] border-[var(--brand-border)]">
+            <DialogContent className="bg-[var(--brand-card)] border-[var(--brand-border)] max-w-2xl">
               <DialogHeader>
-                <DialogTitle>Upload Proxy List</DialogTitle>
-                <DialogDescription>
-                  Enter proxies one per line. Formats: IP:PORT or IP:PORT:USER:PASS
+                <DialogTitle>Add Proxies — Any Provider</DialogTitle>
+                <DialogDescription className="space-y-1">
+                  <span className="block">Works with <span className="text-cyan-300">any proxy provider</span> — ProxyJet, BrightData, SmartProxy, Oxylabs, IPRoyal, Nimble, Rayobyte, GeoNode, BestGo, DataImpulse, ProxyEmpire, etc.</span>
+                  <span className="block text-[11px] text-zinc-500">Paste one proxy per line. Any of these 5 formats auto-detected:</span>
                 </DialogDescription>
               </DialogHeader>
               <form onSubmit={handleUpload} className="space-y-4">
+                <div className="p-2.5 rounded-md bg-zinc-950 border border-zinc-800 text-[11px] font-mono text-zinc-400 space-y-0.5">
+                  <div><span className="text-cyan-300">1.</span> http://user:pass@host:port   <span className="text-zinc-600"># canonical URL</span></div>
+                  <div><span className="text-cyan-300">2.</span> http://host:port:user:pass   <span className="text-zinc-600"># BestGo / GeoNode</span></div>
+                  <div><span className="text-cyan-300">3.</span> user:pass@host:port          <span className="text-zinc-600"># bare, no scheme</span></div>
+                  <div><span className="text-cyan-300">4.</span> host:port:user:pass          <span className="text-zinc-600"># Krexion shorthand</span></div>
+                  <div><span className="text-cyan-300">5.</span> host:port                    <span className="text-zinc-600"># no auth</span></div>
+                </div>
                 <div className="space-y-2">
-                  <Label htmlFor="proxy_type">Proxy Type</Label>
+                  <Label htmlFor="proxy_type">Default Protocol <span className="text-zinc-500 text-[11px]">(used when line has no scheme)</span></Label>
                   <select
                     id="proxy_type"
                     data-testid="proxy-type-select"
@@ -1003,23 +1011,30 @@ export default function ProxiesPage() {
                     className="flex h-9 w-full rounded-md border border-[var(--brand-border)] bg-[var(--brand-card)] px-3 py-1 text-sm text-white"
                   >
                     <option value="http">HTTP</option>
+                    <option value="https">HTTPS</option>
                     <option value="socks5">SOCKS5</option>
+                    <option value="socks5h">SOCKS5H (remote DNS)</option>
+                    <option value="socks4">SOCKS4</option>
                   </select>
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="proxy_list">Proxy List</Label>
+                  <Label htmlFor="proxy_list">Proxy List <span className="text-zinc-500 text-[11px]">(one per line, any format above)</span></Label>
                   <Textarea
                     id="proxy_list"
                     data-testid="proxy-list-textarea"
-                    placeholder="127.0.0.1:8080\n192.168.1.1:3128:user:pass"
+                    placeholder={"http://user1:pass1@gate.smartproxy.com:7000\nhttp://us.rrp.bestgo.work:10000:USER123:pass456\n192.168.1.1:3128:admin:secret\n45.67.89.10:8080"}
                     value={proxyText}
                     onChange={(e) => setProxyText(e.target.value)}
                     className="bg-[var(--brand-card)] border-[var(--brand-border)] font-mono text-xs min-h-[200px]"
                     required
                   />
                 </div>
+                <div className="text-[10px] text-zinc-500">
+                  💡 <span className="text-zinc-400">Tip:</span> Ye page general-purpose proxy pool ke liye hai. Agar aap ProxyJet residential rotating chahte hain (unique IP per visit), upar wale <span className="text-cyan-300">ProxyJet Auto Mode</span> card use karein.
+                </div>
                 <Button type="submit" data-testid="submit-proxies-button" className="w-full">
-                  Upload Proxies
+                  <Plus size={16} className="mr-2" />
+                  Add Proxies to Pool
                 </Button>
               </form>
             </DialogContent>
