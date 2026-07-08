@@ -107,3 +107,88 @@ Customer clicks update → new installer downloaded + run silently.
 - KrexionBackend Windows service: crash-loop on boot → clean start
 - Fresh native installs: works on first boot (no manual sc restart needed)
 - Existing crashed v2.1.81 installs: self-heal on next update (no re-install)
+
+## Session 2026-01-08 — Provider-agnostic Auto Mode + on-demand batch generator (candidate v2.5.0)
+
+### What was requested (verbatim, from user)
+- RUT job page "ProxyJet Auto Mode" toggle was ProxyJet-specific — user wants it
+  to work with WHATEVER provider they picked in the "Proxy source" dropdown above.
+  Basically: kill the ProxyJet-only dependency, make Auto Mode generic across
+  every provider kind (rotating gateway, API endpoint, manual list, ProxyJet).
+- Proxies page: "on-demand generate" only worked when ProxyJet credentials
+  were connected. Generalize so whatever provider the customer selected in
+  the dropdown becomes the source — no ProxyJet-specific setup required.
+- Add proxy format choice on generation:
+  **HTTP / HTTPS / SOCKS5 / SOCKS5H / SOCKS4**.
+- CRITICAL: Nothing else should break. Preserve 100 % backward compat.
+  No deploy until user says so.
+
+### What was implemented
+**Backend — `backend/proxy_provider_module.py` (purely additive)**
+- New endpoint `POST /api/proxy-providers/{provider_id}/generate-batch`
+  - Body: `{ count, country?, state?, sticky_minutes?, proxy_type? }`
+  - `native_proxyjet` → delegates to existing `_pj.generate_unique_proxies`
+    (per-user unique session dedup preserved)
+  - `rotating_gateway` → generates N lines; supports `{sid}` session-token
+    template in the username field for per-line session rotation
+  - `manual_list` → shuffled sample; cycles pool when count > list size
+  - `api_endpoint` → calls provider API N times with retry cap
+  - `proxy_type` override rewrites the scheme prefix on every returned line
+- **Zero changes to any existing endpoint, function, or model.**
+
+**Frontend — `frontend/src/components/MyProxyProvidersCard.js` (rewrite)**
+- Full provider-agnostic on-demand batch generator UI
+- Provider dropdown + Count + Format (5) + Country/State (ProxyJet only)
+  + Session type (rotating / sticky) + sticky-minutes
+- Output textarea with Copy + Download .txt
+
+**Frontend — `frontend/src/pages/RealUserTrafficPage.js` (targeted edits)**
+- Toggle renamed: "🚀 ProxyJet Auto Mode" → "🚀 Auto Mode"
+- Smart status badge: green "✓ using selected provider" when a non-ProxyJet
+  provider is picked; amber guidance when neither provider nor ProxyJet
+  creds are set; green "✓ ProxyJet ready" for legacy users
+- New lazy `useEffect` fetches selected provider's `kind` (used by Auto Mode)
+- On job submit, if Auto Mode ON + non-native_proxyjet provider selected:
+    1. Client POST /api/proxy-providers/{id}/generate-batch (count=totalClicks)
+    2. Response `proxies[]` injected into `effectiveProxies`
+    3. Sends `use_proxyjet_auto=false` → backend uses the paste path
+  ProxyJet fallback path (empty provider OR native_proxyjet kind) is
+  100 % unchanged.
+
+### Backward compatibility
+- Legacy ProxyJet-only users: no behavior change
+- Existing paste / upload / stored proxies flows: untouched
+- Backend RUT engine, real_user_traffic.py, proxyjet_module.py: **not modified**
+- Native app / Electron / installer / Windows scripts: **not touched** (they
+  consume the same backend + frontend so they inherit the improvement)
+- Only 3 files changed:
+  - backend/proxy_provider_module.py (+180 additive)
+  - frontend/src/components/MyProxyProvidersCard.js (rewrite)
+  - frontend/src/pages/RealUserTrafficPage.js (6 targeted edits)
+
+### Verification
+- Backend curl:
+    - manual_list provider: batch of 5 SOCKS5 + batch of 3 HTTP → correct
+    - rotating_gateway with `{sid}` template: 5 lines with unique session IDs
+      + SOCKS5H scheme prefix → correct
+- Frontend E2E screenshots:
+    - Proxies page: MyProxyProvidersCard renders, generator produces 10
+      SOCKS5 proxies from Test List provider, toast "Generated 10 proxies
+      from Test List"
+    - RUT page: Auto Mode label renamed, amber guidance badge shows when
+      no provider selected, green "✓ using selected provider" badge shows
+      after picking "Test List · manual list", proxies textarea disables
+- Lint: no new errors, no new warnings
+
+### NOT yet done (waiting on user's "deploy karo")
+- Save to Github → push `main` → VPS auto-deploy
+- No releases_module publish needed (no customer-side files changed —
+  native app + Electron use the same frontend so they'll get it on next
+  release cycle anyway)
+
+### Backlog for future sessions
+- Audit other pages that hard-code ProxyJet (Browser Profiles config,
+  CPI job creation, Anti-detect) and apply the same generic-provider pattern
+- Add "Test single proxy" quick action button to MyProxyProvidersCard
+- Add provider fallback chain (try A, fallback to B on failure)
+- Add per-provider rate-limit warnings when count is very large

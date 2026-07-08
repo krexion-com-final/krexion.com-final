@@ -149,7 +149,7 @@ def _format_gateway_line(cfg: Dict[str, Any], proxy_type: str) -> Optional[str]:
 def _pick_from_manual_list(cfg: Dict[str, Any]) -> Optional[str]:
     lines_raw = cfg.get("lines") or ""
     if isinstance(lines_raw, list):
-        lines = [str(l).strip() for l in lines_raw if str(l).strip()]
+        lines = [str(x).strip() for x in lines_raw if str(x).strip()]
     else:
         lines = [ln.strip() for ln in str(lines_raw).splitlines() if ln.strip()]
     if not lines:
@@ -332,6 +332,184 @@ def init_router(main_db, get_current_user_dep) -> APIRouter:
         if result.get("proxy") or result.get("use_proxyjet"):
             return {"ok": True, "sample": result}
         return {"ok": False, "error": result.get("error") or "unknown"}
+
+    # ── 2026-01 v2.5.0 — Provider-agnostic on-demand batch generator ─
+    # Wraps ProxyJet's per-user unique batch generation for ANY selected
+    # provider kind. Frontend "Auto Mode" toggle + Proxies page batch
+    # generator both hit this single endpoint so customers no longer
+    # need ProxyJet credentials specifically — whichever provider they
+    # picked in Settings › Proxy Providers becomes the batch source.
+    #
+    # Behavior per kind:
+    #   • native_proxyjet     → uses ProxyJet's existing generate_unique_proxies()
+    #   • rotating_gateway    → generates N gateway lines. When cfg has
+    #                           `session_param` (username token e.g.
+    #                           "-session-{sid}"), each line rotates the
+    #                           token so the gateway rotates IPs per
+    #                           session. Otherwise returns N identical
+    #                           gateway lines (still correct — the
+    #                           gateway rotates IPs on every connect).
+    #   • api_endpoint        → calls the API N times (with small retry
+    #                           per failure).
+    #   • manual_list         → random samples from user's list. If the
+    #                           user asks for more than the list size,
+    #                           picks with replacement (shuffled).
+    #
+    # Request body (all optional except count):
+    #   {
+    #     "count": 10,
+    #     "country": "US",          // hint for providers that support geo
+    #     "state":   "CA",          // ProxyJet & any provider that supports geo
+    #     "sticky_minutes": null,   // ProxyJet only
+    #     "proxy_type": "socks5"    // override scheme prefix on the output
+    #                               //   accepted: http/https/socks5/socks5h/socks4
+    #   }
+    @router.post("/{provider_id}/generate-batch")
+    async def provider_generate_batch(
+        provider_id: str,
+        body: Dict[str, Any] = Body(default_factory=dict),
+        user=Depends(_get_current_user_dep),
+    ):
+        try:
+            count = int(body.get("count") or 10)
+        except Exception:
+            count = 10
+        count = max(1, min(count, 5000))
+        country = str(body.get("country") or "").strip().upper() or None
+        state = str(body.get("state") or "").strip().upper() or None
+        sticky_minutes = body.get("sticky_minutes")
+        try:
+            sticky_minutes = int(sticky_minutes) if sticky_minutes else None
+        except Exception:
+            sticky_minutes = None
+        proxy_type_override = str(body.get("proxy_type") or "").strip().lower() or None
+        if proxy_type_override and proxy_type_override not in SUPPORTED_TYPES:
+            proxy_type_override = None
+
+        provider = await _get(user["id"], provider_id)
+        if not provider:
+            raise HTTPException(404, "Provider not found")
+        if not provider.get("enabled"):
+            raise HTTPException(400, "Provider is disabled")
+
+        kind = provider.get("kind")
+        cfg = provider.get("config") or {}
+        proxy_type = proxy_type_override or provider.get("proxy_type") or "http"
+
+        def _apply_scheme(line: str) -> str:
+            """Ensure the returned proxy string has the requested scheme
+            prefix. Strips any existing scheme first so the caller-
+            chosen format wins."""
+            if not line:
+                return line
+            m = re.match(r"^([a-zA-Z][a-zA-Z0-9+\-.]*)://(.*)$", line)
+            body_part = m.group(2) if m else line
+            return f"{proxy_type}://{body_part}"
+
+        out: List[str] = []
+
+        if kind == "native_proxyjet":
+            # Delegate to the existing ProxyJet generator (with per-user
+            # session dedup). Merge provider's saved country/state as
+            # defaults when the request didn't specify them.
+            try:
+                import proxyjet_module as _pj  # local import to avoid cycles
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(500, f"ProxyJet module unavailable: {e}")
+            try:
+                out = await _pj.generate_unique_proxies(
+                    _db,
+                    user["id"],
+                    count=count,
+                    country=country or (cfg.get("country") or "US").upper(),
+                    state=state or ((cfg.get("state") or "").upper() or None),
+                    sticky_minutes=sticky_minutes,
+                )
+            except RuntimeError as e:
+                raise HTTPException(400, str(e))
+            # Apply proxy_type override on top of ProxyJet's user:pass@host:port
+            # string (ProxyJet returns bare user:pass@host:port with no scheme,
+            # so _apply_scheme just prepends).
+            if proxy_type_override:
+                out = [_apply_scheme(ln) for ln in out]
+
+        elif kind == "rotating_gateway":
+            # Build gateway lines. Support optional `session_param`
+            # template so power users can force per-line rotation by
+            # tokenising their username (e.g.
+            #   "brd-customer-XXX-zone-Y-session-{sid}"
+            # becomes 10 unique session-suffixed usernames when count=10).
+            host = str(cfg.get("gateway_host") or "").strip()
+            port = str(cfg.get("gateway_port") or "").strip()
+            username_tpl = str(cfg.get("username") or "").strip()
+            pwd = str(cfg.get("password") or "").strip()
+            if not host or not port:
+                raise HTTPException(400, "gateway_host / gateway_port not configured")
+            for _ in range(count):
+                if "{sid}" in username_tpl:
+                    sid = str(random.randint(10**7, 10**9 - 1))
+                    user_final = username_tpl.replace("{sid}", sid)
+                else:
+                    user_final = username_tpl
+                if user_final and pwd:
+                    line = f"{proxy_type}://{user_final}:{pwd}@{host}:{port}"
+                else:
+                    line = f"{proxy_type}://{host}:{port}"
+                out.append(line)
+            await _bump_use(user["id"], provider["id"])
+
+        elif kind == "manual_list":
+            lines_raw = cfg.get("lines") or ""
+            if isinstance(lines_raw, list):
+                lines = [str(x).strip() for x in lines_raw if str(x).strip()]
+            else:
+                lines = [ln.strip() for ln in str(lines_raw).splitlines() if ln.strip()]
+            if not lines:
+                raise HTTPException(400, "manual_list is empty")
+            random.shuffle(lines)
+            if count <= len(lines):
+                out = lines[:count]
+            else:
+                # more requested than available → cycle with reshuffle
+                out = []
+                pool = lines[:]
+                while len(out) < count:
+                    if not pool:
+                        pool = lines[:]
+                        random.shuffle(pool)
+                    out.append(pool.pop())
+            # apply scheme override
+            out = [_apply_scheme(ln) for ln in out]
+            await _bump_use(user["id"], provider["id"])
+
+        elif kind == "api_endpoint":
+            # Call the provider API `count` times. Best-effort — skip
+            # failures so a slow API doesn't abort the whole batch.
+            fetched = 0
+            attempts = 0
+            max_attempts = count * 2  # simple safety cap
+            while fetched < count and attempts < max_attempts:
+                attempts += 1
+                proxy = await _pick_from_api(cfg, proxy_type)
+                if proxy:
+                    out.append(_apply_scheme(proxy))
+                    fetched += 1
+            if not out:
+                raise HTTPException(400, "api_endpoint returned no proxies")
+            await _bump_use(user["id"], provider["id"])
+
+        else:
+            raise HTTPException(400, f"unknown provider kind: {kind}")
+
+        return {
+            "ok": True,
+            "count": len(out),
+            "proxies": out,
+            "provider_id": provider["id"],
+            "provider_name": provider["name"],
+            "kind": kind,
+            "proxy_type": proxy_type,
+        }
 
     @router.get("/_meta/kinds")
     async def kinds_meta():

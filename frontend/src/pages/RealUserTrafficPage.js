@@ -414,6 +414,12 @@ export default function RealUserTrafficPage() {
   // v2.4.0 — Selected Proxy Provider (from Settings › Proxy Providers).
   // Empty ⇒ existing legacy flow (paste / upload / ProxyJet).
   const [proxyProviderId, setProxyProviderId] = useState("");
+  // v2.5.0 — Kind of the currently-selected provider, fetched lazily
+  // when proxyProviderId changes. Used by Auto Mode to decide whether
+  // to route through the generic /generate-batch endpoint (any non-
+  // ProxyJet kind) or through the legacy ProxyJet auto flow
+  // (native_proxyjet or when no provider is selected).
+  const [proxyProviderKind, setProxyProviderKind] = useState("");
   // ── 2026-06-11: ProxyJet Multi-Geo MIX ──────────────────────────
   // When `pjGeoMode === "many"`, the engine picks a random
   // country/state per visit from these pools. Single mode preserves
@@ -1329,6 +1335,32 @@ export default function RealUserTrafficPage() {
     };
   }, []);
 
+  // v2.5.0 — Whenever the customer changes their selected proxy
+  // provider, fetch just the kind field so Auto Mode can decide
+  // whether to route through the generic batch generator (any non-
+  // ProxyJet kind) or through the legacy ProxyJet auto flow.
+  useEffect(() => {
+    if (!proxyProviderId) {
+      setProxyProviderKind("");
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`${API_URL}/api/proxy-providers/${proxyProviderId}`, {
+          headers: authH(),
+        });
+        if (!r.ok) return;
+        const j = await r.json();
+        if (!cancelled) setProxyProviderKind(j?.kind || "");
+      } catch {
+        /* silent — Auto Mode will fall back to ProxyJet path */
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [proxyProviderId]);
+
   const fetchEngineStatus = async () => {
     try {
       const r = await fetch(`${API_URL}/api/real-user-traffic/engine-status`, {
@@ -1527,12 +1559,20 @@ export default function RealUserTrafficPage() {
     // then click "Start Full Job" to launch the real run.
     const isSmokeTest = !!opts.smokeTest;
     if (!linkId) return toast.error("Select a tracker link");
-    // Validation: either paste OR uploaded batch OR ProxyJet Auto must be present
+    // v2.5.0 — Auto Mode with a non-ProxyJet provider skips the
+    // ProxyJet credentials check because the batch is generated from
+    // the user's selected provider via /api/proxy-providers/.../generate-batch
+    // in the pre-flight step below. Only when Auto Mode is ON without
+    // a provider (or with native_proxyjet kind) do we require the
+    // legacy ProxyJet creds.
+    const autoModeViaProvider =
+      useProxyJetAuto && !!proxyProviderId && proxyProviderKind && proxyProviderKind !== "native_proxyjet";
+    // Validation: either paste OR uploaded batch OR Auto Mode must be present
     if (!useProxyJetAuto && !useStoredProxies && !selectedUploadProxyId && selectedUploadProxyIds.length === 0 && !proxies.trim()) {
-      return toast.error("Paste proxies, select an uploaded proxy batch, enable 'Use my stored proxies', or turn on ProxyJet Auto Mode");
+      return toast.error("Paste proxies, select an uploaded proxy batch, enable 'Use my stored proxies', or turn on Auto Mode");
     }
-    if (useProxyJetAuto && !pjConfigured) {
-      return toast.error("ProxyJet credentials not saved yet. Go to Proxies → ProxyJet Auto and save them first.");
+    if (useProxyJetAuto && !autoModeViaProvider && !pjConfigured) {
+      return toast.error("Auto Mode needs either (a) a Proxy Provider selected above, or (b) ProxyJet credentials saved on the Proxies page.");
     }
     if (!selectedUploadUaId && selectedUploadUaIds.length === 0 && !userAgents.trim()) {
       return toast.error("Paste at least one User Agent or select one-or-more uploaded UA batch(es)");
@@ -1594,7 +1634,50 @@ export default function RealUserTrafficPage() {
       // so total wait collapses to max-of-N (~1-2 s on a typical link).
       // ────────────────────────────────────────────────────────────────
       const wantExcel = formFillEnabled && dataSource === "excel" && file && !selectedUploadDataId;
-      const wantProxies = !useProxyJetAuto && !useStoredProxies && !selectedUploadProxyId && selectedUploadProxyIds.length === 0 && proxies && proxies.trim();
+      // v2.5.0 — Auto Mode via a non-ProxyJet provider pre-generates
+      // the proxy batch here (client-side) and injects it into the
+      // regular paste flow. This means the backend receives a normal
+      // proxies payload and NOT `use_proxyjet_auto=true`, so no
+      // ProxyJet credentials are required. The ProxyJet path (empty
+      // provider OR native_proxyjet kind) is completely untouched.
+      let effectiveProxies = proxies;
+      let effectiveUseProxyJetAuto = useProxyJetAuto;
+      if (autoModeViaProvider) {
+        try {
+          const desired = Math.max(1, parseInt(totalClicks, 10) || 10);
+          const genRes = await fetch(
+            `${API_URL}/api/proxy-providers/${proxyProviderId}/generate-batch`,
+            {
+              method: "POST",
+              headers: { ...authH(), "Content-Type": "application/json" },
+              body: JSON.stringify({
+                count: desired,
+                // For non-ProxyJet providers geo hints are ignored server-side,
+                // but sending them is harmless and lets rotating_gateway
+                // providers that use `-country-{XX}` username templates
+                // (future) pick them up.
+                country: (proxyJetCountry || "").toUpperCase() || null,
+                state: (proxyJetState || "").toUpperCase() || null,
+                // proxy_type: keep the provider's saved default (backend picks it)
+              }),
+            }
+          );
+          if (!genRes.ok) {
+            const t = await genRes.text().catch(() => "");
+            throw new Error(`HTTP ${genRes.status}: ${t.slice(0, 180)}`);
+          }
+          const gj = await genRes.json();
+          const list = gj?.proxies || [];
+          if (!list.length) throw new Error("provider returned zero proxies");
+          effectiveProxies = list.join("\n");
+          effectiveUseProxyJetAuto = false;
+          toast.success(`Auto Mode: fetched ${list.length} proxies from ${gj?.provider_name || "provider"}`);
+        } catch (e) {
+          setSubmitting(false);
+          return toast.error(`Auto Mode failed: ${e.message || e}. Try disabling Auto Mode and pasting proxies manually.`);
+        }
+      }
+      const wantProxies = !effectiveUseProxyJetAuto && !useStoredProxies && !selectedUploadProxyId && selectedUploadProxyIds.length === 0 && effectiveProxies && effectiveProxies.trim();
       const wantUas = !selectedUploadUaId && selectedUploadUaIds.length === 0 && userAgents && userAgents.trim();
       const wantAj = formFillEnabled && useCustomJson && !selectedUploadAjId && automationJson.trim();
       const wantTarget = !!targetScreenshotFile;
@@ -1612,7 +1695,7 @@ export default function RealUserTrafficPage() {
           `${API_URL}/api/uploads/proxies`,
           (fd) => {
             fd.append("name", `auto-proxies-${Date.now()}`);
-            fd.append("proxies", proxies);
+            fd.append("proxies", effectiveProxies);
           }) : Promise.resolve(""),
         wantUas ? preUpload("User-Agents",
           `${API_URL}/api/uploads/user-agents`,
@@ -1661,7 +1744,7 @@ export default function RealUserTrafficPage() {
       }
 
       // Use pre-uploaded IDs when available (smaller payload = no timeout)
-      fd.append("proxies", autoProxyId ? "" : proxies);
+      fd.append("proxies", autoProxyId ? "" : effectiveProxies);
       fd.append("user_agents", (autoUaId || selectedUploadUaIds.length > 0) ? "" : userAgents);
       fd.append("use_stored_proxies", String(useStoredProxies));
       // Uploaded batches — backend prefers these over pasted content
@@ -1710,7 +1793,10 @@ export default function RealUserTrafficPage() {
       // ProxyJet Auto Mode — when ON the backend ignores proxies/use_stored_proxies/upload_proxy_id
       // and instead asks proxyjet_module to generate a fresh batch of
       // unique residential proxies (one-per-visit, no exit-IP ever reused).
-      fd.append("use_proxyjet_auto", String(useProxyJetAuto));
+      // v2.5.0 — When Auto Mode is routed through a non-ProxyJet provider
+      // (effectiveUseProxyJetAuto=false above) we send `false` here so
+      // the backend uses the pre-generated proxies list normally.
+      fd.append("use_proxyjet_auto", String(effectiveUseProxyJetAuto));
       fd.append("proxyjet_country", (proxyJetCountry || "US").toUpperCase());
       fd.append("proxyjet_state", (proxyJetState || "").toUpperCase());
       // v2.4.0 — Multi-provider proxy dropdown. Empty ⇒ legacy behavior.
@@ -2158,12 +2244,13 @@ export default function RealUserTrafficPage() {
             />
             {proxyProviderId && (
               <p className="text-[10px] text-blue-300 mt-1">
-                ✓ This job will use your selected provider. Paste / upload / ProxyJet fields below are optional and will merge with the provider's output.
+                ✓ Auto Mode below (when enabled) will pull proxies from this provider. Paste / upload
+                fields are optional and only used if Auto Mode is OFF.
               </p>
             )}
           </div>
 
-          {/* ── ProxyJet Auto Mode toggle (one-time creds → unique IP per visit) ── */}
+          {/* ── Auto Mode toggle (works with ANY selected provider, or ProxyJet as fallback) ── */}
           <div
             className={`rounded-md border p-3 transition-colors ${
               useProxyJetAuto
@@ -2183,23 +2270,32 @@ export default function RealUserTrafficPage() {
               <div className="flex-1">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-indigo-200 font-medium text-sm">
-                    🚀 ProxyJet Auto Mode
+                    🚀 Auto Mode
                   </span>
-                  {pjConfigured === false && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">
-                      credentials not saved — go to Proxies page
-                    </span>
-                  )}
-                  {pjConfigured === true && (
+                  {/* Smart status badges — reflect the currently-selected
+                      source. When a non-ProxyJet provider is picked in
+                      the dropdown above, ProxyJet creds are no longer
+                      required — the batch is pulled straight from that
+                      provider via /api/proxy-providers/.../generate-batch. */}
+                  {proxyProviderId && proxyProviderKind && proxyProviderKind !== "native_proxyjet" ? (
                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                      ✓ ready
+                      ✓ using selected provider
                     </span>
-                  )}
+                  ) : pjConfigured === false ? (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                      pick a Proxy source above, OR save ProxyJet creds on Proxies page
+                    </span>
+                  ) : pjConfigured === true ? (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                      ✓ ProxyJet ready
+                    </span>
+                  ) : null}
                 </div>
                 <p className="text-[11px] text-zinc-400 mt-1 leading-snug">
-                  Skip pasting proxies entirely. Backend auto-generates one fresh residential
-                  proxy per visit. Every exit-IP is guaranteed <b className="text-emerald-300">unused</b> for your
-                  account — no duplicate clicks on your offer URL, ever.
+                  Skip pasting proxies entirely. When ON, a fresh batch of proxies is auto-generated
+                  from whichever <b className="text-indigo-300">Proxy source</b> you picked above (any
+                  kind — rotating gateway, API endpoint, manual list, ProxyJet). If no provider is
+                  picked, Krexion falls back to ProxyJet (legacy behavior).
                 </p>
                 {useProxyJetAuto && (
                   <div className="mt-3 space-y-2">
