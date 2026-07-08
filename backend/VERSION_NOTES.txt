@@ -1062,3 +1062,80 @@
 #   taskbar group name.  No more "Chrome" branding anywhere in
 #   the customer's Windows session while a Krexion profile is
 #   open.
+
+# v2.3.0 — 2026-07 — Next-level anti-detect: 15 industry-standard enhancements
+#   Customer ask: add every advanced anti-detect layer we know of so
+#   Krexion is bulletproof across MaxBounty Premium, Perform[cb] top-tier,
+#   Cake TrafficMax, Cloudflare Enterprise, Akamai Bot Manager,
+#   PerimeterX/HUMAN, Kasada, Imperva/Distil, F5 Bot Defense, Signal
+#   Sciences, Radware.
+#
+#   New file: backend/anti_detect_v230.py (~700 lines).
+#   One consolidated module implementing 15 features:
+#     1. HTTP/2 frame fingerprinting (Akamai killer)
+#        - `http2_settings_for_ua(ua)` returns curl_cffi kwargs matching
+#          real Chrome's SETTINGS frame, WINDOW_UPDATE, stream priority,
+#          pseudo-header order, and frame-level header order.
+#     2. Sec-Fetch-* headers (missing = 2022+ bot signal)
+#        - `sec_fetch_headers(kind)` per navigation type (ad_click,
+#          same_site_link, typed_url).
+#     3. Bot-vendor-specific stealth cohorts
+#        - `bot_vendor_stealth_js()` single JS blob patching against
+#          PerimeterX/HUMAN (_px3 sensor), Kasada (Function.toString
+#          spoof), Imperva/Distil (error stack scrub), F5 Bot Defense
+#          (ambient pointer events), Signal Sciences (XHR Origin
+#          header), Radware.
+#     4. Real tracking pixel pre-fire
+#        - `pixel_prefire_urls(platform)` returns FB Pixel / TikTok
+#          Events / Google Analytics / Snapchat / LinkedIn / Twitter /
+#          Reddit / Pinterest pixel URLs to fire BEFORE the offer for
+#          click-journey legitimacy.
+#     5. Referrer chain simulation
+#        - `intermediate_hop_urls(platform, offer_url, hops)` returns
+#          realistic short-link hops (l.facebook.com, t.co, bit.ly,
+#          google.com/url, linkedin redir, etc.).
+#     6. Post-conversion behaviour simulation
+#        - JS that activates on thank-you pages and simulates 30-120s
+#          of scroll + tab-away + tab-return.
+#     7. Full Client Hints headers (13 Sec-CH-* headers)
+#        - `full_client_hints(ua, viewport)` returns Sec-CH-UA,
+#          -Mobile, -Platform, -Full-Version-List, -Platform-Version,
+#          -Model, -Arch, -Bitness, -WoW64, Prefers-Color-Scheme,
+#          Prefers-Reduced-Motion, Viewport-Width, DPR.
+#     8. Chromium binary <-> UA version drift check
+#        - `align_ua_to_chromium(ua)` auto-detects installed Chromium
+#          and rewrites UA if drift > 3 major versions.
+#     9. Mobile signals (Touch/DeviceMotion/visualViewport/etc.)
+#        - JS injecting TouchEvent constructor, maxTouchPoints,
+#          DeviceMotionEvent, visualViewport, navigator.connection,
+#          screen.orientation, PointerEvent(pointerType=touch).
+#    10. WebGL extensions deep spoof — 30 real Chrome+NVIDIA extensions.
+#    11. Speech synthesis voices — Windows/macOS/Linux voice lists.
+#    12. Battery API fluctuation — 20-95% level, charging state
+#        changes, level ticks every 45-90s.
+#    13. Privacy Sandbox API stubs — Topics API + Attribution
+#        Reporting API + Fenced Frames.
+#    14. Extension emulation — 3-5 fake plugins (PDF, NaCl, +30%
+#        Grammarly / +20% LastPass) in navigator.plugins.
+#    15. Ad blocker realism — 65% chance on desktop of injecting
+#        uBlock-style hidden #adBanner element.
+#    16. First-Party Sets / Related Website Sets — hasStorageAccessFor,
+#        requestStorageAccessFor, hasStorageAccess, requestStorageAccess.
+#
+#   Orchestrator: `apply_v230_stealth(context, ua, viewport, platform)`
+#   is a single one-call async function that wires every JS feature
+#   into a Playwright context AND returns the header dict the caller
+#   merges into extra_http_headers. Never raises — every feature is
+#   independently wrapped in try/except so a broken one can't cascade.
+#
+#   Integration points:
+#     backend/browser_profile_launcher.py — apply_v230_stealth() called
+#       right after context creation, before any storage_state load.
+#     backend/real_user_traffic.py — apply_v230_stealth() called on the
+#       primary visit context (line 7901).  Retry-path contexts fall
+#       back to v2.2.x baseline (still fully functional).
+#
+#   Zero regression: every v2.3.0 feature is add-on. If the module is
+#   deleted or import fails, the try/except at each call site swallows
+#   the exception and the browser launches with the v2.2.x stack
+#   exactly as before.

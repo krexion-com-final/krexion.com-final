@@ -652,6 +652,34 @@ async def _launch_profile_session_inner(
         except Exception as _brand_err:
             logger.debug(f"Krexion brand injection failed (non-critical): {_brand_err}")
 
+        # ── 2026-07 v2.3.0 — Apply next-level anti-detect stack ──
+        # 15 industry-standard enhancements: HTTP/2 fingerprint, Sec-Fetch-*,
+        # Full Client Hints, bot-vendor cohorts (PerimeterX/Kasada/Imperva/F5/
+        # Signal Sciences/Radware), mobile signals, WebGL exts, speech voices,
+        # battery fluctuation, privacy sandbox, extension emu, ad blocker
+        # realism, first-party sets, post-conversion behaviour.
+        # Non-blocking — a failure of the whole v2.3.0 stack still leaves
+        # the browser fully functional with the v2.2.x baseline stack.
+        try:
+            from anti_detect_v230 import apply_v230_stealth, full_client_hints, sec_fetch_headers
+            _v230_report = await apply_v230_stealth(
+                context, ua=ua, viewport=viewport, platform=""
+            )
+            # Merge v2.3.0 headers into the context's extra_http_headers
+            # (this replaces the earlier Accept-Language-only set with a
+            # full Chrome 128+ header suite).
+            _extra_hdrs = dict(context_kwargs.get("extra_http_headers") or {})
+            _extra_hdrs.update(_v230_report.get("headers") or {})
+            _extra_hdrs["Accept-Language"] = accept_lang
+            await context.set_extra_http_headers(_extra_hdrs)
+            logger.info(
+                f"[profile-launch] v2.3.0 anti-detect ON — "
+                f"js_ok={_v230_report.get('js_ok')} "
+                f"headers={len(_v230_report.get('headers') or {})}"
+            )
+        except Exception as _v230_err:
+            logger.debug(f"v2.3.0 anti-detect apply skipped: {_v230_err}")
+
         if master:
             try:
                 # Reuse RUT's stealth builder so the SAME ~35 JS patches

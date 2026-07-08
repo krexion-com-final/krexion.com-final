@@ -7900,6 +7900,22 @@ async def run_real_user_traffic_job(
                     raise
             await context.add_init_script(_build_stealth_script(fp, geo, fp_hash_override=_identity_fp_hash))
 
+            # 2026-07 v2.3.0 — apply next-level anti-detect stack.
+            # HTTP/2 fingerprint + Sec-Fetch-* + Full Client Hints +
+            # bot-vendor cohorts + mobile signals + WebGL exts + speech
+            # voices + battery + privacy sandbox + extensions + ad
+            # blocker realism + first-party sets + post-conversion.
+            try:
+                from anti_detect_v230 import apply_v230_stealth as _v230_apply
+                _v230_r = await _v230_apply(context, ua=ua, viewport=fp.get("viewport") or {"width": 1920, "height": 1080}, platform=_kx_platform or "")
+                _v_hdrs = _v230_r.get("headers") or {}
+                if _v_hdrs:
+                    _cur = dict(ctx_args.get("extra_http_headers") or {})
+                    _cur.update(_v_hdrs)
+                    await context.set_extra_http_headers(_cur)
+            except Exception:
+                pass
+
             # Defensive guard: block navigations to URLs that contain
             # unfilled tracker macros like `{{ccpa}}`, `{{sub}}`, etc.
             # Some affiliate offer pages render CCPA / opt-out anchors with
