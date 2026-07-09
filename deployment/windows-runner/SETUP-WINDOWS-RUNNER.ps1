@@ -227,6 +227,20 @@ try {
 # --------------------------------------------------------------------
 Write-Step "Installing runner as Windows Service (via NSSM)"
 
+# CRITICAL: Set machine-wide PowerShell execution policy to RemoteSigned.
+# The runner service runs under LocalSystem where the default policy is
+# Restricted -- this blocks EVERY action that ships a .ps1 script
+# (actions/setup-python@v5's setup.ps1, actions/setup-node@v4, etc.)
+# with "cannot be loaded because running scripts is disabled".
+# RemoteSigned is the recommended standard for build machines: local
+# scripts run freely, downloaded scripts need a signature.
+try {
+    Set-ExecutionPolicy -Scope LocalMachine -ExecutionPolicy RemoteSigned -Force -ErrorAction Stop
+    Write-Ok "LocalMachine PowerShell execution policy set to RemoteSigned"
+} catch {
+    Write-Warn "Could not set execution policy: $($_.Exception.Message) -- may need manual: Set-ExecutionPolicy -Scope LocalMachine RemoteSigned -Force"
+}
+
 $nssmCmd = Get-Command nssm -ErrorAction SilentlyContinue
 if (-not $nssmCmd) {
     Write-Host "  Installing NSSM via Chocolatey..."

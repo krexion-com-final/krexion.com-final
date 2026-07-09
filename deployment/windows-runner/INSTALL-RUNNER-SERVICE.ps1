@@ -37,6 +37,14 @@ if (-not (Test-Path (Join-Path $RunnerDir ".runner"))) {
 }
 Write-Ok "Runner dir + registration confirmed"
 
+Write-Step "Setting LocalMachine PowerShell execution policy"
+try {
+    Set-ExecutionPolicy -Scope LocalMachine -ExecutionPolicy RemoteSigned -Force -ErrorAction Stop
+    Write-Ok "LocalMachine execution policy set to RemoteSigned"
+} catch {
+    Write-Warn "Could not set execution policy -- may need manual fix"
+}
+
 Write-Step "Ensuring NSSM is installed"
 $nssmCmd = Get-Command nssm -ErrorAction SilentlyContinue
 if (-not $nssmCmd) {
