@@ -133,7 +133,8 @@ if (-not $SkipTools) {
         @{ name = "innosetup";   cmd = $null;    args = $null },
         @{ name = "7zip";        cmd = "7z";     args = $null },
         @{ name = "git";         cmd = "git";    args = "--version" },
-        @{ name = "nssm";        cmd = "nssm";   args = $null }
+        @{ name = "nssm";        cmd = "nssm";   args = $null },
+        @{ name = "pwsh";        cmd = "pwsh";   args = "--version" }
     )
     foreach ($t in $tools) {
         Write-Host "  Installing $($t.name)..."
