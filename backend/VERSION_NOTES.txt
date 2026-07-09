@@ -1555,3 +1555,20 @@
 #   * build-electron-desktop.yml mirror-to-vps
 #   * build-windows-release.yml  mirror-windows-to-vps
 # No customer-facing code changes vs v2.4.2.
+
+
+# ─────────────────────────────────────────────────────────────
+# v2.4.9 (2026-01-09) — bulletproof frontend fallback for installer
+# ─────────────────────────────────────────────────────────────
+# v2.4.8 Native Windows installer failed at "Verify build outputs"
+# because frontend/build was missing from both cache AND artifact:
+#   * Actions cache "not found" for the expected key -- possibly a
+#     cross-runner (VPS Linux -> Windows PC) propagation issue
+#     despite enableCrossOsArchive: true on both save/restore
+#   * upload-artifact failed silently with "Artifact storage quota
+#     has been hit" (500 MB private-repo quota exhausted)
+# Fix: added a "Build frontend locally" step in build-installer job
+# BEFORE the Verify gate -- if frontend/build/index.html or
+# build/frontend-build/index.html doesn't exist, runs yarn install +
+# yarn build directly on the Windows PC. Costs ~4 min only when
+# needed, 100% reliable, zero cross-runner dependency.
