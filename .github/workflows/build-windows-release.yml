@@ -193,7 +193,11 @@ jobs:
 
   build-frontend:
     name: Build React frontend
-    runs-on: ubuntu-latest
+    # 2026-01-09 — switched from `ubuntu-latest` (GitHub-hosted, paid
+    # Linux minutes) to the krexion-vps self-hosted runner. Free
+    # forever; queues briefly behind deploy.yml when both fire on
+    # the same push (typical wait: 30-60s).
+    runs-on: [self-hosted, linux, krexion-vps]
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -605,11 +609,13 @@ jobs:
   mirror-windows-to-vps:
     name: Mirror Windows installer to krexion.com VPS
     needs: [build-backend, build-installer]
-    runs-on: ubuntu-latest
+    # 2026-01-09 — moved from ubuntu-latest to krexion-vps runner.
+    # Since the runner IS the VPS, SCP+SSH is replaced by local `cp`.
+    # Free forever + faster (no network round-trip).
+    runs-on: [self-hosted, linux, krexion-vps]
     # Only mirror when an actual release was created (mirrors the Create
-    # GitHub Release gate at line ~557). Skipping otherwise means a
-    # dispatch without a release_tag won't try to mirror a non-existent
-    # build.
+    # GitHub Release gate). Skipping otherwise means a dispatch without
+    # a release_tag won't try to mirror a non-existent build.
     if: ${{ needs.build-installer.result == 'success' && startsWith(needs.build-backend.outputs.version, 'v') }}
     permissions:
       contents: read
@@ -638,42 +644,25 @@ jobs:
             --pattern 'Krexion-Setup-*.exe'
           ls -lah dist/
 
-      - name: SCP installer to VPS
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          port: ${{ secrets.VPS_PORT || 22 }}
-          source: "dist/Krexion-Setup-*.exe"
-          target: "/opt/krexion/downloads/windows/"
-          strip_components: 1
-          overwrite: true
-
-      - name: Update "latest" copy + permissions on VPS
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          port: ${{ secrets.VPS_PORT || 22 }}
-          timeout: 5m
-          script: |
-            set -e
-            mkdir -p /opt/krexion/downloads/windows
-            cd /opt/krexion/downloads/windows
-            V="${{ needs.build-backend.outputs.version }}"
-            # Hard-copy (not symlink) so the nginx docker volume mount
-            # serves the file identically to versioned ones — matches
-            # the desktop mirror's behaviour.
-            if [ -f "Krexion-Setup-${V}.exe" ]; then
-              cp -f "Krexion-Setup-${V}.exe" "Krexion-Setup-latest.exe"
-            else
-              echo "::warning::Expected Krexion-Setup-${V}.exe but not found — picking newest .exe instead"
-              NEWEST=$(ls -t Krexion-Setup-*.exe 2>/dev/null | grep -v latest | head -1)
-              [ -n "$NEWEST" ] && cp -f "$NEWEST" "Krexion-Setup-latest.exe" || true
-            fi
-            ls -la
-            chmod -R a+r .
-            echo "Self-hosted CDN updated:"
-            echo "  https://krexion.com/downloads/windows/Krexion-Setup-latest.exe"
+      - name: Copy installer to VPS downloads dir (local — runner IS the VPS)
+        env:
+          VER: ${{ needs.build-backend.outputs.version }}
+        run: |
+          set -e
+          mkdir -p /opt/krexion/downloads/windows
+          cp -f dist/Krexion-Setup-*.exe /opt/krexion/downloads/windows/
+          cd /opt/krexion/downloads/windows
+          # Hard-copy (not symlink) so the nginx docker volume mount
+          # serves the file identically to versioned ones — matches
+          # the desktop mirror's behaviour.
+          if [ -f "Krexion-Setup-${VER}.exe" ]; then
+            cp -f "Krexion-Setup-${VER}.exe" "Krexion-Setup-latest.exe"
+          else
+            echo "::warning::Expected Krexion-Setup-${VER}.exe but not found — picking newest .exe instead"
+            NEWEST=$(ls -t Krexion-Setup-*.exe 2>/dev/null | grep -v latest | head -1)
+            [ -n "$NEWEST" ] && cp -f "$NEWEST" "Krexion-Setup-latest.exe" || true
+          fi
+          ls -la
+          chmod -R a+r .
+          echo "Self-hosted CDN updated:"
+          echo "  https://krexion.com/downloads/windows/Krexion-Setup-latest.exe"

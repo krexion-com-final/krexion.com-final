@@ -243,23 +243,17 @@ jobs:
   mirror-to-vps:
     name: Mirror to krexion.com VPS (self-hosted CDN)
     needs: build
-    runs-on: ubuntu-latest
+    # 2026-01-09 — moved from ubuntu-latest to krexion-vps runner.
+    # Since the runner IS the VPS, SCP+SSH is replaced by local `cp`.
+    # Free forever + faster (no network round-trip).
+    runs-on: [self-hosted, linux, krexion-vps]
     if: ${{ needs.build.result == 'success' }}
-    # v2.1.56 — gh release download needs read access to releases.
     permissions:
       contents: read
     steps:
       # v2.1.56 — Try artifact first (fast path, no network round-trip
       # to GitHub Releases), then fall back to downloading from the
-      # GitHub Release that the build job just published. The artifact
-      # path can fail when the repo has exhausted its 500 MB Actions
-      # artifact storage quota (run 27869748562 hit this exact failure:
-      # build succeeded, artifact upload silently dropped with
-      # `continue-on-error: true`, mirror then crashed with
-      # "Artifact not found for name: Krexion-Desktop-Setup-2.1.55").
-      # GitHub Releases do NOT count against the artifact quota, so
-      # the release-fallback always works as long as the GH Release
-      # step in the build job ran (it does on every push + tag dispatch).
+      # GitHub Release that the build job just published.
       - name: Download installer artifact from build job
         id: dl-artifact
         continue-on-error: true
@@ -276,12 +270,8 @@ jobs:
         run: |
           set -e
           mkdir -p dist
-          # Mirror the tag-naming convention from the build job:
-          #   inputs.release_tag (manual) OR `desktop-v<version>` (push)
-          # For push events the build job uses `desktop-v<VER>`.
           TAG="${{ inputs.release_tag != '' && inputs.release_tag || format('desktop-v{0}', needs.build.outputs.version) }}"
           echo "Trying GH Release tag: $TAG"
-          # Wait up to 60s for the just-created release to propagate.
           for i in 1 2 3 4 5 6; do
             if gh release view "$TAG" -R "${{ github.repository }}" >/dev/null 2>&1; then
               echo "  release found on attempt $i"
@@ -300,45 +290,25 @@ jobs:
       - name: List downloaded artifacts (debug)
         run: ls -lah dist/
 
-      - name: SCP installer + latest.yml to VPS
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          port: ${{ secrets.VPS_PORT || 22 }}
-          source: "dist/Krexion-Desktop-Setup-*.exe,dist/Krexion-Desktop-Setup-*.exe.blockmap,dist/latest.yml"
-          target: "/opt/krexion/downloads/desktop/"
-          strip_components: 1
-          overwrite: true
-
-      - name: Update "latest" copy + permissions on VPS
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          port: ${{ secrets.VPS_PORT || 22 }}
-          timeout: 5m
-          script: |
-            set -e
-            mkdir -p /opt/krexion/downloads/desktop
-            cd /opt/krexion/downloads/desktop
-            V="${{ needs.build.outputs.version }}"
-            # Stable filename so the public homepage button can point to
-            # a single URL forever ("Krexion-Desktop-Setup-latest.exe").
-            # We hard-copy (cp -f) instead of symlink because the nginx
-            # docker volume mount serves files; copies behave identically
-            # across filesystems and work without follow-symlinks tweaks.
-            if [ -f "Krexion-Desktop-Setup-${V}.exe" ]; then
-              cp -f "Krexion-Desktop-Setup-${V}.exe" "Krexion-Desktop-Setup-latest.exe"
-            else
-              echo "::warning::Expected Krexion-Desktop-Setup-${V}.exe but not found — picking newest .exe instead"
-              NEWEST=$(ls -t Krexion-Desktop-Setup-*.exe 2>/dev/null | grep -v latest | head -1)
-              [ -n "$NEWEST" ] && cp -f "$NEWEST" "Krexion-Desktop-Setup-latest.exe" || true
-            fi
-            ls -la
-            chmod -R a+r .
-            echo "Self-hosted CDN updated:"
-            echo "  https://krexion.com/downloads/desktop/Krexion-Desktop-Setup-latest.exe"
-            echo "  https://krexion.com/downloads/desktop/latest.yml"
+      - name: Copy installer + latest.yml to VPS downloads dir (local — runner IS the VPS)
+        env:
+          VER: ${{ needs.build.outputs.version }}
+        run: |
+          set -e
+          mkdir -p /opt/krexion/downloads/desktop
+          cp -f dist/Krexion-Desktop-Setup-*.exe /opt/krexion/downloads/desktop/ 2>/dev/null || true
+          cp -f dist/Krexion-Desktop-Setup-*.exe.blockmap /opt/krexion/downloads/desktop/ 2>/dev/null || true
+          cp -f dist/latest.yml /opt/krexion/downloads/desktop/ 2>/dev/null || true
+          cd /opt/krexion/downloads/desktop
+          if [ -f "Krexion-Desktop-Setup-${VER}.exe" ]; then
+            cp -f "Krexion-Desktop-Setup-${VER}.exe" "Krexion-Desktop-Setup-latest.exe"
+          else
+            echo "::warning::Expected Krexion-Desktop-Setup-${VER}.exe but not found — picking newest .exe instead"
+            NEWEST=$(ls -t Krexion-Desktop-Setup-*.exe 2>/dev/null | grep -v latest | head -1)
+            [ -n "$NEWEST" ] && cp -f "$NEWEST" "Krexion-Desktop-Setup-latest.exe" || true
+          fi
+          ls -la
+          chmod -R a+r .
+          echo "Self-hosted CDN updated:"
+          echo "  https://krexion.com/downloads/desktop/Krexion-Desktop-Setup-latest.exe"
+          echo "  https://krexion.com/downloads/desktop/latest.yml"
