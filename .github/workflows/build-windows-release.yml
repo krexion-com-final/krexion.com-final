@@ -207,6 +207,13 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Enable yarn via corepack
+        # 2026-01-09 — self-hosted krexion-vps runner doesn't ship yarn
+        # pre-installed (unlike GitHub-hosted ubuntu-latest). corepack
+        # is bundled with Node 20 and can activate yarn v1 to match
+        # our existing yarn.lock (lockfile v1 / Yarn Classic).
+        run: corepack enable && corepack prepare yarn@1.22.22 --activate
+
       - name: Build production bundle
         run: |
           cd frontend
