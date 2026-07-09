@@ -1480,3 +1480,18 @@
 #   Testing: 8/8 unit tests pass — all 5 formats + SOCKS5 URL + None +
 #     empty input.  Regression check confirms v2.2.2 fixes still intact
 #     in browser_profile_module.py and browser_profile_launcher.py.
+
+
+# ─────────────────────────────────────────────────────────────
+# v2.4.3 (2026-01-09) — infra release: self-hosted Windows runner
+# ─────────────────────────────────────────────────────────────
+# No customer-facing code changes vs v2.4.2. This bump is purely
+# a smoke-test to confirm the freshly-installed krexion-windows
+# self-hosted runner successfully builds both:
+#   * Krexion-Setup-<ver>.exe          (native Inno-Setup installer)
+#   * Krexion-Desktop-Setup-<ver>.exe  (Electron installer)
+# and mirrors them to https://krexion.com/downloads/{windows,desktop}/
+# using the stable "*-latest.exe" filenames — exactly the same URLs
+# the DownloadPage + HomePage buttons already point to, so customers
+# see zero disruption. Customer Electron apps polling latest.yml will
+# get the auto-update prompt on next launch.
