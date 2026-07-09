@@ -1520,3 +1520,16 @@
 # policy. Fixed by setting LocalMachine scope to RemoteSigned. Retry
 # to validate full Native + Electron build pipeline. No customer-
 # facing code changes vs v2.4.2.
+
+
+# ─────────────────────────────────────────────────────────────
+# v2.4.6 (2026-01-09) — full retry, all fixes in place
+# ─────────────────────────────────────────────────────────────
+# 5th and final infra-smoke retry. All 5 known first-time self-hosted
+# runner issues resolved:
+#   1. svc.cmd missing (v2.315+ removal)      → NSSM
+#   2. Bash resolves to WSL under LocalSystem → prepend Git Bash to PATH
+#   3. setup.ps1 blocked by execution policy  → Set-ExecutionPolicy RemoteSigned
+#   4. pwsh missing (setup-python needs it)   → choco install pwsh
+#   5. ubuntu-latest quota exhausted          → moved Linux jobs to krexion-vps
+# No customer-facing code changes vs v2.4.2.
