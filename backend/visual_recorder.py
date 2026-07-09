@@ -4478,6 +4478,261 @@ async def wait_for_selector(
     return {"recorded": True, "step": step}
 
 
+# ─────────────────────────────────────────────────────────────────────
+# 2026-01 v2.4.2 — Three additive helpers requested by customer:
+#   • wait_for_xpath           — sibling to wait_for_selector, uses xpath
+#   • scan_element_at          — inspect an element's text/selector/xpath
+#                                without recording a step or clicking it
+#   • detect_popup_buttons     — like detect_clickables but scoped to
+#                                any currently-visible popup/modal/dialog
+# All three follow the same session/lock/return pattern as the existing
+# helpers above. Zero changes to any existing function/step schema.
+# ─────────────────────────────────────────────────────────────────────
+
+async def wait_for_xpath(
+    sess: RecorderSession, xpath: str, timeout_ms: int = 15000
+) -> Dict[str, Any]:
+    """Wait until an XPath expression matches a visible element on the
+    page (max `timeout_ms`). Records an equivalent `wait_for_selector`
+    step with the `xpath=` Playwright prefix — RUT replay hits the
+    same engine as the CSS-selector wait, no runtime branching needed.
+    Customer ask: "wait for selector button k sath wait for xpath b
+    hona chahye agr wait for selector ko selector na mile to wait for
+    xpath use kr liya jay yan customer jo chahe use kr sake"."""
+    sess.touch()
+    if sess.state != "ready" or not sess.page:
+        return {"recorded": False, "error": f"Session not ready ({sess.state})"}
+    xp = (xpath or "").strip()
+    if not xp:
+        return {"recorded": False, "error": "xpath required"}
+    # Playwright's `xpath=` prefix is the canonical way to pass raw
+    # xpath to page.wait_for_selector. It also accepts a bare xpath
+    # starting with "/" or "//" so we normalise defensively.
+    engine_sel = xp if xp.startswith("xpath=") else f"xpath={xp}"
+    timeout_ms = max(500, min(int(timeout_ms or 15000), 120000))
+    try:
+        await sess.page.wait_for_selector(engine_sel, state="visible", timeout=timeout_ms)
+    except Exception as e:
+        return {"recorded": False, "error": f"XPath did not appear within {timeout_ms}ms: {e}"}
+    # Store BOTH the engine-prefixed selector (for the RUT wait engine
+    # that already understands `xpath=…`) AND a bare `xpath` field
+    # (for the step-editor UI + selector-fallback logic that expects
+    # `step.xpath` — same convention used by _attach_selector_and_xpath).
+    step = {
+        "action": "wait_for_selector",
+        "selector": engine_sel,
+        "xpath": xp,
+        "timeout": timeout_ms,
+    }
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
+
+
+async def scan_element_at(sess: RecorderSession, x: int, y: int) -> Dict[str, Any]:
+    """Return the text / css-selector / xpath / attributes of whatever
+    element sits under (x, y) — WITHOUT clicking it and WITHOUT
+    recording a step. Powers the "Scan" tool: customer clicks a
+    button on the live preview and gets a copy-able set of locators
+    they can reuse anywhere (RPA Studio, wait_for_selector, manual
+    click steps, etc). Customer ask: "scan button use kr k page pr
+    kisi b button pr click krein to oska text, selector, xpath show
+    ho jay jo customer use kr k kahin b use kr sake"."""
+    sess.touch()
+    async with sess.lock:
+        if sess.state != "ready" or not sess.page:
+            return {"ok": False, "error": f"Session not ready ({sess.state})"}
+        try:
+            info = await sess.page.evaluate(
+                _RICH_ELEMENT_CAPTURE_JS,
+                [int(x), int(y)],
+            )
+        except Exception as e:
+            return {"ok": False, "error": f"Could not scan element: {e}"}
+        if not info:
+            return {"ok": False, "error": "No element at that point"}
+        # Build the tidy payload the UI needs — same fields the step
+        # capture pipeline uses, so users can paste any of these into
+        # a manual step without translation.
+        out: Dict[str, Any] = {
+            "ok": True,
+            "text": (info.get("text") or "").strip(),
+            "selector": (info.get("selector") or "").strip(),
+            "xpath": (info.get("xpath_stable") or info.get("xpath_abs") or "").strip(),
+            "xpath_stable": (info.get("xpath_stable") or "").strip(),
+            "xpath_abs": (info.get("xpath_abs") or "").strip(),
+            "tag": (info.get("tag") or "").upper(),
+            "attrs": info.get("attrs") or {},
+            "bbox": {
+                "x": info.get("x"),
+                "y": info.get("y"),
+                "w": info.get("w"),
+                "h": info.get("h"),
+            },
+        }
+        return out
+
+
+# JS run by detect_popup_buttons — finds visible popup / dialog / modal
+# containers on the page using multiple heuristics (role attribute, aria-
+# modal, common CSS class names, fixed-positioned high-z overlays), then
+# for each container extracts every clickable inside (buttons, links,
+# inputs, [role=button], onclick, cursor:pointer). Same shape as
+# detect_clickables().items so the front-end can reuse the checklist UI.
+_DETECT_POPUP_BUTTONS_JS = r"""
+() => {
+  const out = [];
+
+  // ── Step 1: find popup / modal / dialog containers ────────────────
+  const popupSel = [
+    '[role="dialog"]',
+    '[role="alertdialog"]',
+    '[aria-modal="true"]',
+    '.modal',
+    '.popup',
+    '.dialog',
+    '.overlay',
+    '.lightbox',
+    '.drawer',
+    '.MuiDialog-root',
+    '.ant-modal',
+    '.ReactModal__Content',
+    '.chakra-modal__content',
+    '.swal2-container',
+    '.sweet-alert',
+    '.fancybox-container',
+  ].join(', ');
+  const candidates = Array.from(document.querySelectorAll(popupSel));
+
+  // Also detect ad-hoc overlays: position:fixed / :absolute + high z-index
+  // + covers > 25 % of the viewport. Catches hand-rolled popups on lead-
+  // gen offer pages that don't use any of the standard class names.
+  const vw = window.innerWidth || document.documentElement.clientWidth || 1;
+  const vh = window.innerHeight || document.documentElement.clientHeight || 1;
+  const vwvh = vw * vh;
+  const scanRoot = document.body ? document.body.querySelectorAll('*') : [];
+  for (const el of scanRoot) {
+    if (candidates.indexOf(el) !== -1) continue;
+    try {
+      const cs = window.getComputedStyle(el);
+      const pos = cs.position;
+      if (pos !== 'fixed' && pos !== 'absolute') continue;
+      const zi = parseFloat(cs.zIndex || '0');
+      if (!(zi >= 100)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width < 100 || r.height < 100) continue;
+      const area = r.width * r.height;
+      if (area / vwvh < 0.10) continue;  // < 10 % viewport → probably not a modal
+      if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity || '1') < 0.15) continue;
+      candidates.push(el);
+    } catch (e) { /* skip */ }
+  }
+
+  // De-dupe: if a container is nested inside another container we keep
+  // ONLY the inner one (buttons live at the leaf of the popup tree).
+  const kept = candidates.filter((el) =>
+    !candidates.some((other) => other !== el && other.contains(el))
+  );
+
+  // ── Step 2: enumerate clickables inside each popup ────────────────
+  const BTN_SEL = 'a, button, input[type=submit], input[type=button], input[type=reset], input[type=checkbox], input[type=radio], [role=button], [role=link], [role=checkbox], [role=radio], [aria-label*="close" i], [aria-label*="dismiss" i], [aria-label*="cancel" i], label, [onclick]';
+  const normText = (el) => (
+    (el.innerText || el.textContent || el.value ||
+     el.getAttribute('aria-label') || el.getAttribute('title') || '')
+      .replace(/\s+/g, ' ').trim()
+  );
+
+  kept.forEach((popup, popupIdx) => {
+    const rectP = popup.getBoundingClientRect();
+    if (rectP.width < 20 || rectP.height < 20) return;
+    const inside = Array.from(popup.querySelectorAll(BTN_SEL));
+    // Cursor:pointer sweep for hand-rolled close-Xs and ad-hoc buttons.
+    const insideAll = Array.from(popup.querySelectorAll('*'));
+    for (const el of insideAll) {
+      if (inside.indexOf(el) !== -1) continue;
+      try {
+        const cs = window.getComputedStyle(el);
+        if (cs && cs.cursor === 'pointer' && el.children.length === 0) {
+          inside.push(el);
+        }
+      } catch (e) {}
+    }
+    const seen = new Set();
+    for (const el of inside) {
+      try {
+        const cs = window.getComputedStyle(el);
+        if (!cs || cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity || '1') < 0.05) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 4 || r.height < 4) continue;
+        const rawText = normText(el);
+        // Popup close-Xs often have empty text — synthesise a label
+        // from aria-label / title / class so the UI still shows a
+        // meaningful checkbox row.
+        let label = rawText;
+        if (!label) {
+          const al = el.getAttribute('aria-label') || el.getAttribute('title') || '';
+          if (al) label = al.trim();
+          else if (el.className && typeof el.className === 'string' &&
+                   /close|dismiss|cancel|x-btn|xbtn/i.test(el.className)) {
+            label = '✕ (close)';
+          }
+        }
+        if (!label) continue;
+        label = label.slice(0, 200);
+        const tag = el.tagName;
+        const dedupKey = `${popupIdx}::${tag}::${label}`;
+        if (seen.has(dedupKey)) continue;
+        seen.add(dedupKey);
+        out.push({
+          popup_index: popupIdx,
+          text: label,
+          tag: tag,
+          x: Math.round(r.left + r.width / 2),
+          y: Math.round(r.top + r.height / 2),
+          w: Math.round(r.width),
+          h: Math.round(r.height),
+        });
+      } catch (e) {}
+    }
+  });
+
+  return {
+    popup_count: kept.length,
+    items: out,
+  };
+}
+"""
+
+
+async def detect_popup_buttons(sess: RecorderSession) -> Dict[str, Any]:
+    """Find every visible popup / modal / dialog on the page and list
+    the clickable buttons inside each — cross (✕), OK, Cancel, Yes/No,
+    custom close-Xs, etc. Powers the "Popup Work" tool so users can
+    add popup-interaction steps mid-flow (e.g. a survey shows a
+    "continue?" popup they must dismiss). Same return shape as
+    detect_clickables so the same checklist UI works with a small
+    tweak (grouped by popup_index).  Customer ask: "click button k
+    sath aik popup work ka button hona chahye … os pr jo button hun
+    like cross yan koi b to wo show ho jayn"."""
+    sess.touch()
+    async with sess.lock:
+        if sess.state != "ready" or not sess.page:
+            return {"popup_count": 0, "items": [], "error": f"Session not ready ({sess.state})"}
+        try:
+            result = await sess.page.evaluate(_DETECT_POPUP_BUTTONS_JS)
+        except Exception as e:
+            return {"popup_count": 0, "items": [], "error": f"Popup scan failed: {e}"}
+        if not isinstance(result, dict):
+            return {"popup_count": 0, "items": []}
+        # Normalise + hard-cap so a busy page can't overwhelm the UI.
+        items = result.get("items") or []
+        if len(items) > 300:
+            items = items[:300]
+        return {
+            "popup_count": int(result.get("popup_count") or 0),
+            "items": items,
+        }
+
+
 def get_steps(sess: RecorderSession) -> List[Dict[str, Any]]:
     return sess.steps
 

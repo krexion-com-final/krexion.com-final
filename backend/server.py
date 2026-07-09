@@ -22065,6 +22065,66 @@ async def vr_wait_for_selector(session_id: str, req: _VRWaitSelectorReq, user: d
     return await vr.wait_for_selector(sess, req.selector, req.timeout_ms)
 
 
+# ── 2026-01 v2.4.2 — three additive endpoints (sibling to the above)
+class _VRWaitXpathReq(BaseModel):
+    xpath: str
+    timeout_ms: int = 15000
+
+
+@api_router.post("/visual-recorder/{session_id}/wait-for-xpath")
+async def vr_wait_for_xpath(session_id: str, req: _VRWaitXpathReq, user: dict = Depends(get_current_user)):
+    """Sibling of /wait-for-selector — waits until an XPath resolves to
+    a visible element and records the equivalent step. Powers the
+    "Wait for xpath" button next to "Wait for selector" so customers
+    can pick whichever locator style works for their target site."""
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.wait_for_xpath(sess, req.xpath, req.timeout_ms)
+
+
+class _VRScanReq(BaseModel):
+    x: int
+    y: int
+
+
+@api_router.post("/visual-recorder/{session_id}/scan")
+async def vr_scan_element(session_id: str, req: _VRScanReq, user: dict = Depends(get_current_user)):
+    """Inspect the element under (x, y) — returns its text, selector,
+    xpath (stable + absolute), tag, attrs and bounding box.  NO click
+    is performed and NO step is recorded.  Powers the "Scan" tool.
+    Customer paste-able locators for RPA / manual steps / debugging."""
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.scan_element_at(sess, req.x, req.y)
+
+
+@api_router.get("/visual-recorder/{session_id}/detect-popup-buttons")
+async def vr_detect_popup_buttons(session_id: str, user: dict = Depends(get_current_user)):
+    """Scan the page for currently-visible popups / modals / dialogs
+    and enumerate every clickable button inside each of them (close-
+    Xs, OK, Cancel, custom close-buttons, etc).  Returns items shaped
+    like /detect-clickables plus a `popup_index` field so the UI can
+    group them.  Powers the "Popup Work" tool."""
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.detect_popup_buttons(sess)
+
+
 @api_router.post("/visual-recorder/{session_id}/finalize")
 async def vr_finalize(session_id: str, user: dict = Depends(get_current_user)):
     if vr is None:

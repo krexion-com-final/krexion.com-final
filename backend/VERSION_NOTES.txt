@@ -1,3 +1,111 @@
+# Force redeploy trigger 1783300200
+# v2.4.2 — 2026-01-09 — Visual Recorder: Popup Work + Scan + Wait for XPath
+#
+# CUSTOMER FEEDBACK ADDRESSED (verbatim):
+#   1. "visual recorder mein click button k sath aik popup work ka
+#       button hona chahye … agr koi popup a jay to os pr jo kam
+#       krna ho button dabain popup wala phr os pr jo button hun
+#       like cross yan koi b to wo show ho jayn"
+#   2. "visual recoder mein jese click button hai wese scan button ho
+#       yani agr kisi button ka selector, text, yan xpath copy krna
+#       ho to scan button use kr k page pr kisi b button pr click
+#       krein to oska text, selector, xpath show ho jay"
+#   3. "visual recoder mein wait for selector button k sath wait for
+#       xpath b hona chahye agr wait for selector ko selector na mile
+#       to wait for xpath use kr liya jay yan customer jo chahe use
+#       kr sake"
+#
+# ══════════════════════════════════════════════════════════════════
+#  Feature A — "Popup Work" tool (key: P)
+# ══════════════════════════════════════════════════════════════════
+#   New tool + endpoint that scans the currently-rendered page for
+#   any visible popup / modal / dialog container (role=dialog,
+#   [aria-modal="true"], .modal / .popup / .dialog / .overlay /
+#   .lightbox / .drawer, .MuiDialog-root, .ant-modal, .swal2-*, etc.,
+#   PLUS ad-hoc position:fixed / :absolute overlays with high z-index
+#   covering ≥10% of the viewport). Inside each popup it enumerates
+#   every clickable element (buttons, links, [role=button], onclick,
+#   cursor:pointer close-Xs) and returns a checklist grouped by
+#   popup_index. The customer ticks which button(s) to click and
+#   each tick becomes a normal click step via the existing /click
+#   endpoint — so RUT replay runs identical to any manual click.
+#
+#   Backend: visual_recorder.detect_popup_buttons() + JS bundle
+#            _DETECT_POPUP_BUTTONS_JS
+#   Route:   GET /api/visual-recorder/{session_id}/detect-popup-buttons
+#   Frontend: TOOLS entry `popup_work` + auto-scan on tool select +
+#             rose-tinted checklist panel + "Add N popup clicks" btn.
+#
+# ══════════════════════════════════════════════════════════════════
+#  Feature B — "Scan" tool (key: S)
+# ══════════════════════════════════════════════════════════════════
+#   New tool + endpoint that inspects the element under the click
+#   coords WITHOUT recording a step or firing the click on the live
+#   page. Returns `text`, `selector` (CSS), `xpath_stable`, `xpath_abs`,
+#   `tag`, `attrs`, `bbox`. Uses the same _RICH_ELEMENT_CAPTURE_JS
+#   the recorder already uses for click/form_fill/dropdown so the
+#   locators returned here are BYTE-IDENTICAL to what would be
+#   recorded — customers can paste them into RPA Studio, manual
+#   click steps, wait_for_selector / wait_for_xpath, or ad-hoc
+#   automation JSON with zero translation.
+#
+#   Backend: visual_recorder.scan_element_at()
+#   Route:   POST /api/visual-recorder/{session_id}/scan
+#   Frontend: TOOLS entry `scan` + cyan hint panel + scan-result
+#             modal with Copy buttons on every field.
+#
+# ══════════════════════════════════════════════════════════════════
+#  Feature C — "Wait for xpath" button
+# ══════════════════════════════════════════════════════════════════
+#   Sibling of the existing "Wait for selector" button. Prompts for
+#   an XPath, waits until it resolves to a visible element, records
+#   a `wait_for_selector` step with Playwright's `xpath=` prefix
+#   PLUS a bare `xpath` field. RUT replay hits the SAME
+#   wait_for_selector engine — no branching, no schema change,
+#   full backward compat with every existing recording.
+#
+#   Backend: visual_recorder.wait_for_xpath()
+#   Route:   POST /api/visual-recorder/{session_id}/wait-for-xpath
+#   Frontend: Indigo "🎯 Wait for xpath" button next to
+#             "⏳ Wait for selector".
+#
+# ══════════════════════════════════════════════════════════════════
+#  Files changed in v2.4.2 (5 total)
+# ══════════════════════════════════════════════════════════════════
+#   backend/visual_recorder.py            + 236 lines (3 new async
+#                                           helpers + JS bundle)
+#   backend/server.py                     + 63 lines (3 new @api_router
+#                                           endpoints + request models)
+#   frontend/src/pages/VisualRecorderPage.js
+#                                         + ~330 lines (2 new tools in
+#                                           TOOLS array, 4 new handler
+#                                           functions, popup checklist
+#                                           panel, scan-result modal,
+#                                           Wait-for-xpath button,
+#                                           keyboard shortcuts P + S)
+#   backend/VERSION                       2.4.1 → 2.4.2
+#   electron-desktop/package.json         2.4.1 → 2.4.2
+#
+# ══════════════════════════════════════════════════════════════════
+#  Backward compatibility (100 %)
+# ══════════════════════════════════════════════════════════════════
+#   • Zero changes to any existing tool / step schema.
+#   • Legacy recordings (no wait_for_xpath, no popup steps, no scan
+#     usage) replay identically — the wait_for_xpath step is stored
+#     as a wait_for_selector step with the `xpath=` prefix which
+#     Playwright already understands.
+#   • No installer / Electron main-process changes — customers
+#     just need to update the app (auto-update from Releases page).
+#
+# Live E2E verified on preview VPS with a real Chromium session:
+#   ✔ wait-for-xpath on //h1 → returned wait_for_selector step
+#     with selector="xpath=//h1" + xpath="//h1"
+#   ✔ scan at (200,200) on example.com → returned text, tag=P,
+#     xpath=/html/body[1]/div[1]/p[1]
+#   ✔ detect-popup-buttons on example.com → popup_count=0 (correct)
+#
+# ══════════════════════════════════════════════════════════════════
+
 # Force redeploy trigger 1783300100
 # v2.4.1 — 2026-01-08 — Browser Profile identity fixes (favicon + taskbar icon)
 #

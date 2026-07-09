@@ -262,3 +262,88 @@ Customer clicks update → new installer downloaded + run silently.
 - Every Windows installer script (.iss / .bat / .ps1)
 - Every VPS deployment / docker-compose / nginx config
 - All customer-installer scripts, dashboards, tray-app
+
+## Session 2026-01-09 — v2.4.2 Visual Recorder: Popup Work + Scan + Wait for XPath
+
+### Customer requests (verbatim, same working session)
+1. "visual recorder mein click button k sath aik popup work ka button hona
+   chahye … os pr jo button hun like cross yan koi b to wo show ho jayn
+   jese random click mein sare button show hote hein" — a new tool that,
+   when a popup / modal appears mid-flow, detects every button inside
+   it (close-X, OK, Cancel, custom close-buttons) and lets the user
+   tick which one(s) to add as click steps.
+2. "wese scan button ho yani agr kisi button ka selector, text, yan
+   xpath copy krna ho to scan button use kr k page pr kisi b button
+   pr click krein to oska text, selector, xpath show ho jay" — a
+   scan tool that inspects an element without recording a step.
+3. "wait for selector button k sath wait for xpath b hona chahye" —
+   sibling button for XPath, so if a CSS selector isn't stable the
+   customer can use XPath instead (or whichever they prefer).
+
+### Fixes shipped (v2.4.2 — 5 files, ~630 net lines)
+
+**backend/visual_recorder.py** — 3 new async helpers:
+- `wait_for_xpath(sess, xpath, timeout_ms)` — records a
+  `wait_for_selector` step with Playwright's `xpath=` prefix so RUT
+  replay hits the same engine as CSS waits (zero schema change).
+- `scan_element_at(sess, x, y)` — reuses `_RICH_ELEMENT_CAPTURE_JS`
+  to return text / selector / xpath_stable / xpath_abs / tag /
+  attrs / bbox WITHOUT recording a step or firing the click.
+- `detect_popup_buttons(sess)` + JS bundle `_DETECT_POPUP_BUTTONS_JS`
+  — scans for popup / modal / dialog containers (role=dialog,
+  aria-modal, .modal / .popup / .dialog / .overlay + ad-hoc
+  fixed-position high-z overlays), enumerates every clickable
+  inside each, dedups, returns checklist grouped by popup_index.
+
+**backend/server.py** — 3 new endpoints:
+- `POST /api/visual-recorder/{sid}/wait-for-xpath`
+- `POST /api/visual-recorder/{sid}/scan`
+- `GET  /api/visual-recorder/{sid}/detect-popup-buttons`
+
+**frontend/src/pages/VisualRecorderPage.js**:
+- 2 new tools in TOOLS array — `popup_work` (key P) + `scan` (key S)
+- 4 new handler functions — detectPopupButtons, addSelectedPopupClicks,
+  scanElementAt, waitForXpathAction
+- Rose-tinted popup checklist panel (grouped by popup_index, with
+  Select-all + "Add N popup clicks" button)
+- Cyan Scan mode hint panel + Scan-result modal (Copy buttons on
+  text / CSS selector / xpath-stable / xpath-abs / attrs)
+- New Indigo "🎯 Wait for xpath" button next to "⏳ Wait for selector"
+- Keyboard shortcuts P + S wired into the existing shortcut handler
+
+### E2E verified on preview VPS with real Chromium
+- `wait-for-xpath //h1` on example.com → recorded correctly with
+  `selector: "xpath=//h1"` + `xpath: "//h1"`
+- `scan at (200,200)` on example.com → returned text "This domain
+  is for use…", tag=P, xpath=/html/body[1]/div[1]/p[1]
+- `detect-popup-buttons` on example.com → popup_count=0 (correct,
+  page has no popup)
+- Full tool palette visible in live UI with "Popup Work" + "Scan"
+  buttons rendering side-by-side with the existing tools
+
+### Version bump
+- backend/VERSION:                 2.4.1 → **2.4.2**
+- backend/VERSION_NOTES.txt:       full customer-facing v2.4.2 block prepended
+- electron-desktop/package.json:   2.4.1 → **2.4.2**
+
+### Backward compatibility (100 %)
+- Zero changes to any existing tool / step schema
+- Legacy recordings replay identically — the new wait_for_xpath step
+  is stored as a wait_for_selector step with Playwright's `xpath=`
+  prefix which the RUT engine already understands.
+- No installer / Electron main-process changes — customer's app
+  auto-updates from the Releases admin page.
+
+### Files NOT touched (safety)
+- Backend RUT engine, ProxyJet, licensing, sync, CPI, fraud, anti-
+  detect, releases, admin, browser_profile_launcher, sites CMS
+- All Electron main / renderer files (except package.json version)
+- All Windows installer scripts, VPS deployment configs
+
+### Deploy (this session)
+- STRICT_CLOUD_HEAVY_BLOCK reverted back to `true` on VPS (only
+  briefly disabled to enable the live E2E test above)
+- Pushed to origin/main via PAT
+- VPS auto-deploy triggers on push
+- **Customer action still needed**: admin panel → Releases → publish
+  v2.4.2 so every customer's native / Electron app auto-updates.

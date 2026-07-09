@@ -46,6 +46,8 @@ import {
   GitBranch,
   X,
   ArrowLeftRight,
+  MessageSquareWarning,
+  ScanSearch,
 } from "lucide-react";
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
@@ -177,6 +179,15 @@ const TOOLS = [
   { id: "check",     icon: CheckSquare, label: "Check Box",   key: "4", help: "Click a checkbox (consent / agree / opt-in) — works on hidden CSS-styled boxes too" },
   { id: "random",    icon: Shuffle,     label: "Random Pick", key: "5", help: "Auto-detect form-selection buttons (Yes/No/radio/checkbox groups) on page → tick the ones to randomise each run" },
   { id: "random_click", icon: MousePointerClick, label: "Random Click", key: "0", help: "Auto-detect ALL clickable CTAs (buttons/links/ads) on the page → tick the ones to randomly click ONE per visit (for offer-flow A/B variants)" },
+  // 2026-01 v2.4.2 — Popup Work: like Random Click but SCOPED to any
+  // currently-visible popup/modal/dialog on the page. Detects the
+  // close (✕) / OK / Cancel / custom buttons INSIDE the popup and
+  // lets the customer tick which ones to add as click steps.
+  { id: "popup_work", icon: MessageSquareWarning, label: "Popup Work", key: "p", help: "Detect ALL buttons inside any visible popup / modal / dialog (close-X, OK, Cancel, custom close-buttons) → tick which ones to add as steps. Perfect for surveys / form pages that throw mid-flow popups." },
+  // 2026-01 v2.4.2 — Scan: click any element to reveal its text,
+  // CSS selector, xpath (stable + absolute) without recording a
+  // step or clicking. Copy-paste locators anywhere.
+  { id: "scan",      icon: ScanSearch,  label: "Scan",        key: "s", help: "Click any element on the page → get its text, CSS selector, xpath (stable + absolute). NO click is performed. Copy the locators for use in RPA Studio / manual steps / wait_for_selector / wait_for_xpath." },
   { id: "capture",   icon: ImageIcon,   label: "Capture",     key: "6", help: "Insert a screenshot marker — shown in Live Activity" },
   { id: "final",     icon: Flag,        label: "Mark Final",  key: "7", help: "Capture this page as conversion target" },
   { id: "nav_only",  icon: ArrowRight,  label: "Move",        key: "8", help: "Click without recording — use to navigate past a Random Pick step" },
@@ -334,6 +345,14 @@ export default function VisualRecorderPage() {
   const [detectedClickables, setDetectedClickables] = useState([]);
   const [selectedRandomKeys, setSelectedRandomKeys] = useState(() => new Set());
   const [detectingClickables, setDetectingClickables] = useState(false);
+  // ── 2026-01 v2.4.2 — Popup Work state (parallel to detectedClickables
+  //                     but scoped to elements INSIDE popups/modals) ──
+  const [detectedPopupItems, setDetectedPopupItems] = useState([]);
+  const [selectedPopupKeys, setSelectedPopupKeys] = useState(() => new Set());
+  const [popupContainerCount, setPopupContainerCount] = useState(0);
+  const [detectingPopups, setDetectingPopups] = useState(false);
+  // ── 2026-01 v2.4.2 — Scan tool result modal ──
+  const [scanResult, setScanResult] = useState(null); // {text, selector, xpath, xpath_stable, xpath_abs, tag, attrs, bbox}
   const [navUrl, setNavUrl] = useState("");
   const [waitMs, setWaitMs] = useState(2000);
   const [busy, setBusy] = useState(false);
@@ -1259,7 +1278,7 @@ export default function VisualRecorderPage() {
           return;
         }
       }
-      // 1-8 — switch tool (only when nothing has focus)
+      // 1-9 — switch tool (only when nothing has focus)
       if (!editable && !ctrl && /^[1-9]$/.test(e.key)) {
         const t = TOOLS[Number(e.key) - 1];
         if (t) {
@@ -1272,8 +1291,33 @@ export default function VisualRecorderPage() {
             // Re-trigger auto-detect when switching via keyboard
             detectClickables();
           }
+          if (t.id === "popup_work") {
+            detectPopupButtons();
+          } else {
+            setDetectedPopupItems([]);
+            setSelectedPopupKeys(new Set());
+            setPopupContainerCount(0);
+          }
           e.preventDefault();
         }
+      }
+      // 2026-01 v2.4.2 — "p" → Popup Work, "s" → Scan (keys chosen so
+      // they don't collide with the numeric 1-9 shortcuts).
+      if (!editable && !ctrl && (e.key === "p" || e.key === "P")) {
+        setTool("popup_work");
+        setPendingRandom([]);
+        setDetectedClickables([]);
+        setSelectedRandomKeys(new Set());
+        detectPopupButtons();
+        e.preventDefault();
+      } else if (!editable && !ctrl && (e.key === "s" || e.key === "S")) {
+        setTool("scan");
+        setPendingRandom([]);
+        setDetectedClickables([]);
+        setSelectedRandomKeys(new Set());
+        setDetectedPopupItems([]);
+        setSelectedPopupKeys(new Set());
+        e.preventDefault();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -1357,6 +1401,16 @@ export default function VisualRecorderPage() {
       } finally {
         setBusy(false);
       }
+      return;
+    }
+
+    // 2026-01 v2.4.2 "scan" tool — inspect an element WITHOUT clicking
+    // it and WITHOUT recording a step. Returns text/selector/xpath so
+    // the customer can paste them into RPA Studio, manual steps or
+    // waits.  Tool stays on "scan" so the user can inspect multiple
+    // elements back-to-back — press Esc / 1 / any other key to leave.
+    if (tool === "scan") {
+      await scanElementAt(x, y);
       return;
     }
 
@@ -1666,6 +1720,144 @@ export default function VisualRecorderPage() {
       toast.error(`Detect failed: ${err.message || err}`);
     } finally {
       setDetectingClickables(false);
+    }
+  };
+
+  // ── 2026-01 v2.4.2 — Popup Work: detect buttons INSIDE popups ─────
+  const detectPopupButtons = async () => {
+    if (!sessionId) return;
+    setDetectingPopups(true);
+    setDetectedPopupItems([]);
+    setSelectedPopupKeys(new Set());
+    setPopupContainerCount(0);
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/detect-popup-buttons`, {
+        method: "GET",
+        headers: authH(),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      const items = Array.isArray(d.items) ? d.items : [];
+      setDetectedPopupItems(items);
+      setPopupContainerCount(Number(d.popup_count) || 0);
+      if (!items.length) {
+        toast.error(d.popup_count > 0
+          ? `Found ${d.popup_count} popup(s) but no clickable buttons inside.`
+          : "No popup/modal/dialog is currently visible on the page.");
+      } else {
+        toast.success(`Detected ${items.length} button(s) across ${d.popup_count} popup(s) — tick the ones to click as steps.`);
+      }
+    } catch (err) {
+      toast.error(`Popup scan failed: ${err.message || err}`);
+    } finally {
+      setDetectingPopups(false);
+    }
+  };
+
+  // Add each ticked popup button as a normal click step (uses the
+  // existing /click endpoint — same code path as a manual click).
+  const addSelectedPopupClicks = async () => {
+    if (!sessionId) return;
+    const picks = Array.from(selectedPopupKeys)
+      .map((idx) => detectedPopupItems[idx])
+      .filter(Boolean);
+    if (!picks.length) {
+      toast.error("Tick at least one popup button first");
+      return;
+    }
+    setBusy(true);
+    let added = 0;
+    try {
+      for (const item of picks) {
+        const cx = Math.round(item.x);
+        const cy = Math.round(item.y);
+        try {
+          const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/click`, {
+            method: "POST",
+            headers: authH(),
+            body: JSON.stringify({ x: cx, y: cy, mode: "default" }),
+          });
+          const d = await r.json();
+          if (r.ok && d.recorded !== false) added += 1;
+        } catch {
+          /* keep going — best effort across the batch */
+        }
+      }
+      toast.success(`Added ${added}/${picks.length} popup click step(s)`);
+      setSelectedPopupKeys(new Set());
+      setDetectedPopupItems([]);
+      setPopupContainerCount(0);
+      refreshState();
+    } catch (err) {
+      toast.error(err.message || String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // ── 2026-01 v2.4.2 — Scan: click any element and see its locators ──
+  //                     No step is recorded and no click is fired on
+  //                     the live page. Just inspection + copy-paste.
+  const scanElementAt = async (x, y) => {
+    if (!sessionId) return;
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/scan`, {
+        method: "POST",
+        headers: authH(),
+        body: JSON.stringify({ x: Math.round(x), y: Math.round(y) }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.ok) {
+        toast.error(d.error || d.detail || "Scan failed");
+        return;
+      }
+      setScanResult(d);
+      toast.success("Element scanned — locators shown");
+    } catch (err) {
+      toast.error(`Scan failed: ${err.message || err}`);
+    }
+  };
+
+  const copyScanValue = async (value, label) => {
+    if (!value) {
+      toast.error("nothing to copy");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(value);
+      toast.success(`${label} copied`);
+    } catch {
+      toast.error("Copy failed — select the value manually");
+    }
+  };
+
+  // ── 2026-01 v2.4.2 — Wait for XPath (sibling of Wait for selector) ─
+  const waitForXpathAction = async () => {
+    if (!sessionId) return;
+    const xp = await vrPrompt(
+      "XPath expression to wait for (e.g. //button[contains(text(),'Continue')] or //div[@id='thank-you']):",
+      ""
+    );
+    if (!xp || !xp.trim()) return;
+    const t = await vrPrompt("Max wait time in ms (default 15000):", "15000");
+    try {
+      const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/wait-for-xpath`, {
+        method: "POST",
+        headers: authH(),
+        body: JSON.stringify({
+          xpath: xp.trim(),
+          timeout_ms: Math.max(500, Number(t) || 15000),
+        }),
+      });
+      const d = await r.json();
+      if (!r.ok || !d.recorded) {
+        toast.error(d.error || d.detail || "XPath wait failed");
+        return;
+      }
+      toast.success("XPath appeared — recorded");
+      refreshState();
+    } catch (e) {
+      toast.error(e.message || "XPath wait failed");
     }
   };
 
@@ -4307,6 +4499,16 @@ export default function VisualRecorderPage() {
                           // to click each button manually anymore.
                           detectClickables();
                         }
+                        // 2026-01 v2.4.2 — auto-scan popups when Popup
+                        // Work tool is selected, and clear popup state
+                        // when switching to any OTHER tool.
+                        if (t.id === "popup_work") {
+                          detectPopupButtons();
+                        } else {
+                          setDetectedPopupItems([]);
+                          setSelectedPopupKeys(new Set());
+                          setPopupContainerCount(0);
+                        }
                       }}
                       title={`${t.help} (key: ${t.key})`}
                       className={`relative flex flex-col items-center justify-center gap-1 py-2 px-1.5 rounded-lg text-xs font-medium transition-all ${
@@ -4455,6 +4657,131 @@ export default function VisualRecorderPage() {
                   </button>
                 </div>
               )}
+
+              {/* ── 2026-01 v2.4.2 — Popup Work checklist panel ──────
+                   Auto-populated by /detect-popup-buttons the moment
+                   the "Popup Work" tool is selected. Same pattern as
+                   the Random checklist above.  Buttons are grouped by
+                   popup_index so the customer can see WHICH popup each
+                   candidate belongs to (useful when 2+ overlapping
+                   modals are open). */}
+              {tool === "popup_work" && (detectingPopups || detectedPopupItems.length > 0 || popupContainerCount > 0) && (
+                <div
+                  className="mt-3 p-3 rounded-lg bg-rose-950/40 border border-rose-700/40"
+                  data-testid="vr-popup-checklist-panel"
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-xs text-rose-300 font-medium">
+                      {detectingPopups ? (
+                        <span className="flex items-center gap-1.5">
+                          <Loader2 className="w-3 h-3 animate-spin" /> Scanning page for popups…
+                        </span>
+                      ) : (
+                        <>
+                          🪟 Popup Work — {popupContainerCount} popup{popupContainerCount === 1 ? "" : "s"} · {detectedPopupItems.length} button{detectedPopupItems.length === 1 ? "" : "s"} · tick the one(s) to add as click steps ({selectedPopupKeys.size}/{detectedPopupItems.length})
+                        </>
+                      )}
+                    </div>
+                    <button
+                      onClick={detectPopupButtons}
+                      disabled={detectingPopups}
+                      title="Re-scan the page for popups now"
+                      className="text-[10px] px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 disabled:opacity-40"
+                      data-testid="vr-popup-rescan-btn"
+                    >
+                      <RefreshCw className={`w-3 h-3 inline mr-1 ${detectingPopups ? "animate-spin" : ""}`} />
+                      Re-scan
+                    </button>
+                  </div>
+                  {!detectingPopups && detectedPopupItems.length > 0 && (
+                    <>
+                      <div className="max-h-56 overflow-y-auto mb-2 flex flex-col gap-1">
+                        {detectedPopupItems.map((el, i) => {
+                          const checked = selectedPopupKeys.has(i);
+                          return (
+                            <label
+                              key={i}
+                              className={`flex items-center gap-2 px-2 py-1 rounded cursor-pointer text-xs ${
+                                checked
+                                  ? "bg-rose-800/50 text-rose-100 border border-rose-500/40"
+                                  : "bg-zinc-900/60 text-zinc-300 hover:bg-zinc-800/60 border border-transparent"
+                              }`}
+                              data-testid={`vr-popup-item-${i}`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={(e) => {
+                                  const next = new Set(selectedPopupKeys);
+                                  if (e.target.checked) next.add(i); else next.delete(i);
+                                  setSelectedPopupKeys(next);
+                                }}
+                                className="accent-rose-500 shrink-0"
+                              />
+                              <span className="text-[9px] font-mono px-1 py-0.5 rounded bg-rose-900/50 text-rose-200 shrink-0">
+                                #{(el.popup_index ?? 0) + 1}
+                              </span>
+                              <span className="flex-1 leading-snug">
+                                <span className="font-medium">{el.text}</span>
+                                <span className="ml-1.5 text-[9px] uppercase tracking-wide text-zinc-500">
+                                  {el.tag}
+                                </span>
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          onClick={() => {
+                            if (selectedPopupKeys.size === detectedPopupItems.length) {
+                              setSelectedPopupKeys(new Set());
+                            } else {
+                              setSelectedPopupKeys(new Set(detectedPopupItems.map((_, i) => i)));
+                            }
+                          }}
+                          className="text-[10px] px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300"
+                          data-testid="vr-popup-toggle-all-btn"
+                        >
+                          {selectedPopupKeys.size === detectedPopupItems.length ? "Clear all" : "Select all"}
+                        </button>
+                        <button
+                          onClick={addSelectedPopupClicks}
+                          disabled={selectedPopupKeys.size < 1 || busy}
+                          className="px-3 py-1.5 rounded bg-rose-600 hover:bg-rose-500 disabled:bg-zinc-700 disabled:text-zinc-500 text-white text-xs font-medium"
+                          data-testid="vr-popup-add-clicks-btn"
+                        >
+                          Add {selectedPopupKeys.size} popup click{selectedPopupKeys.size === 1 ? "" : "s"} as step{selectedPopupKeys.size === 1 ? "" : "s"}
+                        </button>
+                        <span className="text-[10px] text-rose-200/70">
+                          Tip: Each tick becomes a separate click step. Use the ✕ close button in a popup to add a "dismiss popup" step mid-flow.
+                        </span>
+                      </div>
+                    </>
+                  )}
+                  {!detectingPopups && detectedPopupItems.length === 0 && popupContainerCount === 0 && (
+                    <div className="text-[11px] text-rose-200/70">
+                      No popup / modal / dialog is currently visible on the page. Trigger the popup on the live preview (e.g. click something that opens it) then hit <b>Re-scan</b>.
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── 2026-01 v2.4.2 — Scan tool active hint ─────────── */}
+              {tool === "scan" && (
+                <div
+                  className="mt-3 p-3 rounded-lg bg-cyan-950/40 border border-cyan-700/40"
+                  data-testid="vr-scan-hint-panel"
+                >
+                  <div className="text-xs text-cyan-200 leading-snug">
+                    <b>🔎 Scan mode active.</b> Click any element on the live preview to reveal its
+                    text, CSS selector and XPath. Nothing will be clicked or recorded — just
+                    inspection. Copy the locators for use in RPA Studio, manual click steps or
+                    Wait for selector / xpath.
+                  </div>
+                </div>
+              )}
+
 
               {pendingFormFill && (
                 <div className="mt-3 p-3 rounded-lg bg-blue-950/40 border border-blue-700/40">
@@ -4638,6 +4965,19 @@ export default function VisualRecorderPage() {
                     data-testid="vr-wait-selector-btn"
                   >
                     ⏳ Wait for selector
+                  </button>
+                  {/* 2026-01 v2.4.2 — sibling of Wait for selector.
+                       Uses Playwright's `xpath=` prefix so RUT replay
+                       hits the same wait_for_selector engine — no
+                       runtime branching, full backward compat. */}
+                  <button
+                    onClick={waitForXpathAction}
+                    disabled={sessionState !== "ready"}
+                    title="Wait until an XPath expression matches a visible element (fallback / alternative when a CSS selector isn't stable)"
+                    className="px-2 py-1 rounded bg-zinc-800 hover:bg-indigo-700/40 border border-zinc-700 hover:border-indigo-500/40 text-zinc-300 text-[10px] disabled:opacity-40"
+                    data-testid="vr-wait-xpath-btn"
+                  >
+                    🎯 Wait for xpath
                   </button>
                   <button
                     onClick={addWaitForText}
@@ -6221,6 +6561,156 @@ export default function VisualRecorderPage() {
           Output replaces the current `steps` array. Z-index 70 above
           prompt modal so a self-heal prompt mid-AI-call doesn't hide
           this dialog. */}
+      {/* 2026-01 v2.4.2 — Scan Result modal.  Shows the text / CSS
+          selector / xpath (stable + absolute) / attrs of whatever
+          element the customer clicked in Scan mode, each with a Copy
+          button. No step is recorded and no click was fired on the
+          live page. */}
+      {scanResult && (
+        <div
+          className="fixed inset-0 z-[65] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+          data-testid="vr-scan-result-backdrop"
+          onClick={() => setScanResult(null)}
+        >
+          <div
+            className="w-[min(680px,94vw)] max-h-[90vh] overflow-y-auto rounded-2xl border border-cyan-500/40 bg-zinc-950 p-6 shadow-2xl shadow-cyan-900/40"
+            data-testid="vr-scan-result-dialog"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between mb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-cyan-600/20 border border-cyan-500/40 flex items-center justify-center">
+                  <ScanSearch className="w-5 h-5 text-cyan-300" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-semibold text-white">Scanned element</h3>
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    Copy the locators to use anywhere — RPA Studio, manual click steps,
+                    Wait for selector / xpath, custom automation JSON.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setScanResult(null)}
+                className="p-1 text-zinc-500 hover:text-white rounded"
+                data-testid="vr-scan-result-close-btn"
+                aria-label="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              {/* Tag + text summary */}
+              <div className="flex items-center gap-2 text-xs text-zinc-400">
+                <span className="px-2 py-0.5 rounded bg-cyan-900/40 text-cyan-200 font-mono uppercase">
+                  {scanResult.tag || "?"}
+                </span>
+                {scanResult.bbox && (
+                  <span className="text-[10px] text-zinc-500 font-mono">
+                    {scanResult.bbox.w}×{scanResult.bbox.h} @ ({scanResult.bbox.x},{scanResult.bbox.y})
+                  </span>
+                )}
+              </div>
+
+              {/* Text */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-[11px] uppercase tracking-wider text-cyan-300 font-semibold">Text</label>
+                  <button
+                    onClick={() => copyScanValue(scanResult.text, "Text")}
+                    className="text-[10px] px-2 py-0.5 rounded bg-cyan-800/40 hover:bg-cyan-700/50 text-cyan-200 flex items-center gap-1"
+                    data-testid="vr-scan-copy-text-btn"
+                  >
+                    <Copy className="w-3 h-3" /> Copy
+                  </button>
+                </div>
+                <div className="p-2 rounded bg-zinc-900 border border-zinc-800 text-sm text-zinc-100 break-words">
+                  {scanResult.text || <span className="text-zinc-500 italic">(no text)</span>}
+                </div>
+              </div>
+
+              {/* Selector (CSS) */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-[11px] uppercase tracking-wider text-cyan-300 font-semibold">CSS Selector</label>
+                  <button
+                    onClick={() => copyScanValue(scanResult.selector, "Selector")}
+                    className="text-[10px] px-2 py-0.5 rounded bg-cyan-800/40 hover:bg-cyan-700/50 text-cyan-200 flex items-center gap-1"
+                    data-testid="vr-scan-copy-selector-btn"
+                  >
+                    <Copy className="w-3 h-3" /> Copy
+                  </button>
+                </div>
+                <div className="p-2 rounded bg-zinc-900 border border-zinc-800 text-xs text-emerald-200 font-mono break-all">
+                  {scanResult.selector || <span className="text-zinc-500 italic">(none)</span>}
+                </div>
+              </div>
+
+              {/* Xpath (stable, preferred) */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-[11px] uppercase tracking-wider text-cyan-300 font-semibold">XPath (stable)</label>
+                  <button
+                    onClick={() => copyScanValue(scanResult.xpath_stable || scanResult.xpath, "XPath")}
+                    className="text-[10px] px-2 py-0.5 rounded bg-cyan-800/40 hover:bg-cyan-700/50 text-cyan-200 flex items-center gap-1"
+                    data-testid="vr-scan-copy-xpath-btn"
+                  >
+                    <Copy className="w-3 h-3" /> Copy
+                  </button>
+                </div>
+                <div className="p-2 rounded bg-zinc-900 border border-zinc-800 text-xs text-indigo-200 font-mono break-all">
+                  {scanResult.xpath_stable || scanResult.xpath || <span className="text-zinc-500 italic">(none)</span>}
+                </div>
+              </div>
+
+              {/* Xpath absolute (fallback) */}
+              {scanResult.xpath_abs && scanResult.xpath_abs !== (scanResult.xpath_stable || "") && (
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[11px] uppercase tracking-wider text-cyan-300 font-semibold">XPath (absolute)</label>
+                    <button
+                      onClick={() => copyScanValue(scanResult.xpath_abs, "Absolute XPath")}
+                      className="text-[10px] px-2 py-0.5 rounded bg-cyan-800/40 hover:bg-cyan-700/50 text-cyan-200 flex items-center gap-1"
+                      data-testid="vr-scan-copy-xpath-abs-btn"
+                    >
+                      <Copy className="w-3 h-3" /> Copy
+                    </button>
+                  </div>
+                  <div className="p-2 rounded bg-zinc-900 border border-zinc-800 text-xs text-zinc-400 font-mono break-all">
+                    {scanResult.xpath_abs}
+                  </div>
+                </div>
+              )}
+
+              {/* Attributes */}
+              {scanResult.attrs && Object.keys(scanResult.attrs).length > 0 && (
+                <div>
+                  <label className="text-[11px] uppercase tracking-wider text-cyan-300 font-semibold block mb-1">Attributes</label>
+                  <div className="p-2 rounded bg-zinc-900 border border-zinc-800 text-[11px] text-zinc-300 font-mono max-h-32 overflow-y-auto">
+                    {Object.entries(scanResult.attrs).slice(0, 20).map(([k, v]) => (
+                      <div key={k} className="truncate">
+                        <span className="text-amber-300">{k}</span>=<span className="text-emerald-200">&quot;{String(v).slice(0, 120)}&quot;</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <button
+                onClick={() => setScanResult(null)}
+                className="px-3 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs"
+                data-testid="vr-scan-close-btn"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {aiDialogOpen && (
         <div
           className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 backdrop-blur-sm"
