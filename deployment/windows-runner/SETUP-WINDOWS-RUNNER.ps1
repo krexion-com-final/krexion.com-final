@@ -132,7 +132,8 @@ if (-not $SkipTools) {
         @{ name = "yarn";        cmd = "yarn";   args = "--version" },
         @{ name = "innosetup";   cmd = $null;    args = $null },
         @{ name = "7zip";        cmd = "7z";     args = $null },
-        @{ name = "git";         cmd = "git";    args = "--version" }
+        @{ name = "git";         cmd = "git";    args = "--version" },
+        @{ name = "nssm";        cmd = "nssm";   args = $null }
     )
     foreach ($t in $tools) {
         Write-Host "  Installing $($t.name)..."
@@ -217,18 +218,69 @@ try {
 }
 
 # --------------------------------------------------------------------
-# 5. Install as Windows Service (auto-start on boot)
+# 5. Install as Windows Service (auto-start on boot) -- via NSSM
 # --------------------------------------------------------------------
-Write-Step "Installing runner as Windows Service (auto-start on boot)"
-Push-Location $RunnerDir
-try {
-    & .\svc.cmd install
-    if ($LASTEXITCODE -ne 0) { throw "svc.cmd install failed with exit code $LASTEXITCODE" }
-    & .\svc.cmd start
-    if ($LASTEXITCODE -ne 0) { throw "svc.cmd start failed with exit code $LASTEXITCODE" }
-    Write-Ok "Windows service installed and started"
-} finally {
-    Pop-Location
+# Modern actions-runner (v2.315+) removed svc.cmd on Windows. Cleanest
+# cross-version fix: use NSSM (Non-Sucking Service Manager) to wrap
+# run.cmd as a proper Windows service (auto-restart, log rotation,
+# correct working directory). NSSM installs via choco in ~10 sec.
+# --------------------------------------------------------------------
+Write-Step "Installing runner as Windows Service (via NSSM)"
+
+$nssmCmd = Get-Command nssm -ErrorAction SilentlyContinue
+if (-not $nssmCmd) {
+    Write-Host "  Installing NSSM via Chocolatey..."
+    choco install nssm -y --no-progress --limit-output 2>&1 | Select-Object -Last 3
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+    $nssmCmd = Get-Command nssm -ErrorAction SilentlyContinue
+    if (-not $nssmCmd) { throw "NSSM install failed -- cannot proceed" }
+}
+Write-Ok "NSSM ready at $($nssmCmd.Source)"
+
+$svcName = "actions.runner.$RunnerName"
+$runCmd = Join-Path $RunnerDir "run.cmd"
+if (-not (Test-Path $runCmd)) { throw "run.cmd missing in $RunnerDir" }
+
+$existing = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+if ($existing) {
+    Write-Host "  Removing existing service '$svcName'..."
+    Stop-Service $svcName -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    & nssm remove $svcName confirm 2>&1 | Out-Null
+    Start-Sleep -Seconds 2
+}
+
+$diagDir = Join-Path $RunnerDir "_diag"
+if (-not (Test-Path $diagDir)) { New-Item -ItemType Directory -Path $diagDir -Force | Out-Null }
+
+Write-Host "  Installing service '$svcName' wrapping run.cmd..."
+& nssm install $svcName $runCmd
+if ($LASTEXITCODE -ne 0) { throw "nssm install returned $LASTEXITCODE" }
+
+& nssm set $svcName AppDirectory $RunnerDir                                | Out-Null
+& nssm set $svcName Start SERVICE_AUTO_START                               | Out-Null
+& nssm set $svcName DisplayName "GitHub Actions Runner ($RunnerName)"      | Out-Null
+& nssm set $svcName Description "Krexion self-hosted GitHub Actions runner"| Out-Null
+& nssm set $svcName AppStdout (Join-Path $diagDir "service-stdout.log")    | Out-Null
+& nssm set $svcName AppStderr (Join-Path $diagDir "service-stderr.log")    | Out-Null
+& nssm set $svcName AppRotateFiles 1                                       | Out-Null
+& nssm set $svcName AppRotateOnline 1                                      | Out-Null
+& nssm set $svcName AppRotateBytes 10485760                                | Out-Null
+& nssm set $svcName AppExit Default Restart                                | Out-Null
+& nssm set $svcName AppRestartDelay 5000                                   | Out-Null
+
+Write-Host "  Starting service..."
+& nssm start $svcName 2>&1 | Out-Null
+Start-Sleep -Seconds 3
+
+$svcStatus = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+if ($svcStatus -and $svcStatus.Status -eq "Running") {
+    Write-Ok "Windows service '$svcName' installed and running"
+} elseif ($svcStatus) {
+    Write-Warn "Service installed but status is '$($svcStatus.Status)' -- check logs at $diagDir"
+    Write-Host "  Try: nssm start $svcName"
+} else {
+    throw "Service '$svcName' not created -- check nssm errors above"
 }
 
 # --------------------------------------------------------------------
