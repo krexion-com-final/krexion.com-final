@@ -301,6 +301,15 @@ jobs:
           name: krexion-frontend-build
           path: build/frontend-build/
 
+      - name: Set up Node 20 (for local frontend rebuild fallback)
+        # 2026-01-09 — the Windows PC has Node 24 installed via choco
+        # (nodejs-lts latest), but frontend/package.json declares
+        # engines.node = 20.x. Set up Node 20 explicitly for the
+        # local rebuild step below (no-op if cache/artifact worked).
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Build frontend locally (bulletproof fallback if cache + artifact both fail)
         # 2026-01-09 — when GitHub Actions artifact quota is exhausted
         # AND cache save/restore has any hiccup (cross-runner, cross-OS),

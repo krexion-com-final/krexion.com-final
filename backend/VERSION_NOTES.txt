@@ -1572,3 +1572,17 @@
 # build/frontend-build/index.html doesn't exist, runs yarn install +
 # yarn build directly on the Windows PC. Costs ~4 min only when
 # needed, 100% reliable, zero cross-runner dependency.
+
+
+# ─────────────────────────────────────────────────────────────
+# v2.5.0 (2026-01-09) — Node 20 for local frontend rebuild fallback
+# ─────────────────────────────────────────────────────────────
+# v2.4.9 build-installer's local frontend rebuild step ran (as expected,
+# since actions cache continues to miss cross-runner and artifact quota
+# is exhausted) but failed:
+#   error frontend@0.1.0: The engine "node" is incompatible with this
+#   module. Expected version "20.x". Got "24.16.0"
+# The Windows PC has Node 24 (choco nodejs-lts latest), but frontend
+# needs Node 20. Added actions/setup-node@v4 with node-version: 20
+# BEFORE the fallback rebuild step. When cache works, this is a no-op
+# on speed (~2 sec). When rebuild needed, correct Node version is used.
