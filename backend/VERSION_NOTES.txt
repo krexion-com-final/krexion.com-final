@@ -1542,3 +1542,16 @@
 # 'yarn: command not found' because krexion-vps runner doesn't
 # ship yarn pre-installed. Added 'corepack enable + prepare
 # yarn@1.22.22' step to workflow. Retry.
+
+
+# ─────────────────────────────────────────────────────────────
+# v2.4.8 (2026-01-09) — mirror-to-vps fix (curl instead of gh CLI)
+# ─────────────────────────────────────────────────────────────
+# v2.4.7 Electron build succeeded and released
+# Krexion-Desktop-Setup-2.4.7.exe to GitHub. But mirror-to-vps job
+# failed on krexion-vps runner because 'gh' CLI is not installed
+# on the VPS. Fix: replaced gh CLI calls with pure curl+python3
+# (both universally available) in both:
+#   * build-electron-desktop.yml mirror-to-vps
+#   * build-windows-release.yml  mirror-windows-to-vps
+# No customer-facing code changes vs v2.4.2.

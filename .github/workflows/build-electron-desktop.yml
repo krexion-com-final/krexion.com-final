@@ -262,7 +262,7 @@ jobs:
           name: Krexion-Desktop-Setup-${{ needs.build.outputs.version }}
           path: dist
 
-      - name: Fallback — download installer from GitHub Release
+      - name: Fallback — download installer from GitHub Release (via curl)
         if: steps.dl-artifact.outcome != 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -271,21 +271,44 @@ jobs:
           set -e
           mkdir -p dist
           TAG="${{ inputs.release_tag != '' && inputs.release_tag || format('desktop-v{0}', needs.build.outputs.version) }}"
-          echo "Trying GH Release tag: $TAG"
+          REPO="${{ github.repository }}"
+          echo "Trying GH Release tag: $TAG on $REPO"
+          # 2026-01-09 — replaced 'gh' CLI usage with curl. krexion-vps
+          # self-hosted runner doesn't have GitHub CLI installed and we
+          # don't want to introduce that dependency. curl is universally
+          # available and directly hits the GitHub REST API.
           for i in 1 2 3 4 5 6; do
-            if gh release view "$TAG" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            HTTP=$(curl -s -o /tmp/rel.json -w "%{http_code}" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/releases/tags/$TAG")
+            if [ "$HTTP" = "200" ]; then
               echo "  release found on attempt $i"
               break
             fi
-            echo "  attempt $i: release not visible yet, sleeping 10s..."
+            echo "  attempt $i: HTTP $HTTP, sleeping 10s..."
             sleep 10
           done
-          gh release download "$TAG" \
-            -R "${{ github.repository }}" \
-            -D dist \
-            --pattern 'Krexion-Desktop-Setup-*.exe' \
-            --pattern 'Krexion-Desktop-Setup-*.exe.blockmap' \
-            --pattern 'latest.yml'
+          # Extract asset download URLs (Krexion-Desktop-Setup-*.exe*, latest.yml)
+          python3 - <<'PY' > /tmp/assets.tsv
+          import json
+          with open('/tmp/rel.json') as f:
+              d = json.load(f)
+          for a in d.get('assets', []):
+              n = a['name']
+              if n.startswith('Krexion-Desktop-Setup-') or n == 'latest.yml':
+                  print(f"{a['url']}\t{n}")
+          PY
+          echo "Assets to download:"
+          cat /tmp/assets.tsv
+          while IFS=$'\t' read -r URL NAME; do
+            [ -z "$URL" ] && continue
+            echo "Downloading $NAME from $URL ..."
+            curl -sL \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/octet-stream" \
+              -o "dist/$NAME" "$URL"
+          done < /tmp/assets.tsv
 
       - name: List downloaded artifacts (debug)
         run: ls -lah dist/

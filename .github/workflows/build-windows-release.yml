@@ -627,28 +627,50 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Download installer from GitHub Release
+      - name: Download installer from GitHub Release (via curl)
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
           VER: ${{ needs.build-backend.outputs.version }}
         run: |
           set -e
           mkdir -p dist
+          REPO="${{ github.repository }}"
           echo "Downloading Krexion-Setup-${VER}.exe from release ${VER}..."
+          # 2026-01-09 — replaced 'gh' CLI usage with curl. krexion-vps
+          # self-hosted runner doesn't have GitHub CLI installed.
           # Retry up to 6 times — release propagation lag from
           # softprops/action-gh-release@v2 is occasionally up to ~45s.
           for i in 1 2 3 4 5 6; do
-            if gh release view "${VER}" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            HTTP=$(curl -s -o /tmp/rel.json -w "%{http_code}" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/releases/tags/$VER")
+            if [ "$HTTP" = "200" ]; then
               echo "  release visible on attempt $i"
               break
             fi
-            echo "  attempt $i: release not visible yet, sleeping 10s..."
+            echo "  attempt $i: HTTP $HTTP, sleeping 10s..."
             sleep 10
           done
-          gh release download "${VER}" \
-            -R "${{ github.repository }}" \
-            -D dist \
-            --pattern 'Krexion-Setup-*.exe'
+          # Extract asset URLs
+          python3 - <<'PY' > /tmp/assets.tsv
+          import json
+          with open('/tmp/rel.json') as f:
+              d = json.load(f)
+          for a in d.get('assets', []):
+              if a['name'].startswith('Krexion-Setup-') and a['name'].endswith('.exe'):
+                  print(f"{a['url']}\t{a['name']}")
+          PY
+          echo "Assets to download:"
+          cat /tmp/assets.tsv
+          while IFS=$'\t' read -r URL NAME; do
+            [ -z "$URL" ] && continue
+            echo "Downloading $NAME ..."
+            curl -sL \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/octet-stream" \
+              -o "dist/$NAME" "$URL"
+          done < /tmp/assets.tsv
           ls -lah dist/
 
       - name: Copy installer to VPS downloads dir (local — runner IS the VPS)
