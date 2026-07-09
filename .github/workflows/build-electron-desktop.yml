@@ -36,7 +36,11 @@ concurrency:
 jobs:
   build:
     name: Build Electron installer (Windows x64)
-    runs-on: windows-latest
+    # 2026-01-09 — switched from `windows-latest` (paid GH minutes) to
+    # the customer's self-hosted Windows runner. See
+    # deployment/windows-runner/WINDOWS-RUNNER-GUIDE.md for setup +
+    # recovery. Job queues if runner offline (no fallback to hosted).
+    runs-on: [self-hosted, windows, krexion-windows]
     timeout-minutes: 45
     outputs:
       version: ${{ steps.version.outputs.version }}

@@ -507,3 +507,35 @@ Recommended: A. Documented in `/RUNNER-SETUP.md`.
 /RUNNER-SETUP.md                           NEW — collaborator docs
 memory/PRD.md                              this section
 ```
+
+---
+
+### 2026-01-09 — Option B: Windows Self-Hosted Runner (Emergent E1 session)
+
+**Context:** Previous collaborator switched Linux deploys to `krexion-vps` self-hosted runner. Windows builds (`build-windows-release.yml`, `build-electron-desktop.yml`) still on `windows-latest`. User chose Option B (self-hosted Windows) — permanent free Windows builds.
+
+**Files added:**
+```
+deployment/windows-runner/SETUP-WINDOWS-RUNNER.ps1   NEW — PowerShell installer (276 lines)
+deployment/windows-runner/SETUP-WINDOWS-RUNNER.bat   NEW — Admin-launcher (67 lines)
+deployment/windows-runner/WINDOWS-RUNNER-GUIDE.md    NEW — Urdu+English guide (270 lines)
+```
+
+**Files modified:**
+```
+.github/workflows/build-windows-release.yml   runs-on: [self-hosted, windows, krexion-windows] (2 jobs)
+.github/workflows/build-electron-desktop.yml  runs-on: [self-hosted, windows, krexion-windows] (1 job)
+RUNNER-SETUP.md                                Windows section rewritten (self-hosted, not billing)
+```
+
+**Runner label:** `krexion-windows` (with `self-hosted`, `windows`, `X64` also applied)
+**Install target:** `C:\krexion-runner\` on user's Windows PC
+**Setup script installs:** Chocolatey + Python 3.11 + Node 20 + Yarn + Inno Setup 6 + 7-Zip + Git + GitHub Actions runner v2.335.1 as Windows Service
+**Trigger discipline:** Windows + Electron builds still fire ONLY on `backend/VERSION` path change (unchanged). This commit does NOT bump VERSION, so only `deploy.yml` fires on this push — Windows workflows will wait until next VERSION bump (safe rollout).
+
+**User workflow going forward:**
+1. On their Windows PC (ONE-TIME): right-click `SETUP-WINDOWS-RUNNER.bat` → Run as administrator → paste PAT → wait ~10 min → verify runner shows Idle in GH Actions runners page.
+2. Keep PC on when pushing to main.
+3. When bumping VERSION: all 3 workflows fire in parallel (VPS deploy + Windows native build + Electron build) on the same commit SHA. Customer PCs get auto-update via `latest.yml`.
+
+**No behavior change for non-VERSION pushes** — VPS still deploys, Windows workflows sleep. Zero risk to production if user hasn't set up their PC runner yet.

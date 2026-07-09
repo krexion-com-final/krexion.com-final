@@ -113,28 +113,58 @@ tail -f /opt/krexion-runner/_diag/Runner_*.log
 
 ## What about Windows builds?
 
-`.github/workflows/build-windows-release.yml` and
-`build-electron-desktop.yml` both use `runs-on: windows-latest`.
-Those still consume GitHub Actions Windows minutes (which are 10x
-more expensive on the free tier and reset separately from Linux
-minutes).
+**Updated 2026-01-09** — Windows builds ab AAP KI apni Windows PC par
+self-hosted runner (`krexion-windows` label) use karte hain. Zero GitHub
+Actions Windows minutes consume hote hain. Setup guide:
 
-**Options if Windows minutes exhaust too:**
+  📖 `deployment/windows-runner/WINDOWS-RUNNER-GUIDE.md`
+
+`.github/workflows/build-windows-release.yml` and
+`build-electron-desktop.yml` dono use `runs-on: [self-hosted, windows,
+krexion-windows]`. Jab bhi `backend/VERSION` file me change ho (aur
+push to main ho), teenon workflows parallel trigger hoti hain:
+
+  1. **Deploy to VPS** (`krexion-vps` runner) — ~10 min
+  2. **Build Native Windows Release** (`krexion-windows` runner) — ~25 min
+  3. **Build Krexion Desktop / Electron** (`krexion-windows` runner) — ~30 min
+
+Sab same commit SHA + same VERSION pe build hote hain. Customer PCs ko
+same push me VPS backend update + Windows installer + Electron installer
++ latest.yml auto-update manifest — sab kuch mil jata hai.
+
+### If your Windows PC runner goes offline
+
+Jobs queue karte hain jab tak runner online na ho. Fix karne ke steps:
+
+- PC on karo → service auto-start ho jayegi
+- `Restart-Service -Name "actions.runner.*"` (PowerShell as admin)
+- Ya full re-install: `.\SETUP-WINDOWS-RUNNER.ps1 -GithubPAT "ghp_xxx"`
+
+### Legacy options (agar aap kabhi hosted par wapas jana chahen)
 
 - **Option A** — enable usage-based billing on the org. Rate for
   Windows: $0.016/min = ~$1.60 for a 100-min build. Set a
   spending limit at
   https://github.com/organizations/krexion-com-final/billing/summary
-- **Option B** — set up a Windows self-hosted runner on any
-  Windows 10/11 machine you own (dedicated workstation, home PC,
-  etc.). Use `runs-on: [self-hosted, windows]` in the workflow.
-  Bootstrap flow is identical to the Linux one above but with
-  `actions-runner-win-x64-*.zip`.
-- **Option C** — accept longer release cadence: only push to main
-  when Windows quota is available (start of billing cycle) so
-  installer builds succeed.
+- **Option C** — accept longer release cadence: push to main sirf
+  tab jab Windows quota available ho (billing cycle ke shuru me).
 
-Recommended: **Option A** — simplest, cheapest, no VPS pollution.
+Ye options tab useful hain jab aap ki apni PC available na ho —
+otherwise `krexion-windows` self-hosted runner recommended remains.
+
+### VERSION bump discipline
+
+Windows / Electron builds sirf tab trigger hote hain jab `backend/VERSION`
+file change hoti hai. Ye ek natural gate hai — chhote docs/config
+pushes se builds trigger nahi hote (unnecessary runner cycles bachte
+hain). Customer-facing release ke liye:
+
+  ```bash
+  echo "2.4.3" > backend/VERSION      # naya version likhho
+  git add backend/VERSION
+  git commit -m "v2.4.3 — <what changed>"
+  git push origin main                # teenon workflows fire ho jayenge
+  ```
 
 ---
 

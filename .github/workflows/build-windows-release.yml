@@ -49,7 +49,13 @@ permissions:
 jobs:
   build-backend:
     name: Bundle backend (embedded Python)
-    runs-on: windows-latest
+    # 2026-01-09 — switched from `windows-latest` (paid GH minutes) to
+    # the customer's self-hosted Windows runner. Setup guide:
+    # deployment/windows-runner/WINDOWS-RUNNER-GUIDE.md
+    # If the Windows runner is offline, this job will queue until it
+    # comes back — it will NOT fall back to `windows-latest` (that's a
+    # cost-of-doing-business decision, not a runtime one).
+    runs-on: [self-hosted, windows, krexion-windows]
     timeout-minutes: 30
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -230,7 +236,8 @@ jobs:
 
   build-installer:
     name: Build Krexion-Setup.exe
-    runs-on: windows-latest
+    # 2026-01-09 — self-hosted Windows runner (see build-backend job).
+    runs-on: [self-hosted, windows, krexion-windows]
     needs: [build-backend, build-frontend]
     if: always() && needs.build-backend.result == 'success' && needs.build-frontend.result == 'success'
     # Timeout raised from 30 -> 75 min in v1.0.10:
