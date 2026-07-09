@@ -84,7 +84,12 @@ if ($LASTEXITCODE -ne 0) { throw "nssm install returned $LASTEXITCODE" }
 & nssm set $svcName AppRotateBytes 10485760                                | Out-Null
 & nssm set $svcName AppExit Default Restart                                | Out-Null
 & nssm set $svcName AppRestartDelay 5000                                   | Out-Null
-Write-Ok "Service configured"
+
+# CRITICAL: PATH must prefer Git Bash over WSL so 'shell: bash' works
+$gitBash1 = "C:\Program Files\Git\bin"
+$gitBash2 = "C:\Program Files\Git\usr\bin"
+& nssm set $svcName AppEnvironmentExtra "PATH=$gitBash1;$gitBash2;%PATH%" | Out-Null
+Write-Ok "Service configured (with Git Bash PATH priority)"
 
 Write-Step "Starting service"
 & nssm start $svcName 2>&1 | Out-Null

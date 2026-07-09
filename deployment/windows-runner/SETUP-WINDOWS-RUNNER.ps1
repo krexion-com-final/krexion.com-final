@@ -269,6 +269,18 @@ if ($LASTEXITCODE -ne 0) { throw "nssm install returned $LASTEXITCODE" }
 & nssm set $svcName AppExit Default Restart                                | Out-Null
 & nssm set $svcName AppRestartDelay 5000                                   | Out-Null
 
+# CRITICAL: Prepend Git Bash to service PATH so 'shell: bash' in GitHub
+# workflows resolves to Git Bash (C:\Program Files\Git\usr\bin\bash.exe)
+# and NOT to Windows System32 WSL launcher (which fails with error
+# 'Bash/WSL_E_LOCAL_SYSTEM_NOT_SUPPORTED' when the runner service runs
+# under LocalSystem/NetworkService account). Without this, EVERY workflow
+# step declaring 'shell: bash' fails immediately on step start.
+$gitBash1 = "C:\Program Files\Git\bin"
+$gitBash2 = "C:\Program Files\Git\usr\bin"
+$envPath = "PATH=$gitBash1;$gitBash2;%PATH%"
+& nssm set $svcName AppEnvironmentExtra $envPath                           | Out-Null
+Write-Ok "Service PATH configured to prefer Git Bash over WSL"
+
 Write-Host "  Starting service..."
 & nssm start $svcName 2>&1 | Out-Null
 Start-Sleep -Seconds 3
