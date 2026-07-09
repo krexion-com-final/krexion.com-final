@@ -1533,3 +1533,12 @@
 #   4. pwsh missing (setup-python needs it)   → choco install pwsh
 #   5. ubuntu-latest quota exhausted          → moved Linux jobs to krexion-vps
 # No customer-facing code changes vs v2.4.2.
+
+
+# ─────────────────────────────────────────────────────────────
+# v2.4.7 (2026-01-09) — retry after yarn/corepack fix on VPS runner
+# ─────────────────────────────────────────────────────────────
+# v2.4.6 Native Windows Release failed at frontend build with
+# 'yarn: command not found' because krexion-vps runner doesn't
+# ship yarn pre-installed. Added 'corepack enable + prepare
+# yarn@1.22.22' step to workflow. Retry.
