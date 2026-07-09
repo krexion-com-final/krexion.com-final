@@ -1509,3 +1509,14 @@
 # PATH via `nssm set ... AppEnvironmentExtra`. Setup script now
 # does this automatically for all future installs.
 # No customer-facing code changes vs v2.4.3/v2.4.2.
+
+
+# ─────────────────────────────────────────────────────────────
+# v2.4.5 (2026-01-09) — retry after PS execution policy fix
+# ─────────────────────────────────────────────────────────────
+# v2.4.4 build progressed past 'Compute version' but failed at
+# 'Set up Python 3.11' because actions/setup-python@v5's helper
+# setup.ps1 was blocked by LocalSystem's default Restricted execution
+# policy. Fixed by setting LocalMachine scope to RemoteSigned. Retry
+# to validate full Native + Electron build pipeline. No customer-
+# facing code changes vs v2.4.2.
