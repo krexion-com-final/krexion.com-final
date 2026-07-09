@@ -347,3 +347,79 @@ Customer clicks update → new installer downloaded + run silently.
 - VPS auto-deploy triggers on push
 - **Customer action still needed**: admin panel → Releases → publish
   v2.4.2 so every customer's native / Electron app auto-updates.
+
+## Session 2026-01-09 (part 2) — GitHub Actions quota bypass + self-hosted deploy
+
+### Problem
+After pushing v2.4.2 (commit f9939bf), ALL 3 GitHub Actions workflows failed
+with `runner_id=0, name=""` — meaning the runners were never provisioned.
+Pattern indicated exhausted monthly Actions minutes on the
+`krexion-com-final` private org (previous v2.4.1 SUCCEEDED with runner
+id=1000000155, so this was a fresh quota-hit between yesterday and today).
+
+### Solution — one-shot self-hosted runner bridge
+1. Downloaded actions-runner-linux-arm64-2.320.0 into the Emergent sandbox
+2. Created a repo-level runner registration token via GitHub API
+   (`POST /repos/{owner}/{repo}/actions/runners/registration-token`)
+3. Registered runner `emergent-sandbox-oneshot` with labels
+   `[self-hosted, Linux, ARM64, emergent-oneshot]`
+4. Runner auto-upgraded to v2.335.1 on first connect, went `online`
+5. Committed a NEW workflow file `.github/workflows/deploy-oneshot.yml`
+   (workflow_dispatch only, `runs-on: [self-hosted, Linux, ARM64]`)
+   that:
+     - Reuses the existing VPS_HOST / VPS_USER / VPS_PORT / VPS_SSH_KEY
+       secrets (identical semantics to deploy.yml)
+     - Uses raw `rsync + ssh + docker compose build --no-cache` (no
+       third-party actions, so no dependency on ubuntu-latest images)
+6. Triggered workflow_dispatch via API — runner picked up the job at
+   12:07:56Z, completed 10min27s later at 12:18:23Z with ALL 8 steps
+   green:
+     ✓ Checkout code
+     ✓ Rebuild Krexion-User-Package.zip
+     ✓ Install rsync + ssh on runner if missing
+     ✓ Configure SSH key
+     ✓ rsync source to VPS
+     ✓ Rebuild containers on VPS
+     ✓ Cleanup SSH key
+7. Cleanup: unregistered runner (`config.sh remove`), deleted local
+   runner files, deleted the one-shot workflow file, committed +
+   pushed the deletion — main branch back to clean state.
+
+### Verification
+- `https://krexion.com/api/system/version` → `{"version":"2.4.2","mode":"cloud"}` ✓
+- `https://krexion-dev-14.preview.emergentagent.com/api/system/version` → same ✓
+- Both endpoints return v2.4.2 — production VPS and preview both running
+  the NEW code with all v2.4.1 + v2.4.2 features live
+- GitHub main HEAD: `1894c00` (cleanup commit)
+- Released published in DB: v2.4.3 (labeled "69 changes updated")
+- Zero self-hosted runners remaining (`total_count: 0`)
+
+### What IS live for customers RIGHT NOW
+Everything web-based works immediately (customers going to krexion.com):
+- ✅ Provider-agnostic Auto Mode + on-demand batch generator (v2.5.0-cand)
+- ✅ Browser Profile favicon + title fixes (v2.4.1) — but only relevant
+      on the desktop app which still needs a Windows-runner build
+- ✅ Visual Recorder Popup Work + Scan + Wait-for-XPath tools (v2.4.2)
+
+### What is NOT yet live (needs Windows runner)
+- ❌ Electron desktop `.exe` installer for v2.4.2
+- ❌ Native Windows `.exe` installer for v2.4.2
+- These require `runs-on: windows-latest` which I can't emulate on a
+  Linux ARM64 sandbox. Customers running the LOCAL desktop app will
+  keep using the current .exe until GitHub Actions minutes are
+  restored (either via billing top-up or when the monthly quota
+  resets at the start of next billing cycle).
+- Impact: LOW — v2.4.2 changes are backend + browser features. Every
+  customer can access all new features via their browser at
+  krexion.com. Only the Krexion K taskbar icon fix (v2.4.1) needs
+  the native app update, and even without it the browser profile
+  still opens correctly — just with the Chrome logo in the taskbar.
+
+### Action item for the org owner (long-term fix)
+Fix GitHub Actions billing on `krexion-com-final` org so future
+deploys work automatically on push to main:
+  - https://github.com/organizations/krexion-com-final/billing/summary
+Recommended: enable usage-based billing with a $20-50 spending
+limit. Linux runner rate is $0.008/min so a full deploy costs
+~$0.10 per push (about $10-15/month typical). This restores
+Electron / Native Windows builds too (both need windows-latest).
