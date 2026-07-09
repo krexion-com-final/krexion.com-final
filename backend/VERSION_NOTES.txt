@@ -1495,3 +1495,17 @@
 # the DownloadPage + HomePage buttons already point to, so customers
 # see zero disruption. Customer Electron apps polling latest.yml will
 # get the auto-update prompt on next launch.
+
+
+# ─────────────────────────────────────────────────────────────
+# v2.4.4 (2026-01-09) — retry v2.4.3 build after Git Bash PATH fix
+# ─────────────────────────────────────────────────────────────
+# v2.4.3 build hit Bash/WSL_E_LOCAL_SYSTEM_NOT_SUPPORTED on the
+# freshly-installed krexion-windows self-hosted runner because
+# NSSM launches the service under LocalSystem, and every 'shell: bash'
+# step resolved to C:\Windows\System32\bash.exe (WSL launcher) which
+# refuses to run under LocalSystem. Fixed by prepending
+# 'C:\Program Files\Git\bin' + '\usr\bin' to the runner service's
+# PATH via `nssm set ... AppEnvironmentExtra`. Setup script now
+# does this automatically for all future installs.
+# No customer-facing code changes vs v2.4.3/v2.4.2.
