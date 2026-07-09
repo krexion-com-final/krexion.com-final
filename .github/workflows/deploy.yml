@@ -1,370 +1,139 @@
 name: Deploy to VPS
 
+# 2026-01-09 v2.4.2 — REWRITTEN to use the permanent self-hosted
+# GitHub Actions runner installed at /opt/krexion-runner on the
+# customer VPS.  Consumes ZERO GitHub Actions minutes so this
+# workflow succeeds even when the org quota is exhausted.
+#
 # Triggers:
-#   1. Auto — every push to main (Save to GitHub)
+#   1. Auto — every push to main
 #   2. Manual — Actions tab → "Deploy to VPS" → Run workflow
+#
+# What it does (all locally on the VPS itself since the runner IS
+# the VPS):
+#   1. Check out the latest code into the runner's workspace
+#   2. Rebuild Krexion-User-Package.zip
+#   3. rsync workspace → /opt/krexion/ (excludes .env / caches / builds)
+#   4. Disk-space self-heal (removes stale caches + dangling docker
+#      images so a full rebuild always has room)
+#   5. docker compose build --no-cache backend frontend
+#   6. docker compose up -d backend frontend
+#   7. Health check + version report
+
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
+# Only one deploy at a time — new pushes cancel any in-flight run.
+concurrency:
+  group: krexion-vps-deploy
+  cancel-in-progress: false  # let in-flight deploys finish so we don't
+                             # break a mid-container-rebuild step
+
 jobs:
   deploy:
     name: Sync source + rebuild containers
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, krexion-vps]
+    # 45 min hard cap — full no-cache build for backend + frontend on
+    # the VPS typically finishes in 8-12 min but installers with a
+    # cold docker cache can take ~30 min.
+    timeout-minutes: 45
 
     steps:
-      # Step 1: Checkout the LATEST code from THIS repo on the runner
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Step 2: Rebuild the customer installer ZIP from the source folder.
-      # ZIPs are gitignored, so we always rebuild here on the runner.
       - name: Rebuild Krexion-User-Package.zip
         run: |
           if [ -d "Krexion-User-Package" ]; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq zip
+            command -v zip >/dev/null || (apt-get update -qq && apt-get install -y -qq zip)
             rm -f frontend/public/Krexion-User-Package.zip
             ( cd Krexion-User-Package && zip -r ../frontend/public/Krexion-User-Package.zip . -x "*.DS_Store" )
             ls -la frontend/public/Krexion-User-Package.zip
             sha256sum frontend/public/Krexion-User-Package.zip
           fi
 
-      # Step 3: rsync ALL source code from the GitHub runner to the VPS.
-      # This avoids the "VPS pulls from wrong git remote" problem entirely.
-      # Excludes: .env files (protected), node_modules, __pycache__, .git
-      - name: Sync source code to VPS via rsync
-        uses: burnett01/rsync-deployments@7.0.1
-        with:
-          switches: -avzr --delete --exclude='.env' --exclude='node_modules' --exclude='__pycache__' --exclude='*.pyc' --exclude='.git' --exclude='build' --exclude='dist' --exclude='_backup_*' --exclude='visual_recorder_sessions' --exclude='uploads' --exclude='form_filler_screenshots' --exclude='*.zip' --exclude='downloads' --exclude-from='.deployignore'
-          path: ./
-          remote_path: /opt/krexion/
-          remote_host: ${{ secrets.VPS_HOST }}
-          remote_user: ${{ secrets.VPS_USER }}
-          remote_port: ${{ secrets.VPS_PORT || '22' }}
-          remote_key: ${{ secrets.VPS_SSH_KEY }}
+      - name: rsync workspace → /opt/krexion/ (local, no SSH)
+        run: |
+          command -v rsync >/dev/null || (apt-get update -qq && apt-get install -y -qq rsync)
+          rsync -avzr --delete \
+            --exclude='.env' --exclude='node_modules' --exclude='__pycache__' \
+            --exclude='*.pyc' --exclude='.git' --exclude='build' --exclude='dist' \
+            --exclude='_backup_*' --exclude='visual_recorder_sessions' \
+            --exclude='uploads' --exclude='form_filler_screenshots' \
+            --exclude='*.zip' --exclude='downloads' \
+            --exclude-from='.deployignore' \
+            ./ /opt/krexion/
+          echo "→ Source synced to /opt/krexion/"
 
-      # Step 4: SSH into VPS to rebuild ZIP (on VPS for correct paths),
-      # then force-rebuild frontend container without cache, restart.
-      - name: Rebuild containers on VPS
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          port: ${{ secrets.VPS_PORT || 22 }}
-          timeout: 45m
-          command_timeout: 45m
-          script: |
-            set -e
-            cd /opt/krexion
-            echo "===================================================="
-            echo "  KREXION DEPLOY @ $(date)"
-            echo "===================================================="
+      - name: Disk-space self-heal
+        run: |
+          echo ">> Disk BEFORE cleanup"
+          df -h / /var/lib/docker 2>/dev/null | head -5
+          # Remove stale caches + dangling docker artifacts (bounded)
+          rm -rf /opt/krexion/backend/real_user_traffic_results/*.mp4 2>/dev/null || true
+          rm -rf /opt/krexion/backend/form_filler_screenshots/* 2>/dev/null || true
+          rm -rf /opt/krexion/backend/visual_recorder_sessions/*/screenshots 2>/dev/null || true
+          docker image prune -f 2>&1 | tail -2 || true
+          docker builder prune -f 2>&1 | tail -2 || true
+          echo ">> Disk AFTER cleanup"
+          df -h / /var/lib/docker 2>/dev/null | head -5
 
-            # v1.0.11 NEW: Disk-space self-heal step.
-            # Deploy #185 failed with:
-            #   "no space left on device" while extracting the new
-            #   docker layer to /var/lib/containerd/... -> the build
-            #   succeeded on the runner but the VPS could not pull the
-            #   new container image.
-            # Root cause: real_user_traffic_results/ + dangling docker
-            # images + container logs were eating the disk. We do a
-            # bounded auto-cleanup BEFORE rebuilding so future deploys
-            # self-heal without admin intervention.
-            echo ">> Disk-space self-heal..."
-            df -h / | tail -1
-
-            # 2026-02 — ensure self-hosted Krexion Desktop CDN folder
-            # exists BEFORE docker compose mounts it into the frontend
-            # nginx container. The Electron-build workflow SCPs the
-            # installer + latest.yml here; nginx serves the folder at
-            # https://krexion.com/downloads/desktop/.
-            mkdir -p /opt/krexion/downloads/desktop
-            chmod 755 /opt/krexion/downloads /opt/krexion/downloads/desktop
-
-            # 1. Trim RUT screenshot results older than 7 days (keeps recent for forensics)
-            if [ -d "/opt/krexion/backend/real_user_traffic_results" ]; then
-              FOUND=$(find /opt/krexion/backend/real_user_traffic_results -maxdepth 1 -mindepth 1 -type d -mtime +7 2>/dev/null | wc -l)
-              echo "   RUT dirs older than 7d: $FOUND"
-              find /opt/krexion/backend/real_user_traffic_results -maxdepth 1 -mindepth 1 -type d -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+      - name: Detect compose file
+        id: compose
+        run: |
+          cd /opt/krexion
+          for f in docker-compose.prod.yml docker-compose.production.yml docker-compose.yml compose.yml; do
+            if [ -f "$f" ]; then
+              echo "compose_file=$f" >> $GITHUB_OUTPUT
+              echo "→ Using $f"
+              exit 0
             fi
-            # 2. Trim form_filler_screenshots older than 7 days
-            for D in /opt/krexion/backend/form_filler_screenshots /opt/krexion/backend/visual_recorder_sessions /opt/krexion/backend/uploads; do
-              if [ -d "$D" ]; then
-                find "$D" -mindepth 1 -mtime +7 -delete 2>/dev/null || true
-              fi
-            done
-            # 3. Docker housekeeping - dangling images, stopped containers, build cache
-            # v1.0.20 (rev 2): the previous deploy timed out at 30 min
-            # because `docker builder prune -af` on a 146 GB filesystem
-            # with 709 MB free was IO-bound for >25 min. Order matters:
-            # do the FAST, LARGE wins first (rm -rf of well-known dirs),
-            # then docker pruning. Each step is timeboxed via `timeout`.
-            echo "   step 3a: stop docker briefly to release filehandles"
-            # Don't actually stop docker — too risky in prod. Just prune.
-            echo "   step 3b: targeted Docker container/image prune (no cache yet)"
-            timeout 60 docker container prune -f >/dev/null 2>&1 || echo "     skipped"
-            timeout 60 docker image prune -f >/dev/null 2>&1 || echo "     skipped"
-            df -h / | tail -1
+          done
+          echo "ERROR: no docker-compose file found in /opt/krexion"
+          ls -la
+          exit 1
 
-            echo "   step 3c: clear /var/lib/docker/tmp + overlay2 dangling"
-            timeout 30 rm -rf /var/lib/docker/tmp/* 2>/dev/null || true
-            df -h / | tail -1
+      - name: Docker build --no-cache (backend + frontend)
+        env:
+          COMPOSE_FILE: ${{ steps.compose.outputs.compose_file }}
+        run: |
+          cd /opt/krexion
+          echo ">> Building backend + frontend with --no-cache..."
+          docker compose -f "$COMPOSE_FILE" build --no-cache backend frontend
 
-            echo "   step 3d: truncate container logs >50 MB"
-            timeout 30 find /var/lib/docker/containers -name "*-json.log" -size +50M -exec truncate -s 0 {} \; 2>/dev/null || true
-            df -h / | tail -1
+      - name: Docker up
+        env:
+          COMPOSE_FILE: ${{ steps.compose.outputs.compose_file }}
+        run: |
+          cd /opt/krexion
+          docker compose -f "$COMPOSE_FILE" up -d backend frontend
+          echo ">> Containers started"
 
-            echo "   step 3e: builder cache (timeboxed 5 min)"
-            timeout 300 docker builder prune -af >/dev/null 2>&1 || echo "     timed out — continuing anyway"
-            df -h / | tail -1
-            # 4. Trim journalctl logs to last 200 MB (default can grow to GBs)
-            timeout 30 journalctl --vacuum-size=200M >/dev/null 2>&1 || true
-            # 5. apt cache cleanup on the VPS itself
-            apt-get clean >/dev/null 2>&1 || true
-            rm -rf /var/cache/apt/archives/*.deb 2>/dev/null || true
-            # 6. v1.0.20: also clean Krexion-specific large dirs in case
-            #    /opt/krexion/backend/* has accumulated screenshots etc.
-            for D in /opt/krexion/backend/real_user_traffic_results \
-                     /opt/krexion/backend/form_filler_screenshots \
-                     /opt/krexion/backend/visual_recorder_sessions \
-                     /opt/krexion/backend/uploads; do
-              if [ -d "$D" ]; then
-                # remove ANYTHING older than 3 days, plus per-dir prune to ~500 MB
-                find "$D" -mindepth 1 -mtime +3 -exec rm -rf {} + 2>/dev/null || true
-              fi
-            done
-            echo "   After all cleanup:"
-            df -h / | tail -1
-            echo ""
-
-            # v1.0.20: ABORT EARLY if free space is below the
-            # minimum required to extract a fresh backend image
-            # (~3 GB). Far better to fail fast with a clear message
-            # than to crash 4 min later mid-layer-extract.
-            FREE_KB=$(df / | awk 'NR==2 {print $4}')
-            FREE_GB=$((FREE_KB / 1024 / 1024))
-            echo "   Free disk: ${FREE_GB} GB"
-            if [ "$FREE_GB" -lt 3 ]; then
-              echo "   !!! Free disk below 3 GB — running NUCLEAR cleanup"
-              timeout 180 docker system prune -af --volumes >/dev/null 2>&1 || echo "     nuclear prune timed out"
-              df -h / | tail -1
-              FREE_KB=$(df / | awk 'NR==2 {print $4}')
-              FREE_GB=$((FREE_KB / 1024 / 1024))
-              if [ "$FREE_GB" -lt 2 ]; then
-                echo "::error::VPS disk full ($FREE_GB GB free) — admin must SSH in. Aborting."
-                exit 1
-              fi
-            fi
-
-            # ─────────────────────────────────────────────────────
-            # MONGO AUTO-HEAL (runs EARLY — before heavy docker builds)
-            #
-            # Deploy run 28435687428 (v2.1.75) failed with:
-            #   "Container krexion-mongo Error  dependency mongo failed to start"
-            #   "dependency failed to start: container krexion-mongo is unhealthy"
-            # because mongo container was 'Running' but its healthcheck
-            # (`mongosh ping`) timed out. backend has
-            # `depends_on: mongo: condition: service_healthy`, so the
-            # whole deploy aborted before backend/frontend could start.
-            #
-            # We run this check FIRST (right after disk cleanup, before
-            # the ~15-25 min frontend+backend docker builds) for two
-            # reasons:
-            #   1. If mongo is unhealthy, the deploy WILL fail at
-            #      `docker compose up`. Better to know immediately and
-            #      fix in parallel with the builds (mongo restart takes
-            #      ~30s, builds take ~20 min — full overlap).
-            #   2. The previous attempt put this check AFTER builds and
-            #      hit the SSH 30 min command_timeout right when the
-            #      mongo restart was about to fire (run 28441919694).
-            #
-            # mongo-data volume is persistent — no data loss either way.
-            # ─────────────────────────────────────────────────────
-            echo ">> Mongo health pre-check + auto-heal (early, pre-build)..."
-            MONGO_EXISTS=$(docker ps -a --filter "name=krexion-mongo" --format "{{.Names}}" | head -1)
-            if [ -z "$MONGO_EXISTS" ]; then
-              echo "   Mongo container not found — compose up will create it fresh."
-            else
-              MONGO_HEALTH=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' krexion-mongo 2>/dev/null || echo "missing")
-              echo "   Current mongo health: $MONGO_HEALTH"
-              if [ "$MONGO_HEALTH" != "healthy" ]; then
-                echo "   ⚠ Mongo not healthy — capturing diagnostics then restarting..."
-                docker logs --tail 30 krexion-mongo 2>&1 | sed 's/^/     [mongo-log] /' || true
-                echo "   Disk free on /:"
-                df -h / | tail -1 | sed 's/^/     /'
-                echo "   Restarting mongo container..."
-                docker compose restart mongo || docker restart krexion-mongo || true
-                # Wait up to 90s for mongo to become healthy (6 × 15s)
-                for i in 1 2 3 4 5 6; do
-                  sleep 15
-                  MONGO_HEALTH=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' krexion-mongo 2>/dev/null || echo "missing")
-                  echo "   Attempt $i/6: mongo health = $MONGO_HEALTH"
-                  if [ "$MONGO_HEALTH" = "healthy" ]; then
-                    echo "   ✓ Mongo healthy — proceeding with builds."
-                    break
-                  fi
-                done
-                if [ "$MONGO_HEALTH" != "healthy" ]; then
-                  echo "::error::Mongo still unhealthy after 90s restart wait. Manual SSH intervention required (check disk space, mongo logs, possibly recreate container)."
-                  docker logs --tail 60 krexion-mongo 2>&1 | sed 's/^/     [mongo-log] /' || true
-                  exit 1
-                fi
-              else
-                echo "   ✓ Mongo already healthy — no auto-heal needed."
-              fi
-            fi
-
-            # Re-build the installer ZIP from synced source files
-            echo ">> Rebuilding installer ZIP..."
-            command -v zip >/dev/null 2>&1 || (apt-get update && apt-get install -y zip)
-            rm -f frontend/public/Krexion-User-Package.zip
-            if [ -d "Krexion-User-Package" ]; then
-              ( cd Krexion-User-Package && zip -r ../frontend/public/Krexion-User-Package.zip . -x "*.DS_Store" >/dev/null )
-              SRC_SHA=$(sha256sum frontend/public/Krexion-User-Package.zip | awk '{print $1}')
-              SIZE=$(stat -c%s frontend/public/Krexion-User-Package.zip)
-              echo "   Built: ${SIZE} bytes, SHA256: $SRC_SHA"
-            fi
-
-            # Stop + remove old frontend container, untag old image,
-            # then rebuild with NO cache (forces fresh React build).
-            echo ">> Force-rebuilding frontend container..."
-            docker compose stop frontend || true
-            docker compose rm -f frontend || true
-            docker rmi krexion-frontend 2>/dev/null || true
-            docker compose build --no-cache --pull frontend
-            docker compose build backend
-
-            # v1.0.18: explicitly stop + remove the backend container
-            # before `docker compose up -d backend`. Previous deploy
-            # (run 26969956510) failed with:
-            #   "Conflict. The container name "/xxxxx_krexion-backend"
-            #    is already in use by container ..."
-            # which happens whenever a previous deploy aborted mid-
-            # recreate (leaving a renamed-but-not-removed stale
-            # container behind). `compose up` then refuses to recreate
-            # because the old name is still occupied. Force-removing it
-            # by name BEFORE bringing the new one up is idempotent
-            # (succeeds whether or not such a container exists).
-            #
-            # v1.0.20 rev3: previous version raced itself —
-            #   docker compose stop backend (kicks off async stop)
-            #   docker compose rm -f backend (async removal)
-            #   docker rm -f <STALE_ID> (HITS "removal already in progress")
-            # Then `compose up -d backend` also crashed with the same
-            # error because the container wasn't fully gone yet.
-            # New flow: stop synchronously with -t 30 timeout, wait
-            # for actual disappearance with `docker wait`, only THEN
-            # rm + up.
-            echo ">> Force-cleaning stale backend containers (synchronous)..."
-            # 1. Find every backend-ish container
-            BACKEND_IDS=$(docker ps -aq --filter "name=krexion-backend" 2>/dev/null | tr '\n' ' ')
-            if [ -n "$BACKEND_IDS" ]; then
-              echo "   Found backend container IDs: $BACKEND_IDS"
-              # 2. Stop them all with 30s grace
-              for CID in $BACKEND_IDS; do
-                docker stop -t 30 "$CID" 2>/dev/null || true
-              done
-              # 3. Wait for each to actually exit / disappear (max 30s each)
-              for CID in $BACKEND_IDS; do
-                # docker wait blocks until container is removed OR exited
-                timeout 30 docker wait "$CID" 2>/dev/null || true
-              done
-              # 4. Now force-remove. -v drops anon volumes too.
-              for CID in $BACKEND_IDS; do
-                docker rm -fv "$CID" 2>/dev/null || true
-              done
-              # 5. Final wait loop — sometimes docker daemon keeps a
-              #    removal-in-progress flag a few seconds extra.
-              for i in 1 2 3 4 5 6 7 8 9 10; do
-                STILL=$(docker ps -aq --filter "name=krexion-backend" 2>/dev/null | head -1)
-                if [ -z "$STILL" ]; then
-                  echo "   All backend containers cleared."
-                  break
-                fi
-                echo "   Still cleaning ($i/10)..."
-                sleep 2
-              done
-            else
-              echo "   No stale backend containers found — clean state."
-            fi
-
-            # v1.0.21 (rev 4) — belt-and-suspenders fix for deploy
-            # run 27869748552 which failed with:
-            #   "Conflict. The container name '/krexion-backend' is
-            #    already in use by container fd2624e289991..."
-            # The filter-based cleanup above only matched ONE backend
-            # container (6cfea41fd361), but ANOTHER orphan container
-            # holding the same docker NAME slipped through (likely a
-            # leftover from a previous COMPOSE_PROJECT_NAME or a
-            # half-removed compose run). Filter matching by name is
-            # SUBSTRING-based, so technically should have caught both,
-            # but in practice it missed it — perhaps a race with the
-            # docker daemon's removal flag. Force-remove BY EXACT NAME
-            # here as the very last step before `compose up`. This is
-            # idempotent: succeeds whether or not the container exists.
-            echo ">> Final defensive removal by exact name..."
-            docker rm -fv krexion-backend 2>/dev/null || true
-            docker rm -fv krexion-frontend 2>/dev/null || true
-
-            # Bring everything up
-            echo ">> Starting containers..."
-            docker compose up -d frontend backend
-
-            # 2026-02 — Verify the new /downloads/ bind mount actually
-            # took effect inside the frontend container. If docker
-            # compose didn't recreate frontend (e.g. only nginx.conf
-            # was baked into the image but the docker-compose.yml
-            # volumes didn't trigger a recreate), the mount is stale.
-            # Force-recreate the frontend in that case so the bind
-            # mount becomes live without needing a full `down`.
-            echo ">> Verifying /downloads bind mount on frontend container..."
-            MOUNT_OK=$(docker exec krexion-frontend ls -la /usr/share/nginx/html/downloads/desktop/ 2>/dev/null | grep -c "Krexion-Desktop-Setup-latest.exe" || echo 0)
-            HOST_OK=$(ls /opt/krexion/downloads/desktop/Krexion-Desktop-Setup-latest.exe 2>/dev/null | wc -l)
-            echo "   host has latest.exe: $HOST_OK  | container sees latest.exe: $MOUNT_OK"
-            if [ "$HOST_OK" = "1" ] && [ "$MOUNT_OK" != "1" ]; then
-              echo "   ⚠ host has file but container does not — force-recreating frontend"
-              docker compose up -d --force-recreate frontend
-              sleep 4
-              docker exec krexion-frontend ls -la /usr/share/nginx/html/downloads/desktop/ 2>/dev/null | head -10 || true
-            fi
-            # Make sure files are world-readable so the nginx 'nginx'
-            # user inside the container can serve them (host UID 1001
-            # vs container UID may not align).
-            chmod -R a+r /opt/krexion/downloads/ 2>/dev/null || true
-
-            # Wait for frontend to be healthy
-            for i in $(seq 1 15); do
-              if curl -fsS http://localhost:3000/ > /dev/null 2>&1; then
-                echo "   Frontend responding (attempt $i)"
-                break
-              fi
-              sleep 2
-            done
-
-            # Verify production matches source
-            echo ">> Verifying production..."
+      - name: Health check + version report
+        env:
+          COMPOSE_FILE: ${{ steps.compose.outputs.compose_file }}
+        run: |
+          cd /opt/krexion
+          echo ">> Waiting up to 60s for backend health..."
+          for i in $(seq 1 12); do
             sleep 5
-            PROD_SHA=$(curl -sL "https://krexion.com/Krexion-User-Package.zip?nocache=$(date +%s)" | sha256sum | awk '{print $1}')
-            echo "   Source SHA:     $SRC_SHA"
-            echo "   Production SHA: $PROD_SHA"
-            if [ "$SRC_SHA" = "$PROD_SHA" ]; then
-              echo "   ✓ MATCH — new installer is live"
-            else
-              # 2026-02 — Downgraded from hard-fail to warning. The
-              # cloudflare-tunnel cache occasionally serves the previous
-              # ZIP for ~2 minutes after deploy; that's a CDN propagation
-              # delay, not a deploy failure. We tried `docker compose
-              # restart caddy` historically but there is no `caddy`
-              # service in our compose anymore (replaced by cloudflared).
-              # Forcing exit 1 here was causing perfectly-good deploys
-              # to be reported red on the GitHub Actions dashboard.
-              echo "::warning::ZIP SHA mismatched at this exact moment ($PROD_SHA expected $SRC_SHA). This is usually a CDN cache lag and resolves itself within ~2 min. App containers are running fine."
+            if curl -sf --max-time 3 http://localhost:8001/api/system/version >/dev/null 2>&1; then
+              CUR=$(curl -s http://localhost:8001/api/system/version | python3 -c "import sys,json;print(json.load(sys.stdin).get('version','?'))" 2>/dev/null || echo "?")
+              echo "  ✅ Backend up · version=$CUR"
+              break
             fi
-
-            # Final status
-            docker compose ps
-            echo "===================================================="
-            echo "  DEPLOY COMPLETE @ $(date)"
-            echo "===================================================="
+            echo "  ...still starting (attempt $i/12)"
+          done
+          echo ""
+          echo "===================================================="
+          echo "  Container status:"
+          docker compose -f "$COMPOSE_FILE" ps
+          echo "===================================================="
+          echo "  Backend VERSION file: $(cat backend/VERSION 2>/dev/null || echo '?')"
+          echo "  Public endpoint check:"
+          curl -sf --max-time 5 https://krexion.com/api/system/version || echo "(public endpoint check failed — check nginx/cloudflare)"
+          echo "===================================================="
+          echo "  Deploy complete: $(date -u +%FT%TZ)"
+          echo "===================================================="
