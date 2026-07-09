@@ -157,13 +157,7 @@ jobs:
             sleep 5
             STATE=$(curl -s -H "Authorization: Bearer $GH_PAT" \
               "https://api.github.com/repos/${{ github.repository }}/actions/runners" \
-              | python3 -c "import sys,json
-d = json.load(sys.stdin)
-for r in d.get('runners', []):
-    if r['name'] == 'krexion-vps':
-        print(r['status']); break
-else:
-    print('missing')")
+              | python3 -c "import sys,json; d=json.load(sys.stdin); rs=d.get('runners',[]); m=[r for r in rs if r['name']=='krexion-vps']; print(m[0]['status'] if m else 'missing')")
             echo "attempt $i: krexion-vps status=$STATE"
             if [ "$STATE" = "online" ]; then
               echo "✅ Permanent VPS runner is ONLINE — future deploys will use it automatically"
