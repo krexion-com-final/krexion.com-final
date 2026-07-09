@@ -1,7 +1,7 @@
-#Requires -RunAsAdministrator
+﻿#Requires -RunAsAdministrator
 <#
 ================================================================================
-  Krexion Windows Self-Hosted Runner — One-Click Setup
+  Krexion Windows Self-Hosted Runner -- One-Click Setup
 ================================================================================
   Aapki apni Windows PC pe permanent GitHub Actions runner install karta hai.
   Iske baad har `backend/VERSION` bump par aap ki PC automatically:
@@ -244,7 +244,7 @@ if ($GithubPAT) {
         if ($me) {
             Write-Ok "GitHub sees runner '$($me.name)' status=$($me.status) busy=$($me.busy)"
         } else {
-            Write-Warn "Runner not yet visible in API — may take up to 30s to propagate. Check https://github.com/$repo/settings/actions/runners"
+            Write-Warn "Runner not yet visible in API -- may take up to 30s to propagate. Check https://github.com/$repo/settings/actions/runners"
         }
     } catch { Write-Warn "API check failed: $($_.Exception.Message)" }
 }
@@ -262,12 +262,12 @@ Write-Host "  Labels       : $labels"
 Write-Host "  Install path : $RunnerDir"
 Write-Host "  Repo         : https://github.com/$repo"
 Write-Host ""
-Write-Host "  Har `backend/VERSION` bump par ye PC automatically build karegi:"
+Write-Host '  Har "backend/VERSION" bump par ye PC automatically build karegi:'
 Write-Host "    - Krexion-Setup-<ver>.exe          (native installer)"
 Write-Host "    - Krexion-Desktop-Setup-<ver>.exe  (electron installer)"
 Write-Host ""
 Write-Host "  Verify: https://github.com/$repo/settings/actions/runners"
-Write-Host "  Logs  : Get-Service actions.runner.* | ForEach-Object { `$_.LogName } (or check %USERPROFILE%\actions-runner\_diag\)"
+Write-Host '  Logs  : Check C:\krexion-runner\_diag\Runner_*.log'
 Write-Host ""
 Write-Host "  Restart : Restart-Service $($svc.Name)"
 Write-Host "  Stop    : Stop-Service    $($svc.Name)"

@@ -1,7 +1,7 @@
 @echo off
 setlocal
 :: ============================================================================
-::  Krexion Windows Runner — One-Click Setup Launcher
+::  Krexion Windows Runner -- One-Click Setup Launcher
 :: ============================================================================
 ::  Ye .bat file aap ki Windows PC pe self-hosted GitHub Actions runner
 ::  install karega taake har deploy par Windows + Electron builds free me
