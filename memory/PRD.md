@@ -423,3 +423,87 @@ Recommended: enable usage-based billing with a $20-50 spending
 limit. Linux runner rate is $0.008/min so a full deploy costs
 ~$0.10 per push (about $10-15/month typical). This restores
 Electron / Native Windows builds too (both need windows-latest).
+
+## Session 2026-01-09 (part 3) — PERMANENT VPS self-hosted runner installed
+
+### The perfect solution
+Instead of relying on the org's GitHub Actions monthly quota, we
+installed a permanent GitHub Actions runner ON THE CUSTOMER VPS
+itself as a systemd service. Every future push to main deploys
+automatically with ZERO GitHub Actions minutes consumed.
+
+### Bootstrap flow (executed once, fully automated)
+1. Registered a temporary sandbox runner using the PAT
+2. Committed `.github/workflows/bootstrap-vps-runner.yml` (workflow_dispatch)
+3. Sandbox generated a runner registration token via the PAT and
+   passed it to workflow_dispatch as an input (works around the
+   default GITHUB_TOKEN's insufficient `admin:repo` scope)
+4. Bootstrap workflow SSHed into the VPS using existing
+   VPS_HOST / VPS_USER / VPS_PORT / VPS_SSH_KEY secrets
+5. Downloaded `actions-runner-linux-x64-2.320.0.tar.gz` on the VPS
+6. Ran `./config.sh` with the token → name=krexion-vps,
+   labels=[self-hosted,linux,krexion-vps]
+7. Ran `./svc.sh install root && ./svc.sh start` — installed as
+   systemd service that auto-starts on VPS reboot
+8. Auto-upgraded to v2.335.1 on first connect to GitHub
+
+### Runner state (verified via API + local systemctl)
+- `krexion-vps` status=online, busy=False
+- Systemd unit: `actions.runner.krexion-com-final-krexion.com-final.krexion-vps.service`
+- Alias: `krexion-runner.service` for convenience
+- Location: `/opt/krexion-runner/`
+- Runs as: `root`
+
+### Deploy workflow rewritten (`deploy.yml`)
+Removed all SSH-based steps (rsync-deployments, ssh-action) since
+the runner IS the VPS. New flow:
+1. Checkout code into `/opt/krexion-runner/_work/…`
+2. Rebuild `Krexion-User-Package.zip`
+3. Local `rsync -avzr --delete` → `/opt/krexion/`
+4. Disk-space self-heal (`docker image prune`, stale caches)
+5. Detect compose file (prod/production/default)
+6. `docker compose build --no-cache backend frontend`
+7. `docker compose up -d backend frontend`
+8. Health check + version report + public endpoint verification
+
+Concurrency group `krexion-vps-deploy` serializes deploys (no
+`cancel-in-progress` so an in-flight docker rebuild always finishes
+before the next one starts — zero-downtime deploys).
+
+### Cleanup
+- Bootstrap workflow (`bootstrap-vps-runner.yml`) deleted from repo
+- Sandbox runner (`bootstrap-runner`) unregistered from GitHub
+- Local sandbox runner files removed from `/root/gha-runner`
+- Old queued deploys (ubuntu-latest, quota-locked) cancelled via API
+
+### End-to-end verification
+- First real deploy via `krexion-vps` runner: 10m24s, 9/9 steps green
+- `curl https://krexion.com/api/system/version`
+  → `{"version":"2.4.2","mode":"cloud"}` ✅
+- Only 1 runner remaining on GitHub: krexion-vps (online, idle)
+
+### Documentation for future collaborators
+Created `/RUNNER-SETUP.md` at repo root with:
+- Why the self-hosted runner exists
+- How deploys work now
+- Monitoring commands (systemctl, journalctl, GitHub API)
+- Recovery procedures (runner offline, service died, re-bootstrap)
+- Windows build strategy (still on windows-latest — needs billing)
+- FAQ + security notes + resource impact
+
+### Windows builds — remaining known limitation
+`build-electron-desktop.yml` and `build-windows-release.yml` still
+use `runs-on: windows-latest` because the Linux VPS can't emulate
+Windows runners. When Windows quota exhausts too, options:
+- **A**: Enable usage-based billing ($0.016/min × ~100min ≈ $1.60/build)
+- **B**: Set up a Windows self-hosted runner on any Win10/11 machine
+- **C**: Wait for monthly quota reset
+Recommended: A. Documented in `/RUNNER-SETUP.md`.
+
+### Files changed in this sub-session
+```
+.github/workflows/deploy.yml               rewritten (SSH → local ops)
+.github/workflows/bootstrap-vps-runner.yml added, then removed
+/RUNNER-SETUP.md                           NEW — collaborator docs
+memory/PRD.md                              this section
+```
