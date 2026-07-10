@@ -355,7 +355,7 @@ jobs:
           $env:GENERATE_SOURCEMAP = 'false'
           $craco = ".\node_modules\.bin\craco.cmd"
           if (-not (Test-Path $craco)) { $craco = ".\node_modules\.bin\craco" }
-          if (-not (Test-Path $craco)) { throw "craco binary not found under node_modules/.bin/ — yarn install may be incomplete" }
+          if (-not (Test-Path $craco)) { throw "craco binary not found under node_modules/.bin/ -- yarn install may be incomplete" }
           & $craco build
           if ($LASTEXITCODE -ne 0) { throw "craco build failed with exit $LASTEXITCODE" }
           if (-not (Test-Path "build/index.html")) {

@@ -1586,3 +1586,27 @@
 # needs Node 20. Added actions/setup-node@v4 with node-version: 20
 # BEFORE the fallback rebuild step. When cache works, this is a no-op
 # on speed (~2 sec). When rebuild needed, correct Node version is used.
+
+
+# -------------------------------------------------------------
+# v2.5.1 (2026-01-10) -- Fix Native Windows installer build
+# -------------------------------------------------------------
+# v2.4.6..v2.5.0 Native Windows builds all FAILED at the
+# "Build frontend locally (bulletproof fallback)" step with:
+#   Unexpected token 'yarn' in expression or statement.
+#   The string is missing the terminator: ".
+# Root cause: an em-dash character (U+2014) inside the PowerShell
+# `throw "..."` string on build-windows-release.yml:358. When the
+# temp .ps1 file GitHub Actions writes is read by Windows
+# PowerShell 5.1 as cp1252 instead of UTF-8, the em-dash decodes
+# to `a<E2><80><94>` -- three characters that INCLUDE a `"` which
+# prematurely closes the string literal, making the next tokens
+# (`yarn install may be incomplete"`) unparseable.
+# Fix: replace `--` (em-dash) with `--` (two ASCII hyphens) in
+# that one string. Comments in the same block are unaffected
+# because they contain no quote character.
+# This is also the reason customer Electron auto-update is stuck
+# on 2.4.9 -- native + electron builds share the same trigger
+# (backend/VERSION change), so bumping to 2.5.1 will fire ALL
+# THREE workflows (VPS deploy + Native Windows + Electron)
+# simultaneously and, with the fix, all three should land green.
