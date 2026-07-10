@@ -317,8 +317,23 @@ jobs:
         # installer at "Verify build outputs", just rebuild the frontend
         # locally here on the Windows runner. Costs ~4 min only when
         # actually needed — the Test-Path check skips otherwise.
+        #
+        # 2026-02-10 (v2.5.1) — the `yarn build` script in
+        # frontend/package.json is defined as `CI=false craco build`,
+        # which is Unix-style inline env-var syntax. On Windows
+        # PowerShell that fails instantly with:
+        #     'CI' is not recognized as an internal or external command
+        # We must set $env:CI = 'false' in PowerShell BEFORE invoking
+        # yarn build, otherwise the fallback rebuild aborts in ~70ms
+        # and the installer job fails at "Upload installer artifact"
+        # with "No files were found" (root cause of build #139 failure).
+        #
+        # Also add strict $LASTEXITCODE gates so a silent yarn error
+        # doesn't get swallowed by PowerShell's default Continue mode
+        # (which was masking the CI=false failure until now).
         shell: powershell
         run: |
+          $ErrorActionPreference = 'Stop'
           if ((Test-Path "frontend/build/index.html") -or (Test-Path "build/frontend-build/index.html")) {
             Write-Host "Frontend already available from cache or artifact - skipping local rebuild"
             exit 0
@@ -326,8 +341,16 @@ jobs:
           Write-Host "Frontend missing from cache AND artifact - rebuilding locally..."
           cd frontend
           yarn install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { throw "yarn install failed with exit $LASTEXITCODE" }
           "REACT_APP_BACKEND_URL=http://127.0.0.1:8001" | Out-File -FilePath .env.production -Encoding ASCII
+          # Windows-safe CI env var (yarn build script is `CI=false craco build`)
+          $env:CI = 'false'
+          $env:GENERATE_SOURCEMAP = 'false'
           yarn build
+          if ($LASTEXITCODE -ne 0) { throw "yarn build failed with exit $LASTEXITCODE" }
+          if (-not (Test-Path "build/index.html")) {
+            throw "yarn build reported success but build/index.html is missing"
+          }
           Write-Host "Local frontend build complete."
 
       - name: Verify build outputs available
