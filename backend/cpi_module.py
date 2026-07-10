@@ -680,16 +680,31 @@ async def create_job(payload: CPIJobIn, request: Request):
     # one proxy line now and prepend it. Silent no-op when the provider
     # is empty / disabled / errors — legacy paste + upload flow always
     # wins as a fallback.
+    #
+    # 2026-07 v2.5.3 — For rotating_gateway providers this used to emit
+    # ONE identical line so subsequent CPI visits reused the same
+    # sticky IP. We now request `target_count` rotated-session lines so
+    # each visit gets a fresh IP.
     if getattr(payload, "proxy_provider_id", None):
         try:
             import importlib
             _pp_mod = importlib.import_module("proxy_provider_module")
+            _pp_bulk = getattr(_pp_mod, "get_proxy_lines_from_provider", None)
             _pp_get = getattr(_pp_mod, "get_proxy_from_provider", None)
-            if _pp_get:
+            _added: list = []
+            if _pp_bulk:
+                try:
+                    _cnt = int(getattr(payload, "target_count", 0) or 0) or 10
+                except Exception:
+                    _cnt = 10
+                _pp_res = await _pp_bulk(user["id"], payload.proxy_provider_id, _cnt)
+                _added = list(_pp_res.get("lines") or [])
+            if not _added and _pp_get:
                 _pp_res = await _pp_get(user["id"], payload.proxy_provider_id)
-                _pp_line = _pp_res.get("proxy")
-                if _pp_line:
-                    proxies = [_pp_line, *proxies]
+                if _pp_res.get("proxy"):
+                    _added = [_pp_res["proxy"]]
+            if _added:
+                proxies = [*_added, *proxies]
         except Exception:
             pass
 

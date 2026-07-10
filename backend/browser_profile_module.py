@@ -513,14 +513,33 @@ async def launch_profile(request: Request, profile_id: str,
         "start_url": start_url or doc.get("start_url") or "https://www.google.com/",
     }
     # v2.4.0 wire-up: resolve provider_id → live proxy just before launch
+    # 2026-07 v2.5.3 — For rotating_gateway providers we now request a
+    # single line with session rotation so back-to-back profile launches
+    # don't reuse the same sticky IP.
     _proxy_cfg = doc.get("proxy") or {}
     _provider_id = str(_proxy_cfg.get("provider_id") or "").strip()
     if _provider_id:
         try:
             import importlib
             _pp_mod = importlib.import_module("proxy_provider_module")
+            _pp_bulk = getattr(_pp_mod, "get_proxy_lines_from_provider", None)
             _pp_get = getattr(_pp_mod, "get_proxy_from_provider", None)
-            if _pp_get:
+            _pp_res = None
+            if _pp_bulk:
+                _pp_res = await _pp_bulk(uid, _provider_id, 1)
+                _lines = _pp_res.get("lines") or []
+                _proxy_line = _lines[0] if _lines else None
+                if _pp_res.get("use_proxyjet"):
+                    _proxy_cfg["use_proxyjet"] = True
+                    if _pp_res.get("country"):
+                        _proxy_cfg["proxyjet_country"] = _pp_res["country"]
+                    if _pp_res.get("state"):
+                        _proxy_cfg["proxyjet_state"] = _pp_res["state"]
+                    _proxy_cfg["enabled"] = True
+                elif _proxy_line:
+                    _proxy_cfg["enabled"] = True
+                    _proxy_cfg["server"] = _proxy_line
+            elif _pp_get:
                 _pp_res = await _pp_get(uid, _provider_id)
                 if _pp_res.get("use_proxyjet"):
                     _proxy_cfg["use_proxyjet"] = True
@@ -532,9 +551,9 @@ async def launch_profile(request: Request, profile_id: str,
                 elif _pp_res.get("proxy"):
                     _proxy_cfg["enabled"] = True
                     _proxy_cfg["server"] = _pp_res["proxy"]
-                # Persist the resolved snapshot back onto the doc so the
-                # launcher (which reads .proxy) uses the just-picked value.
-                doc["proxy"] = _proxy_cfg
+            # Persist the resolved snapshot back onto the doc so the
+            # launcher (which reads .proxy) uses the just-picked value.
+            doc["proxy"] = _proxy_cfg
         except Exception as _pp_err:
             logger.warning(f"[browser-profile launch] provider resolve failed: {_pp_err}")
 

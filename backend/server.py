@@ -8574,10 +8574,39 @@ async def rut_create_job(
     # resolve it now and inject the result into the existing proxy
     # variables. Legacy flows (proxies/upload_proxy_id/use_proxyjet
     # _auto) run unchanged when proxy_provider_id == "".
+    #
+    # 2026-07 v2.5.3 — For rotating_gateway / manual_list / api_endpoint
+    # providers we now fetch `total_clicks` unique lines (each with a
+    # rotated session token for gateway kind) so `no_repeated_proxy=on`
+    # runs stop failing with "No more proxies available" after visit #1.
     if proxy_provider_id:
+        _pp_bulk = globals().get("get_proxy_lines_from_provider")
         _pp_resolver = globals().get("get_proxy_from_provider")
-        if _pp_resolver is not None:
-            try:
+        try:
+            if _pp_bulk is not None:
+                # Bulk fetch — one line per planned click so RUT's
+                # no_repeated_proxy dedup has enough headroom.
+                _pp_res = await _pp_bulk(user["id"], proxy_provider_id, int(total_clicks) or 1)
+                if _pp_res.get("use_proxyjet"):
+                    use_proxyjet_auto = True
+                    if _pp_res.get("country"):
+                        proxyjet_country = _pp_res["country"]
+                    if _pp_res.get("state"):
+                        proxyjet_state = _pp_res["state"]
+                elif _pp_res.get("lines"):
+                    _pp_block = "\n".join(_pp_res["lines"])
+                    if proxies and proxies.strip():
+                        proxies = f"{_pp_block}\n{proxies.strip()}"
+                    else:
+                        proxies = _pp_block
+                elif _pp_res.get("error"):
+                    logger.warning(
+                        f"[rut] proxy provider {proxy_provider_id} bulk fetch failed: "
+                        f"{_pp_res['error']} — falling back to single-line resolver"
+                    )
+                    # Fall through to legacy single-line resolver below.
+                    _pp_bulk = None
+            if _pp_bulk is None and _pp_resolver is not None:
                 _pp_res = await _pp_resolver(user["id"], proxy_provider_id)
                 if _pp_res.get("use_proxyjet"):
                     use_proxyjet_auto = True
@@ -8593,8 +8622,8 @@ async def rut_create_job(
                         proxies = _pp_line
                 elif _pp_res.get("error"):
                     logger.warning(f"[rut] proxy provider {proxy_provider_id} failed: {_pp_res['error']} — falling back to legacy proxies")
-            except Exception as _pp_err:  # noqa: BLE001
-                logger.warning(f"[rut] proxy provider resolution failed: {_pp_err}")
+        except Exception as _pp_err:  # noqa: BLE001
+            logger.warning(f"[rut] proxy provider resolution failed: {_pp_err}")
 
     # 1. Link ownership + target URL (fast).
     #    v2.1.17: Cloud is the source of truth for links (per the
@@ -23069,10 +23098,15 @@ except Exception as _fp_err:  # noqa: BLE001
 # Wherever a proxy is used the frontend can pick a provider from a
 # dropdown. Backward-compatible: no providers = existing behavior.
 try:
-    from proxy_provider_module import init_router as _pp_init, get_proxy_from_provider as _pp_get_proxy
+    from proxy_provider_module import (
+        init_router as _pp_init,
+        get_proxy_from_provider as _pp_get_proxy,
+        get_proxy_lines_from_provider as _pp_get_lines,
+    )
     _pp_router = _pp_init(main_db=main_db, get_current_user_dep=get_current_user)
     app.include_router(_pp_router, prefix="/api")
     globals()["get_proxy_from_provider"] = _pp_get_proxy
+    globals()["get_proxy_lines_from_provider"] = _pp_get_lines
     logger.info("Proxy provider module loaded — /api/proxy-providers/* (multi-provider proxy sources)")
 except Exception as _pp_err:  # noqa: BLE001
     logger.error(f"Proxy provider module failed to load: {_pp_err}")

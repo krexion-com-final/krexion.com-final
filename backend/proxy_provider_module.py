@@ -133,13 +133,66 @@ async def _delete(user_id: str, provider_id: str) -> None:
 
 
 # ─── Proxy string resolver ───────────────────────────────────────────
-def _format_gateway_line(cfg: Dict[str, Any], proxy_type: str) -> Optional[str]:
+
+# 2026-07 v2.5.3 — Session token auto-rotation for Rotating Gateway.
+# Popular residential/rotating gateway providers embed a session id in
+# the username. Keeping the same session id → the gateway returns the
+# SAME sticky IP on every connection. To get a fresh IP per visit,
+# the session id must change. We auto-detect the common patterns so
+# customers don't have to add {sid} placeholders manually.
+#
+# Supported tokens (case-insensitive, match the numeric/alnum value
+# right after the token name, up to the next '-' or '_'):
+#   -session-XXXX          (Bright Data, BestGo, IPRoyal, SmartProxy)
+#   -sessid-XXXX           (Oxylabs alternate)
+#   -sessionid-XXXX        (Soax)
+#   -sess-XXXX             (short-form)
+#   -sessionduration-XXX   (NOT rotated — this is duration, not id)
+# Placeholder overrides:
+#   {sid}  → replaced with a fresh random id per line
+_SESSION_TOKEN_RE = re.compile(
+    r"(-(?:session(?:id)?|sessid|sess)-)([A-Za-z0-9]+)",
+    re.IGNORECASE,
+)
+
+
+def _make_session_id() -> str:
+    """Generate a fresh random session id (8-digit numeric — matches
+    the format BestGo/Bright Data/IPRoyal accept)."""
+    return str(random.randint(10**7, 10**9 - 1))
+
+
+def _rotate_session_in_username(username: str) -> str:
+    """Return `username` with any embedded session token replaced by a
+    fresh random id. If no known token is present:
+      • honour `{sid}` placeholder if the user added one manually
+      • otherwise return the string unchanged (caller may still emit
+        multiple identical lines — the gateway may rotate on its own
+        without a session param, e.g. per-connect rotation providers).
+    """
+    if not username:
+        return username
+    if "{sid}" in username:
+        return username.replace("{sid}", _make_session_id())
+    if _SESSION_TOKEN_RE.search(username):
+        return _SESSION_TOKEN_RE.sub(
+            lambda m: f"{m.group(1)}{_make_session_id()}",
+            username,
+            count=1,
+        )
+    return username
+
+
+def _format_gateway_line(cfg: Dict[str, Any], proxy_type: str,
+                        rotate_session: bool = False) -> Optional[str]:
     host = str(cfg.get("gateway_host") or "").strip()
     port = str(cfg.get("gateway_port") or "").strip()
     user = str(cfg.get("username") or "").strip()
     pwd = str(cfg.get("password") or "").strip()
     if not host or not port:
         return None
+    if rotate_session and user:
+        user = _rotate_session_in_username(user)
     scheme = proxy_type or "http"
     if user and pwd:
         return f"{scheme}://{user}:{pwd}@{host}:{port}"
@@ -254,7 +307,6 @@ async def get_proxy_from_provider(user_id: str, provider_id: str) -> Dict[str, A
         proxy = _format_gateway_line(cfg, proxy_type)
         await _bump_use(user_id, provider["id"])
         return {"proxy": proxy, **ret_common} if proxy else {"proxy": None, "error": "gateway_host/port missing", **ret_common}
-
     if kind == "manual_list":
         proxy = _pick_from_manual_list(cfg)
         if proxy and not re.match(r"^[a-zA-Z]+://", proxy):
@@ -290,6 +342,121 @@ async def _bump_use(user_id: str, provider_id: str) -> None:
         )
     except Exception:
         pass
+
+
+# 2026-07 v2.5.3 — Bulk resolver for jobs that need many unique lines.
+async def get_proxy_lines_from_provider(
+    user_id: str, provider_id: str, count: int,
+) -> Dict[str, Any]:
+    """
+    Fetch `count` proxy lines from a single provider. Rotating-gateway
+    kind auto-rotates the session token per line so the customer gets
+    a fresh sticky-IP per visit (critical for RUT `no_repeated_proxy`
+    mode — before this fix, rotating gateways emitted ONE line and RUT
+    aborted with "No more proxies available" after visit #1).
+
+    Return shape:
+      { "lines": ["scheme://user:pass@host:port", ...],
+        "kind":  "...",
+        "provider_id": "...",
+        "provider_name": "...",
+        "proxy_type": "...",
+        "use_proxyjet": bool          (native_proxyjet kind only)
+        "country": "US" (native_proxyjet kind only)
+        "state": "CA"  (native_proxyjet kind only, may be "")
+        "error": "..." (only when nothing usable came back)
+      }
+    """
+    if not provider_id:
+        return {"lines": [], "error": "no provider_id supplied"}
+    provider = await _get(user_id, provider_id)
+    if not provider:
+        return {"lines": [], "error": "provider not found"}
+    if not provider.get("enabled"):
+        return {"lines": [], "error": "provider is disabled"}
+
+    kind = provider.get("kind")
+    cfg = provider.get("config") or {}
+    proxy_type = provider.get("proxy_type") or "http"
+    ret_common = {
+        "provider_id": provider.get("id"),
+        "provider_name": provider.get("name"),
+        "kind": kind,
+        "proxy_type": proxy_type,
+    }
+
+    try:
+        count = max(1, int(count))
+    except Exception:
+        count = 1
+    count = min(count, 5000)  # hard cap
+
+    if kind == "rotating_gateway":
+        host = str(cfg.get("gateway_host") or "").strip()
+        port = str(cfg.get("gateway_port") or "").strip()
+        if not host or not port:
+            return {"lines": [], "error": "gateway_host/port missing", **ret_common}
+        lines: List[str] = []
+        for _ in range(count):
+            ln = _format_gateway_line(cfg, proxy_type, rotate_session=True)
+            if ln:
+                lines.append(ln)
+        await _bump_use(user_id, provider["id"])
+        return {"lines": lines, **ret_common}
+
+    if kind == "manual_list":
+        lines_raw = cfg.get("lines") or ""
+        if isinstance(lines_raw, list):
+            pool = [str(x).strip() for x in lines_raw if str(x).strip()]
+        else:
+            pool = [ln.strip() for ln in str(lines_raw).splitlines() if ln.strip()]
+        if not pool:
+            return {"lines": [], "error": "manual list empty", **ret_common}
+        def _prefix(x: str) -> str:
+            return x if re.match(r"^[a-zA-Z]+://", x) else f"{proxy_type}://{x}"
+        shuffled = pool[:]
+        random.shuffle(shuffled)
+        lines = shuffled[:count] if count <= len(shuffled) else []
+        if not lines:
+            bucket: List[str] = []
+            cur = shuffled[:]
+            while len(bucket) < count:
+                if not cur:
+                    cur = pool[:]
+                    random.shuffle(cur)
+                bucket.append(cur.pop())
+            lines = bucket
+        lines = [_prefix(ln) for ln in lines]
+        await _bump_use(user_id, provider["id"])
+        return {"lines": lines, **ret_common}
+
+    if kind == "api_endpoint":
+        lines: List[str] = []
+        attempts = 0
+        max_attempts = count * 2
+        while len(lines) < count and attempts < max_attempts:
+            attempts += 1
+            p = await _pick_from_api(cfg, proxy_type)
+            if p:
+                lines.append(p)
+        if not lines:
+            return {"lines": [], "error": "api_endpoint returned no proxies", **ret_common}
+        await _bump_use(user_id, provider["id"])
+        return {"lines": lines, **ret_common}
+
+    if kind == "native_proxyjet":
+        await _bump_use(user_id, provider["id"])
+        return {
+            "lines": [],
+            "use_proxyjet": True,
+            "country": cfg.get("country") or "US",
+            "state": cfg.get("state") or "",
+            "gateway": cfg.get("gateway") or "",
+            **ret_common,
+        }
+
+    return {"lines": [], "error": f"unknown kind: {kind}", **ret_common}
+
 
 
 # ─── Router factory ──────────────────────────────────────────────────
@@ -439,6 +606,9 @@ def init_router(main_db, get_current_user_dep) -> APIRouter:
             # tokenising their username (e.g.
             #   "brd-customer-XXX-zone-Y-session-{sid}"
             # becomes 10 unique session-suffixed usernames when count=10).
+            # 2026-07 v2.5.3 — Auto-detect common session tokens
+            # (-session-XXX, -sessid-XXX, -sessionid-XXX, -sess-XXX)
+            # so customers don't have to add {sid} placeholders.
             host = str(cfg.get("gateway_host") or "").strip()
             port = str(cfg.get("gateway_port") or "").strip()
             username_tpl = str(cfg.get("username") or "").strip()
@@ -446,11 +616,7 @@ def init_router(main_db, get_current_user_dep) -> APIRouter:
             if not host or not port:
                 raise HTTPException(400, "gateway_host / gateway_port not configured")
             for _ in range(count):
-                if "{sid}" in username_tpl:
-                    sid = str(random.randint(10**7, 10**9 - 1))
-                    user_final = username_tpl.replace("{sid}", sid)
-                else:
-                    user_final = username_tpl
+                user_final = _rotate_session_in_username(username_tpl)
                 if user_final and pwd:
                     line = f"{proxy_type}://{user_final}:{pwd}@{host}:{port}"
                 else:
