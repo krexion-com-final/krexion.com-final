@@ -197,19 +197,27 @@ jobs:
         # (auto-tag = v<VERSION>). Without this the latest.yml auto-update
         # channel never gets the new build because Electron Desktop only
         # picks up updates from a real GH Release attaching latest.yml.
+        #
+        # 2026-01-10 v2.5.2: marked continue-on-error because on self-hosted
+        # Windows runners the ~600 MB .exe upload hits ECONNRESET after
+        # ~2 min on flaky residential ISPs, leaving the release as a
+        # draft with partial assets. The follow-up "Verify + Repair GH
+        # Release" step below is idempotent and completes/publishes the
+        # release with proper retry semantics.
         if: ${{ inputs.release_tag != '' || github.event_name == 'push' }}
+        continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.release_tag != '' && inputs.release_tag || format('desktop-v{0}', steps.version.outputs.version) }}
           name: Krexion Desktop ${{ steps.version.outputs.version }}
           body: |
-            Krexion Desktop — fully-local edition (auto-update enabled).
+            Krexion Desktop -- fully-local edition (auto-update enabled).
 
-            • Local MongoDB on 127.0.0.1:27117
-            • Local FastAPI backend on 127.0.0.1:8088
-            • React dashboard packaged inside Electron
-            • Heavy workload data never leaves the PC.
-            • **Auto-update**: installed clients running this version or
+            * Local MongoDB on 127.0.0.1:27117
+            * Local FastAPI backend on 127.0.0.1:8088
+            * React dashboard packaged inside Electron
+            * Heavy workload data never leaves the PC.
+            * **Auto-update**: installed clients running this version or
               newer will silently detect future releases and prompt to
               install on next launch.
 
@@ -225,6 +233,124 @@ jobs:
             electron-desktop/dist/latest.yml
           draft: false
           prerelease: false
+
+      - name: Verify + Repair GH Release upload (network resilience)
+        # 2026-01-10 -- softprops/action-gh-release@v2 has no built-in
+        # retry for individual asset uploads. When a big installer .exe
+        # (~600 MB) is uploaded from a self-hosted Windows runner over
+        # a residential ISP link, the upload frequently ECONNRESETs
+        # after ~2 min mid-transfer. When that happens the release is
+        # left as a DRAFT with a partial asset set (usually only
+        # latest.yml + blockmap uploaded, the big .exe missing), and
+        # customer Electron apps looking at latest.yml either 404 on
+        # the .exe download or don't see the new version at all.
+        #
+        # This step:
+        #   1. Locates the release by tag (works even if it's still a
+        #      draft that the earlier step created before ECONNRESET).
+        #   2. For each expected file, compares disk size vs attached
+        #      asset size. If missing or mismatched, deletes the stale
+        #      asset and re-uploads with a 20-minute timeout.
+        #   3. Once all expected files are attached with correct sizes,
+        #      patches the release to draft=false (publishes it).
+        # Wrapped in nick-fields/retry@v3 (3 attempts, 60s wait) so
+        # transient network drops on the RE-upload are also survived.
+        if: ${{ inputs.release_tag != '' || github.event_name == 'push' }}
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 25
+          max_attempts: 3
+          retry_wait_seconds: 60
+          shell: powershell
+          command: |
+            $ErrorActionPreference = 'Stop'
+            $repo    = '${{ github.repository }}'
+            $tag     = if ('${{ inputs.release_tag }}' -ne '') { '${{ inputs.release_tag }}' } else { 'desktop-v${{ steps.version.outputs.version }}' }
+            $token   = '${{ secrets.RELEASE_TOKEN }}'
+            if (-not $token) { $token = '${{ secrets.GITHUB_TOKEN }}' }
+            $expected = @(
+              "electron-desktop/dist/Krexion-Desktop-Setup-${{ steps.version.outputs.version }}.exe",
+              "electron-desktop/dist/Krexion-Desktop-Setup-${{ steps.version.outputs.version }}.exe.blockmap",
+              "electron-desktop/dist/latest.yml"
+            )
+            $headers = @{
+              'Authorization' = "token $token"
+              'Accept'        = 'application/vnd.github+json'
+              'User-Agent'    = 'krexion-release-uploader'
+            }
+            Write-Host "Locating release for tag=$tag ..."
+            $rel = $null
+            try {
+              $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/tags/$tag" -Headers $headers -Method Get
+            } catch {
+              Write-Host "  tag endpoint returned $($_.Exception.Message) -- scanning all releases (incl. drafts)"
+            }
+            if (-not $rel -or -not $rel.id) {
+              $all = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=30" -Headers $headers -Method Get
+              $rel = $all | Where-Object { $_.tag_name -eq $tag } | Select-Object -First 1
+            }
+            if (-not $rel -or -not $rel.id) {
+              throw "Release with tag '$tag' does not exist. The preceding softprops step should have created a draft even on partial upload failure."
+            }
+            Write-Host "  found id=$($rel.id)  draft=$($rel.draft)  assets=$($rel.assets.Count)"
+
+            foreach ($file in $expected) {
+              if (-not (Test-Path $file)) { throw "Expected local file missing on runner: $file" }
+              $name      = [System.IO.Path]::GetFileName($file)
+              $localSize = (Get-Item $file).Length
+              $existing  = $rel.assets | Where-Object { $_.name -eq $name }
+              if ($existing -and $existing.size -eq $localSize) {
+                Write-Host "  [OK]     $name  ($localSize bytes already uploaded)"
+                continue
+              }
+              if ($existing) {
+                Write-Host "  [DELETE] $name  (attached size $($existing.size) != local $localSize)"
+                Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/assets/$($existing.id)" -Headers $headers -Method Delete | Out-Null
+              }
+              Write-Host "  [UPLOAD] $name  ($localSize bytes) ..."
+              $uploadUrl = ($rel.upload_url -replace '\{.*\}$', '') + "?name=$name"
+              $uploadHeaders = @{
+                'Authorization' = "token $token"
+                'Accept'        = 'application/vnd.github+json'
+                'User-Agent'    = 'krexion-release-uploader'
+                'Content-Type'  = 'application/octet-stream'
+              }
+              # Use HttpClient for large files to avoid Invoke-WebRequest
+              # loading the whole payload into memory (600 MB .exe would
+              # OOM). Also lets us set a generous timeout.
+              Add-Type -AssemblyName System.Net.Http
+              $client = New-Object System.Net.Http.HttpClient
+              $client.Timeout = [TimeSpan]::FromMinutes(20)
+              foreach ($k in $uploadHeaders.Keys) {
+                if ($k -ne 'Content-Type') { [void]$client.DefaultRequestHeaders.TryAddWithoutValidation($k, $uploadHeaders[$k]) }
+              }
+              $stream = [System.IO.File]::OpenRead($file)
+              try {
+                $content = New-Object System.Net.Http.StreamContent($stream)
+                $content.Headers.ContentType = New-Object System.Net.Http.Headers.MediaTypeHeaderValue('application/octet-stream')
+                $content.Headers.ContentLength = $localSize
+                $resp = $client.PostAsync($uploadUrl, $content).GetAwaiter().GetResult()
+                if (-not $resp.IsSuccessStatusCode) {
+                  $body = $resp.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+                  throw "Upload of $name failed: HTTP $([int]$resp.StatusCode) $($resp.ReasonPhrase) -- $body"
+                }
+                Write-Host "  [DONE]   $name"
+              } finally {
+                $stream.Dispose()
+                $client.Dispose()
+              }
+              # Refresh release view so the next iteration sees the new asset.
+              $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/$($rel.id)" -Headers $headers -Method Get
+            }
+
+            if ($rel.draft) {
+              Write-Host "Publishing (undraft) release id=$($rel.id) ..."
+              $body = @{ draft = $false } | ConvertTo-Json -Compress
+              Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/$($rel.id)" -Headers $headers -Method Patch -Body $body -ContentType 'application/json' | Out-Null
+            }
+            Write-Host "Release $tag verified and published. Assets present:"
+            $final = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/$($rel.id)" -Headers $headers -Method Get
+            foreach ($a in $final.assets) { Write-Host "  - $($a.name)  size=$($a.size)  state=$($a.state)" }
 
   # ─────────────────────────────────────────────────────────────────
   # 2026-02 — SELF-HOSTED MIRROR on the production VPS.

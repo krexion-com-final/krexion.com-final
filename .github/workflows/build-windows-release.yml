@@ -301,6 +301,25 @@ jobs:
           name: krexion-frontend-build
           path: build/frontend-build/
 
+      - name: Set up Python 3.11 (required by Bundle Playwright Chromium step below)
+        # 2026-01-10 -- v2.5.1 native build failed at "Bundle Playwright
+        # Chromium" because THIS job (build-installer) never sets up a
+        # pinned Python. On the self-hosted Windows PC, bare `python` in
+        # PowerShell resolves to the system Python 3.14 install
+        # (C:\Python314). pip then tries to build greenlet==3.1.1 (a
+        # transitive dep of playwright==1.49.1) from source, and
+        # greenlet's C++ code references internal CPython structs
+        # (_PyInterpreterFrame, Py_C_RECURSION_LIMIT, ...) that were
+        # removed / renamed in Python 3.14 -- cl.exe hard-fails with
+        # C2079/C2027/C2065 errors, no chromium bundle is downloaded,
+        # and Inno Setup produces an incomplete installer.
+        # Pinning to Python 3.11 here (same as build-backend job) makes
+        # pip pick up the prebuilt greenlet 3.1.1 wheel, no compilation
+        # happens, and playwright installs cleanly.
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Set up Node 20 (for local frontend rebuild fallback)
         # 2026-01-09 — the Windows PC has Node 24 installed via choco
         # (nodejs-lts latest), but frontend/package.json declares
@@ -634,7 +653,13 @@ jobs:
         # v1.0.18: previously gated only on the manual input which
         # broke the new auto-trigger path (build ran but no Release
         # was created so the customer couldn't download the .exe).
+        #
+        # 2026-01-10 v2.5.2: continue-on-error because the ~700 MB
+        # native installer .exe often ECONNRESETs mid-upload on
+        # residential ISP self-hosted runners. The "Verify + Repair"
+        # step below is idempotent and completes the release.
         if: startsWith(needs.build-backend.outputs.version, 'v')
+        continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.build-backend.outputs.version }}
@@ -654,6 +679,98 @@ jobs:
           # write` declaration is honoured). Either path -> release
           # publishes successfully, no 403.
           token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Verify + Repair GH Release upload (network resilience)
+        # 2026-01-10 -- same resilience pattern as build-electron-desktop.yml.
+        # Native installer .exe from Inno Setup runs ~700 MB (includes
+        # MongoDB portable + Playwright Chromium bundle + embedded
+        # Python) so ECONNRESET risk is even higher than Electron.
+        # Idempotent: only re-uploads missing or size-mismatched assets,
+        # then publishes the release.
+        if: startsWith(needs.build-backend.outputs.version, 'v')
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 30
+          max_attempts: 3
+          retry_wait_seconds: 60
+          shell: powershell
+          command: |
+            $ErrorActionPreference = 'Stop'
+            $repo  = '${{ github.repository }}'
+            $tag   = '${{ needs.build-backend.outputs.version }}'
+            $token = '${{ secrets.RELEASE_TOKEN }}'
+            if (-not $token) { $token = '${{ secrets.GITHUB_TOKEN }}' }
+            $expected = Get-ChildItem installer/Output -Filter 'Krexion-Setup-*.exe' -File | ForEach-Object { $_.FullName }
+            if (-not $expected -or $expected.Count -eq 0) {
+              throw "No Krexion-Setup-*.exe files found in installer/Output. ISCC compile must have failed."
+            }
+            $headers = @{
+              'Authorization' = "token $token"
+              'Accept'        = 'application/vnd.github+json'
+              'User-Agent'    = 'krexion-release-uploader'
+            }
+            Write-Host "Locating release for tag=$tag ..."
+            $rel = $null
+            try {
+              $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/tags/$tag" -Headers $headers -Method Get
+            } catch {
+              Write-Host "  tag endpoint returned $($_.Exception.Message) -- scanning all releases (incl. drafts)"
+            }
+            if (-not $rel -or -not $rel.id) {
+              $all = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=30" -Headers $headers -Method Get
+              $rel = $all | Where-Object { $_.tag_name -eq $tag } | Select-Object -First 1
+            }
+            if (-not $rel -or -not $rel.id) {
+              throw "Release with tag '$tag' does not exist. The preceding softprops step should have created a draft even on partial upload failure."
+            }
+            Write-Host "  found id=$($rel.id)  draft=$($rel.draft)  assets=$($rel.assets.Count)"
+
+            foreach ($file in $expected) {
+              $name      = [System.IO.Path]::GetFileName($file)
+              $localSize = (Get-Item $file).Length
+              $existing  = $rel.assets | Where-Object { $_.name -eq $name }
+              if ($existing -and $existing.size -eq $localSize) {
+                Write-Host "  [OK]     $name  ($localSize bytes already uploaded)"
+                continue
+              }
+              if ($existing) {
+                Write-Host "  [DELETE] $name  (attached size $($existing.size) != local $localSize)"
+                Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/assets/$($existing.id)" -Headers $headers -Method Delete | Out-Null
+              }
+              Write-Host "  [UPLOAD] $name  ($localSize bytes) ..."
+              $uploadUrl = ($rel.upload_url -replace '\{.*\}$', '') + "?name=$name"
+              Add-Type -AssemblyName System.Net.Http
+              $client = New-Object System.Net.Http.HttpClient
+              $client.Timeout = [TimeSpan]::FromMinutes(25)
+              [void]$client.DefaultRequestHeaders.TryAddWithoutValidation('Authorization', "token $token")
+              [void]$client.DefaultRequestHeaders.TryAddWithoutValidation('Accept', 'application/vnd.github+json')
+              [void]$client.DefaultRequestHeaders.TryAddWithoutValidation('User-Agent', 'krexion-release-uploader')
+              $stream = [System.IO.File]::OpenRead($file)
+              try {
+                $content = New-Object System.Net.Http.StreamContent($stream)
+                $content.Headers.ContentType = New-Object System.Net.Http.Headers.MediaTypeHeaderValue('application/octet-stream')
+                $content.Headers.ContentLength = $localSize
+                $resp = $client.PostAsync($uploadUrl, $content).GetAwaiter().GetResult()
+                if (-not $resp.IsSuccessStatusCode) {
+                  $body = $resp.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+                  throw "Upload of $name failed: HTTP $([int]$resp.StatusCode) $($resp.ReasonPhrase) -- $body"
+                }
+                Write-Host "  [DONE]   $name"
+              } finally {
+                $stream.Dispose()
+                $client.Dispose()
+              }
+              $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/$($rel.id)" -Headers $headers -Method Get
+            }
+
+            if ($rel.draft) {
+              Write-Host "Publishing (undraft) release id=$($rel.id) ..."
+              $body = @{ draft = $false } | ConvertTo-Json -Compress
+              Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/$($rel.id)" -Headers $headers -Method Patch -Body $body -ContentType 'application/json' | Out-Null
+            }
+            Write-Host "Release $tag verified and published. Assets present:"
+            $final = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/$($rel.id)" -Headers $headers -Method Get
+            foreach ($a in $final.assets) { Write-Host "  - $($a.name)  size=$($a.size)  state=$($a.state)" }
 
   # ─────────────────────────────────────────────────────────────────
   # 2026-06 — SELF-HOSTED MIRROR for the Native (Inno-Setup) installer.

@@ -1610,3 +1610,49 @@
 # (backend/VERSION change), so bumping to 2.5.1 will fire ALL
 # THREE workflows (VPS deploy + Native Windows + Electron)
 # simultaneously and, with the fix, all three should land green.
+
+
+# -------------------------------------------------------------
+# v2.5.2 (2026-01-10) -- Fix Native Windows greenlet compile
+#                        AND make GH Release upload resilient
+# -------------------------------------------------------------
+# Two blockers found + fixed after the v2.5.1 build round:
+#
+# 1) NATIVE WINDOWS -- greenlet Python 3.14 compile failure
+#    Symptom: build-installer job failed at "Bundle Playwright
+#    Chromium" with C2079/C2027/C2065 errors from cl.exe while
+#    trying to build greenlet-3.1.1 from source. Root cause: the
+#    build-installer job never called actions/setup-python@v5,
+#    so `python` on the self-hosted Windows PC resolved to the
+#    system install at C:\Python314. greenlet's C++ code
+#    references CPython internals (_PyInterpreterFrame,
+#    Py_C_RECURSION_LIMIT) that were removed/renamed in 3.14, so
+#    pip's fallback source build hit hard compile errors and the
+#    chromium-bundle folder ended up empty (0 MB).
+#    Fix: add `Set up Python 3.11` step in build-installer job
+#    before "Set up Node 20". pip then picks up the prebuilt
+#    greenlet 3.1.1 wheel and playwright installs without any
+#    compilation on the runner.
+#
+# 2) ELECTRON + NATIVE -- GH Release upload ECONNRESET
+#    Symptom: softprops/action-gh-release@v2 succeeds at
+#    uploading the small assets (latest.yml, blockmap) then
+#    ECONNRESETs mid-transfer on the ~600 MB installer .exe.
+#    The release is left as a DRAFT with a partial asset set and
+#    customer Electron auto-update polling latest.yml either
+#    404s on the missing .exe or never sees the new version.
+#    Root cause: the action has no per-asset retry semantics --
+#    a single TCP drop from the residential ISP self-hosted
+#    runner corrupts the whole release. Wrapping in
+#    `nick-fields/retry` around a `uses:` action isn't
+#    supported.
+#    Fix: mark the softprops step continue-on-error and add an
+#    idempotent "Verify + Repair GH Release upload" step
+#    wrapped in nick-fields/retry@v3 (3 attempts, 60s wait).
+#    The step compares each expected file's local size against
+#    the attached asset; if missing or size-mismatched it
+#    deletes the stale asset and re-uploads via System.Net.Http
+#    HttpClient with a 20-25 min timeout. Once every expected
+#    file is attached with the correct size, it PATCHes the
+#    release to draft=false. Applied to BOTH build-electron-
+#    desktop.yml and build-windows-release.yml.
