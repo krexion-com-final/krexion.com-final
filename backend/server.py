@@ -8579,6 +8579,16 @@ async def rut_create_job(
     # providers we now fetch `total_clicks` unique lines (each with a
     # rotated session token for gateway kind) so `no_repeated_proxy=on`
     # runs stop failing with "No more proxies available" after visit #1.
+    #
+    # 2026-07 v2.5.4 — CRITICAL: when the frontend "Auto Mode" toggle is
+    # ON *together with* a non-ProxyJet provider (rotating_gateway,
+    # manual_list, api_endpoint), the frontend still forwards
+    # `use_proxyjet_auto=True` because that's the single flag that
+    # unlocks the auto-proxy code paths. We must force it back to
+    # False after we've resolved the provider — otherwise the BG task
+    # enters ProxyJet ROW-FIRST mode (real_user_traffic.py) which
+    # discards the bulk lines we just generated and errors with
+    # "No more proxies available" (empty parsed_proxies + no_repeated_proxy).
     if proxy_provider_id:
         _pp_bulk = globals().get("get_proxy_lines_from_provider")
         _pp_resolver = globals().get("get_proxy_from_provider")
@@ -8599,6 +8609,18 @@ async def rut_create_job(
                         proxies = f"{_pp_block}\n{proxies.strip()}"
                     else:
                         proxies = _pp_block
+                    # v2.5.4 override: we now have concrete proxy lines
+                    # from the customer's chosen provider — turn OFF the
+                    # ProxyJet auto path so the BG task consumes these
+                    # lines instead of ignoring them. Preserve the
+                    # anti-detect safeties that Auto Mode was enforcing
+                    # (no_repeated_proxy + skip_duplicate_ip) — the
+                    # frontend UI labels them "auto-enabled" so users
+                    # expect them ON when Auto Mode was checked.
+                    if use_proxyjet_auto:
+                        no_repeated_proxy = True
+                        skip_duplicate_ip = True
+                    use_proxyjet_auto = False
                 elif _pp_res.get("error"):
                     logger.warning(
                         f"[rut] proxy provider {proxy_provider_id} bulk fetch failed: "
@@ -8620,6 +8642,11 @@ async def rut_create_job(
                         proxies = f"{_pp_line}\n{proxies.strip()}"
                     else:
                         proxies = _pp_line
+                    # v2.5.4 — same override as the bulk branch above.
+                    if use_proxyjet_auto:
+                        no_repeated_proxy = True
+                        skip_duplicate_ip = True
+                    use_proxyjet_auto = False
                 elif _pp_res.get("error"):
                     logger.warning(f"[rut] proxy provider {proxy_provider_id} failed: {_pp_res['error']} — falling back to legacy proxies")
         except Exception as _pp_err:  # noqa: BLE001
@@ -22135,6 +22162,35 @@ async def vr_scan_element(session_id: str, req: _VRScanReq, user: dict = Depends
         raise HTTPException(status_code=404, detail="Session not found")
     _vr_require_ready(sess)
     return await vr.scan_element_at(sess, req.x, req.y)
+
+
+# 2026-07 v2.5.4 — Wait for button (sibling of Wait for selector but
+# invoked by clicking on the live preview).  Records a
+# `wait_for_selector` step targeting the exact button the customer
+# pointed at.  NO click is fired at record time.
+class _VRWaitButtonReq(BaseModel):
+    x: int
+    y: int
+    timeout_ms: int = 30000
+
+
+@api_router.post("/visual-recorder/{session_id}/wait-for-button")
+async def vr_wait_for_button(session_id: str, req: _VRWaitButtonReq, user: dict = Depends(get_current_user)):
+    """Record a wait-until-visible step for the button under (x, y).
+    Customer clicks the button on the live preview → recorder
+    captures the best selector/xpath for that button and appends a
+    `wait_for_selector` step.  RUT will pause replay until that
+    button becomes visible before proceeding to the next step.
+    Complements "Wait for selector" (typed CSS) and "Wait for
+    xpath" (typed XPath) with a visual, point-and-click option."""
+    if vr is None:
+        raise HTTPException(status_code=500, detail="Visual recorder unavailable")
+    try:
+        sess = vr.get_session(session_id, user["id"])
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    _vr_require_ready(sess)
+    return await vr.add_wait_for_button_at(sess, req.x, req.y, req.timeout_ms)
 
 
 @api_router.get("/visual-recorder/{session_id}/detect-popup-buttons")

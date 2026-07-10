@@ -4550,13 +4550,48 @@ async def scan_element_at(sess: RecorderSession, x: int, y: int) -> Dict[str, An
             return {"ok": False, "error": f"Could not scan element: {e}"}
         if not info:
             return {"ok": False, "error": "No element at that point"}
-        # Build the tidy payload the UI needs — same fields the step
-        # capture pipeline uses, so users can paste any of these into
-        # a manual step without translation.
+        # 2026-07 v2.5.4 — Build a solid CSS selector using the same
+        # priority ladder (data-testid → id → name → aria-label → tag+text)
+        # that the recorded steps use, so the "Copy selector" button
+        # in the UI returns something that ACTUALLY resolves at replay
+        # time. Before this fix, `info["selector"]` was empty (the JS
+        # captured attrs but never composed a selector) so the UI
+        # showed a blank selector string for many scanned elements.
+        _selector_synth = ""
+        _tmp_step: Dict[str, Any] = {}
+        try:
+            _attach_selector_and_xpath(_tmp_step, info)
+            _selector_synth = _tmp_step.get("selector", "") or ""
+        except Exception:
+            _selector_synth = ""
+        # Extra fallbacks if the primary ladder didn't produce anything.
+        if not _selector_synth:
+            attrs = info.get("attrs") or {}
+            tag_l = (info.get("tag") or "").lower()
+            aria = attrs.get("aria-label") if isinstance(attrs, dict) else None
+            if isinstance(aria, str) and aria:
+                aria_esc = aria.replace('"', '\\"')[:60]
+                _selector_synth = f'{tag_l}[aria-label="{aria_esc}"]' if tag_l else f'[aria-label="{aria_esc}"]'
+            elif tag_l:
+                cls = attrs.get("class") if isinstance(attrs, dict) else ""
+                if isinstance(cls, str) and cls.strip():
+                    # Pick the first stable-looking class token
+                    tokens = [c for c in cls.split() if c and not any(x in c.lower() for x in ("hover", "active", "focus", "js-"))]
+                    if tokens:
+                        _selector_synth = f"{tag_l}.{tokens[0]}"
+                    else:
+                        _selector_synth = tag_l
+                else:
+                    _selector_synth = tag_l
+
+        # Existing info["selector"] wins if it happened to be present
+        # (some future JS revision might populate it).
+        selector_final = (info.get("selector") or "").strip() or _selector_synth
+
         out: Dict[str, Any] = {
             "ok": True,
             "text": (info.get("text") or "").strip(),
-            "selector": (info.get("selector") or "").strip(),
+            "selector": selector_final,
             "xpath": (info.get("xpath_stable") or info.get("xpath_abs") or "").strip(),
             "xpath_stable": (info.get("xpath_stable") or "").strip(),
             "xpath_abs": (info.get("xpath_abs") or "").strip(),
@@ -4570,6 +4605,70 @@ async def scan_element_at(sess: RecorderSession, x: int, y: int) -> Dict[str, An
             },
         }
         return out
+
+
+# 2026-07 v2.5.4 — Wait-for-button: click any button in the live preview
+# and record a `wait_for_selector` step targeting that exact button —
+# NO click is fired on the page, only a wait-until-visible step is
+# appended. Useful when the target page loads content lazily: the
+# customer picks the button they know will eventually appear, and
+# during replay RUT pauses until it materialises before proceeding.
+# Customer ask: "wait for button ka aik feature ho jay osko use kr k
+# jis b button ye link pr click krein to wo os k ane tak wait kre
+# jab wo show ho tab process start ho jay".
+async def add_wait_for_button_at(
+    sess: RecorderSession, x: int, y: int, timeout_ms: int = 30000,
+) -> Dict[str, Any]:
+    sess.touch()
+    async with sess.lock:
+        if sess.state != "ready" or not sess.page:
+            return {"recorded": False, "error": f"Session not ready ({sess.state})"}
+        try:
+            info = await sess.page.evaluate(
+                _RICH_ELEMENT_CAPTURE_JS,
+                [int(x), int(y)],
+            )
+        except Exception as e:
+            return {"recorded": False, "error": f"Could not read element: {e}"}
+        if not info:
+            return {"recorded": False, "error": "No element at that point"}
+
+    # Reuse scan's selector-composition ladder outside the lock.
+    _tmp_step: Dict[str, Any] = {}
+    try:
+        _attach_selector_and_xpath(_tmp_step, info)
+    except Exception:
+        pass
+    selector = _tmp_step.get("selector", "") or ""
+    xpath = _tmp_step.get("xpath", "") or ""
+    text = ((info.get("text") or "").strip())[:120]
+
+    # If NEITHER a css selector nor an xpath was derived, fall back to
+    # matching the button by its text content — Playwright's
+    # `text=` engine handles both partial and exact match.
+    if not selector and not xpath and text:
+        selector = f'text="{text}"'
+    if not selector and not xpath:
+        return {"recorded": False, "error": "Could not derive a selector/xpath for this element — try clicking a different part of the button."}
+
+    timeout_ms = max(500, min(int(timeout_ms or 30000), 300000))
+    step: Dict[str, Any] = {
+        "action": "wait_for_selector",
+        "timeout": timeout_ms,
+        # `origin` field lets the UI distinguish "wait for a button
+        # the user pointed at" from a hand-typed wait_for_selector.
+        # RUT engine ignores unknown fields.
+        "origin": "wait_for_button",
+    }
+    if selector:
+        step["selector"] = selector
+    if xpath:
+        step["xpath"] = xpath
+    if text:
+        step["hint_text"] = text
+    # Record the step. NO click is fired.
+    sess.steps.append(step)
+    return {"recorded": True, "step": step}
 
 
 # JS run by detect_popup_buttons — finds visible popup / dialog / modal
@@ -4634,12 +4733,47 @@ _DETECT_POPUP_BUTTONS_JS = r"""
   );
 
   // ── Step 2: enumerate clickables inside each popup ────────────────
-  const BTN_SEL = 'a, button, input[type=submit], input[type=button], input[type=reset], input[type=checkbox], input[type=radio], [role=button], [role=link], [role=checkbox], [role=radio], [aria-label*="close" i], [aria-label*="dismiss" i], [aria-label*="cancel" i], label, [onclick]';
+  const BTN_SEL = 'a, button, input[type=submit], input[type=button], input[type=reset], input[type=checkbox], input[type=radio], [role=button], [role=link], [role=checkbox], [role=radio], [aria-label*="close" i], [aria-label*="dismiss" i], [aria-label*="cancel" i], label, [onclick], [class*="close" i], [class*="dismiss" i], [data-dismiss], [data-close]';
   const normText = (el) => (
     (el.innerText || el.textContent || el.value ||
      el.getAttribute('aria-label') || el.getAttribute('title') || '')
       .replace(/\s+/g, ' ').trim()
   );
+
+  // 2026-07 v2.5.4 — Extract a label even when the button has no text.
+  // Handles the common close-X patterns:
+  //   • <button><svg>…</svg></button>                → "✕ (icon button)"
+  //   • <button class="close" aria-label="Close">    → aria-label wins
+  //   • <span class="modal__close" role="button">    → class hint "close"
+  //   • <i class="fa fa-times"></i>                  → icon class name
+  //   • plain <div style="cursor:pointer">✕</div>    → the ✕ char
+  const iconLabelFor = (el) => {
+    const cls = (el.className && typeof el.className === 'string')
+      ? el.className : '';
+    // 1. cross / times / close / xmark FontAwesome & Material icons
+    if (/(?:^|\s)(fa-(?:times|xmark|close)|icon-close|icon-x|material-icons.*close)/i.test(cls))
+      return '✕ (close)';
+    // 2. class name hint (any word containing close/dismiss/cancel/x-btn)
+    if (/close|dismiss|cancel|xbtn|x-btn|btn-x/i.test(cls))
+      return '✕ (close)';
+    // 3. child SVG with an aria/title
+    const svg = el.querySelector && el.querySelector('svg');
+    if (svg) {
+      const tt = svg.querySelector('title');
+      if (tt && tt.textContent) return tt.textContent.trim().slice(0, 60);
+      const al = svg.getAttribute('aria-label');
+      if (al) return al.trim().slice(0, 60);
+      return '(icon button)';
+    }
+    // 4. Look at innerHTML for ✕ / × unicode
+    const html = (el.innerHTML || '').trim();
+    if (/^[×✕✖✗✘⨯]$/.test((el.innerText || html).replace(/\s+/g, '')))
+      return '✕ (close)';
+    // 5. Font Awesome / Material Icons wrapper without cross keyword
+    if (/(?:^|\s)(fa[- ]|material-icons|icon-)/i.test(cls))
+      return '(icon button)';
+    return '';
+  };
 
   kept.forEach((popup, popupIdx) => {
     const rectP = popup.getBoundingClientRect();
@@ -4651,12 +4785,13 @@ _DETECT_POPUP_BUTTONS_JS = r"""
       if (inside.indexOf(el) !== -1) continue;
       try {
         const cs = window.getComputedStyle(el);
-        if (cs && cs.cursor === 'pointer' && el.children.length === 0) {
+        if (cs && cs.cursor === 'pointer' && el.children.length <= 3) {
           inside.push(el);
         }
       } catch (e) {}
     }
     const seen = new Set();
+    let btnCounter = 0;
     for (const el of inside) {
       try {
         const cs = window.getComputedStyle(el);
@@ -4665,21 +4800,34 @@ _DETECT_POPUP_BUTTONS_JS = r"""
         if (r.width < 4 || r.height < 4) continue;
         const rawText = normText(el);
         // Popup close-Xs often have empty text — synthesise a label
-        // from aria-label / title / class so the UI still shows a
-        // meaningful checkbox row.
+        // from aria-label / title / icon class / SVG so the UI still
+        // shows a meaningful checkbox row.
         let label = rawText;
         if (!label) {
           const al = el.getAttribute('aria-label') || el.getAttribute('title') || '';
           if (al) label = al.trim();
-          else if (el.className && typeof el.className === 'string' &&
-                   /close|dismiss|cancel|x-btn|xbtn/i.test(el.className)) {
-            label = '✕ (close)';
+        }
+        if (!label) {
+          label = iconLabelFor(el);
+        }
+        // v2.5.4 — LAST-RESORT synthetic label so no clickable is dropped.
+        // Small square inline elements at the top-right corner of the
+        // popup are 99% close-Xs even without any hint.
+        if (!label) {
+          const relX = r.left - rectP.left;
+          const relY = r.top - rectP.top;
+          const isSmallSquare = Math.abs(r.width - r.height) < 8 && r.width < 60 && r.width > 8;
+          const nearTopRight = relY < 60 && (rectP.width - (relX + r.width)) < 60;
+          if (isSmallSquare && nearTopRight) {
+            label = '✕ (close corner)';
+          } else {
+            btnCounter += 1;
+            label = `Button #${btnCounter}`;
           }
         }
-        if (!label) continue;
         label = label.slice(0, 200);
         const tag = el.tagName;
-        const dedupKey = `${popupIdx}::${tag}::${label}`;
+        const dedupKey = `${popupIdx}::${tag}::${label}::${Math.round(r.left)}::${Math.round(r.top)}`;
         if (seen.has(dedupKey)) continue;
         seen.add(dedupKey);
         out.push({

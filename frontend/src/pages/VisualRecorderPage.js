@@ -188,6 +188,13 @@ const TOOLS = [
   // CSS selector, xpath (stable + absolute) without recording a
   // step or clicking. Copy-paste locators anywhere.
   { id: "scan",      icon: ScanSearch,  label: "Scan",        key: "s", help: "Click any element on the page → get its text, CSS selector, xpath (stable + absolute). NO click is performed. Copy the locators for use in RPA Studio / manual steps / wait_for_selector / wait_for_xpath." },
+  // 2026-07 v2.5.4 — Wait for Button: point-and-click sibling of the
+  // typed "Wait for selector" / "Wait for xpath" buttons. When active,
+  // clicking any button/link on the live preview inserts a
+  // wait_for_selector step targeting that button (no click fires).
+  // Perfect for lazy-loading offer pages: pick the CTA that eventually
+  // appears, replay pauses until it materialises.
+  { id: "wait_for_button", icon: Clock, label: "Wait for Button", key: "w", help: "Click any button/link on the live page → recorder saves a WAIT-UNTIL-VISIBLE step for that exact button (NO click). Use when the offer page loads the button lazily and RUT needs to pause until it appears." },
   { id: "capture",   icon: ImageIcon,   label: "Capture",     key: "6", help: "Insert a screenshot marker — shown in Live Activity" },
   { id: "final",     icon: Flag,        label: "Mark Final",  key: "7", help: "Capture this page as conversion target" },
   { id: "nav_only",  icon: ArrowRight,  label: "Move",        key: "8", help: "Click without recording — use to navigate past a Random Pick step" },
@@ -1318,6 +1325,15 @@ export default function VisualRecorderPage() {
         setDetectedPopupItems([]);
         setSelectedPopupKeys(new Set());
         e.preventDefault();
+      } else if (!editable && !ctrl && (e.key === "w" || e.key === "W")) {
+        // 2026-07 v2.5.4 — "w" → Wait for Button tool
+        setTool("wait_for_button");
+        setPendingRandom([]);
+        setDetectedClickables([]);
+        setSelectedRandomKeys(new Set());
+        setDetectedPopupItems([]);
+        setSelectedPopupKeys(new Set());
+        e.preventDefault();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -1411,6 +1427,35 @@ export default function VisualRecorderPage() {
     // elements back-to-back — press Esc / 1 / any other key to leave.
     if (tool === "scan") {
       await scanElementAt(x, y);
+      return;
+    }
+
+    // 2026-07 v2.5.4 "wait_for_button" tool — pick a button on the live
+    // page and record a wait-until-visible step for it. NO click is
+    // fired. Perfect for lazy-loading offer pages: recorder captures
+    // the best selector for the button; at replay RUT pauses until
+    // that button becomes visible before continuing.
+    if (tool === "wait_for_button") {
+      setBusy(true);
+      try {
+        const r = await fetch(`${API_URL}/api/visual-recorder/${sessionId}/wait-for-button`, {
+          method: "POST",
+          headers: authH(),
+          body: JSON.stringify({ x: Math.round(x), y: Math.round(y), timeout_ms: 30000 }),
+        });
+        const d = await r.json();
+        if (!r.ok || d.recorded === false) {
+          toast.error(d.error || d.detail || "Could not add wait-for-button step");
+        } else {
+          const hint = d.step?.hint_text ? ` — "${d.step.hint_text}"` : "";
+          toast.success(`⏱️ Wait-for-button step added${hint}`);
+          refreshState();
+        }
+      } catch (err) {
+        toast.error(`Wait-for-button failed: ${err.message || err}`);
+      } finally {
+        setBusy(false);
+      }
       return;
     }
 
