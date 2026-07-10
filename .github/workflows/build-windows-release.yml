@@ -343,13 +343,23 @@ jobs:
           yarn install --frozen-lockfile
           if ($LASTEXITCODE -ne 0) { throw "yarn install failed with exit $LASTEXITCODE" }
           "REACT_APP_BACKEND_URL=http://127.0.0.1:8001" | Out-File -FilePath .env.production -Encoding ASCII
-          # Windows-safe CI env var (yarn build script is `CI=false craco build`)
+          # v2.5.1 — DO NOT use `yarn build`. The build script in
+          # frontend/package.json is `CI=false craco build` (Unix
+          # inline env var syntax). Yarn passes that raw string to
+          # cmd.exe on Windows which errors instantly with:
+          #   'CI' is not recognized as an internal or external command
+          # Fix: set CI in the PowerShell environment (inherited by
+          # craco) and invoke craco directly via its local .bin shim,
+          # bypassing the broken package.json script entirely.
           $env:CI = 'false'
           $env:GENERATE_SOURCEMAP = 'false'
-          yarn build
-          if ($LASTEXITCODE -ne 0) { throw "yarn build failed with exit $LASTEXITCODE" }
+          $craco = ".\node_modules\.bin\craco.cmd"
+          if (-not (Test-Path $craco)) { $craco = ".\node_modules\.bin\craco" }
+          if (-not (Test-Path $craco)) { throw "craco binary not found under node_modules/.bin/ — yarn install may be incomplete" }
+          & $craco build
+          if ($LASTEXITCODE -ne 0) { throw "craco build failed with exit $LASTEXITCODE" }
           if (-not (Test-Path "build/index.html")) {
-            throw "yarn build reported success but build/index.html is missing"
+            throw "craco build reported success but build/index.html is missing"
           }
           Write-Host "Local frontend build complete."
 
