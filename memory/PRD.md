@@ -49,3 +49,33 @@ deployed via `.github/workflows/deploy.yml` (self-hosted VPS runner).
 ## Credentials (preview only — see test_credentials.md)
 - Admin login used to test on Emergent preview URL — see
   `/app/memory/test_credentials.md`.
+
+### 2026-07-10 (later) — v2.5.4 batch fix (4 issues)
+* **Commit**: `3f45539` on main. Deployed.
+* **Files touched**: `backend/server.py`, `backend/visual_recorder.py`,
+  `frontend/src/pages/VisualRecorderPage.js`.
+* **Issue #5 (redux)**: Proxy fix v2.5.3 didn't cover the `use_proxyjet_auto=True`
+  path (RUT Auto Mode toggle). Fixed by forcing that flag to False after
+  resolving a non-ProxyJet provider, while preserving Auto Mode's
+  no_repeated_proxy + skip_duplicate_ip safeties.
+* **Issue #2**: Popup Work now detects SVG-icon close-Xs, Font Awesome
+  icons, unicode ✕/×, and top-right corner buttons. Nothing dropped
+  silently (fallback = 'Button #N').
+* **Issue #1**: Scan tool now returns a real CSS selector (composed
+  server-side using the same ladder as recorded steps).
+* **Issue #3 (NEW FEATURE)**: 'Wait for Button' tool — point-and-click
+  sibling of Wait for Selector / Wait for XPath. Records a
+  wait_for_selector step for whatever button the user pointed at.
+  Backend: add_wait_for_button_at() + /api/visual-recorder/{sid}/wait-for-button
+  endpoint. Frontend: new tool mode with Clock icon + "W" keyboard shortcut.
+
+### Pending — Issue #4 (RUT profile close-on-failure)
+* Customer wants: browser profile should stay open while work is in
+  progress; on failure show a red alert with reason at top; customer
+  closes it manually. Currently ANY step failure calls context.close().
+* Complexity: 10+ context.close() call sites in real_user_traffic.py.
+  Needs a per-visit keep_open state machine + memory pressure guard
+  (leaving 50 concurrent failed browsers open would OOM).
+* Deferred until user requests it explicitly with more detail on WHICH
+  close scenario they're seeing (Live Visual Grid mode? Headless run?
+  Specific step failure?). No auto-fix without risk analysis.
