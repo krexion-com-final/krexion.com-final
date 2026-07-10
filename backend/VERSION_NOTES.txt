@@ -1,3 +1,109 @@
+# v2.5.4 — 2026-07-10 — Proxy Auto-Mode fix + Visual Recorder improvements
+#
+# CUSTOMER FEEDBACK ADDRESSED (verbatim):
+#   1. "proxy prvider add kia th or jab rut job chalai to masla a raha
+#       th abi dobara chalai to wahi masla aya" — 'No more proxies
+#       available (no_repeated_proxy = on)' after visit #1 with a
+#       rotating-gateway provider + Auto Mode toggle ON.
+#   2. "visual recorder mein selector thk se scan ni hota" — Scan tool
+#       returned an empty CSS selector for most elements.
+#   3. "visual recorder mein popup work click krte hein to thk se har
+#       button show ni hota like cross etc" — SVG-icon close-Xs and
+#       icon-only buttons were silently dropped by detect_popup_buttons.
+#   4. "wait for button ka aik feature ho jay ... jis button pr click
+#       krein to wo os k ane tak wait kre jab wo show ho tab process
+#       start ho jay" — NEW point-and-click "Wait for Button" tool.
+#
+# ══════════════════════════════════════════════════════════════════
+#  Fix 1 — RUT/CPI/Browser-Profile: rotating-gateway proxy exhaustion
+# ══════════════════════════════════════════════════════════════════
+#   BestGo, Bright Data, IPRoyal, Oxylabs, Soax, SmartProxy — every
+#   popular rotating-gateway provider embeds a session id in the
+#   username (e.g. "-session-XXXX"). Krexion used to send ONE line
+#   with a fixed session id, so RUT (with no_repeated_proxy=on)
+#   aborted after visit #1 with "No more proxies available".
+#
+#   Now the resolver auto-rotates the session token per line and
+#   emits `total_clicks` lines for RUT (`target_count` for CPI, one
+#   session-rotated line for Browser Profile launch). Supported
+#   tokens (case-insensitive):  -session-XXX, -sessid-XXX,
+#   -sessionid-XXX, -sess-XXX, and the {sid} placeholder.
+#
+#   v2.5.4 hotfix on top of v2.5.3: when the frontend "Auto Mode"
+#   toggle is ON *together with* a non-ProxyJet provider, the
+#   backend now correctly forces use_proxyjet_auto=False so the BG
+#   task consumes the generated lines instead of routing to ProxyJet
+#   on-demand. Anti-detect safeties (no_repeated_proxy +
+#   skip_duplicate_ip) that Auto Mode enforces are preserved.
+#
+# ══════════════════════════════════════════════════════════════════
+#  Fix 2 — Visual Recorder: Scan tool returns real CSS selector
+# ══════════════════════════════════════════════════════════════════
+#   scan_element_at now composes the selector server-side using the
+#   same priority ladder the recorded steps use:
+#       data-testid → id → name → aria-label → tag.class
+#   "Copy selector" in the UI now always yields something that
+#   actually resolves at replay time.
+#
+# ══════════════════════════════════════════════════════════════════
+#  Fix 3 — Visual Recorder: Popup Work catches close-X buttons
+# ══════════════════════════════════════════════════════════════════
+#   detect_popup_buttons JS now recognises:
+#     • SVG-icon buttons (uses <title>, aria-label, or a synthetic
+#       "(icon button)" label)
+#     • Font Awesome / Material Icons close classes (fa-times,
+#       fa-xmark, icon-close, material-icons.close)
+#     • Unicode ✕ / × / ✖ / ✗ / ✘ / ⨯ characters
+#     • Small square elements in the top-right corner of the popup
+#       (99% close-Xs even without any hint) → "✕ (close corner)"
+#     • Everything else falls back to "Button #N" so nothing is
+#       dropped silently.
+#   BTN_SEL widened to include [data-dismiss], [data-close], and
+#   [class*="close"].
+#
+# ══════════════════════════════════════════════════════════════════
+#  Feature — "Wait for Button" tool (key: W)
+# ══════════════════════════════════════════════════════════════════
+#   Point-and-click sibling of Wait for selector / Wait for xpath.
+#   When active, clicking any button on the live preview inserts a
+#   wait_for_selector step targeting that button. NO click is fired
+#   at record time. Perfect for lazy-loading offer pages: the
+#   recorder captures the best locator for the button and RUT
+#   pauses at replay until the button becomes visible.
+#
+#   Backend: add_wait_for_button_at(sess, x, y, timeout_ms) —
+#   reuses the same _RICH_ELEMENT_CAPTURE_JS + _attach_selector_and_xpath
+#   selector ladder as recorded steps, falls back to text= locator
+#   when neither a css selector nor an xpath can be derived.
+#   Endpoint: POST /api/visual-recorder/{sid}/wait-for-button.
+#   Frontend: new tool mode `wait_for_button` (Clock icon, "W" key).
+#
+# ══════════════════════════════════════════════════════════════════
+#  Backward compatibility
+# ══════════════════════════════════════════════════════════════════
+#   * No config schema changes.
+#   * No field renames.
+#   * All existing endpoints unchanged.
+#   * Customers not using proxy providers see zero change.
+#   * Existing recordings replay identically.
+#
+# Files touched:
+#   backend/proxy_provider_module.py   +176 lines (session rotation
+#                                       helpers + bulk resolver)
+#   backend/server.py                  +100 lines (RUT wire-up +
+#                                       new wait-for-button endpoint)
+#   backend/cpi_module.py              +21 lines  (bulk resolver hookup)
+#   backend/browser_profile_module.py  +21 lines  (session-rotated
+#                                       single line for launches)
+#   backend/visual_recorder.py         +170 lines (popup JS upgrade +
+#                                       scan selector composition +
+#                                       add_wait_for_button_at)
+#   frontend/src/pages/VisualRecorderPage.js  +45 lines (new tool
+#                                              mode + click handler
+#                                              + keyboard shortcut)
+#
+# ══════════════════════════════════════════════════════════════════
+
 # Force redeploy trigger 1783300200
 # v2.4.2 — 2026-01-09 — Visual Recorder: Popup Work + Scan + Wait for XPath
 #
