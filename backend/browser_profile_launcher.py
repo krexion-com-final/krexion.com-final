@@ -800,6 +800,38 @@ async def _launch_profile_session_inner(
                 if _exit_ip:
                     proxy_diag["ok"] = True
                     proxy_diag["exit_ip"] = _exit_ip
+                    # 2026-07 — Cross-check the exit IP against the
+                    # user's premium fraud provider accounts (IPQS,
+                    # IPHub, Scamalytics, ProxyCheck) so browser
+                    # profiles use the SAME fraud filter as RUT
+                    # visits. Safe: skipped when the profile has no
+                    # user_id (legacy imports) OR when the user has
+                    # not enabled their personal fraud filter (falls
+                    # back to admin defaults, which is what happens
+                    # today).
+                    _profile_user_id = str(profile_config.get("user_id") or "")
+                    if _profile_user_id:
+                        try:
+                            from fraud_provider_module import check_ip_for_user as _check_ip_for_user
+                            _fraud_res = await _check_ip_for_user(_profile_user_id, _exit_ip)
+                            _psource = str(_fraud_res.get("source", "") or "")
+                            # Expose result even when clean — the UI's
+                            # proxy-diag panel can show the score so
+                            # the user knows the check actually ran
+                            # with their premium key.
+                            proxy_diag["fraud_source"] = _psource
+                            proxy_diag["fraud_score"] = _fraud_res.get("vpn_score", 0)
+                            proxy_diag["min_fraud_score"] = _fraud_res.get("min_fraud_score")
+                            proxy_diag["is_vpn"] = bool(_fraud_res.get("is_vpn"))
+                            proxy_diag["risk"] = str(_fraud_res.get("risk", "") or "")
+                            if _fraud_res.get("is_vpn"):
+                                _score = _fraud_res.get("vpn_score", 0)
+                                logger.warning(
+                                    f"[profile-launch] exit IP {_exit_ip} flagged by "
+                                    f"{_psource} (fraud_score={_score}) — session={session_id[:8]}"
+                                )
+                        except Exception as _fe:
+                            logger.debug(f"[profile-launch] fraud provider check failed (non-blocking): {_fe}")
                 else:
                     proxy_diag["ok"] = False
                     proxy_diag["error"] = _last_err or "all probe URLs failed"

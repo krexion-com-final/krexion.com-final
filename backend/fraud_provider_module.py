@@ -77,6 +77,14 @@ _get_current_user_dep = None        # FastAPI dep resolver (from server.py)
 class FraudSettings(BaseModel):
     personal_filter_enabled: bool = False
     fallback_to_defaults: bool = True
+    # 2026-07 — fraud score threshold. Any IP whose vpn_score (aka
+    # fraud_score) meets or exceeds this value is forcibly flagged as
+    # `is_vpn=True` in check_ip_for_user(), so downstream skip_vpn
+    # filters (RUT, browser profile) can block it even when the raw
+    # provider response didn't set the boolean flag. Range 0-100.
+    # Default 75 — matches IPQualityScore's own recommended "block"
+    # threshold for affiliate traffic.
+    min_fraud_score: int = 75
 
 
 class FraudAccountCreate(BaseModel):
@@ -113,17 +121,28 @@ _SERVICE_DEFAULT_ENDPOINT = {
 async def _get_settings(user_id: str) -> Dict[str, Any]:
     doc = await _db.user_fraud_settings.find_one({"user_id": user_id}, {"_id": 0})
     if not doc:
-        return {"personal_filter_enabled": False, "fallback_to_defaults": True}
+        return {"personal_filter_enabled": False, "fallback_to_defaults": True, "min_fraud_score": 75}
+    # Backfill default for legacy docs that don't have the field yet.
+    doc.setdefault("min_fraud_score", 75)
     return doc
 
 
 async def _set_settings(user_id: str, settings: FraudSettings) -> None:
+    # Clamp the threshold to a safe range so we can't be broken by
+    # bad frontend input. 0 = never block on score, 100 = block only
+    # on absolute-certain fraud.
+    _mfs = int(settings.min_fraud_score)
+    if _mfs < 0:
+        _mfs = 0
+    elif _mfs > 100:
+        _mfs = 100
     await _db.user_fraud_settings.update_one(
         {"user_id": user_id},
         {"$set": {
             "user_id": user_id,
             "personal_filter_enabled": settings.personal_filter_enabled,
             "fallback_to_defaults": settings.fallback_to_defaults,
+            "min_fraud_score": _mfs,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }},
         upsert=True,
@@ -374,6 +393,26 @@ async def check_ip_for_user(user_id: str, ip: str) -> Dict[str, Any]:
     if not settings.get("personal_filter_enabled"):
         return await _existing_check_vpn(ip)
 
+    # Per-user fraud-score threshold. Any provider that returns a
+    # vpn_score/fraud_score >= this value will force is_vpn=True so
+    # downstream skip_vpn filters block the IP even when the provider
+    # didn't set the raw boolean flag (some providers e.g. IPQS mark
+    # medium-risk IPs with a numeric score but proxy/vpn=false).
+    _threshold = int(settings.get("min_fraud_score", 75))
+
+    def _apply_threshold(res: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            _score = int(res.get("vpn_score") or 0)
+        except (TypeError, ValueError):
+            _score = 0
+        if _score >= _threshold and not res.get("is_vpn"):
+            res["is_vpn"] = True
+            res["risk"] = res.get("risk") or "high"
+            res["source"] = f"{res.get('source', 'user-account')}:threshold({_threshold})"
+        # Always expose the threshold + raw score so the caller can log it.
+        res["min_fraud_score"] = _threshold
+        return res
+
     accounts = await _list_accounts(user_id)
     usable = [a for a in accounts if a.get("enabled") and not _is_quota_exhausted(a) and not _is_rate_limited(a)]
 
@@ -381,8 +420,8 @@ async def check_ip_for_user(user_id: str, ip: str) -> Dict[str, Any]:
         if settings.get("fallback_to_defaults", True):
             res = await _existing_check_vpn(ip)
             res["source"] = f"admin-fallback:{res.get('source','')}"
-            return res
-        return {"is_vpn": False, "vpn_score": 0, "risk": "unknown", "source": "user-fallback-disabled"}
+            return _apply_threshold(res)
+        return {"is_vpn": False, "vpn_score": 0, "risk": "unknown", "source": "user-fallback-disabled", "min_fraud_score": _threshold}
 
     for acc in usable:
         service = acc.get("service", "")
@@ -395,14 +434,14 @@ async def check_ip_for_user(user_id: str, ip: str) -> Dict[str, Any]:
             continue
         if result:
             await _record_usage(user_id, acc["id"], ok=True, rate_limited=False)
-            return result
+            return _apply_threshold(result)
 
     # All accounts failed
     if settings.get("fallback_to_defaults", True):
         res = await _existing_check_vpn(ip)
         res["source"] = f"admin-fallback:{res.get('source','')}"
-        return res
-    return {"is_vpn": False, "vpn_score": 0, "risk": "unknown", "source": "all-accounts-failed"}
+        return _apply_threshold(res)
+    return {"is_vpn": False, "vpn_score": 0, "risk": "unknown", "source": "all-accounts-failed", "min_fraud_score": _threshold}
 
 
 # ─── Router factory ──────────────────────────────────────────────────

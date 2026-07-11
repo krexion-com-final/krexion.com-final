@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { toast } from "sonner";
 import { Plus, Trash2, Play, Edit2, Shield, ExternalLink, ChevronDown, ChevronUp } from "lucide-react";
+import { Slider } from "../components/ui/slider";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -21,7 +22,7 @@ function authHeaders() {
 }
 
 export default function FraudDetectionTab() {
-  const [settings, setSettings] = useState({ personal_filter_enabled: false, fallback_to_defaults: true });
+  const [settings, setSettings] = useState({ personal_filter_enabled: false, fallback_to_defaults: true, min_fraud_score: 75 });
   const [services, setServices] = useState([]);
   const [accounts, setAccounts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -171,6 +172,40 @@ export default function FraudDetectionTab() {
               onCheckedChange={(v) => saveSettings({ personal_filter_enabled: v })}
               data-testid="fraud-master-toggle"
             />
+          </div>
+
+          {/* 2026-07 — Threshold slider. When any provider returns a
+              vpn_score / fraud_score ≥ this value, the IP is forcibly
+              treated as VPN (is_vpn=true) so downstream skip_vpn
+              filters (RUT job + Browser Profile) block the visit. */}
+          <div className={`p-4 rounded-lg border border-[var(--brand-border)] bg-[#0F172A] ${settings.personal_filter_enabled ? "" : "opacity-60"}`}>
+            <div className="flex items-center justify-between mb-2">
+              <div>
+                <div className="font-medium">Block IP when fraud score ≥ {settings.min_fraud_score ?? 75}</div>
+                <p className="text-xs text-[var(--brand-muted)] mt-1">
+                  Any exit-IP whose fraud/VPN score reaches this threshold is skipped in RUT visits and flagged in Browser Profile sessions.
+                  Recommended: 75 (matches IPQualityScore&apos;s block guidance). Set 100 to only block on absolute-certain fraud.
+                </p>
+              </div>
+              <Badge variant="secondary" className="bg-[#1E293B] text-base">{settings.min_fraud_score ?? 75}</Badge>
+            </div>
+            <Slider
+              min={0}
+              max={100}
+              step={5}
+              value={[settings.min_fraud_score ?? 75]}
+              onValueChange={(v) => setSettings({ ...settings, min_fraud_score: v[0] })}
+              onValueCommit={(v) => saveSettings({ min_fraud_score: v[0] })}
+              disabled={!settings.personal_filter_enabled}
+              className="mt-2"
+              data-testid="fraud-threshold-slider"
+            />
+            <div className="flex justify-between text-[10px] text-[var(--brand-muted)] mt-1">
+              <span>0 · never block on score</span>
+              <span>50 · loose</span>
+              <span>75 · recommended</span>
+              <span>100 · certain fraud only</span>
+            </div>
           </div>
 
           <div className="flex items-center justify-between p-4 rounded-lg border border-[var(--brand-border)] bg-[#0F172A]">

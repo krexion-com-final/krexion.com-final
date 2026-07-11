@@ -2824,9 +2824,26 @@ def _parse_proxy_line(line: str) -> Optional[Dict[str, Any]]:
     return out
 
 
-async def _probe_proxy_geo(proxy: Dict[str, Any], ua: str) -> Dict[str, Any]:
+async def _probe_proxy_geo(
+    proxy: Dict[str, Any],
+    ua: str,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """Probe proxy through ip-api — returns exit IP + country + city + timezone +
-    locale + accept_language + is_vpn flag."""
+    locale + accept_language + is_vpn flag.
+
+    2026-07 — When `user_id` is supplied AND that user has enabled their
+    personal fraud filter (see /api/fraud/settings), the exit-IP is
+    additionally cross-checked against the user's configured premium
+    fraud provider accounts (IPQualityScore / IPHub / Scamalytics /
+    ProxyCheck.io). The user's threshold (`min_fraud_score`) is applied.
+    If the premium provider flags the IP as VPN/proxy, this function
+    sets `result["is_vpn"] = True` so the downstream `skip_vpn` filter
+    can block the visit. Falls back to the existing free-tier cross-
+    check (ipwho.is + ip-api.com + proxycheck.io free) when user_id is
+    None, personal filter is disabled, or all user accounts fail
+    (behaviour identical to pre-2026-07 releases).
+    """
     result = {
         "exit_ip": None, "country": "US", "country_name": "United States",
         "city": "New York", "region": "NY", "region_name": "New York",
@@ -3024,7 +3041,61 @@ async def _probe_proxy_geo(proxy: Dict[str, Any], ua: str) -> Dict[str, Any]:
             # accurate free providers for datacenter/VPN detection.
             if not result.get("is_vpn") and result.get("exit_ip"):
                 _xcheck_ip = result["exit_ip"]
-                try:
+
+                # 2026-07 — PREMIUM per-user fraud check FIRST.
+                # When the caller supplies a user_id AND that user
+                # has enabled their personal fraud filter with
+                # configured provider accounts (IPQS, IPHub, etc.),
+                # we consult their premium keys before falling back
+                # to the free-tier cross-check. This wires the
+                # /api/fraud/* infra (fraud_provider_module) into
+                # the RUT engine so paid API keys actually get used
+                # during real visits. Safe fallback: if user_id is
+                # None, filter disabled, or all user accounts fail
+                # → existing free-tier check runs unchanged.
+                _premium_used = False
+                if user_id:
+                    try:
+                        from fraud_provider_module import check_ip_for_user as _check_ip_for_user
+                        _premium = await _check_ip_for_user(user_id, _xcheck_ip)
+                        _psource = str(_premium.get("source", "") or "")
+                        # Only trust as "authoritative" if the result
+                        # actually came from a user-configured provider
+                        # (not the admin fallback path — that path is
+                        # equivalent to running the free-tier check
+                        # ourselves, so we still want the extra cross-
+                        # checks below to run).
+                        if _premium and not _psource.startswith("admin-fallback"):
+                            _premium_used = True
+                            result["min_fraud_score"] = _premium.get("min_fraud_score")
+                            result["vpn_score"] = _premium.get("vpn_score", 0)
+                            if _premium.get("is_vpn"):
+                                result["is_vpn"] = True
+                                result["vpn_source"] = f"premium:{_psource}"
+                                # Record the raw score/reason so the
+                                # RUT visit log surfaces WHY this IP
+                                # was skipped (fraud_score / recent
+                                # abuse / VPN flag).
+                                _score = _premium.get("vpn_score", 0)
+                                result["vpn_reason"] = (
+                                    f"Flagged by {_psource} "
+                                    f"(fraud_score={_score}"
+                                    + (f", threshold={_premium.get('min_fraud_score')})"
+                                       if _premium.get("min_fraud_score") is not None
+                                       else ")")
+                                )
+                    except Exception as _pe:
+                        logger.debug(f"premium user fraud check failed (non-blocking): {_pe}")
+
+                # Free-tier cross-check — runs when premium didn't
+                # give an authoritative answer, OR premium said the
+                # IP was clean (belt-and-suspenders on the free
+                # opinion is still a net safety win).
+                if _premium_used and result.get("is_vpn"):
+                    # Premium already blocked — no need to hit free tier.
+                    pass
+                else:
+                 try:
                     # Cross-check via the OPPOSITE endpoint. We use a
                     # public no-proxy probe (these endpoints are happy
                     # to be queried with the IP in the path; no proxy
@@ -3069,7 +3140,7 @@ async def _probe_proxy_geo(proxy: Dict[str, Any], ua: str) -> Dict[str, Any]:
                                             result["vpn_source"] = "proxycheck.io"
                             except Exception:
                                 pass
-                except Exception as _xc_e:
+                 except Exception as _xc_e:
                     logger.debug(f"VPN cross-check failed (non-blocking): {_xc_e}")
     except Exception as e:
         logger.debug(f"Proxy geo probe failed: {e}")
@@ -7109,7 +7180,7 @@ async def run_real_user_traffic_job(
                 _probe_ua = pick_next_ua()
                 # Don't consume the UA pointer for probes — rewind
                 state["ua_idx"] = max(0, state["ua_idx"] - 1)
-                _geo = await _probe_proxy_geo(parsed, _probe_ua)
+                _geo = await _probe_proxy_geo(parsed, _probe_ua, user_id=engine_user_id)
                 if not _geo["ok"] or not _geo.get("exit_ip"):
                     last_reason = "exit-IP probe failed"
                     push_live_step(job_id, i + 1, "proxy", "failed",
@@ -7236,7 +7307,7 @@ async def run_real_user_traffic_job(
         if proxyjet_on_demand and on_demand_geo is not None:
             geo = on_demand_geo
         else:
-            geo = await _probe_proxy_geo(proxy, ua)
+            geo = await _probe_proxy_geo(proxy, ua, user_id=engine_user_id)
         entry["exit_ip"] = geo["exit_ip"] or ""
         entry["country"] = geo["country_name"]
         entry["city"] = geo["city"]
@@ -7276,8 +7347,16 @@ async def run_real_user_traffic_job(
         # Pre-filter: VPN
         if skip_vpn and geo["is_vpn"]:
             entry["status"] = "skipped_vpn"
-            entry["error"] = "Exit IP is flagged as VPN/hosting"
-            push_live_step(job_id, i + 1, "filter", "skipped", "Exit IP flagged as VPN/hosting")
+            # 2026-07 — surface the actual provider reason when a
+            # user's premium fraud filter (IPQS / IPHub / etc.) is
+            # what flagged the IP, so the operator can see WHY.
+            _vpn_reason = geo.get("vpn_reason") or "Exit IP is flagged as VPN/hosting"
+            _vpn_src = geo.get("vpn_source") or ""
+            entry["error"] = _vpn_reason
+            entry["vpn_source"] = _vpn_src
+            entry["vpn_score"] = geo.get("vpn_score", 0)
+            push_live_step(job_id, i + 1, "filter", "skipped",
+                           f"Skipped: {_vpn_reason}" + (f" [{_vpn_src}]" if _vpn_src else ""))
             return await _record(job_id, entry, report, report_lock, db)
 
         # Pre-filter: duplicate IP — already enforced inside the
