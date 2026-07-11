@@ -11178,6 +11178,92 @@ def _substitute(template: str, row: Dict[str, Any]) -> str:
 # attribute-based match that doesn't depend on the page's id/name
 # choices — they cover `type`, `autocomplete`, `name*=`, `id*=`,
 # `placeholder*=`, `aria-label*=` so even fully-renamed pages match.
+def _smart_priority_fallbacks(step: Any) -> List[str]:
+    """2026-07 — Modern Playwright-recommended priority-ordered fallback
+    chain for Visual-Recorder steps. Emits selectors in the order:
+
+        1. data-testid / data-cy / data-qa / data-test  (STABLE test IDs
+           — engineered to survive refactors, most reliable rescue)
+        2. aria-label  (semantic — screen-reader anchor, robust)
+        3. text-based match  (`button:has-text` / `text=` — visible label)
+        4. XPath stable + XPath absolute  (last resort — most fragile
+           on DOM changes)
+
+    This is INSERTED in front of the legacy `_step_fallbacks` chain so
+    modern well-instrumented sites (React/Vue apps with data-testid,
+    Bootstrap/Tailwind admin panels with aria-label) get their most
+    stable selectors tried FIRST, before falling into the older
+    attribute-combo + xpath grind. Old recordings without a
+    `fallbacks` dict → returns [] — pure additive, zero-risk.
+
+    Callers should concatenate:
+        extra_alts = _smart_priority_fallbacks(step) + _step_fallbacks(step) + ...
+    Duplicates are auto-deduped by _smart_wait_for_selector.
+    """
+    if not isinstance(step, dict):
+        return []
+    fb = step.get("fallbacks")
+    if not isinstance(fb, dict) or not fb:
+        return []
+    out: List[str] = []
+    attrs = fb.get("attrs") or {}
+    tag = str(fb.get("tag") or "").lower()
+
+    def _push_attr(k: str, v: str) -> None:
+        if not v:
+            return
+        v_esc = v.replace('"', '\\"')
+        out.append(f'[{k}="{v_esc}"]')
+        if tag:
+            out.append(f'{tag}[{k}="{v_esc}"]')
+
+    # ── Layer 1: Stable test IDs (data-testid family) ─────────────
+    if isinstance(attrs, dict):
+        for testid_key in ("data-testid", "data-test", "data-cy", "data-qa", "data-id"):
+            v = attrs.get(testid_key)
+            if isinstance(v, str) and v.strip():
+                _push_attr(testid_key, v.strip())
+
+    # ── Layer 2: aria-label (semantic anchor) ─────────────────────
+    if isinstance(attrs, dict):
+        aria = attrs.get("aria-label")
+        if isinstance(aria, str) and aria.strip():
+            _push_attr("aria-label", aria.strip())
+            # Case-insensitive partial match rescues renames like
+            # "Submit form" → "Submit application"
+            av = aria.strip().replace('"', '\\"')
+            out.append(f'[aria-label*="{av}" i]')
+            if tag:
+                out.append(f'{tag}[aria-label*="{av}" i]')
+
+    # ── Layer 3: Text-based match (visible label) ────────────────
+    txt = str(fb.get("text") or "").strip()
+    if 3 <= len(txt) <= 80:
+        txt_esc = txt.replace('\\', '\\\\').replace('"', '\\"')
+        if tag in ("button", "a", "label", "input", "span", "div"):
+            out.append(f'{tag}:has-text("{txt_esc}")')
+        # Playwright's text= engine — matches partial text
+        # case-insensitively, works across arbitrary tags.
+        out.append(f'text="{txt_esc}"')
+
+    # ── Layer 4: XPath (LAST resort — most fragile) ───────────────
+    xs = str(fb.get("xpath") or "").strip()
+    if xs:
+        out.append(f"xpath={xs}")
+    xa = str(fb.get("xpath_abs") or "").strip()
+    if xa and xa != xs:
+        out.append(f"xpath={xa}")
+
+    # Dedup preserving order
+    seen: set = set()
+    uniq: List[str] = []
+    for s in out:
+        if s and s not in seen:
+            seen.add(s)
+            uniq.append(s)
+    return uniq
+
+
 def _step_fallbacks(step: Any) -> List[str]:
     """2026-05 — Read the `fallbacks` dict embedded in a Visual-Recorder
     step (see visual_recorder._build_fallbacks) and produce a list of
@@ -12471,12 +12557,12 @@ async def _execute_automation_steps(
                     if action in ("select", "check", "uncheck"):
                         resolved_sel = await _smart_wait_for_selector(
                             page, selector, state="attached", timeout=timeout,
-                            extra_alts=(_step_fallbacks(step) + _alias_alts_for(selector) + _field_type_alts_for(selector)),
+                            extra_alts=(_smart_priority_fallbacks(step) + _step_fallbacks(step) + _alias_alts_for(selector) + _field_type_alts_for(selector)),
                         )
                     else:
                         resolved_sel = await _smart_wait_for_selector(
                             page, selector, state="visible", timeout=timeout,
-                            extra_alts=(_step_fallbacks(step) + _alias_alts_for(selector) + _field_type_alts_for(selector)),
+                            extra_alts=(_smart_priority_fallbacks(step) + _step_fallbacks(step) + _alias_alts_for(selector) + _field_type_alts_for(selector)),
                         )
                     if resolved_sel and resolved_sel != selector:
                         logger.info(
@@ -12632,7 +12718,7 @@ async def _execute_automation_steps(
                         page, selector,
                         state=step.get("state") or "visible",
                         timeout=timeout,
-                        extra_alts=(_step_fallbacks(step) + _alias_alts_for(selector)),
+                        extra_alts=(_smart_priority_fallbacks(step) + _step_fallbacks(step) + _alias_alts_for(selector)),
                     )
                 elif action in ("wait_for_navigation", "wait_for_load", "wait_for_networkidle"):
                     # 2026-01 — Smart load wait for SPA-friendly pages.

@@ -30,18 +30,33 @@ export default function FraudDetectionTab() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState(null); // account being edited or {service, ...} for new
   const [form, setForm] = useState({});
+  // 2026-07 — Custom rules + historical cache
+  const [rules, setRules] = useState({
+    enabled: false,
+    allowed_countries: [],
+    blocked_countries: [],
+    blocked_asns: [],
+    block_hosting: true,
+    block_tor: true,
+    block_datacenter: true,
+  });
+  const [cacheStats, setCacheStats] = useState({ total: 0, clean: 0, blocked: 0, block_rate_pct: 0 });
 
   const load = async () => {
     setLoading(true);
     try {
-      const [s, sv, ac] = await Promise.all([
+      const [s, sv, ac, rl, cs] = await Promise.all([
         axios.get(`${API}/fraud/settings`, { headers: authHeaders() }),
         axios.get(`${API}/fraud/services`, { headers: authHeaders() }),
         axios.get(`${API}/fraud/accounts`, { headers: authHeaders() }),
+        axios.get(`${API}/fraud/rules`, { headers: authHeaders() }).catch(() => ({ data: null })),
+        axios.get(`${API}/fraud/cache/stats`, { headers: authHeaders() }).catch(() => ({ data: null })),
       ]);
       setSettings(s.data);
       setServices(sv.data.services || []);
       setAccounts(ac.data || []);
+      if (rl.data) setRules({ ...rules, ...rl.data });
+      if (cs.data) setCacheStats(cs.data);
       // Auto-expand services with accounts
       const exp = {};
       for (const a of ac.data || []) exp[a.service] = true;
@@ -64,6 +79,32 @@ export default function FraudDetectionTab() {
     } catch (e) {
       toast.error("Failed to save settings");
       load();
+    }
+  };
+
+  // 2026-07 — Save custom rules
+  const saveRules = async (patch) => {
+    const next = { ...rules, ...patch };
+    setRules(next);
+    try {
+      await axios.put(`${API}/fraud/rules`, next, { headers: authHeaders() });
+      toast.success("Custom rules saved");
+    } catch (e) {
+      toast.error("Failed to save rules");
+      load();
+    }
+  };
+
+  // 2026-07 — Clear cache
+  const clearCache = async () => {
+    if (!window.confirm("Clear all cached IP reputation entries? Next visits will re-check IPs via your paid providers.")) return;
+    try {
+      const r = await axios.delete(`${API}/fraud/cache`, { headers: authHeaders() });
+      toast.success(`Cleared ${r.data.deleted || 0} cached entries`);
+      const cs = await axios.get(`${API}/fraud/cache/stats`, { headers: authHeaders() });
+      setCacheStats(cs.data);
+    } catch (e) {
+      toast.error("Failed to clear cache");
     }
   };
 
@@ -225,6 +266,147 @@ export default function FraudDetectionTab() {
               />
             </div>
           </div>
+        </CardContent>
+      </Card>
+
+      {/* 2026-07 — Custom Rules Card */}
+      <Card className="bg-[var(--brand-card)] border-[var(--brand-border)]" data-testid="fraud-rules-card">
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="flex items-center gap-2">
+                <Shield className="w-5 h-5" />
+                Custom Fraud Rules
+              </CardTitle>
+              <CardDescription>
+                Fine-grained blocking beyond the fraud score — block by country, ASN, or IP type.
+              </CardDescription>
+            </div>
+            <Switch
+              checked={!!rules.enabled}
+              onCheckedChange={(v) => saveRules({ enabled: v })}
+              data-testid="fraud-rules-master-toggle"
+            />
+          </div>
+        </CardHeader>
+        <CardContent className={`space-y-4 ${rules.enabled ? "" : "opacity-60 pointer-events-none"}`}>
+          {/* IP type blockers */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {[
+              { key: "block_hosting", label: "Block hosting IPs", desc: "IPs marked type=hosting by provider (server IPs)" },
+              { key: "block_tor", label: "Block Tor exit nodes", desc: "Anonymous proxy / Tor network IPs" },
+              { key: "block_datacenter", label: "Block datacenter IPs", desc: "Non-residential proxy/VPN IPs" },
+            ].map((item) => (
+              <div key={item.key} className="p-3 rounded-lg border border-[var(--brand-border)] bg-[#0F172A]">
+                <div className="flex items-center justify-between">
+                  <span className="font-medium text-sm">{item.label}</span>
+                  <Switch
+                    checked={!!rules[item.key]}
+                    onCheckedChange={(v) => saveRules({ [item.key]: v })}
+                    data-testid={`fraud-rule-${item.key}`}
+                  />
+                </div>
+                <p className="text-[11px] text-[var(--brand-muted)] mt-1">{item.desc}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* Country allowlist */}
+          <div className="p-3 rounded-lg border border-[var(--brand-border)] bg-[#0F172A]">
+            <Label className="font-medium">Allowed countries (whitelist)</Label>
+            <p className="text-[11px] text-[var(--brand-muted)] mt-1 mb-2">
+              Comma-separated ISO codes (e.g. <span className="font-mono">US, GB, CA</span>). Leave empty to allow all countries.
+            </p>
+            <Input
+              placeholder="US, GB, CA, AU"
+              value={(rules.allowed_countries || []).join(", ")}
+              onChange={(e) => setRules({ ...rules, allowed_countries: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) })}
+              onBlur={() => saveRules({ allowed_countries: rules.allowed_countries })}
+              className="bg-[#1E293B] border-[var(--brand-border)]"
+              data-testid="fraud-rules-allowed-countries"
+            />
+          </div>
+
+          {/* Country blocklist */}
+          <div className="p-3 rounded-lg border border-[var(--brand-border)] bg-[#0F172A]">
+            <Label className="font-medium">Blocked countries</Label>
+            <p className="text-[11px] text-[var(--brand-muted)] mt-1 mb-2">
+              Comma-separated ISO codes to force-block regardless of fraud score.
+            </p>
+            <Input
+              placeholder="CN, RU, KP"
+              value={(rules.blocked_countries || []).join(", ")}
+              onChange={(e) => setRules({ ...rules, blocked_countries: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) })}
+              onBlur={() => saveRules({ blocked_countries: rules.blocked_countries })}
+              className="bg-[#1E293B] border-[var(--brand-border)]"
+              data-testid="fraud-rules-blocked-countries"
+            />
+          </div>
+
+          {/* ASN blocklist */}
+          <div className="p-3 rounded-lg border border-[var(--brand-border)] bg-[#0F172A]">
+            <Label className="font-medium">Blocked ASNs (Autonomous System Numbers)</Label>
+            <p className="text-[11px] text-[var(--brand-muted)] mt-1 mb-2">
+              Comma-separated ASN numbers. Common datacenters:
+              {" "}<span className="font-mono">15169</span> Google,
+              {" "}<span className="font-mono">16509</span> Amazon,
+              {" "}<span className="font-mono">8075</span> Microsoft,
+              {" "}<span className="font-mono">14061</span> DigitalOcean.
+            </p>
+            <Input
+              placeholder="15169, 16509, 8075"
+              value={(rules.blocked_asns || []).join(", ")}
+              onChange={(e) => {
+                const nums = e.target.value.split(",").map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isFinite(n) && n > 0);
+                setRules({ ...rules, blocked_asns: nums });
+              }}
+              onBlur={() => saveRules({ blocked_asns: rules.blocked_asns })}
+              className="bg-[#1E293B] border-[var(--brand-border)]"
+              data-testid="fraud-rules-blocked-asns"
+            />
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* 2026-07 — Historical IP Reputation Cache */}
+      <Card className="bg-[var(--brand-card)] border-[var(--brand-border)]" data-testid="fraud-cache-card">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Shield className="w-5 h-5" />
+            IP Reputation Cache
+          </CardTitle>
+          <CardDescription>
+            Krexion caches IP reputation results for 30 days to save your paid provider quota. Repeat visits to the same IP skip the provider call.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-4 gap-3 mb-3">
+            <div className="p-3 rounded-lg border border-[var(--brand-border)] bg-[#0F172A] text-center">
+              <div className="text-2xl font-semibold" data-testid="fraud-cache-total">{cacheStats.total}</div>
+              <div className="text-[11px] text-[var(--brand-muted)]">Total cached IPs</div>
+            </div>
+            <div className="p-3 rounded-lg border border-[var(--brand-border)] bg-[#0F172A] text-center">
+              <div className="text-2xl font-semibold text-emerald-300" data-testid="fraud-cache-clean">{cacheStats.clean}</div>
+              <div className="text-[11px] text-[var(--brand-muted)]">Clean</div>
+            </div>
+            <div className="p-3 rounded-lg border border-[var(--brand-border)] bg-[#0F172A] text-center">
+              <div className="text-2xl font-semibold text-rose-300" data-testid="fraud-cache-blocked">{cacheStats.blocked}</div>
+              <div className="text-[11px] text-[var(--brand-muted)]">Blocked</div>
+            </div>
+            <div className="p-3 rounded-lg border border-[var(--brand-border)] bg-[#0F172A] text-center">
+              <div className="text-2xl font-semibold">{cacheStats.block_rate_pct}%</div>
+              <div className="text-[11px] text-[var(--brand-muted)]">Block rate</div>
+            </div>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={clearCache}
+            data-testid="fraud-cache-clear-btn"
+          >
+            <Trash2 className="w-4 h-4 mr-1" />
+            Clear cache
+          </Button>
         </CardContent>
       </Card>
 

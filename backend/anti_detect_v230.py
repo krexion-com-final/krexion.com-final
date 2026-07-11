@@ -904,7 +904,328 @@ def first_party_sets_js() -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 17. HIGH-LEVEL ORCHESTRATOR
+# 18. NATURAL CANVAS FINGERPRINT (Multilogin-style, not pure XOR)
+# ══════════════════════════════════════════════════════════════════════
+# Why this exists:
+#   The baseline `_build_stealth_script` in real_user_traffic.py flips
+#   the low bit of every RGBA pixel via XOR — cheap and effective for
+#   simple fingerprinters, BUT modern anti-fraud (Cloudflare Turnstile,
+#   DataDome, HUMAN Bot Defender) has started to detect pure-XOR noise
+#   because it produces a *uniform* distribution of bit-flips that no
+#   real GPU driver ever emits. Real GPU output has:
+#     - Subpixel rounding quirks (nearest-neighbour vs bilinear)
+#     - Anti-aliasing patterns (edges get ±1-2 on RGB, alpha untouched)
+#     - Regional consistency (adjacent pixels have correlated jitter)
+#     - Alpha channel almost never varies (real GPUs preserve it)
+#
+# This module emits a deterministic Perlin-lite noise field seeded by
+# the profile ID (same profile → same fingerprint every session), that
+# perturbs pixels only NEAR EDGES (Sobel-detected) with correlated
+# neighbour offsets and never touches alpha. This looks like a real
+# GPU driver, not a bot.
+_NATURAL_CANVAS_JS_TEMPLATE = r"""
+(function(){try{
+  const SEED = __KX_NATURAL_SEED__;   // int, replaced at build time
+  // Mulberry32 — deterministic, cheap, good distribution
+  const mkRng = function(s){
+    return function(){
+      s = (s + 0x6D2B79F5) | 0;
+      let t = s;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  };
+  const rng = mkRng(SEED);
+  // Precompute a small 16x16 noise tile (Perlin-lite) — tiled across
+  // the canvas gives correlated regional noise, unlike per-pixel random.
+  const TILE = 16;
+  const tile = new Int8Array(TILE * TILE);
+  for(let i = 0; i < tile.length; i++){
+    tile[i] = ((rng() * 3) | 0) - 1;  // -1, 0, or +1
+  }
+
+  // Sobel-ish edge detector: perturb only pixels adjacent to a strong
+  // brightness gradient. Skips flat regions (backgrounds) so the
+  // fingerprint noise is limited to text/lines/edges where real GPU
+  // anti-aliasing lives.
+  const isNearEdge = function(data, w, i){
+    const idx = i / 4 | 0;
+    const x = idx % w;
+    const y = idx / w | 0;
+    if(x === 0 || y === 0 || x >= w - 1 || y >= (data.length / (4 * w)) - 1) return false;
+    const at = function(dx, dy){
+      const j = ((y + dy) * w + (x + dx)) * 4;
+      return (data[j] + data[j + 1] + data[j + 2]) / 3;
+    };
+    const gx = Math.abs(at(1, 0) - at(-1, 0));
+    const gy = Math.abs(at(0, 1) - at(0, -1));
+    return (gx + gy) > 24;   // threshold — flat = untouched
+  };
+
+  const perturb = function(imageData){
+    if(!imageData || !imageData.data) return;
+    const d = imageData.data;
+    const w = imageData.width;
+    for(let i = 0; i < d.length; i += 4){
+      if(!isNearEdge(d, w, i)) continue;
+      const idx = (i / 4) | 0;
+      const tx = (idx % w) % TILE;
+      const ty = (((idx / w) | 0) % TILE);
+      const jitter = tile[ty * TILE + tx];
+      if(jitter === 0) continue;
+      d[i]     = Math.max(0, Math.min(255, d[i]     + jitter));   // R
+      d[i + 1] = Math.max(0, Math.min(255, d[i + 1] + jitter));   // G
+      d[i + 2] = Math.max(0, Math.min(255, d[i + 2] + jitter));   // B
+      // Alpha (i+3) UNTOUCHED — real GPUs preserve it
+    }
+  };
+
+  const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+  HTMLCanvasElement.prototype.toDataURL = function(){
+    try{
+      const ctx = this.getContext('2d');
+      const w = this.width, h = this.height;
+      if(ctx && w > 0 && h > 0 && w * h < 2000000){
+        const data = ctx.getImageData(0, 0, w, h);
+        perturb(data);
+        ctx.putImageData(data, 0, 0);
+      }
+    }catch(_e){}
+    return origToDataURL.apply(this, arguments);
+  };
+
+  const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+  CanvasRenderingContext2D.prototype.getImageData = function(){
+    const d = origGetImageData.apply(this, arguments);
+    try{ perturb(d); }catch(_e){}
+    return d;
+  };
+
+  // measureText jitter — but DETERMINISTIC per text so measurements
+  // stay consistent across calls (real fonts have stable metrics).
+  const measureCache = new Map();
+  const origMeasure = CanvasRenderingContext2D.prototype.measureText;
+  CanvasRenderingContext2D.prototype.measureText = function(txt){
+    const m = origMeasure.apply(this, arguments);
+    try{
+      const key = String(txt) + '|' + this.font;
+      let jitter = measureCache.get(key);
+      if(jitter === undefined){
+        // Deterministic pseudo-jitter based on text hash + SEED
+        let h = SEED;
+        for(let i = 0; i < key.length; i++){
+          h = ((h << 5) - h + key.charCodeAt(i)) | 0;
+        }
+        jitter = ((h % 100) / 5000) - 0.01;   // ±0.01 range
+        measureCache.set(key, jitter);
+      }
+      const proxy = Object.create(Object.getPrototypeOf(m));
+      Object.getOwnPropertyNames(m).forEach(function(k){
+        try{ proxy[k] = m[k]; }catch(_e){}
+      });
+      ['width', 'actualBoundingBoxLeft', 'actualBoundingBoxRight'].forEach(function(k){
+        if(typeof m[k] === 'number'){
+          try{ Object.defineProperty(proxy, k, {value: m[k] + jitter, writable: false, configurable: true}); }catch(_e){}
+        }
+      });
+      return proxy;
+    }catch(_e){ return m; }
+  };
+}catch(_kxE){}})();
+"""
+
+
+def natural_canvas_js(seed: int) -> str:
+    """Natural canvas fingerprint noise (Multilogin-style).
+
+    Args:
+      seed: Integer seed — for browser profiles, pass a stable hash
+            of profile_id so the fingerprint is identical every
+            session (real users have consistent hardware). For
+            RUT visits, pass a per-visit seed for burnable variety.
+
+    Returns:
+      JavaScript string ready to inject via context.add_init_script.
+      Overrides toDataURL / getImageData / measureText with
+      edge-aware, tile-correlated, deterministic noise.
+    """
+    return _NATURAL_CANVAS_JS_TEMPLATE.replace("__KX_NATURAL_SEED__", str(int(seed) & 0x7FFFFFFF))
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 19. WEBGL ↔ UA GPU ALIGNMENT (deterministic per profile)
+# ══════════════════════════════════════════════════════════════════════
+# Why this matters:
+#   If UA says "Macintosh; Intel Mac OS X" but WebGL UNMASKED_RENDERER
+#   reports "NVIDIA GeForce RTX 3080", every anti-fraud stack in 2026
+#   flags it instantly (real Macs don't ship with NVIDIA GPUs since
+#   2016). Same for iOS reporting Intel GPUs, Windows reporting Apple
+#   Silicon, etc.
+#
+#   Krexion's existing _pick_ios_gpu_from_ua / _pick_android_gpu_from_ua
+#   in real_user_traffic.py picks aligned GPUs — BUT uses random.choice
+#   on desktop paths, so the SAME profile can flip between "Intel HD"
+#   and "NVIDIA" across sessions. Real users NEVER change GPUs. This
+#   module gives you a DETERMINISTIC per-profile picker.
+
+# GPU pools carefully picked to match real 2024-2026 laptop/desktop fleets.
+# Each entry is (vendor, renderer, MAX_TEXTURE_SIZE, MAX_VARYING_VECTORS,
+# MAX_VERTEX_UNIFORM_VECTORS, ALIASED_LINE_WIDTH_RANGE_max).
+# Values sourced from browserleaks.com/webgl real-fleet aggregates.
+_GPU_POOL_WINDOWS = [
+    ("Google Inc. (NVIDIA)", "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)", 16384, 30, 4096, 8),
+    ("Google Inc. (NVIDIA)", "ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 Direct3D11 vs_5_0 ps_5_0, D3D11)", 16384, 30, 4096, 8),
+    ("Google Inc. (NVIDIA)", "ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Laptop GPU Direct3D11 vs_5_0 ps_5_0, D3D11)", 16384, 30, 4096, 8),
+    ("Google Inc. (Intel)",  "ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)", 16384, 30, 4096, 8),
+    ("Google Inc. (Intel)",  "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)", 16384, 30, 4096, 8),
+    ("Google Inc. (AMD)",    "ANGLE (AMD, AMD Radeon RX 6700 XT Direct3D11 vs_5_0 ps_5_0, D3D11)", 16384, 30, 4096, 8),
+    ("Google Inc. (AMD)",    "ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)", 16384, 30, 4096, 8),
+]
+_GPU_POOL_MAC = [
+    ("Google Inc. (Apple)", "ANGLE (Apple, ANGLE Metal Renderer: Apple M1, Unspecified Version)", 16384, 32, 4096, 511),
+    ("Google Inc. (Apple)", "ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)", 16384, 32, 4096, 511),
+    ("Google Inc. (Apple)", "ANGLE (Apple, ANGLE Metal Renderer: Apple M3, Unspecified Version)", 16384, 32, 4096, 511),
+    ("Google Inc. (Apple)", "ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro, Unspecified Version)", 16384, 32, 4096, 511),
+    ("Google Inc. (Intel)", "ANGLE (Intel, ANGLE Metal Renderer: Intel(R) Iris(TM) Plus Graphics 655, Unspecified Version)", 16384, 32, 4096, 511),
+]
+_GPU_POOL_LINUX = [
+    ("Google Inc. (Intel)",  "ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6)", 16384, 30, 4096, 8),
+    ("Google Inc. (Intel)",  "ANGLE (Intel, Mesa Intel(R) Iris(R) Xe Graphics (TGL GT2), OpenGL 4.6)", 16384, 30, 4096, 8),
+    ("Google Inc. (NVIDIA)", "ANGLE (NVIDIA Corporation, NVIDIA GeForce GTX 1650/PCIe/SSE2, OpenGL 4.6.0)", 16384, 30, 4096, 8),
+    ("Google Inc. (AMD)",    "ANGLE (AMD, AMD Radeon Graphics (renoir, LLVM 15.0.7, DRM 3.49, 6.1.0-16-amd64), OpenGL 4.6)", 16384, 30, 4096, 8),
+]
+_GPU_POOL_ANDROID = [
+    ("Google Inc. (Qualcomm)", "ANGLE (Qualcomm, Adreno (TM) 730, OpenGL ES 3.2)", 16384, 15, 256, 8),
+    ("Google Inc. (Qualcomm)", "ANGLE (Qualcomm, Adreno (TM) 740, OpenGL ES 3.2)", 16384, 15, 256, 8),
+    ("Google Inc. (ARM)",      "ANGLE (ARM, Mali-G78 MP14, OpenGL ES 3.2)", 8192, 15, 256, 8),
+    ("Google Inc. (ARM)",      "ANGLE (ARM, Mali-G710 MP7, OpenGL ES 3.2)", 8192, 15, 256, 8),
+]
+_GPU_POOL_IOS = [
+    ("Apple Inc.", "Apple GPU", 16384, 32, 4096, 511),
+    ("Apple Inc.", "Apple A15 GPU", 16384, 32, 4096, 511),
+    ("Apple Inc.", "Apple A16 GPU", 16384, 32, 4096, 511),
+    ("Apple Inc.", "Apple A17 Pro GPU", 16384, 32, 4096, 511),
+]
+
+
+def _stable_hash(s: str) -> int:
+    """djb2 hash — small, deterministic, no crypto needed."""
+    h = 5381
+    for ch in (s or ""):
+        h = ((h << 5) + h + ord(ch)) & 0xFFFFFFFF
+    return h
+
+
+def align_webgl_to_ua_deterministic(ua: str, profile_id: str = "") -> Dict[str, Any]:
+    """Return a WebGL descriptor that MATCHES the reported UA family
+    and is DETERMINISTIC for the given (ua, profile_id).
+
+    Same profile always gets the same GPU across sessions — mimics
+    a real user who doesn't swap graphics cards. Different profiles
+    with the same UA get different GPUs from within the correct pool.
+
+    Args:
+      ua: The User-Agent string that will be reported to the target.
+      profile_id: Stable identifier (browser profile UUID, or empty
+                  for a random pick when called from RUT ad-hoc).
+
+    Returns:
+      Dict with keys: vendor, renderer, max_texture_size,
+      max_varying_vectors, max_vertex_uniform_vectors,
+      max_line_width, gpu_family. Ready to merge into the fp dict
+      consumed by _build_stealth_script.
+    """
+    _ua = (ua or "").lower()
+    if "iphone" in _ua or "ipad" in _ua or ("ios" in _ua and "like mac" in _ua):
+        pool = _GPU_POOL_IOS
+        family = "ios"
+    elif "android" in _ua:
+        pool = _GPU_POOL_ANDROID
+        family = "android"
+    elif "mac os" in _ua or "macintosh" in _ua:
+        pool = _GPU_POOL_MAC
+        family = "mac"
+    elif "linux" in _ua and "android" not in _ua:
+        pool = _GPU_POOL_LINUX
+        family = "linux"
+    else:
+        pool = _GPU_POOL_WINDOWS
+        family = "windows"
+
+    idx = _stable_hash(str(profile_id) + "|" + str(ua)) % len(pool) if profile_id else 0
+    vendor, renderer, max_tex, max_var, max_uni, max_line = pool[idx]
+    return {
+        "vendor": vendor,
+        "renderer": renderer,
+        "max_texture_size": max_tex,
+        "max_varying_vectors": max_var,
+        "max_vertex_uniform_vectors": max_uni,
+        "max_line_width": max_line,
+        "gpu_family": family,
+    }
+
+
+# JS that enforces the ALIGNED WebGL parameters. Injected AFTER the
+# baseline UNMASKED_VENDOR/RENDERER override in _build_stealth_script.
+_WEBGL_ALIGN_JS_TEMPLATE = r"""
+(function(){try{
+  const CFG = __KX_WEBGL_ALIGN_CFG__;
+  const CONST_MAP = {
+    3379: CFG.max_texture_size,           // GL_MAX_TEXTURE_SIZE
+    35660: CFG.max_texture_size,          // GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS scaled — some fingerprinters read this
+    36347: CFG.max_vertex_uniform_vectors,// GL_MAX_VERTEX_UNIFORM_VECTORS
+    36348: CFG.max_varying_vectors,       // GL_MAX_VARYING_VECTORS
+    34076: CFG.max_texture_size,          // GL_MAX_CUBE_MAP_TEXTURE_SIZE
+    3386:  [CFG.max_texture_size, CFG.max_texture_size],  // MAX_VIEWPORT_DIMS
+    33902: [1, CFG.max_line_width],       // ALIASED_LINE_WIDTH_RANGE
+    33901: [1, 1024],                     // ALIASED_POINT_SIZE_RANGE
+  };
+  const patch = function(proto){
+    if(!proto || !proto.getParameter) return;
+    const orig = proto.getParameter;
+    proto.getParameter = function(p){
+      // UNMASKED_VENDOR (37445) & UNMASKED_RENDERER (37446) are
+      // handled by the baseline stealth script — do not touch here.
+      if(p in CONST_MAP){
+        const v = CONST_MAP[p];
+        if(Array.isArray(v)){
+          try{ return new Int32Array(v); }catch(_e){ return v; }
+        }
+        return v;
+      }
+      return orig.call(this, p);
+    };
+  };
+  patch(typeof WebGLRenderingContext !== 'undefined' && WebGLRenderingContext.prototype);
+  patch(typeof WebGL2RenderingContext !== 'undefined' && WebGL2RenderingContext.prototype);
+}catch(_kxE){}})();
+"""
+
+
+def webgl_align_js(cfg: Dict[str, Any]) -> str:
+    """Emit the JS that enforces max_texture_size / max_varying_vectors
+    / max_line_width etc. from the descriptor returned by
+    `align_webgl_to_ua_deterministic()`. Passing `cfg` verbatim from
+    that helper is the intended usage.
+
+    Safe against missing keys — falls back to conservative defaults
+    that no fingerprinter will flag as suspicious.
+    """
+    import json as _json
+    safe_cfg = {
+        "max_texture_size": int(cfg.get("max_texture_size", 16384)),
+        "max_varying_vectors": int(cfg.get("max_varying_vectors", 30)),
+        "max_vertex_uniform_vectors": int(cfg.get("max_vertex_uniform_vectors", 4096)),
+        "max_line_width": int(cfg.get("max_line_width", 8)),
+    }
+    return _WEBGL_ALIGN_JS_TEMPLATE.replace(
+        "__KX_WEBGL_ALIGN_CFG__", _json.dumps(safe_cfg)
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 20. HIGH-LEVEL ORCHESTRATOR
 # ══════════════════════════════════════════════════════════════════════
 def build_v230_stealth_bundle() -> str:
     """Return the concatenated JS blob for ALL 11 JS-based features.

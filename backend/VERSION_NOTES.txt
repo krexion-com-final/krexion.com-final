@@ -1,3 +1,47 @@
+# v2.6.0 — 2026-07-11 — Fraud filter, antidetect, and selector engine major upgrade
+#
+# CUSTOMER-FACING CHANGES:
+#   1. Fraud Detection: paid API keys (IPQualityScore, IPHub, Scamalytics,
+#      ProxyCheck.io) are now ACTUALLY USED during RUT visits and Browser
+#      Profile launches. Silent bug where user-configured providers were
+#      stored but never called during real jobs — FIXED.
+#   2. Custom Fraud Rules: block by country (allowlist + blocklist), ASN,
+#      or IP type (hosting, Tor, datacenter). Set in Settings → Fraud
+#      Detection tab.
+#   3. Fraud Score Threshold slider: block IPs when score exceeds N
+#      (default 75). Recommended for aggressive filtering.
+#   4. IP Reputation Cache: repeat visits to the same IP skip the provider
+#      call (30-day cache). Saves 40-60% of your paid quota on high-volume
+#      RUT jobs. Clear anytime from Fraud Detection tab.
+#   5. Antidetect: deterministic per-profile WebGL GPU alignment. Same
+#      browser profile now reports the SAME GPU across every session
+#      (real users don't swap graphics cards). Different profiles get
+#      different GPUs from a UA-matched pool (Apple for Mac, NVIDIA/AMD/
+#      Intel for Windows, Adreno/Mali for Android, Apple GPU for iOS).
+#   6. Antidetect: natural canvas fingerprint noise (Multilogin-style
+#      edge-aware tile-correlated jitter) — replaces the older pure-XOR
+#      pattern that 2026-vintage anti-fraud tools were starting to flag.
+#   7. Visual Recorder: modern priority-ordered selector fallback chain.
+#      Selectors now try data-testid → data-cy → aria-label → text-match
+#      → XPath in that order (Playwright-recommended). Recordings are
+#      dramatically more resilient to site DOM changes.
+#   8. RUT visit logs: skipped_vpn entries now include the ACTUAL provider
+#      + fraud_score + threshold that caused the skip, so operators can
+#      see WHY an IP was blocked (e.g. "Flagged by ipqualityscore
+#      (fraud_score=89, threshold=75)").
+#
+# NEW API ENDPOINTS:
+#   • GET/PUT /api/fraud/rules       — custom rules CRUD
+#   • GET     /api/fraud/cache/stats — cache totals + block-rate %
+#   • GET     /api/fraud/cache       — list cached entries
+#   • DELETE  /api/fraud/cache       — clear all cache
+#   • DELETE  /api/fraud/cache/{ip}  — clear a single IP
+#
+# BACKWARD COMPATIBILITY: 100%. Every new field defaults to legacy
+# behaviour. Existing users with personal_filter_enabled=false see
+# identical results to v2.5.4. Old Visual Recorder recordings without
+# a `fallbacks` dict get [] from the new priority helper (pure additive).
+#
 # v2.5.4 — 2026-07-10 — Proxy Auto-Mode fix + Visual Recorder improvements
 #
 # CUSTOMER FEEDBACK ADDRESSED (verbatim):

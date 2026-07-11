@@ -700,6 +700,28 @@ async def _launch_profile_session_inner(
                 # land here. Falls back to a minimal stub if the import
                 # ever fails (keeps the launcher usable in isolation).
                 from real_user_traffic import _build_stealth_script
+
+                # 2026-07 — DETERMINISTIC WebGL GPU alignment.
+                # Compute the GPU descriptor from (UA, profile_id) so
+                # the SAME profile always reports the SAME GPU across
+                # sessions — mimics a real user who doesn't swap
+                # graphics cards. Different profiles get different
+                # GPUs drawn from the correct pool for the reported
+                # platform (macOS → Apple/Intel, Windows → NVIDIA/AMD/
+                # Intel, iOS → Apple GPU, etc.).
+                _profile_ua = str(context_kwargs.get("user_agent") or profile_config.get("user_agent") or "")
+                _webgl_cfg = None
+                try:
+                    from anti_detect_v230 import (
+                        align_webgl_to_ua_deterministic as _align_webgl,
+                        natural_canvas_js as _natural_canvas,
+                        webgl_align_js as _webgl_align_js,
+                        _stable_hash as _stable_hash_fn,
+                    )
+                    _webgl_cfg = _align_webgl(_profile_ua, profile_id or session_id)
+                except Exception as _we:
+                    logger.debug(f"webgl deterministic alignment skipped: {_we}")
+
                 fp = {
                     "viewport": context_kwargs["viewport"],
                     "device_scale_factor": dsf,
@@ -707,6 +729,13 @@ async def _launch_profile_session_inner(
                     "has_touch": has_touch,
                     "os": profile_config.get("os") or ("ios" if is_mobile else "windows"),
                 }
+                # Push aligned WebGL vendor/renderer into fp so the
+                # baseline stealth script's UNMASKED_VENDOR/RENDERER
+                # override reports these exact strings. This closes
+                # the "UA says Mac but WebGL says NVIDIA" detection.
+                if _webgl_cfg:
+                    fp["webgl_vendor"] = _webgl_cfg["vendor"]
+                    fp["webgl_renderer"] = _webgl_cfg["renderer"]
                 geo = {
                     "locale": locale,
                     "timezone": timezone_id,
@@ -715,6 +744,27 @@ async def _launch_profile_session_inner(
                 }
                 stealth_js = _build_stealth_script(fp, geo)
                 await context.add_init_script(stealth_js)
+
+                # 2026-07 — Natural canvas + WebGL alignment overrides.
+                # Injected AFTER the baseline so they override the
+                # simple XOR canvas noise and enforce the aligned GPU
+                # constants (MAX_TEXTURE_SIZE, MAX_VIEWPORT_DIMS, etc).
+                # Order matters: init scripts run in add-order and
+                # the last prototype override wins.
+                if _webgl_cfg:
+                    try:
+                        # Deterministic seed per profile — real users have
+                        # the same fingerprint every session.
+                        _canvas_seed = _stable_hash_fn(str(profile_id or session_id) + ":canvas")
+                        await context.add_init_script(_natural_canvas(_canvas_seed))
+                        await context.add_init_script(_webgl_align_js(_webgl_cfg))
+                        logger.debug(
+                            f"[profile-launch] natural canvas + webgl align injected "
+                            f"(gpu_family={_webgl_cfg.get('gpu_family')}, "
+                            f"renderer={_webgl_cfg.get('renderer', '')[:60]}...)"
+                        )
+                    except Exception as _oe:
+                        logger.debug(f"natural canvas/webgl align inject failed: {_oe}")
             except Exception as e:
                 logger.warning(f"anti-detect script injection failed: {e}")
                 # Minimal fallback — at least hide webdriver flag
