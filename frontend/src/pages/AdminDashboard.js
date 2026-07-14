@@ -2571,7 +2571,7 @@ export default function AdminDashboard() {
                   { key: "separate_data", label: "Separate Data (row filter)" },
                   { key: "form_filler", label: "Form Filler / Survey Bot" },
                   { key: "real_user_traffic", label: "Real User Traffic (anti-detect)" },
-                  { key: "profile_builder", label: "Profile Builder (AdsPower bulk profiles + ProxyJet)" },
+                  { key: "profile_builder", label: "Profile Builder (AdsPower bulk profiles + Proxy Provider)" },
                   { key: "cpi", label: "CPI Installs (Cost-Per-Install module)" },
                   { key: "import_data", label: "Data Import (legacy master toggle)" },
                   { key: "settings", label: "Settings Access" }

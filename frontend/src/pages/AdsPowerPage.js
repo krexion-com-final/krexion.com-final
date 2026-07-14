@@ -164,7 +164,7 @@ export default function AdsPowerPage() {
   async function saveProxyCreds() {
     if (!proxyForm.base_user || !proxyForm.base_pass) return toast.error("Both fields required");
     await axios.post(`${API}/adspower/proxy-creds`, proxyForm, { headers: authHeaders() });
-    toast.success("ProxyJet credentials saved");
+    toast.success("Proxy credentials saved");
     setShowProxy(false);
     setProxyForm({ base_user: "", base_pass: "" });
     refreshAll();
@@ -256,7 +256,7 @@ export default function AdsPowerPage() {
 
   async function generate() {
     if (!selectedCfg) return toast.error("Select an AdsPower config first");
-    if (!hasProxyCreds) return toast.error("Save ProxyJet credentials first");
+    if (!hasProxyCreds) return toast.error("Save proxy credentials first");
     if (count < 1 || count > 200) return toast.error("Count must be 1-200");
 
     try {
@@ -314,7 +314,7 @@ export default function AdsPowerPage() {
               <Zap size={22} className="text-amber-400" /> Profile Builder
             </h1>
             <p className="text-sm text-[#71717A] mt-1 max-w-2xl">
-              Bulk AdsPower-compatible profiles in seconds. Each profile gets a unique sticky US residential IP (ProxyJet, 30-min lock) + a realistic in-app User Agent for the app you target. Export to Excel and bulk-import into AdsPower.
+              Bulk AdsPower-compatible profiles in seconds. Each profile gets a unique sticky US residential IP (via your Proxy Provider, 30-min lock) + a realistic in-app User Agent for the app you target. Export to Excel and bulk-import into AdsPower.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -482,11 +482,11 @@ export default function AdsPowerPage() {
             )}
           </div>
 
-          {/* ProxyJet creds */}
+          {/* Proxy credentials */}
           <div className="bg-white/[0.03] border border-white/10 rounded-xl p-4">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-bold text-white inline-flex items-center gap-2">
-                <Globe size={15} /> ProxyJet credentials
+                <Globe size={15} /> Proxy credentials
               </h3>
               <button
                 onClick={() => setShowProxy(true)}
@@ -502,7 +502,7 @@ export default function AdsPowerPage() {
               </div>
             ) : (
               <div className="text-xs text-amber-300 inline-flex items-center gap-2">
-                <AlertCircle size={14} /> Add your ProxyJet username + password (from ProxyJet dashboard "Proxy Generator").
+                <AlertCircle size={14} /> Add your provider username + password (from your proxy dashboard "Proxy Generator").
               </div>
             )}
           </div>
@@ -697,9 +697,9 @@ export default function AdsPowerPage() {
       {showProxy && (
         <div className="fixed inset-0 z-[100] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-[#0f0a18] border border-[#3B82F6]/40 rounded-2xl w-full max-w-md p-6 space-y-4">
-            <h3 className="text-lg font-bold text-white">ProxyJet credentials</h3>
+            <h3 className="text-lg font-bold text-white">Proxy credentials</h3>
             <p className="text-xs text-[#71717A]">
-              ProxyJet dashboard → Proxy Generator → copy <b>Proxy Username</b> + <b>Proxy Password</b>.
+              Your proxy dashboard → Proxy Generator → copy <b>Proxy Username</b> + <b>Proxy Password</b>.
             </p>
             <input
               placeholder="Base username (e.g. 260202i9bQO)"

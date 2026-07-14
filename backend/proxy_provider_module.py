@@ -917,15 +917,10 @@ def init_router(main_db, get_current_user_dep) -> APIRouter:
                         {"key": "lines", "label": "Proxies (one per line, any format)", "placeholder": "socks5://user:pass@host:port\nhttp://host:port\nuser:pass@host:port\nhost:port:user:pass", "type": "textarea"},
                     ],
                 },
-                {
-                    "key": "native_proxyjet",
-                    "label": "Native ProxyJet (Krexion built-in)",
-                    "description": "Uses your existing Krexion ProxyJet with per-provider country/state override.",
-                    "fields": [
-                        {"key": "country", "label": "Country code (ISO-2)", "placeholder": "US", "type": "text"},
-                        {"key": "state", "label": "State (US only, optional)", "placeholder": "CA", "type": "text"},
-                    ],
-                },
+                # v2.6.2 — Native ProxyJet kind removed from the picker.
+                # Any provider (rotating gateway / API endpoint / manual
+                # list) is enough — customers no longer have to configure
+                # a special "ProxyJet" entry.
             ],
             "proxy_types": list(SUPPORTED_TYPES),
         }

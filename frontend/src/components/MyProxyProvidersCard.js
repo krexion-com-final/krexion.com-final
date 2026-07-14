@@ -103,6 +103,9 @@ export default function MyProxyProvidersCard() {
   }, []);
 
   const selected = providers.find((p) => p.id === selectedId);
+  // v2.6.2 — native_proxyjet kind removed. If a legacy provider still
+  // exists with this kind (from before the change), keep the geo/
+  // sticky UI functional so nothing breaks.
   const supportsGeo = selected?.kind === "native_proxyjet";
   const supportsSticky = selected?.kind === "native_proxyjet";
 

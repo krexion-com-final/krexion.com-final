@@ -516,7 +516,7 @@ export default function BrowserProfilesPage() {
                 <h2 className="text-xl font-semibold text-zinc-100">{editingId ? "Edit Profile" : "New Browser Profile"}</h2>
                 {!editingId && (
                   <p className="text-[11px] text-zinc-500 mt-1">
-                    Each profile gets a UNIQUE user-agent (live generator) + UNIQUE proxy (ProxyJet) — anti-detect ready. Leave name blank for auto-naming.
+                    Each profile gets a UNIQUE user-agent (live generator) + UNIQUE proxy from your selected Proxy Provider — anti-detect ready. Leave name blank for auto-naming.
                   </p>
                 )}
               </div>
@@ -754,7 +754,7 @@ export default function BrowserProfilesPage() {
                         <input type="radio" name="proxy_mode" value="proxyjet" className="sr-only"
                           checked={advProxy.mode === "proxyjet"}
                           onChange={() => setAdvProxy({ ...advProxy, mode: "proxyjet" })} />
-                        <div className="font-semibold">⚡ Generate (ProxyJet)</div>
+                        <div className="font-semibold">⚡ Generate (Provider)</div>
                         <div className="text-[10px] mt-0.5 opacity-70">Unique IP per profile</div>
                       </label>
                       <label className={`cursor-pointer p-2 rounded border text-center text-xs ${advProxy.mode === "manual" ? "border-cyan-400 bg-cyan-500/15 text-cyan-200" : "border-zinc-700 text-zinc-400 hover:bg-zinc-900"}`}>
@@ -1026,14 +1026,14 @@ export default function BrowserProfilesPage() {
                           value={form.proxy.provider_id}
                           onChange={(v) => setForm({ ...form, proxy: { ...form.proxy, provider_id: v } })}
                           label="Provider (optional)"
-                          labelDefault="(use manual proxy / ProxyJet fields below)"
+                          labelDefault="(use manual proxy fields below)"
                           testIdPrefix="bp-proxy-provider"
                         />
                         <label className="flex items-center gap-2 text-xs text-zinc-300">
                           <input type="checkbox" checked={form.proxy.use_proxyjet}
                             onChange={(e) => setForm({ ...form, proxy: { ...form.proxy, use_proxyjet: e.target.checked } })}
                             className="w-4 h-4 rounded accent-cyan-500" />
-                          Use ProxyJet Auto (unique sticky session per profile)
+                          Auto-generate unique proxy per profile (uses selected Provider)
                         </label>
                         {!form.proxy.use_proxyjet && (
                           <div className="grid grid-cols-2 gap-2">

@@ -167,7 +167,7 @@ export default function LocalPCStatusBadge() {
             onClick={resyncToPC}
             disabled={resyncing}
             className="inline-flex items-center gap-1 px-2 py-1.5 rounded-md bg-sky-500/10 border border-sky-500/30 text-sky-300 text-xs font-medium hover:bg-sky-500/20 hover:border-sky-500/50 transition disabled:opacity-50 disabled:cursor-not-allowed"
-            title="Push links & ProxyJet credentials from cloud to your PC's local database"
+            title="Push links & Proxy credentials from cloud to your PC's local database"
             type="button"
           >
             {resyncing ? (

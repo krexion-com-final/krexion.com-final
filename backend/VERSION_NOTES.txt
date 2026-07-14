@@ -1,3 +1,85 @@
+# v2.6.2 — 2026-07-14 — Provider-first proxy layer + per-customer VPS heavy override + Smart Paste
+#
+# CUSTOMER-FACING CHANGES:
+#   1. Smart Paste (Settings › Proxy Providers): customer paste kar dein
+#      koi bhi format ki proxy strings (1-500 lines) — Krexion khud
+#      detect kar leta hai socks5 / http / https / socks4, aur ek click
+#      mein provider ban jaata hai. Supported formats:
+#         • socks5://user:pass@host:port    • http://host:port
+#         • user:pass@host:port             • host:port
+#         • host:port:user:pass             • host,port,user,pass
+#      Add Provider dialog ke andar bhi Smart Paste button available hai.
+#
+#   2. ProxyJet-Specific UI Removed — Provider-First Everywhere:
+#      Ab pura proxy generation aap ke selected Provider se hota hai.
+#      • Proxies page se ProxyJet Auto Mode card hata diya
+#      • RUT Auto Mode ab strictly Provider chahiye (no ProxyJet fallback)
+#      • Visual Recorder / AI Dialog: "From Provider" button
+#      • Browser Profiles: "Generate (Provider)" mode
+#      • AdsPower: generic "Proxy credentials"
+#      Existing native_proxyjet providers agar aap ke DB mein hain toh
+#      chalte rahen ge — sirf new-provider dropdown mein ye option nahi
+#      dikhayega.
+#
+#   3. Provider Universal Use: RUT, Browser Profiles, Visual Recorder,
+#      CPI — sab jagah ek hi Provider dropdown. Test button provider ko
+#      verify karta hai; jab kaam kare toh sab jagah kaam karega.
+#
+#   4. Import Traffic + Form Filler Pages Removed: dono features already
+#      Real User Traffic ke andar hain. Sidebar cleaner ho gaya. Legacy
+#      URLs (/import-traffic, /form-filler) redirect to /real-user-traffic.
+#
+#   5. RUT Live Visual Grid — Failed Visit Visibility (Task 5):
+#      • Naya "⚠ Failed" toggle header mein — ON hone par failed /
+#        cancelled visits red border + full error message ke saath grid
+#        mein bane rehte hain (pehle silent-vanish hote thay).
+#      • Per-tile Dismiss (✕) button reviewed tile hataane ke liye.
+#      • Per-visit Kill button pehle se tha, ab bhi hai.
+#
+#   6. Sidebar Icons-Only Collapse (works on VPS + Electron + Native):
+#      Krexion logo ke saath naya toggle button — dabao toh sidebar
+#      icons-only ho jaati hai (labels hidden), doobara dabao toh
+#      complete wapas. localStorage mein preference save. VPS cloud
+#      DashboardLayout aur Electron/Native shell dono par.
+#
+#   7. Per-Customer VPS Heavy Feature Override (Admin › Users):
+#      Naya "VPS Heavy" toggle button har user row mein. Admin flip
+#      karke kisi specific customer ko VPS pe heavy features (RUT,
+#      Form Filler, Visual Recorder, bulk proxy tests) chalane ki
+#      permission de sakta hai — baaki customers strict-mode par rehte
+#      hain. Sub-users parent ki setting inherit karte hain.
+#      Backend: `allow_cloud_heavy` field on user + new endpoint
+#      GET /api/mode/effective returning per-user resolution.
+#
+# BACKEND (no breaking API changes):
+#   • NEW  POST /api/proxy-providers/_smart-parse
+#   • NEW  GET  /api/mode/effective
+#   • MOD  PUT  /api/admin/users/{id} accepts allow_cloud_heavy
+#   • MOD  GET  /api/auth/me returns allow_cloud_heavy
+#   • REMOVED from GET /api/proxy-providers/_meta/kinds: native_proxyjet
+#     (existing providers with this kind keep working)
+#   • MOD  require_local_mode() now also checks per-user
+#     allow_cloud_heavy override before refusing cloud execution.
+#
+# FRONTEND (no breaking route removals):
+#   • REMOVED file  frontend/src/components/ProxyJetAutoCard.jsx
+#   • MOD  RealUserTrafficPage — Auto Mode block simplified; ProxyJet
+#          credentials check removed; provider required for Auto Mode
+#   • MOD  VisualRecorderPage — "From Provider" buttons
+#   • MOD  BrowserProfilesPage — provider-first proxy mode
+#   • MOD  AdsPowerPage — generic "Proxy credentials" labels
+#   • MOD  ProxiesPage — ProxyJet card removed; provider-only card
+#   • MOD  ProxyProvidersTab — Smart Paste UI + dialog
+#   • MOD  AdminDashboard — new "VPS Heavy" toggle per user
+#   • MOD  DashboardLayout / NativeShell — sidebar icons-only mode
+#   • ADD  NativeShell.css — .knative-app-collapsed rules
+#
+# NO DATA MIGRATIONS REQUIRED.
+# Deploy triggers all three CI/CD workflows:
+#   • deploy.yml               → VPS auto-deploy (backend + frontend)
+#   • build-electron-desktop   → new Electron installer
+#   • build-windows-release    → new native Windows package
+
 # v2.6.0 — 2026-07-11 — Fraud filter, antidetect, and selector engine major upgrade
 #
 # CUSTOMER-FACING CHANGES:

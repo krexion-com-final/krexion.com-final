@@ -990,7 +990,7 @@ export default function ProxiesPage() {
               <DialogHeader>
                 <DialogTitle>Add Proxies — Any Provider</DialogTitle>
                 <DialogDescription className="space-y-1">
-                  <span className="block">Works with <span className="text-cyan-300">any proxy provider</span> — ProxyJet, BrightData, SmartProxy, Oxylabs, IPRoyal, Nimble, Rayobyte, GeoNode, BestGo, DataImpulse, ProxyEmpire, etc.</span>
+                  <span className="block">Works with <span className="text-cyan-300">any proxy provider</span> — BrightData, SmartProxy, Oxylabs, IPRoyal, Nimble, Rayobyte, GeoNode, BestGo, DataImpulse, ProxyEmpire, and many more.</span>
                   <span className="block text-[11px] text-zinc-500">Paste one proxy per line. Any of these 5 formats auto-detected:</span>
                 </DialogDescription>
               </DialogHeader>
@@ -1031,7 +1031,7 @@ export default function ProxiesPage() {
                   />
                 </div>
                 <div className="text-[10px] text-zinc-500">
-                  💡 <span className="text-zinc-400">Tip:</span> Ye page general-purpose proxy pool ke liye hai. Agar aap ProxyJet residential rotating chahte hain (unique IP per visit), upar wale <span className="text-cyan-300">ProxyJet Auto Mode</span> card use karein.
+                  💡 <span className="text-zinc-400">Tip:</span> Ye page general-purpose proxy pool ke liye hai. Agar aap residential rotating (unique IP per visit) chahte hain, upar wale <span className="text-cyan-300">My Proxy Providers</span> card se apna provider add karein.
                 </div>
                 <Button type="submit" data-testid="submit-proxies-button" className="w-full">
                   <Plus size={16} className="mr-2" />

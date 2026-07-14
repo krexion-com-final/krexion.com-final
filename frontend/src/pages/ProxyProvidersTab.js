@@ -115,7 +115,7 @@ export default function ProxyProvidersTab() {
       const res = await axios.post(`${API}/proxy-providers/${p.id}/test`, {}, { headers: authHeaders() });
       if (res.data.ok) {
         const s = res.data.sample || {};
-        toast.success(`Test OK — ${s.use_proxyjet ? "ProxyJet " + (s.country || "") : (s.proxy ? s.proxy.slice(0, 40) + "…" : "resolved")}`);
+        toast.success(`Test OK — ${s.use_proxyjet ? "provider " + (s.country || "") : (s.proxy ? s.proxy.slice(0, 40) + "…" : "resolved")}`);
       } else {
         toast.error(`Test failed: ${res.data.error || "unknown"}`);
       }

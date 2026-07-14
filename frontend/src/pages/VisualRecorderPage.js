@@ -381,6 +381,7 @@ export default function VisualRecorderPage() {
   // Defaults to US — user picks via the country dropdown in setup.
   const [country, setCountry] = useState("US");
   const [pjAvailable, setPjAvailable] = useState(false);
+  const [defaultProviderId, setDefaultProviderId] = useState("");
   const [pjCountry, setPjCountry] = useState("US");
   const [saving, setSaving] = useState(false);
   const [savedToLibraryId, setSavedToLibraryId] = useState(null);
@@ -592,15 +593,21 @@ export default function VisualRecorderPage() {
     } catch {}
   };
 
-  // ── ProxyJet availability check ────────────────────────────────────
+  // v2.6.2 — Refactored: ProxyJet-specific fetch removed. This helper
+  // now uses the user's default Proxy Provider (Settings › Proxy
+  // Providers) via /api/proxy-providers/{id}/generate-batch. If the
+  // user has no provider yet, we prompt them to add one.
   useEffect(() => {
     (async () => {
       try {
-        const r = await fetch(`${API_URL}/api/proxyjet/credentials`, { headers: authH() });
+        const r = await fetch(`${API_URL}/api/proxy-providers`, { headers: authH() });
         if (r.ok) {
-          const d = await r.json();
-          setPjAvailable(!!d.configured);
-          if (d.default_country) setPjCountry(d.default_country);
+          const list = await r.json();
+          const enabled = Array.isArray(list) ? list.filter(p => p.enabled !== false) : [];
+          setPjAvailable(enabled.length > 0);
+          if (enabled.length > 0 && !defaultProviderId) {
+            setDefaultProviderId(enabled[0].id);
+          }
         }
       } catch {}
     })();
@@ -622,30 +629,31 @@ export default function VisualRecorderPage() {
     return () => clearInterval(t);
   }, [setupStage, sessionState]);
 
-  // Fetch ONE fresh ProxyJet proxy via the existing generate-batch API.
-  // Lets the user populate the proxy field with a single click on setup.
+  // v2.6.2 — Fetch ONE fresh proxy from the user's default provider
+  // (generic — works for any provider kind).
   const useProxyJetProxy = async () => {
-    if (!pjAvailable) {
-      toast.error("Save ProxyJet credentials first (Proxies page → ProxyJet Auto)");
+    if (!defaultProviderId) {
+      toast.error("Add a Proxy Provider first (Settings › Proxy Providers)");
       return;
     }
     setBusy(true);
     try {
-      const r = await fetch(`${API_URL}/api/proxyjet/generate-batch`, {
+      const r = await fetch(`${API_URL}/api/proxy-providers/${defaultProviderId}/generate-batch`, {
         method: "POST",
         headers: authH(),
         body: JSON.stringify({ count: 1, country: pjCountry }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
-      if (d.proxies?.[0]) {
-        setProxy(d.proxies[0]);
-        toast.success(`Fresh ${pjCountry} residential proxy loaded`);
+      const line = d.proxies?.[0] || d.lines?.[0];
+      if (line) {
+        setProxy(line);
+        toast.success(`Fresh proxy loaded from provider`);
       } else {
-        toast.error("No proxy returned");
+        toast.error("No proxy returned by provider");
       }
     } catch (e) {
-      toast.error(e.message || "ProxyJet fetch failed");
+      toast.error(e.message || "Provider fetch failed");
     } finally {
       setBusy(false);
     }
@@ -735,32 +743,31 @@ export default function VisualRecorderPage() {
   });
 
   // ── 2026-06 — AI Step Generator handler ──────────────────────────
-  // Fetch a fresh ProxyJet proxy directly into the AI dialog's local
-  // proxy field. Doesn't touch the main setup `proxy` state until the
-  // user actually clicks Generate (avoids overwriting their existing
-  // proxy if they cancel mid-dialog).
+  // v2.6.2 — Fetch a fresh proxy from the user's default Proxy
+  // Provider directly into the AI dialog's local proxy field.
   const aiUseProxyJet = async () => {
-    if (!pjAvailable) {
-      toast.error("Save ProxyJet credentials first (Proxies page → ProxyJet Auto)");
+    if (!defaultProviderId) {
+      toast.error("Add a Proxy Provider first (Settings › Proxy Providers)");
       return;
     }
     setAiProxyJetBusy(true);
     try {
-      const r = await fetch(`${API_URL}/api/proxyjet/generate-batch`, {
+      const r = await fetch(`${API_URL}/api/proxy-providers/${defaultProviderId}/generate-batch`, {
         method: "POST",
         headers: authH(),
         body: JSON.stringify({ count: 1, country: pjCountry }),
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
-      if (d.proxies?.[0]) {
-        setAiProxy(d.proxies[0]);
-        toast.success(`Fresh ${pjCountry} ProxyJet proxy loaded into AI dialog`);
+      const line = d.proxies?.[0] || d.lines?.[0];
+      if (line) {
+        setAiProxy(line);
+        toast.success(`Fresh proxy loaded from provider into AI dialog`);
       } else {
-        toast.error("No proxy returned");
+        toast.error("No proxy returned by provider");
       }
     } catch (e) {
-      toast.error(e.message || "ProxyJet fetch failed");
+      toast.error(e.message || "Provider fetch failed");
     } finally {
       setAiProxyJetBusy(false);
     }
@@ -4017,10 +4024,10 @@ export default function VisualRecorderPage() {
                       onClick={useProxyJetProxy}
                       disabled={busy}
                       className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md bg-indigo-600/30 hover:bg-indigo-600/60 border border-indigo-500/40 text-indigo-200 disabled:opacity-50"
-                      data-testid="vr-use-pj-proxy"
-                      title="Fetch a fresh unique ProxyJet residential proxy"
+                      data-testid="vr-use-provider-proxy"
+                      title="Fetch a fresh proxy from your default Proxy Provider"
                     >
-                      <Zap className="w-3 h-3" /> ProxyJet
+                      <Zap className="w-3 h-3" /> From Provider
                     </button>
                   )}
                 </div>
@@ -4034,7 +4041,7 @@ export default function VisualRecorderPage() {
                 />
                 {!pjAvailable && (
                   <p className="text-[10px] text-zinc-500 mt-1">
-                    Tip: save ProxyJet credentials on the Proxies page for one-click fresh proxies here.
+                    Tip: add a Proxy Provider in Settings › Proxy Providers for one-click fresh proxies here.
                   </p>
                 )}
 
@@ -6837,13 +6844,13 @@ export default function VisualRecorderPage() {
                       onClick={aiUseProxyJet}
                       disabled={aiProxyJetBusy || aiBusy}
                       className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md bg-indigo-600/30 hover:bg-indigo-600/60 border border-indigo-500/40 text-indigo-200 disabled:opacity-50"
-                      data-testid="vr-ai-use-pj-proxy"
-                      title={`Fetch fresh ${pjCountry} residential proxy from ProxyJet`}
+                      data-testid="vr-ai-use-provider-proxy"
+                      title="Fetch a fresh proxy from your default Proxy Provider"
                     >
                       {aiProxyJetBusy
                         ? <Loader2 className="w-3 h-3 animate-spin" />
                         : <Zap className="w-3 h-3" />}
-                      ProxyJet ({pjCountry})
+                      From Provider
                     </button>
                   )}
                 </div>
@@ -6857,8 +6864,8 @@ export default function VisualRecorderPage() {
                 />
                 <p className="text-[10px] text-zinc-500 mt-1">
                   {pjAvailable
-                    ? "Click ProxyJet button for one-click fresh residential proxy, OR paste your own. Used during Start Recording / Live Test."
-                    : "Tip: save ProxyJet credentials on Proxies page for one-click fresh proxies. Or paste your own proxy URL."}
+                    ? "Click From Provider for a one-click fresh proxy, OR paste your own. Used during Start Recording / Live Test."
+                    : "Tip: add a Proxy Provider in Settings › Proxy Providers for one-click fresh proxies. Or paste your own proxy URL."}
                 </p>
               </div>
 
