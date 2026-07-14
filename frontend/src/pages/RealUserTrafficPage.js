@@ -721,6 +721,16 @@ export default function RealUserTrafficPage() {
   const [liveVisits, setLiveVisits] = useState({}); // { "1": {visit_idx, latest_frame_b64, latest_event, ...} }
   const [expandedVisit, setExpandedVisit] = useState(null); // tile id when expanded to fullscreen
   const visualGridTimerRef = useRef(null);
+  // v2.6.1 — Customer ask (Task 5): keep failed / cancelled visits in
+  // view (in red) so the operator can see WHAT went wrong instead of
+  // the tile silently vanishing. Persisted so the choice survives
+  // reloads.
+  const [showFailedVisits, setShowFailedVisits] = useState(
+    () => (typeof window !== "undefined" && localStorage.getItem("krexion_rut_show_failed") !== "0")
+  );
+  useEffect(() => {
+    try { localStorage.setItem("krexion_rut_show_failed", showFailedVisits ? "1" : "0"); } catch (_) {}
+  }, [showFailedVisits]);
 
   // 2026-06 — Customer ask (Roman Urdu): "Live visual grid mein siraf
   // wo screen show ho jo active chal rahi hai. Jo complete / cancelled
@@ -761,6 +771,21 @@ export default function RealUserTrafficPage() {
     // `action`/`selector` and never sets `stage`).
     if (ev.stage === 'done') return false;
     return true;
+  };
+
+  // v2.6.1 — Task 5. Predicate that also keeps FAILED / CANCELLED
+  // visits visible so the operator can see what went wrong. Successful
+  // visits still vanish (nothing to inspect).
+  const isVisitVisible = (v) => {
+    if (!v) return false;
+    if (isVisitActive(v)) return true;
+    if (!showFailedVisits) return false;
+    const vStatus = v.status;
+    const ev = v.latest_event || {};
+    if (vStatus === 'failed') return true;
+    if (vStatus === 'cancelled' || ev.stage === 'manual_cancel') return true;
+    if (vStatus === 'skipped') return true;
+    return false;
   };
 
   // ─── 2026-06 — Manual Takeover + Hybrid Streaming state ──────────────
@@ -2283,19 +2308,19 @@ export default function RealUserTrafficPage() {
                     </span>
                   ) : pjConfigured === false ? (
                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">
-                      pick a Proxy source above, OR save ProxyJet creds on Proxies page
+                      pick a Proxy source above
                     </span>
                   ) : pjConfigured === true ? (
                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                      ✓ ProxyJet ready
+                      ✓ provider ready
                     </span>
                   ) : null}
                 </div>
                 <p className="text-[11px] text-zinc-400 mt-1 leading-snug">
                   Skip pasting proxies entirely. When ON, a fresh batch of proxies is auto-generated
-                  from whichever <b className="text-indigo-300">Proxy source</b> you picked above (any
-                  kind — rotating gateway, API endpoint, manual list, ProxyJet). If no provider is
-                  picked, Krexion falls back to ProxyJet (legacy behavior).
+                  from whichever <b className="text-indigo-300">Proxy source</b> you picked above
+                  (any kind — rotating gateway, API endpoint, manual list, custom provider).
+                  Add providers in <i>Settings › Proxy Providers</i> — they show up in the dropdown above.
                 </p>
                 {useProxyJetAuto && (
                   <div className="mt-3 space-y-2">
@@ -5542,9 +5567,33 @@ export default function RealUserTrafficPage() {
                     <span className="text-zinc-500 text-sm font-normal ml-1">
                       / {activeJob?.concurrency || activeJob?.total || '?'} concurrent visits
                     </span>
+                    {showFailedVisits && Object.values(liveVisits).filter(v => v && (v.status === 'failed' || v.status === 'cancelled')).length > 0 && (
+                      <span className="text-rose-400 text-sm font-normal ml-2">
+                        + {Object.values(liveVisits).filter(v => v && (v.status === 'failed' || v.status === 'cancelled')).length} failed/cancelled
+                      </span>
+                    )}
                   </h3>
                 </div>
                 <div className="flex items-center gap-1">
+                  {/* v2.6.1 — Show/Hide Failed Visits toggle (Task 5).
+                      When ON, failed / cancelled visits stay pinned in
+                      the grid (with red border + error tooltip) so the
+                      operator can see WHAT went wrong. When OFF, tiles
+                      vanish the moment they fail (original behaviour). */}
+                  <button
+                    onClick={() => setShowFailedVisits((v) => !v)}
+                    className={`px-2 py-1 text-xs rounded transition-colors mr-1 ${
+                      showFailedVisits
+                        ? 'bg-rose-900/60 text-rose-200 hover:bg-rose-800/70'
+                        : 'text-zinc-400 hover:text-white hover:bg-zinc-800'
+                    }`}
+                    title={showFailedVisits
+                      ? 'Failed/cancelled visits stay visible in red — click to hide them'
+                      : 'Show failed/cancelled visits in red (so you can see the error)'}
+                    data-testid="rut-visual-grid-toggle-failed"
+                  >
+                    {showFailedVisits ? '⚠ Failed ON' : '⚠ Failed'}
+                  </button>
                   {/* 2026-05 — Show Step Markers toggle. When ON, the
                       tile renders coloured dots at each step's target
                       position on the full-page screenshot. */}
@@ -5601,7 +5650,7 @@ export default function RealUserTrafficPage() {
               </div>
               {/* Grid body */}
               <div className="flex-1 overflow-y-auto p-3" data-testid="rut-visual-grid-body">
-                {Object.values(liveVisits).filter(isVisitActive).length === 0 ? (
+                {Object.values(liveVisits).filter(isVisitVisible).length === 0 ? (
                   <div className="text-center text-zinc-500 py-20">
                     <Loader2 className="w-8 h-8 animate-spin inline-block mb-2" />
                     <div>Waiting for first visit to start…</div>
@@ -5614,7 +5663,7 @@ export default function RealUserTrafficPage() {
                     gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
                   }}>
                     {Object.entries(liveVisits)
-                      .filter(([, v]) => isVisitActive(v))
+                      .filter(([, v]) => isVisitVisible(v))
                       .sort(([a], [b]) => parseInt(a, 10) - parseInt(b, 10))
                       .map(([vid, v]) => {
                         const ev = v.latest_event || {};
@@ -5664,6 +5713,46 @@ export default function RealUserTrafficPage() {
                             <div className={`absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded text-[10px] font-mono ${badgeColor} z-10`}>
                               {isCancelled ? '⊘ cancelled' : status === 'running' ? '⏵ running' : status === 'ok' ? '✓ ok' : '✗ failed'}
                             </div>
+                            {/* v2.6.1 — Task 5: red error banner for FAILED / CANCELLED
+                                visits. Sits at the bottom of the tile with the exact
+                                error message + a small "Dismiss" button so the operator
+                                can free the slot after reviewing the reason. */}
+                            {(v.status === 'failed' || v.status === 'cancelled') && (v.error || v.latest_event?.detail || v.latest_event?.error) && (
+                              <div
+                                className={`absolute bottom-0 left-0 right-0 z-20 px-2 py-1.5 border-t text-[10px] leading-tight font-mono
+                                  ${v.status === 'failed' 
+                                    ? 'bg-rose-950/95 text-rose-100 border-rose-500/60'
+                                    : 'bg-zinc-900/95 text-zinc-200 border-zinc-500/60'}`}
+                                onClick={(e) => e.stopPropagation()}
+                                data-testid={`rut-visual-tile-error-${vid}`}
+                              >
+                                <div className="flex items-start gap-1">
+                                  <span className="shrink-0">{v.status === 'failed' ? '⚠' : '⊘'}</span>
+                                  <span className="flex-1 break-words" title={v.error || v.latest_event?.detail || v.latest_event?.error}>
+                                    {(v.error || v.latest_event?.detail || v.latest_event?.error || '').toString().slice(0, isExpanded ? 400 : 140)}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      // Dismiss = hide this tile client-side by
+                                      // wiping its entry from state. Backend
+                                      // still keeps it for post-mortem.
+                                      setLiveVisits((prev) => {
+                                        const nx = { ...prev };
+                                        delete nx[vid];
+                                        return nx;
+                                      });
+                                    }}
+                                    className="shrink-0 px-1 py-0 rounded text-[9px] font-semibold bg-black/40 hover:bg-black/70 text-white"
+                                    title="Dismiss this tile"
+                                    data-testid={`rut-visual-tile-dismiss-${vid}`}
+                                  >
+                                    ✕
+                                  </button>
+                                </div>
+                              </div>
+                            )}
                             {/* 2026-05 — Per-visit manual kill button.
                                 Shows only while the visit is still running
                                 (so users can rescue a stuck tile without

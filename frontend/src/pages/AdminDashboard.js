@@ -20,7 +20,7 @@ import {
   LogOut, Settings, Trash2, CheckCircle, XCircle, 
   Clock, Search, RefreshCw, Eye, EyeOff, UserPlus,
   Palette, Image, Type, RotateCcw, Save, Server, Key, Plus, TestTube, Globe,
-  Activity, Mail, Send, ExternalLink, AlertCircle, Menu, Cpu, ShieldCheck
+  Activity, Mail, Send, ExternalLink, AlertCircle, Menu, Cpu, ShieldCheck, Cloud
 } from "lucide-react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator } from "../components/ui/dropdown-menu";
 
@@ -379,6 +379,28 @@ export default function AdminDashboard() {
       fetchData();
     } catch (error) {
       toast.error("Failed to block user");
+    }
+  };
+
+  // v2.6.1 — Toggle per-user override that lets a specific customer
+  // run heavy features (RUT, Form Filler, Visual Recorder) on the VPS
+  // even while global strict_heavy_block stays ON for everyone else.
+  const toggleCloudHeavy = async (user) => {
+    const nextValue = !user.allow_cloud_heavy;
+    try {
+      await axios.put(
+        `${API}/admin/users/${user.id}`,
+        { allow_cloud_heavy: nextValue },
+        { headers: { Authorization: `Bearer ${getAdminToken()}` } }
+      );
+      toast.success(
+        nextValue
+          ? `${user.email} can now run heavy features on the VPS`
+          : `${user.email} is back to strict (desktop-only) mode`
+      );
+      fetchData();
+    } catch (error) {
+      toast.error("Failed to update VPS heavy override");
     }
   };
 
@@ -1243,6 +1265,21 @@ export default function AdminDashboard() {
                                 Block
                               </Button>
                             )}
+                            <Button 
+                              size="sm" 
+                              variant="outline"
+                              className={user.allow_cloud_heavy 
+                                ? "border-[#F59E0B] text-[#F59E0B] hover:bg-[#F59E0B]/10" 
+                                : "border-[var(--brand-border)] text-[#94A3B8] hover:bg-white/5"}
+                              onClick={() => toggleCloudHeavy(user)}
+                              data-testid={`cloud-heavy-user-${user.id}`}
+                              title={user.allow_cloud_heavy 
+                                ? "VPS heavy features ENABLED for this user — click to disable" 
+                                : "Click to allow this user to run heavy features on the VPS (bypasses strict mode)"}
+                            >
+                              <Cloud size={14} className="mr-1" />
+                              {user.allow_cloud_heavy ? "VPS Heavy ✓" : "VPS Heavy"}
+                            </Button>
                             <Button 
                               size="sm" 
                               variant="outline"

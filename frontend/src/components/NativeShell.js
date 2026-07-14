@@ -81,7 +81,7 @@ const NAV_GROUPS = [
       { name: "Browser Profiles",  path: "/browser-profiles",  icon: Globe,       feature: "real_user_traffic" },
       { name: "Visual Recorder",   path: "/visual-recorder",   icon: Camera,      feature: "real_user_traffic" },
       { name: "RPA Studio",        path: "/rpa-studio",        icon: Zap,         feature: null },
-      { name: "Form Filler",       path: "/form-filler",       icon: FileText,    feature: "form_filler" },
+      // v2.6.1 — Form Filler removed (already inside Real-User Traffic)
       { name: "Uploaded Items",    path: "/uploaded-things",   icon: Package,     feature: "real_user_traffic" },
     ],
   },
@@ -92,7 +92,7 @@ const NAV_GROUPS = [
       { name: "Email Checker",  path: "/email-checker",  icon: Mail,     feature: "email_checker" },
       { name: "Phone Checker",  path: "/phone-checker",  icon: Phone,    feature: "phone_checker" },
       { name: "Separate Data",  path: "/separate-data",  icon: Filter,   feature: "separate_data" },
-      { name: "Import Traffic", path: "/import-traffic", icon: Upload,   feature: "import_traffic" },
+      // v2.6.1 — Import Traffic removed (already inside Real-User Traffic)
       { name: "UA Generator",   path: "/ua-generator",   icon: Smartphone, feature: "ua_generator" },
       { name: "UA Checker",     path: "/ua-checker",     icon: Search,   feature: "ua_generator" },
     ],
@@ -150,12 +150,21 @@ export default function NativeShell({ children }) {
   const [collapsed, setCollapsed] = useState({});  // section -> bool
   // v2.1.22 — Sidebar hide toggle for fullscreen RUT view. Persisted to
   // localStorage so the choice survives reloads.
+  // v2.6.1 — Added an icons-only "collapsed" mode. Toggle cycles
+  //   full ↔ icons-only. A separate long-press / secondary control can
+  //   still fully hide the sidebar via `sidebarHidden`.
   const [sidebarHidden, setSidebarHidden] = useState(
     () => (typeof window !== "undefined" && localStorage.getItem("krexion_sidebar_hidden") === "1")
+  );
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => (typeof window !== "undefined" && localStorage.getItem("krexion_sidebar_collapsed") === "1")
   );
   useEffect(() => {
     try { localStorage.setItem("krexion_sidebar_hidden", sidebarHidden ? "1" : "0"); } catch (_) { /* localStorage unavailable */ }
   }, [sidebarHidden]);
+  useEffect(() => {
+    try { localStorage.setItem("krexion_sidebar_collapsed", sidebarCollapsed ? "1" : "0"); } catch (_) { /* ignore */ }
+  }, [sidebarCollapsed]);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef(null);
 
@@ -285,14 +294,28 @@ export default function NativeShell({ children }) {
       </div>
 
       {/* ── Sidebar + content ──────────────────────────────────────── */}
-      <div className={`knative-app ${sidebarHidden ? "knative-app-no-sidebar" : ""}`}>
+      <div className={`knative-app ${sidebarHidden ? "knative-app-no-sidebar" : ""} ${!sidebarHidden && sidebarCollapsed ? "knative-app-collapsed" : ""}`}>
         {!sidebarHidden && (
         <aside className="knative-sidebar" data-testid="native-sidebar">
           <div className="knative-brand">
             <div className="knative-brand-logo">
               {branding?.logo_url ? <img src={branding.logo_url} alt={branding?.app_name || "Krexion"} /> : "K"}
             </div>
-            <div className="knative-brand-name">{branding?.app_name || "Krexion"}</div>
+            {!sidebarCollapsed && (
+              <div className="knative-brand-name">{branding?.app_name || "Krexion"}</div>
+            )}
+            {/* v2.6.1 — Sidebar collapse toggle right next to the Krexion logo.
+                Visible in both full + collapsed states so user can always
+                switch. Fully-hidden state is toggled from the top-bar icon. */}
+            <button
+              className="knative-brand-toggle"
+              onClick={() => setSidebarCollapsed((v) => !v)}
+              title={sidebarCollapsed ? "Expand sidebar" : "Collapse to icons only"}
+              data-testid="native-sidebar-collapse-toggle"
+              aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            >
+              {sidebarCollapsed ? <PanelLeftOpen size={14} /> : <PanelLeftClose size={14} />}
+            </button>
           </div>
 
           <button className="knative-cta" onClick={quickAction} data-testid="native-quick-new-job">

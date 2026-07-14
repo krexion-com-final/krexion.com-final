@@ -333,6 +333,192 @@ async def get_proxy_from_provider(user_id: str, provider_id: str) -> Dict[str, A
     return {"proxy": None, "error": f"unknown kind: {kind}", **ret_common}
 
 
+# ─── Smart proxy string parser (Task 1) ──────────────────────────────
+# Understand ANY proxy string a customer may paste in.
+# Supported input shapes (case-insensitive scheme prefix optional):
+#   • http://host:port
+#   • http://user:pass@host:port
+#   • https://user:pass@host:port
+#   • socks5://user:pass@host:port
+#   • socks5h://user:pass@host:port
+#   • socks4://host:port
+#   • user:pass@host:port                (scheme = auto/http default)
+#   • host:port                          (scheme = auto/http default)
+#   • host:port:user:pass                (Webshare / common list style)
+#   • user:pass:host:port                (alt style)
+#   • host,port,user,pass                (comma-separated)
+# Returns dict per line:
+#   {"raw", "ok", "proxy_type", "host", "port", "username", "password",
+#    "normalized"}  — normalized is `<scheme>://user:pass@host:port` or
+#                     `<scheme>://host:port`.
+_SCHEME_ALIASES = {
+    "http": "http", "https": "https",
+    "socks5": "socks5", "socks5h": "socks5h", "socks4": "socks4",
+    "socks": "socks5",  # user shorthand
+    "s5": "socks5", "s4": "socks4",
+}
+
+
+def _looks_like_host(s: str) -> bool:
+    if not s:
+        return False
+    if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", s):
+        return True
+    if re.match(r"^[a-zA-Z0-9]([a-zA-Z0-9\-\.]{0,253}[a-zA-Z0-9])?$", s):
+        return "." in s or s in ("localhost",)
+    return False
+
+
+def _looks_like_port(s: str) -> bool:
+    if not s or not s.isdigit():
+        return False
+    n = int(s)
+    return 1 <= n <= 65535
+
+
+def parse_proxy_string(raw: str, default_type: str = "http") -> Dict[str, Any]:
+    """Auto-detect any common proxy string layout."""
+    result = {
+        "raw": raw,
+        "ok": False,
+        "proxy_type": default_type,
+        "host": "",
+        "port": "",
+        "username": "",
+        "password": "",
+        "normalized": "",
+        "error": "",
+    }
+    if not raw:
+        result["error"] = "empty"
+        return result
+    line = raw.strip().strip("'\"")
+    if not line:
+        result["error"] = "empty"
+        return result
+
+    # 1) Strip and detect scheme
+    scheme = default_type
+    m = re.match(r"^([a-zA-Z][a-zA-Z0-9]*)://(.+)$", line)
+    if m:
+        raw_scheme = m.group(1).lower()
+        scheme = _SCHEME_ALIASES.get(raw_scheme, raw_scheme)
+        if scheme not in SUPPORTED_TYPES:
+            scheme = default_type
+        line = m.group(2)
+
+    user = pwd = host = port = ""
+
+    # 2) Handle user:pass@host:port pattern
+    if "@" in line:
+        auth, hostpart = line.rsplit("@", 1)
+        if ":" in auth:
+            user, pwd = auth.split(":", 1)
+        else:
+            user = auth
+        if ":" in hostpart:
+            host, port = hostpart.split(":", 1)
+        else:
+            host = hostpart
+    else:
+        # 3) Handle colon/comma-separated flat lists (host:port[:user:pass] or reverse)
+        sep = "," if "," in line and ":" not in line else ":"
+        parts = [p.strip() for p in line.split(sep) if p.strip()]
+        if len(parts) == 2:
+            host, port = parts[0], parts[1]
+        elif len(parts) == 4:
+            # ambiguous: could be host:port:user:pass OR user:pass:host:port
+            a, b, c, d = parts
+            if _looks_like_host(a) and _looks_like_port(b):
+                host, port, user, pwd = a, b, c, d
+            elif _looks_like_host(c) and _looks_like_port(d):
+                user, pwd, host, port = a, b, c, d
+            else:
+                # fallback: assume host:port:user:pass
+                host, port, user, pwd = a, b, c, d
+        elif len(parts) == 3:
+            # host:port:user  (no password)  — rare but possible
+            host, port, user = parts[0], parts[1], parts[2]
+        else:
+            result["error"] = f"unrecognised format ({len(parts)} parts)"
+            return result
+
+    # Cleanup
+    host = host.strip().strip("/")
+    port = port.strip()
+    user = user.strip()
+    pwd = pwd.strip()
+
+    if not _looks_like_host(host):
+        result["error"] = f"invalid host '{host}'"
+        return result
+    if not _looks_like_port(port):
+        result["error"] = f"invalid port '{port}'"
+        return result
+
+    result.update({
+        "ok": True,
+        "proxy_type": scheme,
+        "host": host,
+        "port": port,
+        "username": user,
+        "password": pwd,
+    })
+    if user and pwd:
+        result["normalized"] = f"{scheme}://{user}:{pwd}@{host}:{port}"
+    elif user:
+        result["normalized"] = f"{scheme}://{user}@{host}:{port}"
+    else:
+        result["normalized"] = f"{scheme}://{host}:{port}"
+    return result
+
+
+def _bulk_parse(strings: List[str], default_type: str = "http") -> Dict[str, Any]:
+    """Parse a list of strings; return per-line results + summary."""
+    lines = []
+    for raw in strings:
+        if isinstance(raw, str):
+            for chunk in raw.splitlines():
+                chunk = chunk.strip()
+                if chunk:
+                    lines.append(chunk)
+    parsed = [parse_proxy_string(ln, default_type) for ln in lines]
+    ok = [p for p in parsed if p["ok"]]
+    # Detect dominant proxy_type (majority wins)
+    type_votes: Dict[str, int] = {}
+    for p in ok:
+        type_votes[p["proxy_type"]] = type_votes.get(p["proxy_type"], 0) + 1
+    dominant = default_type
+    if type_votes:
+        dominant = sorted(type_votes.items(), key=lambda x: -x[1])[0][0]
+
+    # Suggest a provider config:
+    # - If exactly 1 line with credentials → suggest rotating_gateway (one host)
+    # - Else → suggest manual_list with all normalized lines
+    suggested_kind = "manual_list"
+    suggested_config: Dict[str, Any] = {}
+    if len(ok) == 1 and ok[0]["username"] and ok[0]["password"]:
+        suggested_kind = "rotating_gateway"
+        suggested_config = {
+            "gateway_host": ok[0]["host"],
+            "gateway_port": ok[0]["port"],
+            "username": ok[0]["username"],
+            "password": ok[0]["password"],
+        }
+    else:
+        suggested_config = {"lines": "\n".join(p["normalized"] for p in ok)}
+
+    return {
+        "parsed": parsed,
+        "ok_count": len(ok),
+        "fail_count": len(parsed) - len(ok),
+        "dominant_type": dominant,
+        "suggested_kind": suggested_kind,
+        "suggested_proxy_type": dominant,
+        "suggested_config": suggested_config,
+    }
+
+
 async def _bump_use(user_id: str, provider_id: str) -> None:
     try:
         await _db.user_proxy_providers.update_one(
@@ -677,6 +863,24 @@ def init_router(main_db, get_current_user_dep) -> APIRouter:
             "proxy_type": proxy_type,
         }
 
+    @router.post("/_smart-parse")
+    async def smart_parse(
+        body: Dict[str, Any] = Body(default_factory=dict),
+        user=Depends(_get_current_user_dep),
+    ):
+        """Parse ANY pasted proxy strings (1-N lines, any format) and
+        return per-line normalized results + a suggested provider
+        config (rotating_gateway for a single credentialed line, or
+        manual_list for many)."""
+        strings = body.get("strings") or []
+        if isinstance(strings, str):
+            strings = [strings]
+        default_type = str(body.get("default_type") or "http").lower()
+        if default_type not in SUPPORTED_TYPES:
+            default_type = "http"
+        result = _bulk_parse(list(strings), default_type=default_type)
+        return result
+
     @router.get("/_meta/kinds")
     async def kinds_meta():
         """Metadata for the frontend Add Provider dialog."""
@@ -707,10 +911,10 @@ def init_router(main_db, get_current_user_dep) -> APIRouter:
                 },
                 {
                     "key": "manual_list",
-                    "label": "Manual List",
-                    "description": "Paste static proxies (one per line). Any HTTP/HTTPS/SOCKS format.",
+                    "label": "Manual List / Paste Strings",
+                    "description": "Paste ANY proxy strings — the tool auto-detects http/https/socks5 etc. Use the Smart Paste button above to bulk-import.",
                     "fields": [
-                        {"key": "lines", "label": "Proxies (one per line)", "placeholder": "user:pass@host:port\nsocks5://host:port", "type": "textarea"},
+                        {"key": "lines", "label": "Proxies (one per line, any format)", "placeholder": "socks5://user:pass@host:port\nhttp://host:port\nuser:pass@host:port\nhost:port:user:pass", "type": "textarea"},
                     ],
                 },
                 {

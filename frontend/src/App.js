@@ -14,13 +14,13 @@ import ConversionsPage from "./pages/ConversionsPage";
 import ProxiesPage from "./pages/ProxiesPage";
 import SettingsPage from "./pages/SettingsPage";
 import ReferrerStatsPage from "./pages/ReferrerStatsPage";
-import ImportTrafficPage from "./pages/ImportTrafficPage";
+// import ImportTrafficPage from "./pages/ImportTrafficPage";  // removed v2.6.1 — merged into RUT
 import EmailCheckerPage from "./pages/EmailCheckerPage";
 import PhoneCheckerPage from "./pages/PhoneCheckerPage";
 import SeparateDataPage from "./pages/SeparateDataPage";
 import UserAgentGeneratorPage from "./pages/UserAgentGeneratorPage";
 import UserAgentCheckerPage from "./pages/UserAgentCheckerPage";
-import FormFillerPage from "./pages/FormFillerPage";
+// import FormFillerPage from "./pages/FormFillerPage";  // removed v2.6.1 — merged into RUT
 import RealUserTrafficPage from "./pages/RealUserTrafficPage";
 import BrowserProfilesPage from "./pages/BrowserProfilesPage";
 import VisualRecorderPage from "./pages/VisualRecorderPage";
@@ -246,11 +246,10 @@ function App() {
                           <ReferrerStatsPage />
                         </FeatureRoute>
                       } />
-                      <Route path="/import-traffic" element={
-                        <FeatureRoute feature="import_traffic">
-                          <ImportTrafficPage />
-                        </FeatureRoute>
-                      } />
+                      {/* Import Traffic + Form Filler pages removed (v2.6.1)
+                        — functionality already exists inside Real User Traffic.
+                        Legacy URLs redirect to /real-user-traffic. */}
+                      <Route path="/import-traffic" element={<Navigate to="/real-user-traffic" replace />} />
                       <Route path="/email-checker" element={
                         <FeatureRoute feature="email_checker">
                           <EmailCheckerPage />
@@ -276,11 +275,7 @@ function App() {
                           <UserAgentCheckerPage />
                         </FeatureRoute>
                       } />
-                      <Route path="/form-filler" element={
-                        <FeatureRoute feature="form_filler">
-                          <FormFillerPage />
-                        </FeatureRoute>
-                      } />
+                      <Route path="/form-filler" element={<Navigate to="/real-user-traffic" replace />} />
                       <Route path="/real-user-traffic" element={
                         <FeatureRoute feature="real_user_traffic">
                           <RealUserTrafficPage />

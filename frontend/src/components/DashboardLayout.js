@@ -81,7 +81,7 @@ export default function DashboardLayout({ children }) {
     { name: "Links", path: "/links", icon: Link2, feature: "links" },
     { name: "Clicks", path: "/clicks", icon: MousePointerClick, feature: "clicks" },
     { name: "Traffic Sources", path: "/referrers", icon: TrendingUp, feature: "clicks" },
-    { name: "Import Traffic", path: "/import-traffic", icon: Upload, feature: "import_traffic" },
+    // v2.6.1 — Import Traffic + Form Filler removed (already inside Real User Traffic)
     { name: "Email Checker", path: "/email-checker", icon: Mail, feature: "email_checker" },
     { name: "Phone Checker", path: "/phone-checker", icon: Phone, feature: "phone_checker" },
     { name: "Separate Data", path: "/separate-data", icon: Filter, feature: "separate_data" },

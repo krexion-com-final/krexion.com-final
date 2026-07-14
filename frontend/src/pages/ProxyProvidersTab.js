@@ -11,7 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { toast } from "sonner";
-import { Plus, Trash2, Play, Edit2, Server } from "lucide-react";
+import { Plus, Trash2, Play, Edit2, Server, Wand2, Loader2 } from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -29,6 +29,13 @@ export default function ProxyProvidersTab() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({});
+  // Smart-Paste state — customer can dump 1-N raw proxy strings of any
+  // format (Task 1) and the tool auto-detects everything.
+  const [smartPasteOpen, setSmartPasteOpen] = useState(false);
+  const [smartInput, setSmartInput] = useState("");
+  const [smartDefaultType, setSmartDefaultType] = useState("http");
+  const [smartLoading, setSmartLoading] = useState(false);
+  const [smartResult, setSmartResult] = useState(null);
 
   const load = async () => {
     setLoading(true);
@@ -125,6 +132,89 @@ export default function ProxyProvidersTab() {
   const currentKind = kinds.find((k) => k.key === (form.kind || "rotating_gateway")) || kinds[0];
   const kindLabel = (k) => kinds.find((x) => x.key === k)?.label || k;
 
+  // ── Smart Paste — auto-parse pasted proxy strings ───────────────
+  const runSmartParse = async () => {
+    if (!smartInput.trim()) {
+      toast.error("Paste some proxy strings first");
+      return;
+    }
+    setSmartLoading(true);
+    setSmartResult(null);
+    try {
+      const r = await axios.post(
+        `${API}/proxy-providers/_smart-parse`,
+        { strings: [smartInput], default_type: smartDefaultType },
+        { headers: authHeaders() }
+      );
+      setSmartResult(r.data);
+      if ((r.data.ok_count || 0) === 0) {
+        toast.error("Could not parse any strings — please check the format.");
+      } else {
+        toast.success(`Parsed ${r.data.ok_count} of ${(r.data.ok_count || 0) + (r.data.fail_count || 0)} strings`);
+      }
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Parse failed");
+    } finally {
+      setSmartLoading(false);
+    }
+  };
+
+  const useSmartParseAsNew = async () => {
+    // Auto-create a provider from the parsed result.
+    if (!smartResult || smartResult.ok_count === 0) {
+      toast.error("Nothing to add");
+      return;
+    }
+    const suggested = smartResult.suggested_kind || "manual_list";
+    const config = smartResult.suggested_config || {};
+    const proxy_type = smartResult.suggested_proxy_type || smartDefaultType;
+    const defaultName = suggested === "rotating_gateway"
+      ? `Gateway ${config.gateway_host || ""}`.trim()
+      : `Paste ${smartResult.ok_count} proxies`;
+    try {
+      await axios.post(
+        `${API}/proxy-providers`,
+        {
+          name: defaultName,
+          kind: suggested,
+          proxy_type,
+          enabled: true,
+          config,
+        },
+        { headers: authHeaders() }
+      );
+      toast.success("Provider added from Smart Paste");
+      setSmartPasteOpen(false);
+      setSmartInput("");
+      setSmartResult(null);
+      load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed to add provider");
+    }
+  };
+
+  const applySmartToForm = () => {
+    // Fill the classic form (already-open Add dialog) with the parsed result.
+    if (!smartResult || smartResult.ok_count === 0) {
+      toast.error("Parse a string first");
+      return;
+    }
+    const suggested = smartResult.suggested_kind || "manual_list";
+    const config = smartResult.suggested_config || {};
+    setForm((f) => ({
+      ...f,
+      kind: suggested,
+      proxy_type: smartResult.suggested_proxy_type || f.proxy_type,
+      config,
+      name: f.name || (suggested === "rotating_gateway"
+        ? `Gateway ${config.gateway_host || ""}`.trim()
+        : `Paste ${smartResult.ok_count} proxies`),
+    }));
+    setSmartPasteOpen(false);
+    toast.success("Form filled from Smart Paste — review then click Add Provider");
+  };
+
+
   const summarizeConfig = (p) => {
     const c = p.config || {};
     switch (p.kind) {
@@ -160,6 +250,9 @@ export default function ProxyProvidersTab() {
                 When you have none, existing default flow runs unchanged.
               </CardDescription>
             </div>
+            <Button size="sm" variant="outline" onClick={() => { setSmartInput(""); setSmartResult(null); setSmartPasteOpen(true); }} data-testid="proxy-provider-smart-paste-btn" className="mr-2">
+              <Wand2 size={14} className="mr-1" /> Smart Paste
+            </Button>
             <Button size="sm" onClick={openNew} data-testid="proxy-provider-add-btn">
               <Plus size={14} className="mr-1" /> Add Provider
             </Button>
@@ -226,6 +319,17 @@ export default function ProxyProvidersTab() {
               on pages that use proxies (RUT, Browser Profiles, CPI, Proxy Test).
             </DialogDescription>
           </DialogHeader>
+          {editing?.isNew && (
+            <div className="rounded-md border border-blue-500/40 bg-blue-500/10 px-3 py-2 flex items-center justify-between text-xs">
+              <span className="text-blue-200">
+                Don&apos;t know host/port? Paste any raw proxy strings and let Krexion auto-detect
+                the type (HTTP/SOCKS5/etc) &amp; fill everything for you.
+              </span>
+              <Button size="sm" variant="outline" onClick={() => { setSmartInput(""); setSmartResult(null); setSmartPasteOpen(true); }} data-testid="proxy-form-smart-paste-btn" className="ml-3 shrink-0">
+                <Wand2 size={12} className="mr-1" /> Smart Paste
+              </Button>
+            </div>
+          )}
           <div className="space-y-3">
             <div className="grid grid-cols-2 gap-3">
               <div>
@@ -307,6 +411,100 @@ export default function ProxyProvidersTab() {
             <Button onClick={save} data-testid="proxy-form-save">
               {editing?.isNew ? "Add Provider" : "Update Provider"}
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Smart Paste dialog — auto-detects any proxy string format */}
+      <Dialog open={smartPasteOpen} onOpenChange={setSmartPasteOpen}>
+        <DialogContent className="bg-[var(--brand-card)] border-[var(--brand-border)] max-w-2xl" data-testid="proxy-smart-paste-dialog">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Wand2 size={18} className="text-amber-300" /> Smart Paste — Any Proxy Format
+            </DialogTitle>
+            <DialogDescription>
+              Paste 1–500 proxy strings in <b>ANY</b> format. Krexion auto-detects the type
+              (<code>http</code>, <code>https</code>, <code>socks5</code>, <code>socks5h</code>, <code>socks4</code>)
+              and parses host, port, username, password. Then click <i>Parse</i> to preview, and
+              <i> Add Provider</i> to save.
+              <br />
+              <span className="text-xs text-[var(--brand-muted)] mt-1 block">
+                Supported: <code>socks5://user:pass@host:port</code> · <code>http://host:port</code> ·
+                <code> user:pass@host:port</code> · <code>host:port</code> · <code>host:port:user:pass</code> ·
+                <code> host,port,user,pass</code>
+              </span>
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="grid grid-cols-3 gap-3">
+              <div className="col-span-2">
+                <Label>Paste proxy strings (one per line)</Label>
+                <Textarea
+                  rows={7}
+                  value={smartInput}
+                  onChange={(e) => setSmartInput(e.target.value)}
+                  placeholder={"socks5://joe:pw@1.2.3.4:1080\nhttp://5.6.7.8:8080\nhost.example.com:3128:user:pass"}
+                  data-testid="proxy-smart-paste-input"
+                  className="font-mono text-xs"
+                />
+              </div>
+              <div>
+                <Label>Default type (if scheme missing)</Label>
+                <Select value={smartDefaultType} onValueChange={setSmartDefaultType}>
+                  <SelectTrigger data-testid="proxy-smart-paste-default-type">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {proxyTypes.map((t) => (
+                      <SelectItem key={t} value={t}>{t.toUpperCase()}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-[10px] text-[var(--brand-muted)] mt-2 leading-tight">
+                  Lines that don&apos;t have <code>socks5://</code> or <code>http://</code> etc.
+                  will use this scheme. Lines that DO include a scheme keep their own.
+                </p>
+              </div>
+            </div>
+            <Button onClick={runSmartParse} disabled={smartLoading} data-testid="proxy-smart-paste-parse-btn" className="bg-amber-500 hover:bg-amber-600 text-black">
+              {smartLoading ? <><Loader2 size={14} className="mr-1 animate-spin" /> Parsing…</> : <><Wand2 size={14} className="mr-1" /> Parse</>}
+            </Button>
+
+            {smartResult && (
+              <div className="rounded-md border border-[var(--brand-border)] p-3 space-y-2 max-h-64 overflow-auto" data-testid="proxy-smart-paste-preview">
+                <div className="text-xs flex items-center gap-3">
+                  <span className="text-emerald-400">OK: <b>{smartResult.ok_count}</b></span>
+                  <span className="text-red-400">Failed: <b>{smartResult.fail_count}</b></span>
+                  <span className="text-blue-300">Suggested kind: <b>{smartResult.suggested_kind}</b></span>
+                  <span className="text-blue-300">Dominant type: <b>{(smartResult.suggested_proxy_type || "").toUpperCase()}</b></span>
+                </div>
+                <div className="space-y-1">
+                  {(smartResult.parsed || []).map((p, i) => (
+                    <div key={i} className={"text-[11px] font-mono flex items-start gap-2 " + (p.ok ? "text-emerald-300" : "text-red-300")}>
+                      <span className="shrink-0 w-6">{p.ok ? "✓" : "✗"}</span>
+                      <span className="truncate flex-1">
+                        {p.ok ? p.normalized : `${p.raw} — ${p.error}`}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSmartPasteOpen(false)}>Cancel</Button>
+            {smartResult && smartResult.ok_count > 0 && (
+              <>
+                {dialogOpen && (
+                  <Button variant="outline" onClick={applySmartToForm} data-testid="proxy-smart-paste-apply-btn">
+                    Fill Form
+                  </Button>
+                )}
+                <Button onClick={useSmartParseAsNew} data-testid="proxy-smart-paste-add-btn">
+                  Add Provider Now
+                </Button>
+              </>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -945,6 +945,47 @@ async def require_local_mode(request: Request):
     if not await get_effective_strict_heavy_block():
         return True
 
+    # ── 2026-07 (v2.6.1) — Per-customer VPS heavy override ──
+    # Admin can flip `allow_cloud_heavy=true` on any user (Admin › Users)
+    # to whitelist THAT specific customer for running heavy features on
+    # the VPS even while global strict mode stays ON for everyone else.
+    # We resolve the caller's user_id from the bearer token and check
+    # both the user and (if applicable) the parent user for sub-users.
+    try:
+        auth = request.headers.get("Authorization") or ""
+        token = auth[7:] if auth.lower().startswith("bearer ") else ""
+        if token:
+            _payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            _uid = _payload.get("user_id")
+            _email = _payload.get("sub")
+            _user_doc = None
+            if _uid:
+                _user_doc = await db.users.find_one(
+                    {"id": _uid},
+                    {"allow_cloud_heavy": 1, "parent_user_id": 1, "_id": 0},
+                )
+            if _user_doc is None and _email:
+                _user_doc = await db.users.find_one(
+                    {"email": _email},
+                    {"allow_cloud_heavy": 1, "parent_user_id": 1, "id": 1, "_id": 0},
+                )
+            if _user_doc is not None:
+                if _user_doc.get("allow_cloud_heavy") is True:
+                    return True
+                # Sub-user inherits parent's override.
+                parent_id = _user_doc.get("parent_user_id")
+                if parent_id:
+                    parent = await db.users.find_one(
+                        {"id": parent_id},
+                        {"allow_cloud_heavy": 1, "_id": 0},
+                    )
+                    if parent and parent.get("allow_cloud_heavy") is True:
+                        return True
+    except Exception:  # noqa: BLE001
+        # Fail closed — if we can't resolve the user, default to the
+        # existing strict-block behaviour below.
+        pass
+
     # ── 2026-06 (replaces 2026-05 online-bypass) ──
     # Previous behaviour:
     #   Cloud + strict + PC ONLINE → ALLOWED VPS execution.
@@ -1401,6 +1442,7 @@ async def get_mode():
         "strict_heavy_block_env": STRICT_CLOUD_HEAVY_BLOCK,  # what .env says
         "download_url": "https://krexion.com/download" if IS_CLOUD else None,
     }
+
 
 
 # v2.1.2: public status page endpoint - no auth required so it can be
@@ -2151,6 +2193,11 @@ class UserUpdate(BaseModel):
     subscription_type: Optional[str] = None  # free, monthly, yearly
     subscription_expires: Optional[str] = None  # ISO date string
     max_sub_users: Optional[int] = None  # Direct update for max sub-users
+    # v2.6.1 — Per-customer override: when true, this user bypasses the
+    # global STRICT_CLOUD_HEAVY_BLOCK and can run heavy features
+    # (RUT, Form Filler, Visual Recorder, bulk proxy tests) on the VPS
+    # even when strict mode is ON for everyone else.
+    allow_cloud_heavy: Optional[bool] = None
 
 class UserProfileUpdate(BaseModel):
     name: Optional[str] = None
@@ -4535,7 +4582,34 @@ async def get_me(user: dict = Depends(get_current_user)):
         "sub_user_count": sub_user_count,
         "max_sub_users": max_sub_users,
         "is_sub_user": False,
+        # v2.6.1 — per-customer VPS heavy override
+        "allow_cloud_heavy": bool(user.get("allow_cloud_heavy")),
         "admin_contact": ADMIN_CONTACT_EMAIL
+    }
+
+
+# v2.6.1 — Per-user effective mode. Authenticated variant of /api/mode
+# that also reveals whether THIS user has been whitelisted via
+# `allow_cloud_heavy`. Frontend uses it to hide "install desktop app"
+# banners for whitelisted customers.
+@api_router.get("/mode/effective")
+async def get_mode_effective(user: dict = Depends(get_current_user)):
+    effective = await get_effective_strict_heavy_block() if IS_CLOUD else False
+    allow_cloud_heavy = bool(user.get("allow_cloud_heavy"))
+    parent_id = user.get("parent_user_id")
+    if not allow_cloud_heavy and parent_id:
+        parent = await db.users.find_one(
+            {"id": parent_id}, {"allow_cloud_heavy": 1, "_id": 0}
+        )
+        if parent and parent.get("allow_cloud_heavy") is True:
+            allow_cloud_heavy = True
+    heavy_blocked_for_user = effective and not allow_cloud_heavy
+    return {
+        "mode": KREXION_MODE,
+        "is_cloud": IS_CLOUD,
+        "strict_heavy_block": effective,
+        "allow_cloud_heavy": allow_cloud_heavy,
+        "heavy_blocked_for_user": heavy_blocked_for_user,
     }
 
 @api_router.put("/auth/profile")
@@ -6442,6 +6516,9 @@ async def update_user(user_id: str, update: UserUpdate, admin: dict = Depends(ge
         update_data["subscription_type"] = update.subscription_type
     if update.subscription_expires:
         update_data["subscription_expires"] = update.subscription_expires
+    # v2.6.1 — per-customer VPS heavy override
+    if update.allow_cloud_heavy is not None:
+        update_data["allow_cloud_heavy"] = bool(update.allow_cloud_heavy)
     
     # Admin can update email
     if update.email and update.email != user["email"]:
