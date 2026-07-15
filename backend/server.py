@@ -16296,6 +16296,52 @@ def extract_ip_from_proxy(proxy_string: str) -> str:
 
     return host_port.strip()
 
+
+# 2026-07 v2.6.3 — Central helper to build an httpx-compatible proxy URL
+# from any stored proxy_string. Fixes the "http://http://…" bug where
+# provider-generated lines (e.g. DataImpulse with scheme prefix) were
+# double-prefixed by the tester, causing DNS-fail → false "dead" verdicts.
+#
+# Accepted inputs (all yield a valid scheme://user:pass@host:port URL):
+#     http://user:pass@host:port          → returned as-is (or scheme normalised)
+#     socks5://user:pass@host:port        → returned as-is
+#     user:pass@host:port                 → prefixed with proxy_type scheme
+#     host:port:user:pass                 → reordered + prefixed (Krexion shorthand)
+#     host:port                           → prefixed with proxy_type scheme
+def _build_proxy_url(proxy_string: str, proxy_type: str) -> str:
+    """Return a valid `scheme://[user:pass@]host:port` proxy URL.
+
+    Preserves any existing scheme in the input (critical for DataImpulse-
+    style credentials with `;` semicolon separators, which must not be
+    re-parsed as `host:port:user:pass`).
+    Raises ValueError for unparseable input.
+    """
+    ps = (proxy_string or "").strip()
+    if not ps:
+        raise ValueError("empty proxy string")
+
+    scheme_fallback = "socks5" if str(proxy_type).lower().startswith("socks") else "http"
+
+    # 1. Already has a scheme → use it as-is (do NOT re-prefix).
+    if "://" in ps:
+        return ps
+
+    # 2. Has userinfo (`user:pass@host:port`) → prefix scheme only.
+    if "@" in ps:
+        return f"{scheme_fallback}://{ps}"
+
+    # 3. No `@` and no scheme → could be `host:port` OR the Krexion
+    # shorthand `host:port:user:pass`.
+    parts = ps.split(":")
+    if len(parts) == 4:
+        host, port, username, password = parts
+        return f"{scheme_fallback}://{username}:{password}@{host}:{port}"
+    if len(parts) == 2:
+        return f"{scheme_fallback}://{ps}"
+
+    raise ValueError(f"Invalid proxy format: cannot parse {ps!r}")
+
+
 @api_router.post("/proxies/upload", response_model=List[ProxyResponse])
 async def upload_proxies(proxy_upload: ProxyUpload, user: dict = Depends(get_current_user_with_fresh_data)):
     check_user_feature(user, "proxies")
@@ -16431,17 +16477,10 @@ async def _test_proxy_fast(proxy_string: str, proxy_type: str, timeout: float = 
     error_msg = None
     
     try:
-        if "@" in proxy_string:
-            proxy_url = f"http://{proxy_string}" if proxy_type == "http" else f"socks5://{proxy_string}"
-        else:
-            parts = proxy_string.split(":")
-            if len(parts) == 4:
-                host, port, username, password = parts
-                proxy_url = f"http://{username}:{password}@{host}:{port}" if proxy_type == "http" else f"socks5://{username}:{password}@{host}:{port}"
-            elif len(parts) == 2:
-                proxy_url = f"http://{proxy_string}" if proxy_type == "http" else f"socks5://{proxy_string}"
-            else:
-                return {"status": "dead", "error": "Invalid format", "detected_ip": None, "all_detected_ips": [], "response_time": None}
+        try:
+            proxy_url = _build_proxy_url(proxy_string, proxy_type)
+        except ValueError as _fmt_err:
+            return {"status": "dead", "error": str(_fmt_err)[:100], "detected_ip": None, "all_detected_ips": [], "response_time": None}
         
         # Use fastest IP check service first (ipify is very fast)
         ip_check_urls = [
@@ -16495,22 +16534,17 @@ async def _test_proxy_with_proxycheck(proxy_string: str, proxy_type: str, timeou
     isp = None
     
     try:
-        # Build proxy URL
-        if "@" in proxy_string:
-            proxy_url = f"http://{proxy_string}" if proxy_type == "http" else f"socks5://{proxy_string}"
-        else:
-            parts = proxy_string.split(":")
-            if len(parts) == 4:
-                host, port, username, password = parts
-                proxy_url = f"http://{username}:{password}@{host}:{port}" if proxy_type == "http" else f"socks5://{username}:{password}@{host}:{port}"
-            elif len(parts) == 2:
-                proxy_url = f"http://{proxy_string}" if proxy_type == "http" else f"socks5://{proxy_string}"
-            else:
-                return {
-                    "status": "dead", "error": "Invalid format", "detected_ip": None,
-                    "all_detected_ips": [], "response_time": None, "is_vpn": False,
-                    "country": None, "city": None, "region": None, "isp": None
-                }
+        # Build proxy URL (v2.6.3 — single helper handles all input shapes
+        # including provider strings that already carry an http:// scheme,
+        # fixing the double-prefix bug that turned alive proxies into "dead")
+        try:
+            proxy_url = _build_proxy_url(proxy_string, proxy_type)
+        except ValueError:
+            return {
+                "status": "dead", "error": "Invalid format", "detected_ip": None,
+                "all_detected_ips": [], "response_time": None, "is_vpn": False,
+                "country": None, "city": None, "region": None, "isp": None
+            }
         
         start_time = time.time()
         
@@ -16934,29 +16968,13 @@ async def test_proxy(
     
     for protocol in ["http"]:  # Only try HTTP first (faster)
         try:
-            if "@" in proxy_string:
-                if proxy_type == "http":
-                    proxy_url = f"http://{proxy_string}"
-                else:
-                    proxy_url = f"socks5://{proxy_string}"
-            else:
-                if ":" in proxy_string:
-                    parts = proxy_string.split(":")
-                    if len(parts) == 4:
-                        host, port, username, password = parts
-                        if proxy_type == "http":
-                            proxy_url = f"http://{username}:{password}@{host}:{port}"
-                        else:
-                            proxy_url = f"socks5://{username}:{password}@{host}:{port}"
-                    elif len(parts) == 2:
-                        if proxy_type == "http":
-                            proxy_url = f"http://{proxy_string}"
-                        else:
-                            proxy_url = f"socks5://{proxy_string}"
-                    else:
-                        raise ValueError("Invalid proxy format")
-                else:
-                    raise ValueError("Invalid proxy format")
+            # v2.6.3 — use central helper so proxy strings that already
+            # carry a scheme (e.g. `http://…` from provider generator or
+            # DataImpulse with `;sessid.xxx`) don't get double-prefixed.
+            try:
+                proxy_url = _build_proxy_url(proxy_string, proxy_type)
+            except ValueError:
+                raise ValueError("Invalid proxy format")
             
             start_time = datetime.now(timezone.utc)
             
