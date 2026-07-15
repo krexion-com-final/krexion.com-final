@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import axios from "axios";
 import { Link } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "./ui/card";
@@ -8,14 +8,17 @@ import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { toast } from "sonner";
-import { Server, Zap, Copy, Settings2, ExternalLink, Loader2, Download } from "lucide-react";
+import {
+  Server, Zap, Copy, Settings2, ExternalLink, Loader2, Download,
+  Globe2, MapPin, Building2, Hash, Radio, Timer, Sparkles, Info,
+  ChevronDown, ChevronUp, Wand2,
+} from "lucide-react";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 
-// Countries + US states shortlists — used only for provider kinds that
-// support geo params (native_proxyjet). For other kinds the geo fields
-// are hidden automatically.
+// Country shortlist — used both for the geo dropdown and to show a
+// human label under the Country field.
 const COUNTRIES = [
   { code: "US", label: "United States" },
   { code: "CA", label: "Canada" },
@@ -30,6 +33,13 @@ const COUNTRIES = [
   { code: "ES", label: "Spain" },
   { code: "NL", label: "Netherlands" },
   { code: "MX", label: "Mexico" },
+  { code: "AE", label: "United Arab Emirates" },
+  { code: "SG", label: "Singapore" },
+  { code: "TR", label: "Turkey" },
+  { code: "PL", label: "Poland" },
+  { code: "SE", label: "Sweden" },
+  { code: "NO", label: "Norway" },
+  { code: "PH", label: "Philippines" },
 ];
 const US_STATES = [
   "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA",
@@ -52,36 +62,40 @@ const PROXY_TYPES = [
  *
  *   • Dropdown of every enabled provider the customer added under
  *     Settings › Proxy Providers.
- *   • Batch generator (count / format / country / state / session mode)
- *     that works for ALL provider kinds — no ProxyJet-specific setup
- *     required. Whichever provider the customer picked here is used.
+ *   • Universal batch generator with Country / State / City / ZIP /
+ *     ASN / Session mode / Sticky minutes — the backend detects the
+ *     provider (DataImpulse, Bright Data, Oxylabs, IPRoyal, Smart-
+ *     proxy, ProxyEmpire, Soax, PacketStream, or custom {placeholders})
+ *     and applies each field using that provider's own DSL.
  *   • Output textarea with Copy / Download.
- *
- * Backward compat: If the customer has zero providers, the card just
- * links them to Settings and the legacy ProxyJet flow below remains
- * the source of truth.
  */
 export default function MyProxyProvidersCard() {
   const [providers, setProviders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState("");
+  const [profile, setProfile] = useState(null);        // targeting-profile from backend
+  const [profileLoading, setProfileLoading] = useState(false);
 
   // Batch generator state
   const [count, setCount] = useState(10);
   const [proxyType, setProxyType] = useState("http");
   const [country, setCountry] = useState("US");
   const [state, setState] = useState("");
-  const [sessionMode, setSessionMode] = useState("rotating"); // rotating | sticky
-  const [stickyMinutes, setStickyMinutes] = useState(10);
+  const [city, setCity] = useState("");
+  const [zip, setZip] = useState("");
+  const [asn, setAsn] = useState("");
+  const [sessionMode, setSessionMode] = useState("sticky"); // rotating | sticky
+  const [stickyMinutes, setStickyMinutes] = useState(60);
+  const [showTargeting, setShowTargeting] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [output, setOutput] = useState("");
 
-  const authHeaders = () => {
+  const authHeaders = useCallback(() => {
     const token = localStorage.getItem("token");
     return token ? { Authorization: `Bearer ${token}` } : {};
-  };
+  }, []);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     try {
       const r = await axios.get(`${API}/proxy-providers`, { headers: authHeaders() });
@@ -96,27 +110,77 @@ export default function MyProxyProvidersCard() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [authHeaders, selectedId]);
 
-  useEffect(() => {
-    load();
-  }, []);
+  useEffect(() => { load(); }, [load]);
 
   const selected = providers.find((p) => p.id === selectedId);
-  // v2.6.2 — native_proxyjet kind removed. If a legacy provider still
-  // exists with this kind (from before the change), keep the geo/
-  // sticky UI functional so nothing breaks.
-  const supportsGeo = selected?.kind === "native_proxyjet";
-  const supportsSticky = selected?.kind === "native_proxyjet";
 
-  // Auto-sync proxy type when provider changes (only if user hasn't
-  // explicitly overridden — keep it simple: always match provider's
-  // native type on provider change).
+  // Load per-provider targeting profile whenever selection changes.
   useEffect(() => {
+    if (!selectedId) { setProfile(null); return; }
+    setProfileLoading(true);
+    axios.get(`${API}/proxy-providers/${selectedId}/targeting-profile`, { headers: authHeaders() })
+      .then((r) => setProfile(r.data || null))
+      .catch(() => setProfile(null))
+      .finally(() => setProfileLoading(false));
     if (selected?.proxy_type) setProxyType(selected.proxy_type);
-  }, [selectedId, selected]);
+  }, [selectedId, authHeaders, selected?.proxy_type]);
+
+  const supports = profile?.supported || {};
+  const anyGeo = supports.country || supports.state || supports.city || supports.zip || supports.asn;
+  const ttlCap = profile?.ttl_cap_min || 120;
 
   const kindLabel = (k) => (k || "").replace(/_/g, " ");
+
+  // Preview of what backend will build for the FIRST generated line —
+  // helps the user learn each provider's DSL by seeing exactly what
+  // gets sent. Uses only client-side heuristics; backend is source of
+  // truth. Only shown for rotating_gateway providers.
+  const dslPreview = useMemo(() => {
+    if (!selected || selected.kind !== "rotating_gateway") return "";
+    const host = selected?.config_summary?.gateway_host
+      || selected?.gateway_host
+      || (selected?.name || "").toLowerCase();
+    const detect = profile?.detected_provider || "";
+    let sep = "-", kv = "-", prefix = "-";
+    let keys = { country: "country", state: "state", city: "city", zip: "zip", asn: "asn" };
+    let sidKey = "session", ttlKey = null;
+    if (/DataImpulse/i.test(detect)) {
+      prefix = "__"; sep = ";"; kv = ".";
+      keys = { country: "cr", state: "st", city: "city", zip: "zip", asn: "asn" };
+      sidKey = "sessid"; ttlKey = "sessttl";
+    } else if (/Oxylabs/i.test(detect)) {
+      prefix = "-"; sep = "-"; kv = "-";
+      keys = { country: "cc", state: "st", city: "city", zip: "zip", asn: "asn" };
+      sidKey = "sessid"; ttlKey = "sesstime";
+    } else if (/IPRoyal/i.test(detect)) {
+      prefix = "_"; sep = "_"; kv = "-";
+      sidKey = "session"; ttlKey = "lifetime";
+    } else if (/ProxyEmpire/i.test(detect)) {
+      keys.state = "region"; ttlKey = "lifetime";
+    } else if (/Smartproxy|Decodo/i.test(detect)) {
+      ttlKey = "sessionduration";
+    } else if (/Soax/i.test(detect)) {
+      prefix = ";"; sep = ";"; kv = "-";
+      keys.state = "region"; keys.asn = "isp";
+      sidKey = "sessionid"; ttlKey = "sessionlength";
+    } else if (/PacketStream/i.test(detect)) {
+      prefix = "_"; sep = "_";
+    } else if (/Bright Data/i.test(detect)) {
+      sidKey = "session";
+    }
+    const parts = [];
+    if (country && keys.country) parts.push(`${keys.country}${kv}${country.toLowerCase()}`);
+    if (state && keys.state) parts.push(`${keys.state}${kv}${state.toLowerCase()}`);
+    if (city && keys.city) parts.push(`${keys.city}${kv}${city.toLowerCase().replace(/\s+/g, "")}`);
+    if (zip && keys.zip) parts.push(`${keys.zip}${kv}${zip}`);
+    if (asn && keys.asn) parts.push(`${keys.asn}${kv}${asn.toLowerCase()}`);
+    if (sessionMode === "sticky" && stickyMinutes && ttlKey) parts.push(`${ttlKey}${kv}${stickyMinutes}`);
+    if (sidKey) parts.push(`${sidKey}${kv}<random>`);
+    if (!parts.length) return "";
+    return `<login>${prefix}${parts.join(sep)}`;
+  }, [selected, profile, country, state, city, zip, asn, sessionMode, stickyMinutes]);
 
   const generateBatch = async () => {
     if (!selectedId) {
@@ -127,22 +191,27 @@ export default function MyProxyProvidersCard() {
     setGenerating(true);
     setOutput("");
     try {
+      const payload = {
+        count: n,
+        proxy_type: proxyType,
+        session_mode: sessionMode,
+      };
+      if (supports.country && country) payload.country = country.trim().toUpperCase();
+      if (supports.state && state) payload.state = state.trim().toUpperCase();
+      if (supports.city && city) payload.city = city.trim();
+      if (supports.zip && zip) payload.zip = zip.trim();
+      if (supports.asn && asn) payload.asn = asn.trim();
+      if (supports.sticky_minutes && sessionMode === "sticky" && stickyMinutes) {
+        payload.sticky_minutes = Math.max(1, Math.min(parseInt(stickyMinutes, 10) || 10, ttlCap));
+      }
       const r = await axios.post(
         `${API}/proxy-providers/${selectedId}/generate-batch`,
-        {
-          count: n,
-          country: supportsGeo ? (country || "").trim().toUpperCase() : null,
-          state: supportsGeo ? (state || "").trim().toUpperCase() : null,
-          sticky_minutes: supportsSticky && sessionMode === "sticky"
-            ? Math.max(1, Math.min(parseInt(stickyMinutes, 10) || 10, 120))
-            : null,
-          proxy_type: proxyType,
-        },
+        payload,
         { headers: authHeaders() }
       );
       const lines = (r.data?.proxies || []).join("\n");
       setOutput(lines);
-      toast.success(`Generated ${r.data?.count || 0} proxies from ${selected?.name || "provider"}`);
+      toast.success(`Generated ${r.data?.count || 0} ${proxyType.toUpperCase()} proxies from ${selected?.name || "provider"}`);
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Generation failed");
     } finally {
@@ -230,30 +299,44 @@ export default function MyProxyProvidersCard() {
                   ))}
                 </SelectContent>
               </Select>
+
+              {/* Provider detection hint */}
               {selected && (
-                <p className="text-[10px] text-zinc-500 mt-1">
-                  Selected: <span className="text-blue-300 font-medium">{selected.name}</span>{" · "}
-                  <span className="text-zinc-400">{kindLabel(selected.kind)}</span>{" · "}
-                  <span className="uppercase text-blue-300">{selected.proxy_type}</span>
-                </p>
+                <div className="mt-2 flex items-start gap-2 text-[11px]">
+                  {profileLoading ? (
+                    <span className="text-zinc-500 italic">Detecting provider capabilities…</span>
+                  ) : profile ? (
+                    <div className="flex-1 flex items-center gap-2 flex-wrap">
+                      <Badge className="bg-emerald-500/15 text-emerald-300 border-emerald-500/40 font-medium">
+                        <Sparkles size={11} className="mr-1" />
+                        {profile.detected_provider || "Custom"}
+                      </Badge>
+                      <span className="text-zinc-400 text-[11px]">{profile.hint}</span>
+                    </div>
+                  ) : (
+                    <span className="text-zinc-500 italic">
+                      Selected: <span className="text-blue-300 font-medium">{selected.name}</span>{" · "}
+                      <span className="text-zinc-400">{kindLabel(selected.kind)}</span>{" · "}
+                      <span className="uppercase text-blue-300">{selected.proxy_type}</span>
+                    </span>
+                  )}
+                </div>
               )}
             </div>
 
             {/* Batch generator */}
-            <div className="pt-3 mt-1 border-t border-blue-500/20 space-y-3">
+            <div className="pt-4 mt-2 border-t border-blue-500/20 space-y-4">
               <div className="flex items-center gap-2">
                 <Zap size={14} className="text-amber-300" />
                 <h4 className="text-sm font-semibold text-white">Generate proxies on-demand</h4>
               </div>
-              <p className="text-[11px] text-zinc-400 leading-relaxed">
-                Pick how many / format / geo (when supported) and grab a batch of proxy strings
-                you can paste anywhere. All formats are supported —
-                <b className="text-blue-300"> HTTP, HTTPS, SOCKS5, SOCKS5H, SOCKS4</b>.
-              </p>
 
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {/* Basic controls: How many + Format */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
                 <div>
-                  <Label className="text-xs text-zinc-300">How many</Label>
+                  <Label className="text-[11px] text-zinc-400 uppercase tracking-wider flex items-center gap-1 mb-1">
+                    <Hash size={11} /> How many
+                  </Label>
                   <Input
                     type="number"
                     min={1}
@@ -265,7 +348,9 @@ export default function MyProxyProvidersCard() {
                   />
                 </div>
                 <div>
-                  <Label className="text-xs text-zinc-300">Format</Label>
+                  <Label className="text-[11px] text-zinc-400 uppercase tracking-wider flex items-center gap-1 mb-1">
+                    <Radio size={11} /> Output format
+                  </Label>
                   <select
                     value={proxyType}
                     onChange={(e) => setProxyType(e.target.value)}
@@ -277,78 +362,207 @@ export default function MyProxyProvidersCard() {
                     ))}
                   </select>
                 </div>
-                {supportsGeo && (
-                  <>
-                    <div>
-                      <Label className="text-xs text-zinc-300">Country</Label>
-                      <select
-                        value={country}
-                        onChange={(e) => {
-                          setCountry(e.target.value);
-                          if (e.target.value !== "US") setState("");
-                        }}
-                        className="w-full h-10 px-2 rounded-md bg-zinc-900/60 border border-zinc-700 text-white text-sm"
-                        data-testid="mpp-gen-country"
-                      >
-                        {COUNTRIES.map((c) => (
-                          <option key={c.code} value={c.code}>{c.code} — {c.label}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <Label className="text-xs text-zinc-300">
-                        State {country !== "US" && <span className="text-zinc-500">(US only)</span>}
-                      </Label>
-                      <select
-                        value={state}
-                        onChange={(e) => setState(e.target.value)}
-                        disabled={country !== "US"}
-                        className="w-full h-10 px-2 rounded-md bg-zinc-900/60 border border-zinc-700 text-white text-sm disabled:opacity-50"
-                        data-testid="mpp-gen-state"
-                      >
-                        <option value="">— Any state —</option>
-                        {US_STATES.map((s) => (
-                          <option key={s} value={s}>{s}</option>
-                        ))}
-                      </select>
-                    </div>
-                  </>
-                )}
-                {supportsSticky && (
+                {supports.session_mode && (
                   <div>
-                    <Label className="text-xs text-zinc-300">Session type</Label>
+                    <Label className="text-[11px] text-zinc-400 uppercase tracking-wider flex items-center gap-1 mb-1">
+                      <Timer size={11} /> Session type
+                    </Label>
                     <select
                       value={sessionMode}
                       onChange={(e) => setSessionMode(e.target.value)}
                       className="w-full h-10 px-2 rounded-md bg-zinc-900/60 border border-zinc-700 text-white text-sm"
                       data-testid="mpp-gen-session-mode"
                     >
-                      <option value="rotating">Rotating (fresh IP / connect)</option>
-                      <option value="sticky">Sticky (hold IP X minutes)</option>
+                      <option value="rotating">Rotating (fresh IP per connect)</option>
+                      <option value="sticky">Sticky (hold IP for N min)</option>
                     </select>
                   </div>
                 )}
               </div>
 
-              {supportsSticky && sessionMode === "sticky" && (
-                <div>
-                  <Label className="text-xs text-zinc-300">Sticky duration (minutes, 1–120)</Label>
-                  <Input
-                    type="number"
-                    min={1}
-                    max={120}
-                    value={stickyMinutes}
-                    onChange={(e) => setStickyMinutes(e.target.value)}
-                    className="bg-zinc-900/60 border-zinc-700 text-white md:w-1/3"
-                    data-testid="mpp-gen-sticky-min"
-                  />
+              {/* Sticky duration slider */}
+              {supports.sticky_minutes && sessionMode === "sticky" && (
+                <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/5 p-3">
+                  <Label className="text-[11px] text-emerald-300 uppercase tracking-wider flex items-center gap-1 mb-2">
+                    <Timer size={11} /> Sticky duration
+                    <Badge variant="secondary" className="ml-auto bg-emerald-500/15 text-emerald-200 border-emerald-500/30 text-[10px] font-normal">
+                      max {ttlCap} min
+                    </Badge>
+                  </Label>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="range"
+                      min={1}
+                      max={ttlCap}
+                      value={Math.min(stickyMinutes, ttlCap)}
+                      onChange={(e) => setStickyMinutes(e.target.value)}
+                      className="flex-1 accent-emerald-500"
+                      data-testid="mpp-gen-sticky-slider"
+                    />
+                    <Input
+                      type="number"
+                      min={1}
+                      max={ttlCap}
+                      value={stickyMinutes}
+                      onChange={(e) => setStickyMinutes(e.target.value)}
+                      className="w-20 bg-zinc-900/70 border-emerald-500/30 text-emerald-100 text-center"
+                      data-testid="mpp-gen-sticky-min"
+                    />
+                    <span className="text-emerald-300 text-sm font-medium">min</span>
+                  </div>
+                  <p className="text-[10px] text-emerald-200/70 mt-1.5">
+                    Each proxy line holds the same IP for up to <b>{Math.min(stickyMinutes, ttlCap)} min</b> before rotating (subject to the upstream network availability).
+                  </p>
+                </div>
+              )}
+
+              {/* Advanced Targeting section */}
+              {anyGeo && (
+                <div className="rounded-lg border border-blue-500/25 bg-zinc-950/40">
+                  <button
+                    type="button"
+                    onClick={() => setShowTargeting((v) => !v)}
+                    className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-blue-500/5 transition"
+                    data-testid="mpp-targeting-toggle"
+                  >
+                    <span className="flex items-center gap-2 text-sm">
+                      <Globe2 size={14} className="text-blue-300" />
+                      <span className="text-blue-100 font-medium">Geo targeting</span>
+                      <span className="text-[10px] text-zinc-500 italic">— optional, uses provider&apos;s native DSL</span>
+                    </span>
+                    {showTargeting ? <ChevronUp size={14} className="text-zinc-400" /> : <ChevronDown size={14} className="text-zinc-400" />}
+                  </button>
+                  {showTargeting && (
+                    <div className="px-3 pb-3 space-y-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                        {supports.country && (
+                          <div>
+                            <Label className="text-[11px] text-zinc-400 uppercase tracking-wider flex items-center gap-1 mb-1">
+                              <Globe2 size={11} /> Country
+                            </Label>
+                            <select
+                              value={country}
+                              onChange={(e) => {
+                                setCountry(e.target.value);
+                                if (e.target.value !== "US") setState("");
+                              }}
+                              className="w-full h-10 px-2 rounded-md bg-zinc-900/60 border border-zinc-700 text-white text-sm"
+                              data-testid="mpp-gen-country"
+                            >
+                              <option value="">— Any —</option>
+                              {COUNTRIES.map((c) => (
+                                <option key={c.code} value={c.code}>{c.code} — {c.label}</option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
+                        {supports.state && (
+                          <div>
+                            <Label className="text-[11px] text-zinc-400 uppercase tracking-wider flex items-center gap-1 mb-1">
+                              <MapPin size={11} /> State
+                              {country && country !== "US" && (
+                                <span className="text-zinc-600 lowercase text-[10px]">(US-only list)</span>
+                              )}
+                            </Label>
+                            {country === "US" ? (
+                              <select
+                                value={state}
+                                onChange={(e) => setState(e.target.value)}
+                                className="w-full h-10 px-2 rounded-md bg-zinc-900/60 border border-zinc-700 text-white text-sm"
+                                data-testid="mpp-gen-state"
+                              >
+                                <option value="">— Any state —</option>
+                                {US_STATES.map((s) => (
+                                  <option key={s} value={s}>{s}</option>
+                                ))}
+                              </select>
+                            ) : (
+                              <Input
+                                value={state}
+                                onChange={(e) => setState(e.target.value)}
+                                placeholder="e.g. bavaria, ontario"
+                                className="bg-zinc-900/60 border-zinc-700 text-white"
+                                data-testid="mpp-gen-state-txt"
+                              />
+                            )}
+                          </div>
+                        )}
+                        {supports.city && (
+                          <div>
+                            <Label className="text-[11px] text-zinc-400 uppercase tracking-wider flex items-center gap-1 mb-1">
+                              <Building2 size={11} /> City
+                            </Label>
+                            <Input
+                              value={city}
+                              onChange={(e) => setCity(e.target.value)}
+                              placeholder="e.g. miami, london"
+                              className="bg-zinc-900/60 border-zinc-700 text-white"
+                              data-testid="mpp-gen-city"
+                            />
+                          </div>
+                        )}
+                        {supports.zip && (
+                          <div>
+                            <Label className="text-[11px] text-zinc-400 uppercase tracking-wider flex items-center gap-1 mb-1">
+                              <Hash size={11} /> ZIP / Postal
+                            </Label>
+                            <Input
+                              value={zip}
+                              onChange={(e) => setZip(e.target.value)}
+                              placeholder="e.g. 33101, SW1A"
+                              className="bg-zinc-900/60 border-zinc-700 text-white"
+                              data-testid="mpp-gen-zip"
+                            />
+                          </div>
+                        )}
+                        {supports.asn && (
+                          <div>
+                            <Label className="text-[11px] text-zinc-400 uppercase tracking-wider flex items-center gap-1 mb-1">
+                              <Server size={11} /> ISP / ASN
+                            </Label>
+                            <Input
+                              value={asn}
+                              onChange={(e) => setAsn(e.target.value)}
+                              placeholder="e.g. comcast, 7018"
+                              className="bg-zinc-900/60 border-zinc-700 text-white"
+                              data-testid="mpp-gen-asn"
+                            />
+                          </div>
+                        )}
+                      </div>
+
+                      {/* DSL preview */}
+                      {dslPreview && (
+                        <div className="rounded border border-zinc-700/60 bg-black/40 px-3 py-2 flex items-start gap-2">
+                          <Wand2 size={12} className="text-amber-300 mt-0.5 shrink-0" />
+                          <div className="flex-1 min-w-0">
+                            <div className="text-[10px] text-zinc-500 uppercase tracking-wider mb-0.5">
+                              Provider will receive
+                            </div>
+                            <code className="text-[11px] text-amber-200/90 font-mono block break-all">
+                              {dslPreview}
+                            </code>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {selected && selected.kind === "rotating_gateway" && !anyGeo && (
+                <div className="rounded border border-zinc-700/60 bg-zinc-950/40 px-3 py-2 text-[11px] text-zinc-400 flex items-start gap-2">
+                  <Info size={12} className="text-zinc-500 mt-0.5 shrink-0" />
+                  <span>
+                    Session-only mode. To enable Country / State / City / ZIP / ASN targeting, edit your provider in Settings and either use a supported gateway host (DataImpulse, Bright Data, Oxylabs, IPRoyal, Smartproxy, ProxyEmpire, Soax, PacketStream) or add <code className="text-amber-300 mx-0.5">{`{country}`}</code> / <code className="text-amber-300 mx-0.5">{`{state}`}</code> / <code className="text-amber-300 mx-0.5">{`{city}`}</code> / <code className="text-amber-300 mx-0.5">{`{zip}`}</code> / <code className="text-amber-300 mx-0.5">{`{asn}`}</code> / <code className="text-amber-300 mx-0.5">{`{ttl}`}</code> / <code className="text-amber-300 mx-0.5">{`{sid}`}</code> placeholders in the username template.
+                  </span>
                 </div>
               )}
 
               <Button
                 onClick={generateBatch}
                 disabled={generating || !selectedId}
-                className="bg-blue-600 hover:bg-blue-700 text-white"
+                className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white shadow-lg shadow-blue-500/20 w-full sm:w-auto"
                 data-testid="my-proxy-providers-generate-btn"
               >
                 {generating
@@ -357,10 +571,10 @@ export default function MyProxyProvidersCard() {
               </Button>
 
               {output && (
-                <div className="space-y-2">
+                <div className="space-y-2 pt-2">
                   <div className="flex items-center justify-between">
                     <Label className="text-xs text-zinc-400">
-                      <span className="text-blue-300 font-semibold">{output.split("\n").length}</span> proxies ready
+                      <span className="text-emerald-300 font-semibold">{output.split("\n").length}</span> proxies ready
                     </Label>
                     <div className="flex gap-2">
                       <Button

@@ -183,6 +183,287 @@ def _rotate_session_in_username(username: str) -> str:
     return username
 
 
+# ─── Provider-aware targeting profiles (2026-07 v2.6.3) ──────────────
+# Every rotating-gateway provider uses its own username DSL for geo /
+# session targeting. To let ANY provider be targeted from a single
+# universal UI (country / state / city / zip / ASN / session TTL /
+# session ID), we detect the provider from its gateway hostname and
+# apply the matching syntax when the customer picks values in the
+# on-demand generator.
+#
+# For unknown providers OR when the customer prefers manual control,
+# `{country}`, `{state}`, `{city}`, `{zip}`, `{asn}`, `{ttl}`, `{sid}`
+# placeholders in the saved username template are substituted from the
+# targeting overrides. Placeholders always win over auto-detection.
+#
+# Sources for each provider's DSL:
+#   • DataImpulse:  docs.dataimpulse.com/proxies/parameters
+#   • Bright Data:  docs.brightdata.com   (`-country-us-state-fl-city-…`)
+#   • Oxylabs:      developers.oxylabs.io (`-cc-us-st-california-city-…`)
+#   • Smartproxy:   help.smartproxy.com  (`-country-us-city-newyork-…`)
+#   • IPRoyal:      docs.iproyal.com     (`_country-us_state-florida_…`)
+#   • ProxyEmpire:  docs.proxyempire.io  (`-country-us-region-fl-city-…`)
+#   • Soax:         docs.soax.com        (`country-us;region-florida;city-…`)
+#   • PacketStream: packetstream.io/docs (`_country-UnitedStates_state-FL`)
+#
+# Each profile is a dict: sep=(prefix, kv_sep), keys={country:'cr',...}
+# meaning: prefix param starts with '__' or '-', each key is joined
+# using kv_sep. Session id key + session ttl key differ per provider.
+
+_PROVIDER_PROFILES: List[Dict[str, Any]] = [
+    {
+        "name": "DataImpulse",
+        "hosts": ["dataimpulse.com"],
+        "prefix": "__",          # first param separator (from login)
+        "delim": ";",             # between params
+        "kv": ".",                # key.value
+        "keys": {
+            "country": "cr", "state": "st", "city": "city",
+            "zip": "zip", "asn": "asn",
+        },
+        "sid_key": "sessid",
+        "ttl_key": "sessttl",     # minutes
+        "ttl_unit": "min",
+    },
+    {
+        "name": "Bright Data",
+        "hosts": ["brd.superproxy.io", "brdcorp.com", "luminati.io", "lum-superproxy.io"],
+        "prefix": "-",
+        "delim": "-",
+        "kv": "-",                # key-value (single dash between key and value token)
+        "keys": {
+            "country": "country", "state": "state", "city": "city",
+            "zip": "zip", "asn": "asn",
+        },
+        "sid_key": "session",
+        "ttl_key": None,          # Bright Data configures TTL in dashboard, not URL
+        "ttl_unit": None,
+    },
+    {
+        "name": "Oxylabs",
+        "hosts": ["oxylabs.io", "pr.oxylabs.io"],
+        "prefix": "-",
+        "delim": "-",
+        "kv": "-",
+        "keys": {
+            "country": "cc", "state": "st", "city": "city",
+            "zip": "zip", "asn": "asn",
+        },
+        "sid_key": "sessid",
+        "ttl_key": "sesstime",    # minutes
+        "ttl_unit": "min",
+    },
+    {
+        "name": "Smartproxy / Decodo",
+        "hosts": ["smartproxy.com", "decodo.com", "smart-proxy.com"],
+        "prefix": "-",
+        "delim": "-",
+        "kv": "-",
+        "keys": {
+            "country": "country", "state": "state", "city": "city",
+            "zip": "zip", "asn": "asn",
+        },
+        "sid_key": "session",
+        "ttl_key": "sessionduration",   # minutes
+        "ttl_unit": "min",
+    },
+    {
+        "name": "IPRoyal",
+        "hosts": ["iproyal.com"],
+        "prefix": "_",
+        "delim": "_",
+        "kv": "-",
+        "keys": {
+            "country": "country", "state": "state", "city": "city",
+            "zip": "zip", "asn": "asn",
+        },
+        "sid_key": "session",
+        "ttl_key": "lifetime",     # minutes
+        "ttl_unit": "min",
+    },
+    {
+        "name": "ProxyEmpire",
+        "hosts": ["proxyempire.io"],
+        "prefix": "-",
+        "delim": "-",
+        "kv": "-",
+        "keys": {
+            "country": "country", "state": "region", "city": "city",
+            "zip": "zip", "asn": "asn",
+        },
+        "sid_key": "session",
+        "ttl_key": "lifetime",
+        "ttl_unit": "min",
+    },
+    {
+        "name": "Soax",
+        "hosts": ["soax.com"],
+        "prefix": ";",           # Soax uses semicolon prefix
+        "delim": ";",
+        "kv": "-",
+        "keys": {
+            "country": "country", "state": "region", "city": "city",
+            "zip": "zip", "asn": "isp",
+        },
+        "sid_key": "sessionid",
+        "ttl_key": "sessionlength",
+        "ttl_unit": "sec",         # Soax uses seconds — will multiply by 60
+    },
+    {
+        "name": "PacketStream",
+        "hosts": ["packetstream.io", "proxy.packetstream.io"],
+        "prefix": "_",
+        "delim": "_",
+        "kv": "-",
+        "keys": {
+            "country": "country", "state": "state", "city": "city",
+            "zip": "zip", "asn": "asn",
+        },
+        "sid_key": "session",
+        "ttl_key": None,
+        "ttl_unit": None,
+    },
+]
+
+# Placeholder tokens the customer may embed manually in a saved
+# username template — always take precedence over provider auto-detect.
+_TARGETING_PLACEHOLDER_KEYS = ("country", "state", "city", "zip", "asn", "ttl", "sid")
+
+
+def _detect_profile(host: str) -> Optional[Dict[str, Any]]:
+    h = (host or "").lower().strip()
+    if not h:
+        return None
+    for prof in _PROVIDER_PROFILES:
+        for needle in prof["hosts"]:
+            if needle in h:
+                return prof
+    return None
+
+
+def _norm_target_val(profile: Dict[str, Any], key: str, val: str) -> str:
+    """Normalise a targeting value for the given provider.
+    Country codes → lowercase 2-letter (dataimpulse expects `us`, so
+    does Bright Data). State abbreviations kept as-is (some providers
+    want full names, some abbreviations — we pass through and let the
+    provider validate). Cities/ISPs lower-cased and stripped."""
+    v = str(val or "").strip()
+    if not v:
+        return ""
+    if key == "country":
+        return v.lower()[:3]
+    if key == "state":
+        return v.lower().replace(" ", "")
+    if key == "city":
+        return v.lower().replace(" ", "")
+    if key == "zip":
+        return re.sub(r"[^A-Za-z0-9\-]", "", v)
+    if key == "asn":
+        return re.sub(r"[^A-Za-z0-9]", "", v).lower()
+    return v
+
+
+def _apply_targeting_to_username(
+    username_tpl: str,
+    gateway_host: str,
+    targeting: Dict[str, Any],
+) -> str:
+    """Return the username template with targeting overrides applied.
+
+    Order of precedence:
+      1.  `{country}`/`{state}`/`{city}`/`{zip}`/`{asn}`/`{ttl}` placeholders
+          in the saved template — always substituted first.
+      2.  For known providers (detected via gateway_host), APPEND the
+          matching key/value tokens using the provider's DSL — but only
+          for keys not already present in the template (avoid clobbering
+          the customer's manual configuration).
+      3.  `{sid}` is deliberately NOT substituted here — that happens
+          later per-line via `_rotate_session_in_username` so each
+          generated line gets a distinct session id.
+
+    `targeting` is a dict with keys: country, state, city, zip, asn,
+    sticky_minutes (int, optional). Any value that is None/'' is
+    ignored.
+    """
+    if not username_tpl:
+        return username_tpl
+    if not targeting:
+        return username_tpl
+
+    out = username_tpl
+    profile = _detect_profile(gateway_host or "")
+
+    # 1. Placeholder substitution — universal, provider-agnostic.
+    for key in ("country", "state", "city", "zip", "asn"):
+        val = targeting.get(key)
+        placeholder = "{" + key + "}"
+        if placeholder in out:
+            if val:
+                nv = _norm_target_val(profile or {}, key, val) if profile else str(val).strip().lower()
+                out = out.replace(placeholder, nv)
+            else:
+                # Strip empty placeholders and any orphaned separator
+                # immediately preceding them (handles ";st.{state}"
+                # collapsing cleanly to "").
+                out = re.sub(r"[;,\-_]?" + re.escape(placeholder), "", out)
+    if "{ttl}" in out:
+        ttl = targeting.get("sticky_minutes")
+        if ttl:
+            out = out.replace("{ttl}", str(int(ttl)))
+        else:
+            out = re.sub(r"[;,\-_]?\{ttl\}", "", out)
+
+    # 2. Provider-aware DSL append — only for keys NOT already present.
+    if profile:
+        parts_to_append: List[str] = []
+        for key in ("country", "state", "city", "zip", "asn"):
+            val = targeting.get(key)
+            if not val:
+                continue
+            provider_key = profile["keys"].get(key)
+            if not provider_key:
+                continue
+            # If the template already contains this provider key, skip
+            # (customer already configured it manually).
+            if re.search(rf"(^|[{re.escape(profile['delim'])}{re.escape(profile['prefix'])}]){re.escape(provider_key)}{re.escape(profile['kv'])}", out):
+                continue
+            nv = _norm_target_val(profile, key, val)
+            if nv:
+                parts_to_append.append(f"{provider_key}{profile['kv']}{nv}")
+
+        # Session TTL
+        ttl = targeting.get("sticky_minutes")
+        if ttl and profile.get("ttl_key"):
+            ttl_key = profile["ttl_key"]
+            # Skip if already present
+            if not re.search(rf"(^|[{re.escape(profile['delim'])}{re.escape(profile['prefix'])}]){re.escape(ttl_key)}{re.escape(profile['kv'])}", out):
+                ttl_val = int(ttl) * 60 if profile.get("ttl_unit") == "sec" else int(ttl)
+                parts_to_append.append(f"{ttl_key}{profile['kv']}{ttl_val}")
+
+        # Session id — inject with {sid} placeholder so per-line
+        # rotation replaces it later. Only inject if template has no
+        # existing session token/placeholder — this preserves customer
+        # intent when they manually set one.
+        want_sid = targeting.get("session_mode", "sticky") == "sticky" or targeting.get("_want_sid")
+        if want_sid and profile.get("sid_key"):
+            sid_key = profile["sid_key"]
+            if "{sid}" not in out and not re.search(
+                rf"(^|[{re.escape(profile['delim'])}{re.escape(profile['prefix'])}]){re.escape(sid_key)}{re.escape(profile['kv'])}",
+                out,
+            ):
+                parts_to_append.append(f"{sid_key}{profile['kv']}{{sid}}")
+
+        if parts_to_append:
+            joined = profile["delim"].join(parts_to_append)
+            if profile["prefix"] and profile["prefix"] not in out:
+                # First targeting param → use provider's prefix token
+                out = f"{out}{profile['prefix']}{joined}"
+            else:
+                out = f"{out}{profile['delim']}{joined}"
+
+    return out
+
+
 def _format_gateway_line(cfg: Dict[str, Any], proxy_type: str,
                         rotate_session: bool = False) -> Optional[str]:
     host = str(cfg.get("gateway_host") or "").strip()
@@ -730,6 +1011,12 @@ def init_router(main_db, get_current_user_dep) -> APIRouter:
         count = max(1, min(count, 5000))
         country = str(body.get("country") or "").strip().upper() or None
         state = str(body.get("state") or "").strip().upper() or None
+        # v2.6.3 — universal targeting overrides (work for every
+        # rotating_gateway provider, not just native_proxyjet).
+        city = str(body.get("city") or "").strip() or None
+        zip_code = str(body.get("zip") or body.get("zip_code") or "").strip() or None
+        asn = str(body.get("asn") or body.get("isp") or "").strip() or None
+        session_mode = str(body.get("session_mode") or "").strip().lower() or "rotating"
         sticky_minutes = body.get("sticky_minutes")
         try:
             sticky_minutes = int(sticky_minutes) if sticky_minutes else None
@@ -738,6 +1025,15 @@ def init_router(main_db, get_current_user_dep) -> APIRouter:
         proxy_type_override = str(body.get("proxy_type") or "").strip().lower() or None
         if proxy_type_override and proxy_type_override not in SUPPORTED_TYPES:
             proxy_type_override = None
+
+        # Package targeting for the provider-aware username transformer.
+        targeting = {
+            "country": country, "state": state, "city": city,
+            "zip": zip_code, "asn": asn,
+            "sticky_minutes": sticky_minutes,
+            "session_mode": session_mode,
+            "_want_sid": session_mode in ("sticky", "rotating"),
+        }
 
         provider = await _get(user["id"], provider_id)
         if not provider:
@@ -795,13 +1091,33 @@ def init_router(main_db, get_current_user_dep) -> APIRouter:
             # 2026-07 v2.5.3 — Auto-detect common session tokens
             # (-session-XXX, -sessid-XXX, -sessionid-XXX, -sess-XXX)
             # so customers don't have to add {sid} placeholders.
+            # 2026-07 v2.6.3 — Universal targeting overrides (country,
+            # state, city, zip, ASN, session TTL) applied via provider-
+            # aware DSL detection. Works for DataImpulse, Bright Data,
+            # Oxylabs, Smartproxy, IPRoyal, ProxyEmpire, Soax, Packet-
+            # Stream, and any custom gateway that uses {country}/{state}
+            # /{city}/{zip}/{asn}/{ttl} placeholders in the username.
             host = str(cfg.get("gateway_host") or "").strip()
             port = str(cfg.get("gateway_port") or "").strip()
             username_tpl = str(cfg.get("username") or "").strip()
             pwd = str(cfg.get("password") or "").strip()
             if not host or not port:
                 raise HTTPException(400, "gateway_host / gateway_port not configured")
+
+            # Apply targeting overrides ONCE to the template (session id
+            # is left as {sid} placeholder, rotated per-line below).
+            has_targeting = any(
+                targeting.get(k) for k in ("country", "state", "city", "zip", "asn", "sticky_minutes")
+            )
+            if has_targeting:
+                username_tpl = _apply_targeting_to_username(username_tpl, host, targeting)
+
             for _ in range(count):
+                # For sticky mode we still need unique per-line session
+                # ids so each line points to a different sticky IP. For
+                # rotating mode, gateways rotate on their own — but
+                # {sid} rotation is harmless (many providers just ignore
+                # the tag when rotation is dashboard-controlled).
                 user_final = _rotate_session_in_username(username_tpl)
                 if user_final and pwd:
                     line = f"{proxy_type}://{user_final}:{pwd}@{host}:{port}"
@@ -880,6 +1196,107 @@ def init_router(main_db, get_current_user_dep) -> APIRouter:
             default_type = "http"
         result = _bulk_parse(list(strings), default_type=default_type)
         return result
+
+    @router.get("/{provider_id}/targeting-profile")
+    async def provider_targeting_profile(
+        provider_id: str,
+        user=Depends(_get_current_user_dep),
+    ):
+        """Return the targeting fields this provider supports so the UI
+        can render the correct on-demand generator (v2.6.3).
+
+        Detection strategy:
+          1. Known providers (DataImpulse, Bright Data, Oxylabs, …) →
+             lookup by gateway_host substring.
+          2. Custom rotating_gateway with `{country}`/`{state}`/…
+             placeholders in the saved username template.
+          3. Fallback → session-mode only (no geo).
+
+        Also returns the sticky-session TTL cap (in minutes) that the
+        provider is known to support, so the UI can validate the input.
+        """
+        provider = await _get(user["id"], provider_id)
+        if not provider:
+            raise HTTPException(404, "Provider not found")
+        kind = provider.get("kind")
+        cfg = provider.get("config") or {}
+
+        supported = {
+            "country": False, "state": False, "city": False,
+            "zip": False, "asn": False,
+            "sticky_minutes": False, "session_mode": False,
+        }
+        detected_provider = None
+        ttl_cap_min = 120
+        hint = ""
+
+        if kind == "native_proxyjet":
+            supported.update({
+                "country": True, "state": True,
+                "sticky_minutes": True, "session_mode": True,
+            })
+            detected_provider = "ProxyJet (native)"
+            ttl_cap_min = 120
+            hint = "Native ProxyJet — country + US state + sticky window supported."
+
+        elif kind == "rotating_gateway":
+            supported["session_mode"] = True
+            host = str(cfg.get("gateway_host") or "").strip()
+            username_tpl = str(cfg.get("username") or "")
+            profile = _detect_profile(host)
+            if profile:
+                detected_provider = profile["name"]
+                for key in ("country", "state", "city", "zip", "asn"):
+                    if profile["keys"].get(key):
+                        supported[key] = True
+                if profile.get("ttl_key"):
+                    supported["sticky_minutes"] = True
+                # TTL caps per provider (empirical / from docs).
+                caps = {
+                    "DataImpulse": 120,
+                    "Bright Data": 30,
+                    "Oxylabs": 30,
+                    "Smartproxy / Decodo": 30,
+                    "IPRoyal": 60,
+                    "ProxyEmpire": 60,
+                    "Soax": 60,
+                    "PacketStream": 30,
+                }
+                ttl_cap_min = caps.get(profile["name"], 120)
+                hint = f"{profile['name']} detected — auto-applies its DSL for the fields you fill."
+            # Placeholder overrides always work — check template.
+            for key, ph in (
+                ("country", "{country}"), ("state", "{state}"),
+                ("city", "{city}"), ("zip", "{zip}"),
+                ("asn", "{asn}"), ("sticky_minutes", "{ttl}"),
+            ):
+                if ph in username_tpl:
+                    supported[key] = True
+            if not detected_provider and any(supported.values()):
+                detected_provider = "Custom gateway (via {placeholders})"
+                hint = "Custom gateway — placeholders detected in the username template."
+            if not detected_provider:
+                detected_provider = "Custom gateway"
+                hint = "Custom gateway — session-only mode. To enable geo targeting, edit your provider and use {country}/{state}/{city}/{zip}/{asn}/{ttl}/{sid} placeholders in the username."
+
+        elif kind == "api_endpoint":
+            detected_provider = "API endpoint"
+            hint = "This provider fetches proxies from an API you configured. Geo targeting must be set inside the API URL/body."
+
+        elif kind == "manual_list":
+            detected_provider = "Manual list"
+            hint = "Static list of proxies — no per-fetch targeting."
+
+        return {
+            "provider_id": provider_id,
+            "provider_name": provider.get("name"),
+            "kind": kind,
+            "proxy_type": provider.get("proxy_type"),
+            "detected_provider": detected_provider,
+            "hint": hint,
+            "supported": supported,
+            "ttl_cap_min": ttl_cap_min,
+        }
 
     @router.get("/_meta/kinds")
     async def kinds_meta():
