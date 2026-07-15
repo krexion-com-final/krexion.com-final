@@ -13,41 +13,32 @@ import {
   Globe2, MapPin, Building2, Hash, Radio, Timer, Sparkles, Info,
   ChevronDown, ChevronUp, Wand2,
 } from "lucide-react";
+import SearchableCombo from "./SearchableCombo";
+import {
+  COUNTRIES as REF_COUNTRIES,
+  US_STATES as REF_US_STATES,
+  CITIES_BY_COUNTRY,
+  ISPS_BY_COUNTRY,
+} from "../data/proxyTargetingRefData";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 
-// Country shortlist — used both for the geo dropdown and to show a
-// human label under the Country field.
-const COUNTRIES = [
-  { code: "US", label: "United States" },
-  { code: "CA", label: "Canada" },
-  { code: "GB", label: "United Kingdom" },
-  { code: "DE", label: "Germany" },
-  { code: "FR", label: "France" },
-  { code: "AU", label: "Australia" },
-  { code: "BR", label: "Brazil" },
-  { code: "IN", label: "India" },
-  { code: "JP", label: "Japan" },
-  { code: "IT", label: "Italy" },
-  { code: "ES", label: "Spain" },
-  { code: "NL", label: "Netherlands" },
-  { code: "MX", label: "Mexico" },
-  { code: "AE", label: "United Arab Emirates" },
-  { code: "SG", label: "Singapore" },
-  { code: "TR", label: "Turkey" },
-  { code: "PL", label: "Poland" },
-  { code: "SE", label: "Sweden" },
-  { code: "NO", label: "Norway" },
-  { code: "PH", label: "Philippines" },
-];
-const US_STATES = [
-  "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA",
-  "HI","ID","IL","IN","IA","KS","KY","LA","ME","MD",
-  "MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ",
-  "NM","NY","NC","ND","OH","OK","OR","PA","RI","SC",
-  "SD","TN","TX","UT","VT","VA","WA","WV","WI","WY",
-];
+// Build combobox options from the shared reference data. Values are
+// normalised (lower/no-space) so they match the backend's DSL syntax
+// for the detected provider — the customer never has to worry about
+// which form the provider wants.
+const COUNTRY_OPTIONS = REF_COUNTRIES.map((c) => ({
+  value: c.code,
+  label: `${c.flag}  ${c.code} — ${c.label}`,
+  hint: c.code,
+}));
+
+const US_STATE_OPTIONS = REF_US_STATES.map((s) => ({
+  value: s.code,
+  label: `${s.code} — ${s.label}`,
+  hint: s.code,
+}));
 
 const PROXY_TYPES = [
   { value: "http",     label: "HTTP" },
@@ -130,6 +121,36 @@ export default function MyProxyProvidersCard() {
   const supports = profile?.supported || {};
   const anyGeo = supports.country || supports.state || supports.city || supports.zip || supports.asn;
   const ttlCap = profile?.ttl_cap_min || 120;
+
+  // Reference options for the geo comboboxes — refresh whenever the
+  // selected country changes so cities/ISPs update in sync.
+  const cityOptions = useMemo(() => {
+    const list = CITIES_BY_COUNTRY[country] || [];
+    // If US and state chosen, prefer cities in that state at the top
+    // but keep the rest available (customer may still want cross-state).
+    if (country === "US" && state) {
+      const inState = list.filter((c) => c.state === state);
+      const rest = list.filter((c) => c.state !== state);
+      return [...inState, ...rest];
+    }
+    return list;
+  }, [country, state]);
+
+  const ispOptions = useMemo(() => {
+    const list = ISPS_BY_COUNTRY[country] || [];
+    // Show ISP name + ASN so power users can pick a numeric ASN too.
+    return list.map((i) => ({
+      value: i.value,
+      label: i.label,
+      hint: i.asn ? `AS${i.asn}` : "",
+    }));
+  }, [country]);
+
+  const stateOptions = useMemo(() => {
+    // Only US has a curated state dropdown. Other countries → free-text
+    // (customer can still type region names their provider accepts).
+    return country === "US" ? US_STATE_OPTIONS : [];
+  }, [country]);
 
   const kindLabel = (k) => (k || "").replace(/_/g, " ");
 
@@ -440,64 +461,54 @@ export default function MyProxyProvidersCard() {
                             <Label className="text-[11px] text-zinc-400 uppercase tracking-wider flex items-center gap-1 mb-1">
                               <Globe2 size={11} /> Country
                             </Label>
-                            <select
+                            <SearchableCombo
                               value={country}
-                              onChange={(e) => {
-                                setCountry(e.target.value);
-                                if (e.target.value !== "US") setState("");
+                              onChange={(v) => {
+                                setCountry(v);
+                                // Reset dependents when country changes
+                                if (v !== country) {
+                                  setState("");
+                                  setCity("");
+                                  setAsn("");
+                                }
                               }}
-                              className="w-full h-10 px-2 rounded-md bg-zinc-900/60 border border-zinc-700 text-white text-sm"
-                              data-testid="mpp-gen-country"
-                            >
-                              <option value="">— Any —</option>
-                              {COUNTRIES.map((c) => (
-                                <option key={c.code} value={c.code}>{c.code} — {c.label}</option>
-                              ))}
-                            </select>
+                              options={COUNTRY_OPTIONS}
+                              placeholder="Any country — search or type ISO"
+                              testid="mpp-gen-country"
+                            />
                           </div>
                         )}
                         {supports.state && (
                           <div>
                             <Label className="text-[11px] text-zinc-400 uppercase tracking-wider flex items-center gap-1 mb-1">
-                              <MapPin size={11} /> State
+                              <MapPin size={11} /> State / Region
                               {country && country !== "US" && (
-                                <span className="text-zinc-600 lowercase text-[10px]">(US-only list)</span>
+                                <span className="text-zinc-600 lowercase text-[10px]">(free text)</span>
                               )}
                             </Label>
-                            {country === "US" ? (
-                              <select
-                                value={state}
-                                onChange={(e) => setState(e.target.value)}
-                                className="w-full h-10 px-2 rounded-md bg-zinc-900/60 border border-zinc-700 text-white text-sm"
-                                data-testid="mpp-gen-state"
-                              >
-                                <option value="">— Any state —</option>
-                                {US_STATES.map((s) => (
-                                  <option key={s} value={s}>{s}</option>
-                                ))}
-                              </select>
-                            ) : (
-                              <Input
-                                value={state}
-                                onChange={(e) => setState(e.target.value)}
-                                placeholder="e.g. bavaria, ontario"
-                                className="bg-zinc-900/60 border-zinc-700 text-white"
-                                data-testid="mpp-gen-state-txt"
-                              />
-                            )}
+                            <SearchableCombo
+                              value={state}
+                              onChange={setState}
+                              options={stateOptions}
+                              placeholder={country === "US" ? "Any state — search or type code" : "e.g. bavaria, ontario, ile-de-france"}
+                              testid="mpp-gen-state"
+                            />
                           </div>
                         )}
                         {supports.city && (
                           <div>
                             <Label className="text-[11px] text-zinc-400 uppercase tracking-wider flex items-center gap-1 mb-1">
                               <Building2 size={11} /> City
+                              {cityOptions.length === 0 && (
+                                <span className="text-zinc-600 lowercase text-[10px]">(free text)</span>
+                              )}
                             </Label>
-                            <Input
+                            <SearchableCombo
                               value={city}
-                              onChange={(e) => setCity(e.target.value)}
-                              placeholder="e.g. miami, london"
-                              className="bg-zinc-900/60 border-zinc-700 text-white"
-                              data-testid="mpp-gen-city"
+                              onChange={setCity}
+                              options={cityOptions}
+                              placeholder={cityOptions.length ? "Search cities or type your own" : "e.g. miami, london, tokyo"}
+                              testid="mpp-gen-city"
                             />
                           </div>
                         )}
@@ -519,13 +530,16 @@ export default function MyProxyProvidersCard() {
                           <div>
                             <Label className="text-[11px] text-zinc-400 uppercase tracking-wider flex items-center gap-1 mb-1">
                               <Server size={11} /> ISP / ASN
+                              {ispOptions.length === 0 && (
+                                <span className="text-zinc-600 lowercase text-[10px]">(free text)</span>
+                              )}
                             </Label>
-                            <Input
+                            <SearchableCombo
                               value={asn}
-                              onChange={(e) => setAsn(e.target.value)}
-                              placeholder="e.g. comcast, 7018"
-                              className="bg-zinc-900/60 border-zinc-700 text-white"
-                              data-testid="mpp-gen-asn"
+                              onChange={setAsn}
+                              options={ispOptions}
+                              placeholder={ispOptions.length ? "Pick an ISP or type ASN like 7018" : "e.g. comcast, 7018"}
+                              testid="mpp-gen-asn"
                             />
                           </div>
                         )}
