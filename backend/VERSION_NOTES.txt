@@ -1,3 +1,52 @@
+# v2.6.8 — 2026-07-16 — RUT Customize Preset: full platform access + advanced options
+#
+# CUSTOMER-FACING FIXES (issue: "customize mein siraf preset ke default 4 platform hi
+# dikhte the — customer YouTube/LinkedIn/Reddit/Google etc. add nahi kar sakte the"):
+#
+#   Customize This Preset panel completely revamped so NO platform / setting is
+#   ever hidden from the customer:
+#
+#   1. ALL 18 platforms now accessible:
+#      • Active chips (with % weight input): the platforms in the preset's mix
+#      • "➕ Add Another Platform" strip: every remaining platform as a click-to-add chip
+#          — Facebook · Instagram · TikTok · YouTube · Twitter/X · Snapchat
+#          — Pinterest · Reddit · LinkedIn
+#          — Google · Bing · Yahoo · DuckDuckGo · Yandex
+#          — Email (14 ESPs inside)
+#          — WhatsApp · Telegram · Discord
+#      Click any inactive chip → added to mix at 20% (adjust after).
+#
+#   2. Source URL(s) upgraded — single input → multi-line textarea:
+#      • Blank        → preset picks realistic source per platform
+#      • 1 URL        → mode=custom (every visit uses that URL)
+#      • Multiple URLs → mode=random_list (random pick per visit)
+#
+#   3. NEW "⚙️ Advanced Options" collapsible section inside Customize panel:
+#      • Search Engine dropdown + Keywords textarea — appears automatically
+#        when Google/Bing/Yahoo/DDG/Yandex is in the platform mix
+#      • Brand Tag input — drives utm_source=<brand>_newsletter and
+#        utm_campaign=<brand>_...
+#      • 6 individual Realism Layer toggles (previously locked by preset):
+#          — Social link wrappers (l.facebook.com / t.co / lnkd.in / out.reddit.com)
+#          — In-app deep paths (TikTok video URLs, IG /p/, FB pfbid)
+#          — Ad-network click chain (Referer = affiliate-network host)
+#          — Pass Referer to offer (bypass Krexion origin leak)
+#          — Match UA to platform (FBAN/musical_ly/Instagram markers)
+#          — Strip search /?q= path (modern strict-origin referrer-policy)
+#
+#   4. Save-preset payload now includes every advanced field → reloading a saved
+#      preset restores the EXACT complete recipe (weights + URLs + search + brand +
+#      realism toggles + mode).
+#
+#   Backend: no schema change required — traffic_source_presets_module.py's opaque
+#   `config` dict already supports arbitrary keys (forward-compat design).
+#
+#   Files: frontend/src/pages/RealUserTrafficPage.js (Customize panel refactor,
+#   ~230 lines added).
+#
+#   No breaking changes — pre-v2.6.7 customers see full v2.6.6 behaviour when the
+#   panel is untouched. v2.6.7 saved presets load correctly into v2.6.8 UI.
+#
 # v2.6.7 — 2026-07-16 — RUT Traffic Preset customisation + user-saved presets
 #
 # CUSTOMER-FACING CHANGES:
