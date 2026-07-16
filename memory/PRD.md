@@ -77,3 +77,58 @@ User wants 7 bug-fixes / feature changes to the Krexion app. Every change must s
 
 ## Suggestion (revenue nudge — future)
 Show a subtle upsell inside the RUT "Cloud (light) mode" banner when a user tries a heavy feature: "Upgrade to VPS Heavy for $X/mo" — with a Stripe checkout. This turns the strict-block-modal into a monetisation touchpoint.
+
+---
+
+## What Was Implemented (v2.6.7 — 2026-07-16)
+
+### Task — Customisable Simple-Mode Traffic Presets + user-saved presets
+User request: "customer preset chose kre like social media to os k related he sab option hun jo customer manully apni requirment k mutabik b select kr sake … or customer apne setting kr k osko preset k tor pr save kr sake … same as json automation aik bar save kia to har bar band osko select kr k use kr leta hai".
+
+**Backend** — new module `backend/traffic_source_presets_module.py`:
+- Router `/api/referrer-pro/my-presets`  (GET / POST / PUT / DELETE)
+- Mongo collection `traffic_source_presets`, scoped per `user_id`
+- Duplicate-name guard per user; forward-compat opaque `config` dict
+- Wired in `server.py` right after the existing referrer_pro router.
+
+**Frontend** — `frontend/src/pages/RealUserTrafficPage.js`:
+- New **🎛️ Customize This Preset** panel appears whenever a base preset (Social Media Ads / Mixed Realistic / Search Engine Ads / Email Campaign / Direct Traffic) is active. Inside it:
+  - Chip toggles per platform (Facebook / Instagram / TikTok / Twitter / Google / Bing …) with inline % weight input
+  - **Source URL** input — when set, becomes the exact per-visit Referer (switches internal mode to `custom`)
+  - **💾 Save this configuration as my preset** button → prompts for a name, persists via API
+- New **⭐ My Saved Presets** chip strip above the base-preset dropdown. Click a chip to reload every toggle exactly like a saved JSON Automation profile. Delete via the × next to each chip (confirm dialog).
+- Zero behaviour change for customers who don't touch the new panel (opt-in).
+
+### Deploy & Version Bump
+- `backend/VERSION` bumped `2.6.6 → 2.6.7` on the same commit → auto-triggers:
+  - `Deploy to VPS` workflow (VPS auto-updates)
+  - `Build Native Windows Release` workflow (customer .exe installer)
+  - `Build Krexion Desktop (Electron)` workflow (Electron desktop app auto-update channel)
+- Notes prepended to `backend/VERSION_NOTES.txt`.
+- Admin must click **Quick Publish** on the Releases page once VPS confirms 2.6.7 is live so end customers see the update prompt (per user's workflow preference).
+
+### Files touched
+- `backend/VERSION` (2.6.6 → 2.6.7)
+- `backend/VERSION_NOTES.txt` (prepended v2.6.7 notes)
+- `backend/server.py` (new router registration block, ~15 lines added)
+- `backend/traffic_source_presets_module.py` (NEW, ~210 lines)
+- `frontend/src/pages/RealUserTrafficPage.js` (new state + effects + helpers + Customize panel + Saved-presets chip strip)
+
+## Verification
+- Backend API tested via curl end-to-end (create → list → duplicate-guard → update → delete). All pass.
+- Frontend Playwright screenshot showed:
+  1. Choose "Social Media Ads" preset → auto-config summary + Customize panel render.
+  2. Uncheck Facebook / Instagram / Twitter (chips greyed & line-through), set TikTok = 100%, source URL = `https://mypromo.com/tiktok-landing`.
+  3. Click Save → prompt appears → enter name "TikTok US Promo v1" → chip appears in "My Saved Presets" strip (indigo highlight).
+- MongoDB verified: doc stored with correct `platform_weights`, `referer_value`, `referer_mode: custom`, `network_click_chain: true`, etc.
+
+## Next Session Backlog (P1 — carried over)
+- P1: Approve `usmanjaved070@gmail.com` from admin panel (still pending from HANDOFF)
+- P1: TikTok proxy leak workaround verification
+- P2: iOS CPI engine via tidevice3
+- P2: AI Decision Log viewer in Live Activity panel
+- P2: server.py (25k lines) split into routes/models/services
+
+## Suggestion (retention nudge — future)
+Add a small "Share preset" button on each saved preset row → generates a signed one-time-import URL. Team accounts / affiliate mentors can then send their proven configs to sub-users with one click. Increases stickiness and reduces "how do I set up a good campaign?" support tickets significantly.
+
