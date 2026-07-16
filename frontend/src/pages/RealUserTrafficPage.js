@@ -3233,13 +3233,23 @@ export default function RealUserTrafficPage() {
                   </span>
                 </div>
                 <ul className="ml-6 list-disc space-y-0.5 text-zinc-300">
-                  <li>Referer forced to <span className="font-mono text-cyan-300">https://www.{inappBrowserPreset === "twitter" ? "twitter" : inappBrowserPreset}.com/</span></li>
                   <li>UA rotation → realistic mobile UAs (Android + iOS mix)</li>
-                  <li>In-app markers appended per visit (e.g. <span className="font-mono text-cyan-300">{inappBrowserPreset === "facebook" ? "[FB_IAB/FB4A;FBAV/…]" : inappBrowserPreset === "instagram" ? "Instagram 354.0.0.45.81 …" : inappBrowserPreset === "tiktok" ? "musical_ly_… BytedanceWebview/…" : inappBrowserPreset === "messenger" ? "[FB_IAB/MESSENGER;FBAV/…]" : inappBrowserPreset === "snapchat" ? "Snapchat/…" : inappBrowserPreset === "linkedin" ? "LinkedInApp/…" : "TwitterAndroid/…"}</span>)</li>
+                  <li>In-app markers appended per visit (e.g. <span className="font-mono text-cyan-300">{inappBrowserPreset === "facebook" ? "[FB_IAB/FB4A;FBAV/…]" : inappBrowserPreset === "instagram" ? "Instagram 354.0.0.45.81 …" : inappBrowserPreset === "tiktok" ? "musical_ly_… BytedanceWebview/…" : inappBrowserPreset === "messenger" ? "[FB_IAB/MESSENGER;FBAV/…]" : inappBrowserPreset === "snapchat" ? "Snapchat/…" : inappBrowserPreset === "linkedin" ? "LinkedInApp/…" : "TwitterAndroid/…"}</span>) — tracker will report <span className="text-cyan-300 font-medium">Browser: {inappBrowserPreset === "tiktok" ? "TikTok for iOS/Android" : inappBrowserPreset === "facebook" ? "Facebook In-App" : inappBrowserPreset === "instagram" ? "Instagram In-App" : inappBrowserPreset === "messenger" ? "Messenger In-App" : inappBrowserPreset === "snapchat" ? "Snapchat In-App" : inappBrowserPreset === "linkedin" ? "LinkedIn In-App" : "Twitter In-App"}</span></li>
+                  <li>
+                    <span className="font-semibold text-emerald-300">Referer:</span>{" "}
+                    <span className="text-zinc-300">
+                      If you type a URL in <span className="text-emerald-300">&ldquo;Custom Referrer URL&rdquo;</span> below (e.g. your landing page{" "}
+                      <span className="font-mono text-cyan-300">https://your-landing.com/</span>), <span className="text-emerald-300 font-medium">that</span> becomes the referer sent to the tracker/offer &mdash; exactly like a real{" "}
+                      <span className="capitalize">{inappBrowserPreset}</span> ad click that lands on the advertiser page.
+                      Leave the Custom URL empty to fall back to{" "}
+                      <span className="font-mono text-cyan-300">https://www.{inappBrowserPreset === "twitter" ? "twitter" : inappBrowserPreset}.com/</span>{" "}
+                      as the referer.
+                    </span>
+                  </li>
                   <li>Referer passed directly to the offer (bypasses Krexion origin leak)</li>
                 </ul>
                 <div className="pt-1 text-[11px] text-zinc-400">
-                  💡 The "Referrer Source" panel below is <span className="text-zinc-300">overridden</span> while a preset is active. Choose "— None —" above if you want full manual control.
+                  💡 The preset applies the in-app <span className="text-zinc-300">browser identity</span>. The <span className="text-zinc-300">&ldquo;Referrer Source&rdquo;</span> panel below still controls the <span className="text-zinc-300">exact Referer URL</span> — perfect for real-ad-flow simulation (in-app browser + advertiser landing-page referer).
                 </div>
               </div>
             )}

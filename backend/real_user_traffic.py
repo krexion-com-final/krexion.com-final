@@ -1238,6 +1238,17 @@ def _resolve_visit_referer(ua: str, cfg: Optional[Dict[str, Any]]) -> Tuple[str,
         if mode == "custom":
             ref = value.strip()
             plat = _platform_from_referer_url(ref)
+            # v2.6.5 — When the operator combined the "In-App Browser
+            # Preset" with a Custom Referrer URL (real ad flow: browser
+            # LOOKS like TikTok but referer is the ADVERTISER landing
+            # page), the URL by itself won't derive to a platform.
+            # Fall back to the preset platform so the UA coercer still
+            # applies the correct in-app markers (musical_ly_ for
+            # TikTok, FBAN/FBAV for Facebook, Instagram for IG, etc.).
+            if not plat:
+                _pp = str(cfg.get("preset_platform") or "").strip().lower()
+                if _pp:
+                    plat = _pp
             esp = _esp_from_referer_url(ref) if plat == "email" else ""
             # Custom URL: operator picked it explicitly — DO NOT deepen.
             return ref, plat, esp, {}
@@ -1251,6 +1262,13 @@ def _resolve_visit_referer(ua: str, cfg: Optional[Dict[str, Any]]) -> Tuple[str,
                 return ref, plat, "", {}
             ref = random.choice(lines)
             plat = _platform_from_referer_url(ref)
+            # v2.6.5 — Same preset-platform fallback as `custom` mode:
+            # when the pool is a list of advertiser landing pages, the
+            # UA still needs the preset's in-app markers.
+            if not plat:
+                _pp = str(cfg.get("preset_platform") or "").strip().lower()
+                if _pp:
+                    plat = _pp
             esp = _esp_from_referer_url(ref) if plat == "email" else ""
             # random_list: operator-curated pool — DO NOT deepen.
             return ref, plat, esp, {}
@@ -6116,32 +6134,61 @@ async def run_real_user_traffic_job(
     """
     Main orchestrator. Emits progress into RUT_JOBS[job_id].
     """
-    # ── 2026-07 v2.2.1 — In-App Browser Preset: force referrer + mobile UAs
+    # ── 2026-07 v2.6.5 — In-App Browser Preset: force referrer + mobile UAs
     # Applied BEFORE the referer_cfg dict is built so all downstream
     # logic (referer resolution, UA coercion, pass-to-offer, etc.) sees
     # the preset values as if the operator had toggled them manually
     # in the advanced UI. Empty / "none" / unknown preset = no-op
     # (100 % backward-compatible with older frontends and past jobs).
+    #
+    # v2.6.5 change (customer report: "TikTok preset + landing-page
+    # custom URL → tracker records TikTok video URL as referer, not
+    # the landing page"): When the operator has ALREADY typed a custom
+    # referer URL, the preset MUST NOT overwrite it — the operator's
+    # explicit choice wins. This matches how real TikTok ads flow:
+    # browser LOOKS like TikTok in-app (via mobile UA + musical_ly
+    # marker) but the referer sent to the offer is the ADVERTISER'S
+    # LANDING PAGE, not tiktok.com. We still apply every UA-related
+    # preset behaviour (mobile UA swap, platform coerce, pass-to-
+    # offer) so the visit still looks like a real in-app click.
     _inapp_preset_key = (inapp_browser_preset or "").strip().lower()
+    _preset_platform_for_ua = ""  # remembered for the referer_cfg below
     if _inapp_preset_key and _inapp_preset_key != "none":
         _preset_referer_url = _INAPP_PRESET_REFERER.get(_inapp_preset_key, "")
         if _preset_referer_url:
             referer_override_enabled = True
-            referer_mode = "custom"
-            referer_value = _preset_referer_url
+            # Preserve the operator's chosen mode + URL when they've
+            # supplied one. Only auto-fill when nothing was picked yet.
+            _op_had_custom_url = bool(str(referer_value or "").strip())
+            _op_had_pool = bool(str(referer_platform_pool or "").strip())
+            if not _op_had_custom_url and not _op_had_pool:
+                # Legacy behaviour: no custom pick → default to the
+                # preset's canonical platform homepage.
+                referer_mode = "custom"
+                referer_value = _preset_referer_url
+            else:
+                # Operator provided their own URL / pool → keep it.
+                # Ensure `mode` matches what they filled in.
+                if _op_had_custom_url and (referer_mode or "").strip().lower() not in ("custom", "random_list"):
+                    referer_mode = "custom"
+                if _op_had_pool and (referer_mode or "").strip().lower() not in ("platform_pool", "auto"):
+                    referer_mode = "platform_pool"
             referer_match_ua_to_platform = True
             referer_pass_to_offer = True
+            _preset_platform_for_ua = _inapp_preset_key
             # Replace desktop UAs with mobile UAs (only mobile UAs
             # can be coerced with in-app markers — desktop UAs are
             # left unchanged by coerce_ua_for_platform by design).
             _orig_ua_count = len(user_agents or [])
             user_agents = _apply_inapp_preset_to_uas(user_agents, total_clicks)
             try:
+                _log_ref = referer_value if _op_had_custom_url else _preset_referer_url
                 push_live_step(
                     job_id, 0, "preset", "info",
                     f"In-App Browser preset ACTIVE · platform={_inapp_preset_key} · "
-                    f"referer={_preset_referer_url} · UA pool: {_orig_ua_count} in → "
+                    f"referer={_log_ref} · UA pool: {_orig_ua_count} in → "
                     f"{len(user_agents)} mobile UAs out (Android+iOS mix)"
+                    + (" · operator's custom URL preserved" if _op_had_custom_url else "")
                 )
             except Exception:
                 pass
@@ -6174,6 +6221,14 @@ async def run_real_user_traffic_job(
         "pass_to_offer": bool(referer_pass_to_offer),
         # 2026-06-14 — UA ↔ Referer coercion toggle (anti-fraud).
         "match_ua_to_platform": bool(referer_match_ua_to_platform),
+        # 2026-07 v2.6.5 — Preset platform used for UA coercion when the
+        # referer URL doesn't itself derive a known platform (e.g. the
+        # operator picked "TikTok In-App Preset" AND supplied a custom
+        # landing-page URL as referer — the tracker should record the
+        # landing page URL as referer but the browser still needs the
+        # TikTok in-app UA markers so anti-fraud reports "TikTok"). Empty
+        # → resolver falls back to legacy platform-from-URL detection.
+        "preset_platform": _preset_platform_for_ua,
     }
 
     # Guarantee chromium is installed BEFORE launching any visits.
