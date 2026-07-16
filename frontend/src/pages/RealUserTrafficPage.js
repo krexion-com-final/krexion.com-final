@@ -583,6 +583,19 @@ export default function RealUserTrafficPage() {
   // When ON, the chosen mode below is applied per visit so the operator
   // can make traffic look like it originated from any platform.
   const [refererOverrideEnabled, setRefererOverrideEnabled] = useState(false);
+
+  // ── 2026-07: Traffic Source Preset (SIMPLE MODE) ─────────────────────
+  // Single-dropdown replacement for the 20+ granular toggles below so
+  // non-technical customers can pick ONE meaningful business-mode and
+  // let Krexion configure every downstream toggle consistently (no
+  // conflicts possible). When set to "custom" the full advanced UI
+  // appears exactly as before → power-users lose nothing.
+  //
+  // Default is "off" so existing customers see zero behaviour change
+  // until they explicitly pick a preset. Picking any non-"off" preset
+  // auto-enables refererOverrideEnabled and configures pool / realism
+  // toggles below via the effect that follows.
+  const [trafficSourcePreset, setTrafficSourcePreset] = useState("off");
   const [refererMode, setRefererMode] = useState("platform_pool");
   // ↑ Default mode is platform_pool (visually obvious "real social
   // traffic" look). The toggle is OFF by default so existing customer
@@ -674,6 +687,95 @@ export default function RealUserTrafficPage() {
       .then(d => setAdCapabilities(d))
       .catch(() => {});
   }, []);
+
+  // ── 2026-07: Traffic Source Preset applier ─────────────────────────
+  // When the operator picks a preset from the SIMPLE dropdown, this
+  // effect deterministically wires up EVERY downstream toggle (pool
+  // weights + realism layers + pass-to-offer + UA coercion) to a
+  // tested, conflict-free combination. Each preset is a "recipe" of
+  // all 20+ toggles so the customer cannot accidentally produce a
+  // mismatched configuration (e.g. social wrappers off but in-app
+  // preset on). Preset "custom" is the escape hatch that leaves
+  // every toggle untouched → power-users see the full advanced UI.
+  // Preset "off" restores the legacy UA-only behaviour.
+  useEffect(() => {
+    if (!trafficSourcePreset || trafficSourcePreset === "custom") {
+      return;  // Custom / initial mount — do NOT overwrite manual picks
+    }
+    if (trafficSourcePreset === "off") {
+      // Legacy path: just turn the master switch off and leave the
+      // sub-toggles at whatever they already are so re-enabling
+      // returns the customer to their previous config.
+      setRefererOverrideEnabled(false);
+      return;
+    }
+    // Every real preset REQUIRES the master switch on.
+    setRefererOverrideEnabled(true);
+    // Recommended universal defaults — every preset gets these unless
+    // it overrides below. Pass-to-offer + UA↔platform coercion are
+    // the anti-fraud fundamentals; they must be on for realistic ads.
+    setRefererPassToOffer(true);
+    setRefererMatchUaToPlatform(true);
+    setRefererProMode(true);              // presets use weighted pools
+    setRefererMode("platform_pool");      // pro-mode reads weights from here
+    setRefererSocialWrapper(true);
+    setRefererInappDeep(true);
+    setRefererStripSearchPath(true);
+    setInappBrowserPreset("none");        // let matchUaToPlatform rotate per visit
+    setRefererValue("");                   // preset owns the source
+    if (trafficSourcePreset === "mixed_realistic") {
+      // Balanced 4-way mix — best all-round default for most offers.
+      setRefererPlatformWeights({
+        facebook: 30, instagram: 15, tiktok: 20,
+        google: 20, twitter: 5, email: 10,
+      });
+      setRefererNetworkClickChain(true);   // affiliate-chain look
+      setRefererSearchEngine("google");
+    } else if (trafficSourcePreset === "social_media_ads") {
+      // Paid-social heavy: FB / IG / TikTok / Twitter, no search
+      setRefererPlatformWeights({
+        facebook: 40, instagram: 30, tiktok: 25, twitter: 5,
+      });
+      setRefererNetworkClickChain(true);
+      setRefererSearchEngine("google");
+    } else if (trafficSourcePreset === "search_engine_ads") {
+      // Google / Bing SEM + a slice of privacy engines
+      setRefererPlatformWeights({
+        google: 65, bing: 25, duckduckgo: 5, yandex: 5,
+      });
+      setRefererNetworkClickChain(false);  // search doesn't use ad-network wrappers
+      setRefererSearchEngine("google");
+      setRefererInappDeep(false);           // search has no in-app deep paths
+      setRefererSocialWrapper(false);
+    } else if (trafficSourcePreset === "email_campaign") {
+      // Pure email — ESP weights drive per-visit ESP choice
+      setRefererPlatformWeights({ email: 100 });
+      setRefererEmailWeights({
+        gmail: 40, outlook: 20, yahoo: 10,
+        mailchimp: 15, klaviyo: 10, empty: 5,
+      });
+      setRefererNetworkClickChain(false);
+      setRefererInappDeep(false);
+      setRefererSocialWrapper(false);
+    } else if (trafficSourcePreset === "direct_traffic") {
+      // Bookmark / direct-typed URL / native mail app — no Referer.
+      // pass_to_offer STAYS ON: Bug #9 fix allows pass-to-offer with
+      // blank Referer, so the browser navigates DIRECTLY to the offer
+      // with an empty Referer header. Without this, the browser would
+      // go tracker→302→offer and referrer-policy would leak
+      // `krexion.com` as the origin — defeating the whole point of
+      // "direct traffic".
+      setRefererMode("direct");
+      setRefererProMode(false);             // direct mode ignores pro pools
+      setRefererNetworkClickChain(false);
+      setRefererSocialWrapper(false);
+      setRefererInappDeep(false);
+      // setRefererPassToOffer(true) already set above → keep it.
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trafficSourcePreset]);
+
+
 
   // ── 2026-06: Health Check / Preflight Trace ──
   // Lightweight dry-run that validates the recording + URL on ONE
@@ -3269,7 +3371,13 @@ export default function RealUserTrafficPage() {
                   data-testid="rut-referer-override-enabled"
                   type="checkbox"
                   checked={refererOverrideEnabled}
-                  onChange={(e) => setRefererOverrideEnabled(e.target.checked)}
+                  onChange={(e) => {
+                    setRefererOverrideEnabled(e.target.checked);
+                    // Turning the master switch off also parks the
+                    // preset dropdown at "off" so the two controls
+                    // never disagree.
+                    if (!e.target.checked) setTrafficSourcePreset("off");
+                  }}
                   className="w-4 h-4 rounded accent-emerald-500"
                 />
                 <span className={`text-xs font-medium ${refererOverrideEnabled ? "text-emerald-300" : "text-zinc-500"}`}>
@@ -3281,7 +3389,94 @@ export default function RealUserTrafficPage() {
               When <span className="text-zinc-300">OFF</span> the engine sets Referer only for in-app browser UAs (TikTok / FB / IG / …) — plain Chrome / Safari UAs hit your tracker with <span className="text-zinc-300">no Referer</span>, which gets logged as <span className="text-amber-400">Direct / Other</span>. Turn this <span className="text-emerald-300">ON</span> to force every visit through a chosen organic source so analytics show the real platform.
             </p>
 
+            {/* ── 2026-07: SIMPLE MODE — Traffic Source Preset dropdown ── */}
             {refererOverrideEnabled && (
+              <div className="mb-4 p-4 rounded-lg border-2 border-emerald-500/50 bg-gradient-to-br from-emerald-950/40 to-teal-950/30">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-emerald-200 text-sm font-bold">
+                    🎯 Traffic Source (Simple Mode)
+                  </span>
+                  <span className="text-[10px] text-emerald-400 px-2 py-0.5 rounded-full bg-emerald-900/60 border border-emerald-600/60 font-medium">
+                    ONE-CLICK SETUP
+                  </span>
+                </div>
+                <p className="text-[12px] text-zinc-300 mb-3 leading-relaxed">
+                  Pick <span className="text-emerald-300 font-medium">one</span> traffic source and Krexion auto-configures every advanced setting for you (weighted platforms, in-app markers, UA matching, network chains, offer-referrer pass-through). No conflicts, no confusion — just pick and go.
+                </p>
+                <Label className="text-emerald-200 text-xs font-semibold uppercase tracking-wide">
+                  Choose Your Traffic Source
+                </Label>
+                <select
+                  data-testid="rut-traffic-source-preset"
+                  value={trafficSourcePreset}
+                  onChange={(e) => setTrafficSourcePreset(e.target.value)}
+                  className="mt-1 w-full bg-zinc-900 border-2 border-emerald-600/60 text-emerald-100 rounded-lg px-4 py-3 text-sm font-medium focus:outline-none focus:border-emerald-400 hover:border-emerald-500 transition"
+                >
+                  <option value="off">🚫 Off — legacy UA-only (no Referer override)</option>
+                  <option value="mixed_realistic">⭐ Mixed Realistic (Recommended) — best all-round</option>
+                  <option value="social_media_ads">📱 Social Media Ads — Facebook / Instagram / TikTok / Twitter</option>
+                  <option value="search_engine_ads">🔍 Search Engine Ads — Google / Bing / DuckDuckGo / Yandex</option>
+                  <option value="email_campaign">📧 Email Campaign — Gmail / Outlook / Mailchimp / Klaviyo</option>
+                  <option value="direct_traffic">🎯 Direct Traffic — no Referer (bookmark / typed URL / native mail)</option>
+                  <option value="custom">⚙️ Custom (Advanced) — show every toggle</option>
+                </select>
+
+                {/* Live preview of what preset just configured */}
+                {trafficSourcePreset !== "custom" && trafficSourcePreset !== "off" && (
+                  <div className="mt-3 p-3 rounded-md bg-zinc-950/60 border border-emerald-800/40">
+                    <div className="text-[11px] text-emerald-300 font-semibold mb-2 flex items-center gap-1">
+                      ✓ Auto-configured settings for this preset:
+                    </div>
+                    <ul className="text-[11px] text-zinc-300 space-y-1 leading-relaxed" data-testid="rut-preset-summary">
+                      {trafficSourcePreset === "mixed_realistic" && (
+                        <>
+                          <li>• <span className="text-emerald-300">Traffic mix:</span> 30% Facebook · 20% TikTok · 20% Google · 15% Instagram · 10% Email · 5% Twitter</li>
+                          <li>• <span className="text-emerald-300">Realism:</span> In-app deep paths + Social link wrappers + Network click chain — all ON</li>
+                          <li>• <span className="text-emerald-300">Anti-fraud:</span> UA↔Platform matching + Pass-to-Offer — all ON</li>
+                        </>
+                      )}
+                      {trafficSourcePreset === "social_media_ads" && (
+                        <>
+                          <li>• <span className="text-emerald-300">Traffic mix:</span> 40% Facebook · 30% Instagram · 25% TikTok · 5% Twitter</li>
+                          <li>• <span className="text-emerald-300">Realism:</span> Deep post/reel/video paths + <span className="font-mono text-zinc-200">l.facebook.com</span> / <span className="font-mono text-zinc-200">t.co</span> wrappers + Ad-network click chain</li>
+                          <li>• <span className="text-emerald-300">Mobile in-app markers:</span> FBAN/FBIOS · musical_ly · Instagram — auto-appended to UA per visit</li>
+                        </>
+                      )}
+                      {trafficSourcePreset === "search_engine_ads" && (
+                        <>
+                          <li>• <span className="text-emerald-300">Search mix:</span> 65% Google · 25% Bing · 5% DuckDuckGo · 5% Yandex</li>
+                          <li>• <span className="text-emerald-300">Realism:</span> Geo-localized TLDs (google.de, google.co.uk, …) matching your proxy country</li>
+                          <li>• <span className="text-emerald-300">Referrer-Policy strip:</span> Only origin (matches modern search-engine referrer behaviour)</li>
+                        </>
+                      )}
+                      {trafficSourcePreset === "email_campaign" && (
+                        <>
+                          <li>• <span className="text-emerald-300">ESP mix:</span> 40% Gmail · 20% Outlook · 15% Mailchimp · 10% Klaviyo · 10% Yahoo · 5% Native</li>
+                          <li>• <span className="text-emerald-300">Auto-tagging:</span> <span className="font-mono text-zinc-200">mc_cid</span> · <span className="font-mono text-zinc-200">_kx</span> · <span className="font-mono text-zinc-200">_hsenc</span> — matched to the picked ESP per visit</li>
+                          <li>• <span className="text-emerald-300">UTMs:</span> <span className="font-mono text-zinc-200">utm_medium=email</span> auto-added</li>
+                        </>
+                      )}
+                      {trafficSourcePreset === "direct_traffic" && (
+                        <>
+                          <li>• <span className="text-emerald-300">Referer:</span> None (offer sees blank Referer, tracker logs as <span className="text-zinc-400">Direct</span>)</li>
+                          <li>• <span className="text-emerald-300">Use case:</span> Bookmark clicks / typed URLs / native iOS Mail links / SMS clicks</li>
+                        </>
+                      )}
+                    </ul>
+                    <p className="text-[10px] text-emerald-400/70 mt-2 italic">
+                      Want to fine-tune anything? Pick <span className="font-semibold">Custom (Advanced)</span> to see all 20+ toggles.
+                    </p>
+                  </div>
+                )}
+                {trafficSourcePreset === "custom" && (
+                  <div className="mt-3 p-2 rounded-md bg-amber-950/40 border border-amber-700/40 text-[11px] text-amber-200">
+                    ⚙️ <span className="font-semibold">Advanced mode active.</span> Every toggle below is under your control — Krexion will NOT auto-configure anything.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {refererOverrideEnabled && trafficSourcePreset === "custom" && (
               <div className="mb-3 p-3 rounded-md bg-emerald-950/30 border border-emerald-700/40">
                 <div className="flex items-start gap-2 text-xs text-emerald-200">
                   <span className="text-emerald-400 text-base leading-none">⚡</span>
@@ -3293,7 +3488,7 @@ export default function RealUserTrafficPage() {
             )}
 
             {/* 2026-01 — Pass-Referer-To-Offer (universal toggle, works in every referer mode) */}
-            {refererOverrideEnabled && (
+            {refererOverrideEnabled && trafficSourcePreset === "custom" && (
               <label
                 className="flex items-start gap-3 text-xs text-zinc-200 cursor-pointer p-3 mb-3 rounded-md border-2 border-emerald-500/60 bg-emerald-950/40 hover:bg-emerald-950/60 transition"
                 data-testid="rut-pass-referer-to-offer-label"
@@ -3325,7 +3520,7 @@ export default function RealUserTrafficPage() {
               </label>
             )}
 
-            {refererOverrideEnabled && (
+            {refererOverrideEnabled && trafficSourcePreset === "custom" && (
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
                   <Label className="text-zinc-300 text-sm">Referrer Mode</Label>

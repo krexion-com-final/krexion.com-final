@@ -1004,11 +1004,26 @@ def parse_weighted_pool(value: str) -> List[Tuple[str, float]]:
 
     Returns [] when nothing parseable. Caller picks weighted-random or
     falls back to legacy behaviour.
+
+    BUG #8 fix (2026-07): When JSON parses successfully AND contains
+    VALID_PLATFORM_KEYS entries but ALL weights are zero / malformed /
+    missing, do NOT return [] silently (that would drop the user's
+    intent). Fall back to equal-weight for the valid keys so the
+    resolver still picks from the operator's chosen set.
+
+    BUG #11 fix: Return entries sorted by descending weight (then
+    ascending key for stable tie-break) so downstream analytics and
+    logs show the operator's dominant platforms first regardless of
+    dict insertion order.
     """
     if not value:
         return []
     v = value.strip()
     out: List[Tuple[str, float]] = []
+    # Track which keys were VALID but had zero/invalid weights so the
+    # zero-weight fallback (Bug #8) can rebuild an equal-weight pool
+    # instead of returning nothing.
+    _valid_keys_seen: List[str] = []
     try:
         if v.startswith("{") or v.startswith("["):
             data = json.loads(v)
@@ -1016,6 +1031,7 @@ def parse_weighted_pool(value: str) -> List[Tuple[str, float]]:
                 for k, w in data.items():
                     key = str(k).strip().lower()
                     if key in VALID_PLATFORM_KEYS:
+                        _valid_keys_seen.append(key)
                         try:
                             wf = float(w)
                             if wf > 0:
@@ -1028,12 +1044,25 @@ def parse_weighted_pool(value: str) -> List[Tuple[str, float]]:
                         key = str(item.get("key", "")).strip().lower()
                         w = item.get("weight", item.get("value", 0))
                         if key in VALID_PLATFORM_KEYS:
+                            _valid_keys_seen.append(key)
                             try:
                                 wf = float(w)
                                 if wf > 0:
                                     out.append((key, wf))
                             except (TypeError, ValueError):
                                 continue
+            # Bug #8 fallback: JSON had valid platform keys but all
+            # weights were zero / invalid → give them equal weight
+            # instead of dropping the whole pool.
+            if not out and _valid_keys_seen:
+                # de-dup while preserving encounter order
+                _seen: set = set()
+                for k in _valid_keys_seen:
+                    if k not in _seen:
+                        _seen.add(k)
+                        out.append((k, 1.0))
+            # Bug #11: stable, weight-desc order.
+            out.sort(key=lambda kv: (-kv[1], kv[0]))
             return out
     except (json.JSONDecodeError, ValueError):
         pass
@@ -1068,6 +1097,8 @@ def parse_weighted_pool(value: str) -> List[Tuple[str, float]]:
             key = piece.strip().lower()
             if key in VALID_PLATFORM_KEYS:
                 out.append((key, 1.0))
+    # Bug #11: stable, weight-desc order (also for the comma-list path).
+    out.sort(key=lambda kv: (-kv[1], kv[0]))
     return out
 
 
@@ -1377,6 +1408,9 @@ def resolve_pro_visit(
             out["utm_content"] = _preset.get("content", "")
             out["utm_term"]    = _preset.get("term", "")
         out["sec_fetch"] = build_sec_fetch_headers(ref, is_navigation=True)
+        # BUG #6 fix (2026-07): honour network_click_chain for email too.
+        if network_click_chain_enabled:
+            out["network_click_referer"] = build_network_click_referer(network_click_host)
         return out
 
     # Search engines (google / bing / yahoo / duckduckgo / yandex / youtube / baidu / naver)
@@ -1384,19 +1418,39 @@ def resolve_pro_visit(
         # If pool entry maps to search, use the user's chosen search engine
         kws = [ln.strip() for ln in (search_keywords or "").splitlines() if ln.strip()]
         kw = random.choice(kws) if kws else ""
-        # Use chosen as the actual engine — not the search_engine override —
-        # so per-visit rotation across engines works inside the same pool.
-        eng = chosen if chosen != "duckduckgo" else "duckduckgo"
+        # BUG #2 fix (2026-07): honour the operator's explicit
+        # `search_engine` UI override. Previously this branch always
+        # used `chosen` from the pool, so the dropdown was decorative.
+        # Now: if the operator picked an engine (non-default), that
+        # engine wins; otherwise we fall back to the pool selection.
+        # BUG #4 fix: removed dead `eng = chosen if chosen != "duckduckgo" else "duckduckgo"`
+        se = (search_engine or "").strip().lower()
+        _VALID_SE = ("google", "bing", "duckduckgo", "ddg", "yahoo",
+                     "yandex", "youtube", "baidu", "naver")
+        if se and se in _VALID_SE and se != "google":
+            # "google" is our internal default → treat as "no override";
+            # anything else (bing/ddg/yandex/…) counts as an explicit
+            # operator override. `ddg` is an alias for `duckduckgo`.
+            eng = "duckduckgo" if se == "ddg" else se
+        else:
+            eng = chosen
         ref = build_search_referer(eng, kw, country=country, strip_path=strip_search_path)
+        # Signal must reflect the ACTUAL engine used so downstream
+        # tracker/UA coercion picks the right platform.
+        actual_signal = eng if eng in VALID_PLATFORM_KEYS else signal
         out["referer"] = ref
-        out["platform"] = signal
-        out["utm_source"], out["utm_medium"] = pick_utm_variation(signal, brand)
-        out["utm_campaign"] = pick_utm_campaign(signal, brand)
+        out["platform"] = actual_signal
+        out["utm_source"], out["utm_medium"] = pick_utm_variation(actual_signal, brand)
+        out["utm_campaign"] = pick_utm_campaign(actual_signal, brand)
         if _preset:
             out["utm_medium"]  = _preset.get("medium", out["utm_medium"])
             out["utm_content"] = _preset.get("content", "")
             out["utm_term"]    = _preset.get("term", "")
         out["sec_fetch"] = build_sec_fetch_headers(ref, is_navigation=True)
+        # BUG #5 fix (2026-07): honour network_click_chain for search
+        # paths too — previously only social paths got the network ref.
+        if network_click_chain_enabled:
+            out["network_click_referer"] = build_network_click_referer(network_click_host)
         return out
 
     # Social: pick wrapper or in-app deep path

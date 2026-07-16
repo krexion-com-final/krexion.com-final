@@ -1,3 +1,83 @@
+# v2.6.6 — 2026-07-16 — RUT Referrer System: 11 bugs fixed + Simple Traffic Preset UI
+#
+# CUSTOMER-FACING CHANGES:
+#   1. New "🎯 Traffic Source (Simple Mode)" dropdown on RUT job creation:
+#      customer sirf ONE preset pick karte hain — Krexion khud 20+ toggles
+#      auto-configure kar deta hai. No more conflicts, no more confusion.
+#      Available presets:
+#         • ⭐ Mixed Realistic (Recommended) — 30% FB · 20% TT · 20% Google · 15% IG · 10% Email · 5% Twitter
+#         • 📱 Social Media Ads — 40% FB · 30% IG · 25% TikTok · 5% Twitter
+#         • 🔍 Search Engine Ads — 65% Google · 25% Bing · 5% DDG · 5% Yandex
+#         • 📧 Email Campaign — 40% Gmail · 20% Outlook · 15% Mailchimp · 10% Klaviyo · 10% Yahoo · 5% Native
+#         • 🎯 Direct Traffic — no Referer (bookmark / typed URL / native mail)
+#         • ⚙️ Custom (Advanced) — old UI with all 20+ granular toggles for power users
+#      Live "auto-configured settings" preview shows exactly what each
+#      preset does so customer knows what got set. Existing customers see
+#      "Off" default → zero behaviour change until they opt in.
+#
+# BUG FIXES (RUT Referrer Resolver — All 11 issues identified during audit):
+#   1. Network Click Chain toggle now actually wires the ad-network host
+#      as the outbound Referer (previously stored in extras but never
+#      consumed by browser navigation). Real ad chain: platform →
+#      l.facebook.com / sig.click.com → offer.
+#   2. Search Engine dropdown now honoured by pro-mode resolver
+#      (previously decorative). Explicit non-default engine wins over
+#      pool selection. "ddg" alias maps to duckduckgo.
+#   3. Legacy `google_search` mode now honours cfg.search_engine +
+#      cfg.country + cfg.strip_search_path (was hardcoded to
+#      www.google.com regardless of picks).
+#   4. Removed dead code in resolve_pro_visit (`eng = chosen if chosen
+#      != "duckduckgo" else "duckduckgo"`).
+#   5. network_click_referer now emitted for search-engine pool picks
+#      (previously social-platforms only).
+#   6. network_click_referer now emitted for email pool picks too.
+#   7. random_list mode now respects inapp_deep_path toggle for bare
+#      platform homepages (custom landing URLs still preserved
+#      byte-for-byte by design).
+#   8. parse_weighted_pool: all-zero JSON weights now fall back to
+#      equal-weight instead of silently dropping the pool.
+#   9. Pass-Referer-To-Offer now works when Referer is blank (direct
+#      mode) — previously silent no-op that leaked krexion.com origin
+#      to the offer. Direct Traffic preset now correctly benefits from
+#      this fix (pass_to_offer stays ON).
+#  10. _esp_from_referer_url + _platform_from_referer_url now use
+#      parsed hostname (exact/subdomain) instead of substring — a URL
+#      like `example.com/list-manage.com-fake` can no longer be
+#      misclassified as Mailchimp/Facebook.
+#  11. parse_weighted_pool output is now weight-desc-sorted (stable
+#      tie-break by key) so downstream analytics and logs are
+#      deterministic regardless of dict insertion order.
+#
+# BACKEND CHANGES:
+#   • /app/backend/referrer_pro.py — parse_weighted_pool zero-fallback +
+#     sort, resolve_pro_visit search_engine override + network_click for
+#     search+email paths.
+#   • /app/backend/real_user_traffic.py — google_search rebuilt through
+#     build_search_referer, random_list deepen-bare-homepage, main loop
+#     applies network_click_referer as outbound Referer, pass_to_offer
+#     works with blank Referer, hostname-based platform/ESP detection.
+#
+# FRONTEND CHANGES:
+#   • /app/frontend/src/pages/RealUserTrafficPage.js — new
+#     trafficSourcePreset state + useEffect applier + simplified
+#     dropdown UI at top of Referrer Source section. Advanced UI now
+#     only shown when preset === "custom".
+#
+# TESTING:
+#   • Backend: 13/13 pytest cases in tests/test_rut_referrer_bugs.py PASS.
+#   • Frontend: end-to-end preset UI verified via Playwright.
+#   • Zero regressions in existing referrer resolver behaviour.
+#
+# BACKWARD COMPATIBILITY:
+#   • Preset default = "off" → existing customer jobs behave exactly
+#     as before v2.6.5. Only customers who explicitly pick a preset
+#     see the new auto-configured behaviour.
+#   • "Custom (Advanced)" preset shows the pre-2.6.6 UI unchanged.
+#   • All existing FormData fields (referer_mode, referer_pro_mode,
+#     referer_platform_weights, …) still work identically — presets
+#     just set them to sensible values via React state.
+
+
 # v2.6.2 — 2026-07-14 — Provider-first proxy layer + per-customer VPS heavy override + Smart Paste
 #
 # CUSTOMER-FACING CHANGES:

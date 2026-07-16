@@ -1270,20 +1270,50 @@ def _resolve_visit_referer(ua: str, cfg: Optional[Dict[str, Any]]) -> Tuple[str,
                 if _pp:
                     plat = _pp
             esp = _esp_from_referer_url(ref) if plat == "email" else ""
-            # random_list: operator-curated pool — DO NOT deepen.
+            # BUG #7 fix (2026-07): random_list URLs are operator-curated,
+            # BUT when the entry is a bare platform homepage (e.g.
+            # "https://www.facebook.com/") AND the operator turned on
+            # inapp-deep-path, respect their toggle by deepening ONLY
+            # bare homepages. Any URL with a path/query stays untouched
+            # so custom landing pages / affiliate deeplinks are preserved.
+            try:
+                from urllib.parse import urlparse as _urlp
+                _u = _urlp(ref)
+                _is_bare_home = (
+                    _u.scheme in ("http", "https")
+                    and _u.hostname
+                    and (_u.path in ("", "/"))
+                    and not _u.query
+                    and not _u.fragment
+                )
+                if _is_bare_home and plat:
+                    ref = _maybe_deepen(ref, plat)
+            except Exception:
+                pass
             return ref, plat, esp, {}
 
         if mode == "google_search":
+            # BUG #3 fix (2026-07): honour cfg.search_engine + cfg.country
+            # + cfg.strip_search_path so the legacy mode matches the
+            # pro-mode search resolver behaviour. Previously this branch
+            # was hardcoded to www.google.com regardless of user pick.
             kws = [ln.strip() for ln in value.splitlines() if ln.strip()]
-            if not kws:
-                return "https://www.google.com/", "google", "", {}
-            from urllib.parse import quote_plus
-            return (
-                f"https://www.google.com/search?q={quote_plus(random.choice(kws))}",
-                "google",
-                "",
-                {},
+            kw = random.choice(kws) if kws else ""
+            engine = str(cfg.get("search_engine") or "google").strip().lower()
+            country = cfg.get("country") or None
+            strip_path = bool(cfg.get("strip_search_path", True))
+            try:
+                from referrer_pro import build_search_referer as _bsr
+                ref = _bsr(engine, kw, country=country, strip_path=strip_path)
+            except Exception:
+                from urllib.parse import quote_plus
+                ref = (f"https://www.google.com/search?q={quote_plus(kw)}"
+                       if kw else "https://www.google.com/")
+            plat = _platform_from_referer_url(ref) or (
+                engine if engine in ("google", "bing", "duckduckgo", "yahoo", "yandex")
+                else "google"
             )
+            return ref, plat, "", {}
 
         if mode == "platform_pool":
             # 2026-06-11: Accept JSON-dict weighted form too (forwards-
@@ -1360,12 +1390,25 @@ _ESP_HOST_TO_NAME: Tuple[Tuple[str, str], ...] = (
 def _esp_from_referer_url(ref_url: str) -> str:
     """Infer ESP short-name from a Referer URL. Returns "" for webmail
     or unrelated URLs — caller should leave esp empty so the tracker
-    falls back to random ESP rotation."""
+    falls back to random ESP rotation.
+
+    BUG #10 fix (2026-07): Match against the parsed hostname (exact or
+    proper subdomain) instead of raw substring, so an attacker-controlled
+    URL like `example.com/list-manage.com-fake` can't be misclassified
+    as Mailchimp.
+    """
     if not ref_url:
         return ""
-    ref_l = ref_url.lower()
+    try:
+        from urllib.parse import urlparse as _urlp
+        host = (_urlp(ref_url).hostname or "").lower()
+    except Exception:
+        host = ""
+    if not host:
+        return ""
     for needle, esp in _ESP_HOST_TO_NAME:
-        if needle in ref_l:
+        needle_l = needle.lower()
+        if host == needle_l or host.endswith("." + needle_l):
             return esp
     return ""
 
@@ -1428,13 +1471,37 @@ _REFERER_HOST_TO_PLATFORM: Tuple[Tuple[str, str], ...] = (
 def _platform_from_referer_url(ref_url: str) -> str:
     """Infer the platform short-name from a Referer URL. Returns "" for
     unknown hosts (e.g. the user's own blog) so the engine knows NOT to
-    inject platform-specific URL params on that visit."""
+    inject platform-specific URL params on that visit.
+
+    BUG #10 fix (2026-07): Match against the parsed hostname (exact or
+    proper subdomain / TLD prefix like "google.") instead of raw
+    substring so paths that CONTAIN a platform name in the URL can't
+    poison the classifier. Special-case "google." and "yandex." because
+    the map uses them as TLD-agnostic prefixes.
+    """
     if not ref_url:
         return ""
-    ref_l = ref_url.lower()
+    try:
+        from urllib.parse import urlparse as _urlp
+        host = (_urlp(ref_url).hostname or "").lower()
+    except Exception:
+        host = ""
+    if not host:
+        return ""
     for needle, platform in _REFERER_HOST_TO_PLATFORM:
-        if needle in ref_l:
-            return platform
+        needle_l = needle.lower()
+        # TLD-agnostic entries end with "." (e.g. "google." / "yandex.")
+        # → match as a hostname prefix or interior label so ccTLDs
+        # like `www.google.co.uk` classify correctly.
+        if needle_l.endswith("."):
+            base = needle_l[:-1]  # "google"
+            if (host == base
+                    or host.startswith(base + ".")
+                    or ("." + base + ".") in host):
+                return platform
+        else:
+            if host == needle_l or host.endswith("." + needle_l):
+                return platform
     return ""
 
 
@@ -7817,6 +7884,30 @@ async def run_real_user_traffic_job(
                 # do honour it; only the FIRST goto needed the explicit
                 # referer kwarg. Build a small kwargs dict so all gotos
                 # that touch the offer page can splat it in via **.
+                #
+                # BUG #1 fix (2026-07): Network Click Chain toggle.
+                # Real ad flow is: platform (l.facebook.com) →
+                # ad-network click host (sig.click.com / trklink.com /
+                # …) → advertiser landing. The Referer that arrives at
+                # the advertiser is the PREVIOUS HOP = the ad-network
+                # host, NOT the raw platform. When the operator turns
+                # on `network_click_chain`, use the generated
+                # network-click host as the outbound Referer so the
+                # visit matches this real-world chain. Falls back
+                # silently to the platform referer when no network
+                # click host was produced.
+                _network_click_ref = str(
+                    (_pro_extras or {}).get("network_click_referer") or ""
+                ).strip()
+                if _referer_cfg.get("network_click_chain") and _network_click_ref:
+                    _ua_referer = _network_click_ref
+                    try:
+                        push_live_step(
+                            job_id, i + 1, "referer", "info",
+                            f"Network Click Chain: outbound Referer → ad-network host {_network_click_ref[:80]}",
+                        )
+                    except Exception:
+                        pass
                 _goto_referer_kw: Dict[str, Any] = {}
                 if _ua_referer:
                     _goto_referer_kw["referer"] = _ua_referer
@@ -7932,9 +8023,20 @@ async def run_real_user_traffic_job(
                 except Exception:
                     pass
                 try:
+                    # BUG #9 fix (2026-07): removed `_ua_referer` guard so
+                    # pass-to-offer also works with "direct" (blank
+                    # Referer) mode. Without this, operators who
+                    # explicitly wanted to hide the Krexion origin via
+                    # pass-to-offer but chose a direct-navigation ref
+                    # got a silent no-op — the offer still saw the
+                    # tracker URL as origin via the 302 hop. Now the
+                    # server-side tracker resolve fires regardless;
+                    # when Referer is blank we forward it as blank
+                    # (real "direct" browser navigation) which the
+                    # offer records as "direct traffic" — exactly what
+                    # the operator asked for.
                     if (
                         _referer_cfg.get("pass_to_offer")
-                        and _ua_referer
                         and _visit_target_url
                     ):
                         _resolved_offer_direct = await _resolve_tracker_via_localhost(
