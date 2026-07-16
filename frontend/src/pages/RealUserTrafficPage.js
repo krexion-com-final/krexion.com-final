@@ -672,11 +672,13 @@ export default function RealUserTrafficPage() {
   // (per-visit) even inside Simple-Mode presets. Empty = let the preset
   // pick a realistic source per platform.
   const [presetSourceUrl, setPresetSourceUrl] = useState("");
-  // 2026-07: fine-tune which of the preset's built-in platforms are
+  // 2026-07 v2.6.7: fine-tune which of the preset's built-in platforms are
   // ACTIVE. `null` = use the preset's default. A Set of platform keys
   // = only those platforms contribute traffic. Empty Set means keep
   // preset defaults (safety fallback).
   const [presetPlatformFilter, setPresetPlatformFilter] = useState(null);
+  // Advanced Options accordion inside Customize panel (v2.6.7)
+  const [presetAdvancedOpen, setPresetAdvancedOpen] = useState(false);
 
   // Load saved traffic-source presets on mount
   useEffect(() => {
@@ -693,16 +695,21 @@ export default function RealUserTrafficPage() {
   }, []);
 
   // Keep the underlying refererValue in sync with the customer's
-  // preset-level Source URL override. When empty → preset picks its
-  // own realistic source per platform (existing behaviour). When set →
-  // every visit uses this exact URL as the Referer.
+  // preset-level Source URL override. Behaviour (v2.6.7 upgrade):
+  //   - empty         → preset picks its own realistic source per platform
+  //   - 1 URL         → mode="custom" (that exact URL used for every visit)
+  //   - multiple URLs → mode="random_list" (one URL picked at random per visit)
   useEffect(() => {
-    if (presetSourceUrl && presetSourceUrl.trim()) {
-      setRefererValue(presetSourceUrl.trim());
-      // "custom" mode = use refererValue verbatim for every visit
+    const trimmed = (presetSourceUrl || "").trim();
+    if (!trimmed) return;
+    const lines = trimmed.split("\n").map((s) => s.trim()).filter(Boolean);
+    setRefererValue(trimmed);
+    if (lines.length > 1) {
+      setRefererMode("random_list");
+    } else {
       setRefererMode("custom");
-      setRefererProMode(false);  // custom mode overrides pro-mode pools
     }
+    setRefererProMode(false); // explicit URLs override pro-mode pools
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [presetSourceUrl]);
 
@@ -3705,95 +3712,276 @@ export default function RealUserTrafficPage() {
                           🎛️ Customize This Preset
                         </span>
                         <span className="text-[10px] text-cyan-400/80">
-                          Pick only the platforms + source URL you want — save it as your own preset for one-click reuse next time.
+                          Pick ANY platforms + source URL(s) — save the setup as your own preset for one-click reuse next time.
                         </span>
                       </div>
                     </div>
 
-                    {/* Platform chip toggles + weight sliders */}
-                    {Object.keys(refererPlatformWeights).length > 0 && (
-                      <div className="mb-3">
-                        <Label className="text-cyan-300 text-[11px] font-semibold uppercase tracking-wide mb-1 block">
-                          Active Platforms &amp; Weights
-                        </Label>
-                        <div className="flex flex-wrap gap-2">
-                          {Object.entries(refererPlatformWeights).map(([plat, weight]) => {
-                            const active = weight > 0;
-                            return (
-                              <div
-                                key={plat}
-                                className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs transition ${
-                                  active
-                                    ? "bg-cyan-900/60 border-cyan-500/60 text-cyan-100"
-                                    : "bg-zinc-900/60 border-zinc-700 text-zinc-500 line-through"
-                                }`}
-                                data-testid={`rut-preset-plat-chip-${plat}`}
-                              >
-                                <label className="flex items-center gap-2 cursor-pointer select-none">
-                                  <input
-                                    type="checkbox"
-                                    checked={active}
-                                    data-testid={`rut-preset-plat-toggle-${plat}`}
-                                    onChange={(e) => {
-                                      const nextEnabled = e.target.checked;
-                                      setRefererPlatformWeights((prev) => {
-                                        const next = { ...prev };
-                                        if (!nextEnabled) {
-                                          next[plat] = 0;
-                                        } else if (!next[plat] || next[plat] <= 0) {
-                                          // Restore to a sensible default when re-enabling
-                                          next[plat] = 20;
-                                        }
-                                        return next;
-                                      });
-                                    }}
-                                    className="w-3.5 h-3.5 rounded accent-cyan-400"
-                                  />
-                                  <span className="font-medium capitalize">{plat}</span>
-                                </label>
-                                {active && (
-                                  <input
-                                    type="number"
-                                    min={0}
-                                    max={100}
-                                    step={1}
-                                    value={weight}
-                                    data-testid={`rut-preset-plat-weight-${plat}`}
-                                    onChange={(e) => {
-                                      const v = Math.max(0, Math.min(100, parseInt(e.target.value || "0", 10) || 0));
-                                      setRefererPlatformWeights((prev) => ({ ...prev, [plat]: v }));
-                                    }}
-                                    className="w-12 bg-zinc-950 border border-cyan-700/50 rounded px-1.5 py-0.5 text-[11px] text-cyan-100 text-center"
-                                  />
-                                )}
-                                {active && <span className="text-[10px] text-cyan-400/80">%</span>}
-                              </div>
-                            );
-                          })}
-                        </div>
-                        <p className="text-[10px] text-cyan-400/60 mt-1.5">
-                          Uncheck to remove a platform. Weights are relative — they don't have to sum to 100.
-                        </p>
-                      </div>
-                    )}
+                    {/* Platform chips: ALL 18 platforms shown; toggling adds/removes from mix */}
+                    {(() => {
+                      const ALL_PLATFORMS = (refererProDefaults?.platforms && refererProDefaults.platforms.length > 0)
+                        ? refererProDefaults.platforms
+                        : [
+                            "facebook", "instagram", "tiktok", "youtube", "twitter",
+                            "snapchat", "pinterest", "reddit", "linkedin",
+                            "google", "bing", "duckduckgo", "yahoo", "yandex",
+                            "email", "whatsapp", "telegram", "discord",
+                          ];
+                      const LABELS = {
+                        facebook: "Facebook", instagram: "Instagram", tiktok: "TikTok",
+                        youtube: "YouTube", twitter: "Twitter/X", snapchat: "Snapchat",
+                        pinterest: "Pinterest", reddit: "Reddit", linkedin: "LinkedIn",
+                        google: "Google", bing: "Bing", duckduckgo: "DuckDuckGo",
+                        yahoo: "Yahoo", yandex: "Yandex", email: "Email",
+                        whatsapp: "WhatsApp", telegram: "Telegram", discord: "Discord",
+                      };
+                      const activePlats = ALL_PLATFORMS.filter(
+                        (p) => (refererPlatformWeights[p] || 0) > 0
+                      );
+                      const inactivePlats = ALL_PLATFORMS.filter(
+                        (p) => !((refererPlatformWeights[p] || 0) > 0)
+                      );
 
-                    {/* Source URL override */}
+                      const togglePlatform = (plat, on) => {
+                        setRefererPlatformWeights((prev) => {
+                          const next = { ...prev };
+                          if (!on) {
+                            delete next[plat];
+                          } else {
+                            next[plat] = 20;  // sensible default weight
+                          }
+                          return next;
+                        });
+                      };
+
+                      return (
+                        <>
+                          <div className="mb-3">
+                            <Label className="text-cyan-300 text-[11px] font-semibold uppercase tracking-wide mb-1 block">
+                              Active Platforms &amp; Weights ({activePlats.length})
+                            </Label>
+                            {activePlats.length === 0 ? (
+                              <p className="text-[11px] text-amber-300/80 italic">
+                                No platforms selected — pick at least one from the "Add another platform" list below.
+                              </p>
+                            ) : (
+                              <div className="flex flex-wrap gap-2">
+                                {activePlats.map((plat) => {
+                                  const weight = refererPlatformWeights[plat] || 0;
+                                  return (
+                                    <div
+                                      key={plat}
+                                      className="flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs bg-cyan-900/60 border-cyan-500/60 text-cyan-100"
+                                      data-testid={`rut-preset-plat-chip-${plat}`}
+                                    >
+                                      <label className="flex items-center gap-2 cursor-pointer select-none">
+                                        <input
+                                          type="checkbox"
+                                          checked
+                                          data-testid={`rut-preset-plat-toggle-${plat}`}
+                                          onChange={() => togglePlatform(plat, false)}
+                                          className="w-3.5 h-3.5 rounded accent-cyan-400"
+                                          title={`Remove ${LABELS[plat] || plat} from the mix`}
+                                        />
+                                        <span className="font-medium">{LABELS[plat] || plat}</span>
+                                      </label>
+                                      <input
+                                        type="number"
+                                        min={0}
+                                        max={100}
+                                        step={1}
+                                        value={weight}
+                                        data-testid={`rut-preset-plat-weight-${plat}`}
+                                        onChange={(e) => {
+                                          const v = Math.max(0, Math.min(100, parseInt(e.target.value || "0", 10) || 0));
+                                          setRefererPlatformWeights((prev) => {
+                                            const next = { ...prev };
+                                            if (v <= 0) delete next[plat];
+                                            else next[plat] = v;
+                                            return next;
+                                          });
+                                        }}
+                                        className="w-12 bg-zinc-950 border border-cyan-700/50 rounded px-1.5 py-0.5 text-[11px] text-cyan-100 text-center"
+                                      />
+                                      <span className="text-[10px] text-cyan-400/80">%</span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                            <p className="text-[10px] text-cyan-400/60 mt-1.5">
+                              Weights are relative — they don't have to sum to 100. Uncheck to remove.
+                            </p>
+                          </div>
+
+                          {inactivePlats.length > 0 && (
+                            <div className="mb-3">
+                              <Label className="text-emerald-300 text-[11px] font-semibold uppercase tracking-wide mb-1 block">
+                                ➕ Add Another Platform ({inactivePlats.length} available)
+                              </Label>
+                              <div className="flex flex-wrap gap-2" data-testid="rut-preset-add-platform-strip">
+                                {inactivePlats.map((plat) => (
+                                  <button
+                                    key={plat}
+                                    type="button"
+                                    data-testid={`rut-preset-plat-add-${plat}`}
+                                    onClick={() => togglePlatform(plat, true)}
+                                    className="text-xs px-3 py-1.5 rounded-full border border-zinc-700 bg-zinc-900/60 text-zinc-400 hover:bg-emerald-900/40 hover:border-emerald-600/60 hover:text-emerald-200 transition"
+                                    title={`Add ${LABELS[plat] || plat} to the mix (default weight 20%)`}
+                                  >
+                                    + {LABELS[plat] || plat}
+                                  </button>
+                                ))}
+                              </div>
+                              <p className="text-[10px] text-emerald-400/60 mt-1.5">
+                                Click any platform to add it. New platform starts at 20% weight — adjust after.
+                              </p>
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
+
+                    {/* Source URL(s) — supports multi-line for random rotation */}
                     <div className="mb-3">
                       <Label htmlFor="rut-preset-source-url" className="text-cyan-300 text-[11px] font-semibold uppercase tracking-wide mb-1 block">
-                        Source URL (Optional)
+                        Source URL(s) — Optional
                       </Label>
-                      <input
+                      <textarea
                         id="rut-preset-source-url"
                         data-testid="rut-preset-source-url"
-                        type="url"
-                        placeholder="https://mysite.com/promo   (leave blank = preset picks a realistic source per platform)"
+                        placeholder={"https://mysite.com/promo\nhttps://tiktok.com/@me/video/12345   (one URL per line — one is picked at random per visit)"}
                         value={presetSourceUrl}
                         onChange={(e) => setPresetSourceUrl(e.target.value)}
-                        className="w-full bg-zinc-950 border border-cyan-700/50 rounded px-3 py-2 text-xs text-cyan-100 placeholder-zinc-600 focus:outline-none focus:border-cyan-400"
+                        rows={3}
+                        className="w-full bg-zinc-950 border border-cyan-700/50 rounded px-3 py-2 text-xs text-cyan-100 placeholder-zinc-600 focus:outline-none focus:border-cyan-400 font-mono resize-y"
                       />
                       <p className="text-[10px] text-cyan-400/60 mt-1">
-                        e.g. your own landing page, an ad-network click URL, or a specific TikTok video — Krexion will send every visit through this exact Referer.
+                        Leave blank → preset picks a realistic source per platform. Paste one or more URLs (one per line) → Krexion rotates them as the Referer.
                       </p>
+                    </div>
+
+                    {/* Advanced Options accordion */}
+                    <div className="mb-3 border-t border-cyan-800/40 pt-3">
+                      <button
+                        type="button"
+                        data-testid="rut-preset-advanced-toggle"
+                        onClick={() => setPresetAdvancedOpen((v) => !v)}
+                        className="text-xs text-cyan-300 hover:text-cyan-200 font-semibold flex items-center gap-2 mb-2"
+                      >
+                        <span>{presetAdvancedOpen ? "▼" : "▶"}</span>
+                        ⚙️ Advanced Options
+                        <span className="text-[10px] font-normal text-cyan-400/70">
+                          (search keywords, brand tag, country, realism toggles)
+                        </span>
+                      </button>
+
+                      {presetAdvancedOpen && (
+                        <div className="pl-4 border-l-2 border-cyan-800/50 space-y-3">
+                          {/* Search Engine + Keywords — only relevant when a search platform is in the mix */}
+                          {(() => {
+                            const searchPlatformsInMix = ["google", "bing", "yahoo", "duckduckgo", "yandex"]
+                              .filter((p) => (refererPlatformWeights[p] || 0) > 0);
+                            if (searchPlatformsInMix.length === 0) return null;
+                            return (
+                              <div>
+                                <Label className="text-cyan-300 text-[11px] font-semibold uppercase tracking-wide mb-1 block">
+                                  Search Engine &amp; Keywords
+                                </Label>
+                                <div className="grid md:grid-cols-2 gap-2">
+                                  <select
+                                    data-testid="rut-preset-search-engine"
+                                    value={refererSearchEngine}
+                                    onChange={(e) => setRefererSearchEngine(e.target.value)}
+                                    className="bg-zinc-950 border border-cyan-700/50 rounded px-2 py-1.5 text-xs text-cyan-100"
+                                  >
+                                    <option value="google">Google</option>
+                                    <option value="bing">Bing</option>
+                                    <option value="yahoo">Yahoo</option>
+                                    <option value="duckduckgo">DuckDuckGo</option>
+                                    <option value="yandex">Yandex</option>
+                                    <option value="youtube">YouTube Search</option>
+                                    <option value="baidu">Baidu (China)</option>
+                                    <option value="naver">Naver (Korea)</option>
+                                  </select>
+                                  <textarea
+                                    data-testid="rut-preset-search-keywords"
+                                    placeholder={"free trial\nbest running shoes\nhow to lose weight   (one keyword per line)"}
+                                    value={refererSearchKeywords}
+                                    onChange={(e) => setRefererSearchKeywords(e.target.value)}
+                                    rows={2}
+                                    className="bg-zinc-950 border border-cyan-700/50 rounded px-2 py-1.5 text-xs text-cyan-100 placeholder-zinc-600 font-mono resize-y"
+                                  />
+                                </div>
+                                <p className="text-[10px] text-cyan-400/60 mt-1">
+                                  Active search platforms in mix: {searchPlatformsInMix.join(", ")}. Empty keywords → origin-only URL (e.g. https://google.com/).
+                                </p>
+                              </div>
+                            );
+                          })()}
+
+                          {/* Brand tag */}
+                          <div>
+                            <Label htmlFor="rut-preset-brand" className="text-cyan-300 text-[11px] font-semibold uppercase tracking-wide mb-1 block">
+                              Brand Tag — Optional
+                            </Label>
+                            <input
+                              id="rut-preset-brand"
+                              data-testid="rut-preset-brand"
+                              type="text"
+                              maxLength={40}
+                              placeholder="e.g. mybrand   (used in utm_source=mybrand_newsletter + utm_campaign=mybrand_...)"
+                              value={refererBrand}
+                              onChange={(e) => setRefererBrand(e.target.value)}
+                              className="w-full bg-zinc-950 border border-cyan-700/50 rounded px-3 py-1.5 text-xs text-cyan-100 placeholder-zinc-600"
+                            />
+                          </div>
+
+                          {/* Realism toggles */}
+                          <div>
+                            <Label className="text-cyan-300 text-[11px] font-semibold uppercase tracking-wide mb-1 block">
+                              Realism Layers (advanced)
+                            </Label>
+                            <div className="grid md:grid-cols-2 gap-2">
+                              {[
+                                { key: "socialWrapper", state: refererSocialWrapper, set: setRefererSocialWrapper,
+                                  label: "Social link wrappers", hint: "l.facebook.com, t.co, lnkd.in, out.reddit.com" },
+                                { key: "inappDeep", state: refererInappDeep, set: setRefererInappDeep,
+                                  label: "In-app deep paths", hint: "TikTok video URLs, IG /p/ post URLs, FB pfbid posts" },
+                                { key: "networkClickChain", state: refererNetworkClickChain, set: setRefererNetworkClickChain,
+                                  label: "Ad-network click chain", hint: "Referer becomes affiliate-network host (sig.click.com, trklink)" },
+                                { key: "passToOffer", state: refererPassToOffer, set: setRefererPassToOffer,
+                                  label: "Pass Referer to offer", hint: "Bypass Krexion origin leak — offer sees exact Referer" },
+                                { key: "matchUaToPlatform", state: refererMatchUaToPlatform, set: setRefererMatchUaToPlatform,
+                                  label: "Match UA to platform", hint: "Add FBAN/musical_ly/Instagram in-app markers to UA per visit" },
+                                { key: "stripSearchPath", state: refererStripSearchPath, set: setRefererStripSearchPath,
+                                  label: "Strip search /?q= path", hint: "Match modern strict-origin referrer-policy" },
+                              ].map((t) => (
+                                <label
+                                  key={t.key}
+                                  className="flex items-start gap-2 cursor-pointer text-[11px] text-zinc-200 hover:text-cyan-100"
+                                >
+                                  <input
+                                    type="checkbox"
+                                    data-testid={`rut-preset-realism-${t.key}`}
+                                    checked={t.state}
+                                    onChange={(e) => t.set(e.target.checked)}
+                                    className="mt-0.5 w-3.5 h-3.5 rounded accent-cyan-400"
+                                  />
+                                  <span className="flex flex-col leading-tight">
+                                    <span className="font-medium">{t.label}</span>
+                                    <span className="text-[10px] text-cyan-400/60">{t.hint}</span>
+                                  </span>
+                                </label>
+                              ))}
+                            </div>
+                          </div>
+
+                          <p className="text-[10px] text-cyan-400/70 italic">
+                            All these fields also travel with the preset — click Save below to persist your exact recipe.
+                          </p>
+                        </div>
+                      )}
                     </div>
 
                     {/* Save-as-preset action */}
@@ -3850,7 +4038,7 @@ export default function RealUserTrafficPage() {
                             </p>
                           )}
                           <p className="text-[10px] text-cyan-400/70">
-                            Saves ALL current settings (base preset "{trafficSourcePreset}", platform weights, source URL, realism toggles). One-click reload next time.
+                            Saves ALL current settings (base preset "{trafficSourcePreset}", every active platform + weight, source URLs, search keywords, brand, realism toggles). One-click reload next time.
                           </p>
                         </div>
                       )}
