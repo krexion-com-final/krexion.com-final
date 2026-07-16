@@ -22489,6 +22489,23 @@ except Exception as _refpro_err:  # noqa: BLE001
     logger.error(f"Referrer Pro module failed to load: {_refpro_err}")
 
 # ─────────────────────────────────────────────────────────────────────
+# 2026-07 (v2.6.7): Traffic-Source Presets (user-saved customised presets)
+# Lets each customer save their customised traffic-source configuration
+# under a name (e.g. "TikTok-only from my landing") and reload it later
+# — same UX as saved JSON automation profiles.
+# ─────────────────────────────────────────────────────────────────────
+try:
+    from traffic_source_presets_module import (
+        router as _tsp_router,
+        bind_deps as _tsp_bind,
+    )
+    _tsp_bind(db=db, get_current_user=get_current_user)
+    app.include_router(_tsp_router)
+    logger.info("Traffic-source presets module loaded — /api/referrer-pro/my-presets/*")
+except Exception as _tsp_err:  # noqa: BLE001
+    logger.error(f"Traffic-source presets module failed to load: {_tsp_err}")
+
+# ─────────────────────────────────────────────────────────────────────
 # 2026-06-11: Browser Profiles module (AdsPower/GoLogin-style manual
 # anti-detect browsing profiles)
 # ─────────────────────────────────────────────────────────────────────

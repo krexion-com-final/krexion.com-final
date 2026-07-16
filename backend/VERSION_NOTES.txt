@@ -1,3 +1,33 @@
+# v2.6.7 — 2026-07-16 — RUT Traffic Preset customisation + user-saved presets
+#
+# CUSTOMER-FACING CHANGES:
+#   Feature: Simple-Mode presets are now fully customisable — customer picks
+#   a base preset (e.g. "📱 Social Media Ads"), then fine-tunes it inline:
+#      • ✅ Toggle individual platforms on/off (e.g. keep only TikTok)
+#      • ✅ Adjust each platform's weight via inline % field
+#      • ✅ Set an exact Source URL (advertiser landing / TikTok video /
+#           ad-network click URL) — becomes the Referer for every visit
+#      • ✅ "Save this configuration as my preset" → names the config and
+#           stores it per-user in Mongo (`traffic_source_presets`)
+#      • ✅ "My Saved Presets" chip strip appears at the top of the Simple
+#           Mode panel — one click reloads every toggle from that preset,
+#           exactly like saved JSON Automation profiles
+#      • ✅ Deleting a saved preset from the chip strip (× icon + confirm)
+#
+#   Backend:
+#      - New module: backend/traffic_source_presets_module.py
+#      - New router:  /api/referrer-pro/my-presets   (GET/POST/PUT/DELETE)
+#      - New Mongo collection: `traffic_source_presets` (scoped per user_id,
+#        duplicate-name guard, forward-compat opaque config dict)
+#
+#   Frontend:
+#      - RealUserTrafficPage.js: "🎛️ Customize This Preset" panel (chip
+#        toggles + weight inputs + source URL input + Save button) +
+#        "⭐ My Saved Presets" chip strip above the base-preset dropdown.
+#
+#   No breaking changes — customers who don't touch the new panel continue
+#   getting the exact same behaviour as v2.6.6. The panel is opt-in.
+#
 # v2.6.6 — 2026-07-16 — RUT Referrer System: 11 bugs fixed + Simple Traffic Preset UI
 #
 # CUSTOMER-FACING CHANGES:

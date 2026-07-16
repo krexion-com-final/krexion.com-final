@@ -656,6 +656,171 @@ export default function RealUserTrafficPage() {
   const [aiKwLoading, setAiKwLoading] = useState(false);
   const [aiKwError, setAiKwError] = useState("");
 
+  // ── 2026-07 v2.6.7: Saved-Traffic-Source-Presets (per-user) ─────────
+  // Customer can customise the built-in Simple Mode preset (adjust
+  // platform mix, set specific source URL, enable/disable realism
+  // toggles) and save the whole config under a name. Next time they
+  // open RUT they just pick their preset from the dropdown and every
+  // toggle auto-fills — same UX as saved JSON automation profiles.
+  const [myTrafficPresets, setMyTrafficPresets] = useState([]);
+  const [selectedMyPresetId, setSelectedMyPresetId] = useState("");
+  const [presetSaveOpen, setPresetSaveOpen] = useState(false);
+  const [presetSaveName, setPresetSaveName] = useState("");
+  const [presetSaving, setPresetSaving] = useState(false);
+  const [presetSaveError, setPresetSaveError] = useState("");
+  // Editable "source URL" — when set, becomes the exact Referer URL
+  // (per-visit) even inside Simple-Mode presets. Empty = let the preset
+  // pick a realistic source per platform.
+  const [presetSourceUrl, setPresetSourceUrl] = useState("");
+  // 2026-07: fine-tune which of the preset's built-in platforms are
+  // ACTIVE. `null` = use the preset's default. A Set of platform keys
+  // = only those platforms contribute traffic. Empty Set means keep
+  // preset defaults (safety fallback).
+  const [presetPlatformFilter, setPresetPlatformFilter] = useState(null);
+
+  // Load saved traffic-source presets on mount
+  useEffect(() => {
+    const token = localStorage.getItem("token");
+    if (!token) return;
+    fetch(`${process.env.REACT_APP_BACKEND_URL}/api/referrer-pro/my-presets`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => (r.ok ? r.json() : []))
+      .then((d) => {
+        if (Array.isArray(d)) setMyTrafficPresets(d);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Keep the underlying refererValue in sync with the customer's
+  // preset-level Source URL override. When empty → preset picks its
+  // own realistic source per platform (existing behaviour). When set →
+  // every visit uses this exact URL as the Referer.
+  useEffect(() => {
+    if (presetSourceUrl && presetSourceUrl.trim()) {
+      setRefererValue(presetSourceUrl.trim());
+      // "custom" mode = use refererValue verbatim for every visit
+      setRefererMode("custom");
+      setRefererProMode(false);  // custom mode overrides pro-mode pools
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [presetSourceUrl]);
+
+  // ── Apply a saved preset (from the "My Saved Presets" chip strip) ──
+  const applyMyPreset = (mp) => {
+    if (!mp || !mp.config) return;
+    const cfg = mp.config || {};
+    setSelectedMyPresetId(mp.id);
+    // Set the base preset first so the "auto-configure" effect fires and
+    // sets sensible defaults, THEN override each field with saved values.
+    setTrafficSourcePreset(mp.base_preset || "custom");
+    // Defer the overrides one tick so the base-preset effect runs first
+    setTimeout(() => {
+      setRefererOverrideEnabled(true);
+      if (cfg.platform_weights && typeof cfg.platform_weights === "object") {
+        setRefererPlatformWeights({ ...cfg.platform_weights });
+      }
+      if (cfg.email_weights && typeof cfg.email_weights === "object") {
+        setRefererEmailWeights({ ...cfg.email_weights });
+      }
+      if (typeof cfg.referer_value === "string") {
+        setRefererValue(cfg.referer_value);
+        setPresetSourceUrl(cfg.referer_value);
+      }
+      if (typeof cfg.referer_brand === "string") setRefererBrand(cfg.referer_brand);
+      if (typeof cfg.referer_mode === "string") setRefererMode(cfg.referer_mode);
+      if (typeof cfg.social_wrapper === "boolean") setRefererSocialWrapper(cfg.social_wrapper);
+      if (typeof cfg.inapp_deep === "boolean") setRefererInappDeep(cfg.inapp_deep);
+      if (typeof cfg.strip_search_path === "boolean") setRefererStripSearchPath(cfg.strip_search_path);
+      if (typeof cfg.network_click_chain === "boolean") setRefererNetworkClickChain(cfg.network_click_chain);
+      if (typeof cfg.pass_to_offer === "boolean") setRefererPassToOffer(cfg.pass_to_offer);
+      if (typeof cfg.match_ua_to_platform === "boolean") setRefererMatchUaToPlatform(cfg.match_ua_to_platform);
+      if (typeof cfg.search_engine === "string") setRefererSearchEngine(cfg.search_engine);
+      if (typeof cfg.search_keywords === "string") setRefererSearchKeywords(cfg.search_keywords);
+      if (typeof cfg.pro_mode === "boolean") setRefererProMode(cfg.pro_mode);
+    }, 30);
+  };
+
+  // ── Save the current preset+customisations as a NAMED preset ──
+  const saveMyPreset = async () => {
+    const name = (presetSaveName || "").trim();
+    if (!name) {
+      setPresetSaveError("Preset name required");
+      return;
+    }
+    setPresetSaving(true);
+    setPresetSaveError("");
+    // Snapshot every field the frontend controls so reloading later
+    // brings the customer back to the EXACT same configuration.
+    const cfg = {
+      platform_weights: refererPlatformWeights,
+      email_weights: refererEmailWeights,
+      referer_value: presetSourceUrl || refererValue || "",
+      referer_brand: refererBrand,
+      referer_mode: refererMode,
+      social_wrapper: refererSocialWrapper,
+      inapp_deep: refererInappDeep,
+      strip_search_path: refererStripSearchPath,
+      network_click_chain: refererNetworkClickChain,
+      pass_to_offer: refererPassToOffer,
+      match_ua_to_platform: refererMatchUaToPlatform,
+      search_engine: refererSearchEngine,
+      search_keywords: refererSearchKeywords,
+      pro_mode: refererProMode,
+    };
+    try {
+      const token = localStorage.getItem("token");
+      const res = await fetch(
+        `${process.env.REACT_APP_BACKEND_URL}/api/referrer-pro/my-presets`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            name,
+            base_preset: trafficSourcePreset,
+            config: cfg,
+          }),
+        }
+      );
+      const body = await res.json();
+      if (!res.ok) {
+        setPresetSaveError(body?.detail || "Save failed");
+      } else {
+        setMyTrafficPresets((prev) => [body, ...prev.filter((p) => p.id !== body.id)]);
+        setSelectedMyPresetId(body.id);
+        setPresetSaveOpen(false);
+        setPresetSaveName("");
+      }
+    } catch (e) {
+      setPresetSaveError(String(e?.message || e));
+    } finally {
+      setPresetSaving(false);
+    }
+  };
+
+  // ── Delete a saved preset ──
+  const deleteMyPreset = async (mp) => {
+    if (!mp || !mp.id) return;
+    if (!window.confirm(`Delete preset "${mp.name}"? This cannot be undone.`)) return;
+    try {
+      const token = localStorage.getItem("token");
+      const res = await fetch(
+        `${process.env.REACT_APP_BACKEND_URL}/api/referrer-pro/my-presets/${mp.id}`,
+        {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+      if (res.ok) {
+        setMyTrafficPresets((prev) => prev.filter((p) => p.id !== mp.id));
+        if (selectedMyPresetId === mp.id) setSelectedMyPresetId("");
+      }
+    } catch {}
+  };
+
   // Load referrer-pro defaults ONCE so the multi-select UI can render
   // the list of available platforms / ESPs / countries / search engines.
   useEffect(() => {
@@ -3403,6 +3568,68 @@ export default function RealUserTrafficPage() {
                 <p className="text-[12px] text-zinc-300 mb-3 leading-relaxed">
                   Pick <span className="text-emerald-300 font-medium">one</span> traffic source and Krexion auto-configures every advanced setting for you (weighted platforms, in-app markers, UA matching, network chains, offer-referrer pass-through). No conflicts, no confusion — just pick and go.
                 </p>
+
+                {/* ── 2026-07 v2.6.7: My Saved Presets ── */}
+                {myTrafficPresets.length > 0 && (
+                  <div className="mb-4 p-3 rounded-md bg-indigo-950/40 border border-indigo-700/40" data-testid="rut-my-presets-panel">
+                    <div className="flex items-center justify-between mb-2">
+                      <Label className="text-indigo-200 text-xs font-semibold uppercase tracking-wide flex items-center gap-2">
+                        ⭐ My Saved Presets
+                        <span className="text-[10px] font-normal text-indigo-400 px-2 py-0.5 rounded-full bg-indigo-900/60 border border-indigo-600/60">
+                          {myTrafficPresets.length}
+                        </span>
+                      </Label>
+                      <button
+                        type="button"
+                        data-testid="rut-my-presets-clear"
+                        className="text-[10px] text-zinc-400 hover:text-zinc-200 underline"
+                        onClick={() => {
+                          setSelectedMyPresetId("");
+                          setPresetSourceUrl("");
+                          setPresetPlatformFilter(null);
+                        }}
+                        title="Deselect the saved preset (built-in preset stays)"
+                      >
+                        clear selection
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {myTrafficPresets.map((mp) => {
+                        const active = selectedMyPresetId === mp.id;
+                        return (
+                          <div key={mp.id} className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              data-testid={`rut-my-preset-chip-${mp.id}`}
+                              onClick={() => applyMyPreset(mp)}
+                              className={`text-xs px-3 py-1.5 rounded-full border transition font-medium ${
+                                active
+                                  ? "bg-indigo-500 border-indigo-300 text-white"
+                                  : "bg-zinc-900 border-indigo-700/60 text-indigo-200 hover:bg-indigo-900/60"
+                              }`}
+                              title={`Load: ${mp.name} (base: ${mp.base_preset})`}
+                            >
+                              {mp.name}
+                            </button>
+                            <button
+                              type="button"
+                              data-testid={`rut-my-preset-delete-${mp.id}`}
+                              onClick={() => deleteMyPreset(mp)}
+                              className="text-xs text-red-400 hover:text-red-300 px-1 leading-none"
+                              title={`Delete "${mp.name}"`}
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <p className="text-[10px] text-indigo-400/70 mt-2 italic">
+                      Click a chip to load your saved configuration. All 20+ toggles auto-fill from that preset.
+                    </p>
+                  </div>
+                )}
+
                 <Label className="text-emerald-200 text-xs font-semibold uppercase tracking-wide">
                   Choose Your Traffic Source
                 </Label>
@@ -3464,8 +3691,170 @@ export default function RealUserTrafficPage() {
                       )}
                     </ul>
                     <p className="text-[10px] text-emerald-400/70 mt-2 italic">
-                      Want to fine-tune anything? Pick <span className="font-semibold">Custom (Advanced)</span> to see all 20+ toggles.
+                      Want to fine-tune anything? Pick <span className="font-semibold">Custom (Advanced)</span> to see all 20+ toggles — or use the <span className="font-semibold text-cyan-300">Customize</span> panel below to tweak this preset and save it as your own.
                     </p>
+                  </div>
+                )}
+
+                {/* ── 2026-07 v2.6.7: Inline Customize + Save this preset ── */}
+                {trafficSourcePreset !== "off" && trafficSourcePreset !== "custom" && (
+                  <div className="mt-3 p-3 rounded-md bg-cyan-950/40 border border-cyan-700/50" data-testid="rut-preset-customize-panel">
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-center gap-2">
+                        <span className="text-cyan-200 text-xs font-bold uppercase tracking-wide">
+                          🎛️ Customize This Preset
+                        </span>
+                        <span className="text-[10px] text-cyan-400/80">
+                          Pick only the platforms + source URL you want — save it as your own preset for one-click reuse next time.
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Platform chip toggles + weight sliders */}
+                    {Object.keys(refererPlatformWeights).length > 0 && (
+                      <div className="mb-3">
+                        <Label className="text-cyan-300 text-[11px] font-semibold uppercase tracking-wide mb-1 block">
+                          Active Platforms &amp; Weights
+                        </Label>
+                        <div className="flex flex-wrap gap-2">
+                          {Object.entries(refererPlatformWeights).map(([plat, weight]) => {
+                            const active = weight > 0;
+                            return (
+                              <div
+                                key={plat}
+                                className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs transition ${
+                                  active
+                                    ? "bg-cyan-900/60 border-cyan-500/60 text-cyan-100"
+                                    : "bg-zinc-900/60 border-zinc-700 text-zinc-500 line-through"
+                                }`}
+                                data-testid={`rut-preset-plat-chip-${plat}`}
+                              >
+                                <label className="flex items-center gap-2 cursor-pointer select-none">
+                                  <input
+                                    type="checkbox"
+                                    checked={active}
+                                    data-testid={`rut-preset-plat-toggle-${plat}`}
+                                    onChange={(e) => {
+                                      const nextEnabled = e.target.checked;
+                                      setRefererPlatformWeights((prev) => {
+                                        const next = { ...prev };
+                                        if (!nextEnabled) {
+                                          next[plat] = 0;
+                                        } else if (!next[plat] || next[plat] <= 0) {
+                                          // Restore to a sensible default when re-enabling
+                                          next[plat] = 20;
+                                        }
+                                        return next;
+                                      });
+                                    }}
+                                    className="w-3.5 h-3.5 rounded accent-cyan-400"
+                                  />
+                                  <span className="font-medium capitalize">{plat}</span>
+                                </label>
+                                {active && (
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    max={100}
+                                    step={1}
+                                    value={weight}
+                                    data-testid={`rut-preset-plat-weight-${plat}`}
+                                    onChange={(e) => {
+                                      const v = Math.max(0, Math.min(100, parseInt(e.target.value || "0", 10) || 0));
+                                      setRefererPlatformWeights((prev) => ({ ...prev, [plat]: v }));
+                                    }}
+                                    className="w-12 bg-zinc-950 border border-cyan-700/50 rounded px-1.5 py-0.5 text-[11px] text-cyan-100 text-center"
+                                  />
+                                )}
+                                {active && <span className="text-[10px] text-cyan-400/80">%</span>}
+                              </div>
+                            );
+                          })}
+                        </div>
+                        <p className="text-[10px] text-cyan-400/60 mt-1.5">
+                          Uncheck to remove a platform. Weights are relative — they don't have to sum to 100.
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Source URL override */}
+                    <div className="mb-3">
+                      <Label htmlFor="rut-preset-source-url" className="text-cyan-300 text-[11px] font-semibold uppercase tracking-wide mb-1 block">
+                        Source URL (Optional)
+                      </Label>
+                      <input
+                        id="rut-preset-source-url"
+                        data-testid="rut-preset-source-url"
+                        type="url"
+                        placeholder="https://mysite.com/promo   (leave blank = preset picks a realistic source per platform)"
+                        value={presetSourceUrl}
+                        onChange={(e) => setPresetSourceUrl(e.target.value)}
+                        className="w-full bg-zinc-950 border border-cyan-700/50 rounded px-3 py-2 text-xs text-cyan-100 placeholder-zinc-600 focus:outline-none focus:border-cyan-400"
+                      />
+                      <p className="text-[10px] text-cyan-400/60 mt-1">
+                        e.g. your own landing page, an ad-network click URL, or a specific TikTok video — Krexion will send every visit through this exact Referer.
+                      </p>
+                    </div>
+
+                    {/* Save-as-preset action */}
+                    <div className="pt-2 border-t border-cyan-800/40">
+                      {!presetSaveOpen ? (
+                        <button
+                          type="button"
+                          data-testid="rut-preset-save-open"
+                          onClick={() => {
+                            setPresetSaveError("");
+                            setPresetSaveName("");
+                            setPresetSaveOpen(true);
+                          }}
+                          className="text-xs bg-cyan-500 hover:bg-cyan-400 text-white font-semibold px-4 py-2 rounded transition"
+                        >
+                          💾 Save this configuration as my preset
+                        </button>
+                      ) : (
+                        <div className="flex flex-col gap-2" data-testid="rut-preset-save-dialog">
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="text"
+                              data-testid="rut-preset-save-name"
+                              placeholder="Preset name (e.g. 'TikTok-only US promo')"
+                              value={presetSaveName}
+                              onChange={(e) => setPresetSaveName(e.target.value)}
+                              maxLength={80}
+                              className="flex-1 bg-zinc-950 border border-cyan-500 rounded px-3 py-2 text-xs text-cyan-100 placeholder-zinc-600 focus:outline-none focus:border-cyan-300"
+                            />
+                            <button
+                              type="button"
+                              data-testid="rut-preset-save-confirm"
+                              disabled={presetSaving || !presetSaveName.trim()}
+                              onClick={saveMyPreset}
+                              className="text-xs bg-emerald-500 hover:bg-emerald-400 text-white font-semibold px-4 py-2 rounded transition disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {presetSaving ? "Saving…" : "Save"}
+                            </button>
+                            <button
+                              type="button"
+                              data-testid="rut-preset-save-cancel"
+                              onClick={() => {
+                                setPresetSaveOpen(false);
+                                setPresetSaveError("");
+                              }}
+                              className="text-xs text-zinc-400 hover:text-zinc-200 px-2"
+                            >
+                              cancel
+                            </button>
+                          </div>
+                          {presetSaveError && (
+                            <p className="text-[11px] text-red-400" data-testid="rut-preset-save-error">
+                              ⚠️ {presetSaveError}
+                            </p>
+                          )}
+                          <p className="text-[10px] text-cyan-400/70">
+                            Saves ALL current settings (base preset "{trafficSourcePreset}", platform weights, source URL, realism toggles). One-click reload next time.
+                          </p>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
                 {trafficSourcePreset === "custom" && (
