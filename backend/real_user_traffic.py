@@ -7654,6 +7654,45 @@ async def run_real_user_traffic_job(
                 # MISMATCH leak AND keeps the ESP click-tracking host +
                 # URL `mc_cid`/`_kx` ids consistent for email visits.
                 _ua_referer, _kx_platform, _kx_esp, _pro_extras = _resolve_visit_referer(ua, _referer_cfg)
+                # ── 2026-07 v2.6.4 — Blank-referer safety net ──
+                # A well-known footgun: when the operator set a CUSTOM
+                # referer / platform pool but forgot to actually enable
+                # the override, `_resolve_visit_referer` returns ""
+                # for plain-browser UAs — the tracker then records a
+                # blank Referrer, which stands out as a fraud tell in
+                # advertiser reports.  When cfg carries any hint of
+                # intent (custom value, platform_pool, platform_weights,
+                # brand, or an in-app preset), extract the platform we
+                # SHOULD use and force the referer + platform for this
+                # visit rather than emit a blank one.
+                if not _ua_referer:
+                    _hint_url = ""
+                    _hint_plat = ""
+                    if _referer_cfg.get("value"):
+                        # `value` is either a single URL (mode=custom)
+                        # or the first line of the random_list — either
+                        # way, use it as the visit referer.
+                        _hint_url = str(_referer_cfg.get("value") or "").strip().splitlines()[0].strip()
+                        if _hint_url and _hint_url.startswith(("http://", "https://")):
+                            _hint_plat = _platform_from_referer_url(_hint_url)
+                    if not _hint_url and _referer_cfg.get("platform_pool"):
+                        # Pool set but resolver returned nothing — grab
+                        # the first known platform key from the pool
+                        # and use its canonical referer URL.
+                        _pool_raw = str(_referer_cfg.get("platform_pool") or "").lower()
+                        for _k in [k.strip() for k in _pool_raw.split(",") if k.strip()]:
+                            if _k in _INAPP_PRESET_REFERER:
+                                _hint_plat = _k
+                                _hint_url = _INAPP_PRESET_REFERER[_k]
+                                break
+                    if _hint_url:
+                        _ua_referer = _hint_url
+                        if _hint_plat and not _kx_platform:
+                            _kx_platform = _hint_plat
+                        push_live_step(
+                            job_id, i + 1, "referer", "info",
+                            f"Blank referer prevented · using configured referer {_hint_url[:80]}",
+                        )
                 # ── 2026-06-14: UA ↔ Referer consistency coercion ────
                 # When the chosen referer is an in-app platform (FB /
                 # TikTok / IG / Snapchat / Messenger / LinkedIn /
@@ -7667,6 +7706,39 @@ async def run_real_user_traffic_job(
                 if _referer_cfg.get("match_ua_to_platform", True) and _kx_platform:
                     try:
                         from referrer_pro import coerce_ua_for_platform as _coerce_ua
+                        # ── 2026-07 v2.6.4 — Perfect Ad Simulation guard ──
+                        # When the user picked an in-app-only platform
+                        # (TikTok / Instagram / Snapchat / Facebook /
+                        # Messenger / LinkedIn / Pinterest / Twitter),
+                        # `coerce_ua_for_platform` refuses to touch
+                        # DESKTOP UAs by design — but real users on
+                        # those platforms are 100% mobile.  A desktop
+                        # UA hitting a TikTok-referred click is an
+                        # instant fraud tell.  Auto-swap the desktop
+                        # UA with a fresh mobile UA (Android-weighted
+                        # to match the real audience split) BEFORE the
+                        # coerce runs, so the visit ends up with a
+                        # properly-signed mobile in-app UA + the
+                        # correct in-app browser marker the tracker
+                        # will then detect.
+                        _MOBILE_ONLY_PLATFORMS = {
+                            "tiktok", "instagram", "snapchat",
+                            "facebook", "messenger", "pinterest",
+                            "linkedin", "twitter",
+                        }
+                        if _kx_platform in _MOBILE_ONLY_PLATFORMS:
+                            try:
+                                from referrer_pro import _is_mobile_ua as _is_mob
+                                if not _is_mob(ua):
+                                    _new_mob_ua = _mobile_ua_for_inapp()
+                                    if _new_mob_ua:
+                                        ua = _new_mob_ua
+                                        push_live_step(
+                                            job_id, i + 1, "ua", "info",
+                                            f"Desktop UA replaced with mobile UA for {_kx_platform} in-app consistency",
+                                        )
+                            except Exception:
+                                pass
                         _coerced_ua = _coerce_ua(ua, _kx_platform)
                         if _coerced_ua and _coerced_ua != ua:
                             ua = _coerced_ua
