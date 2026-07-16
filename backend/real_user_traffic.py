@@ -8358,6 +8358,76 @@ async def run_real_user_traffic_job(
                     except Exception as _ge:
                         goto_exc = _ge
                         err_str = str(_ge)
+                        # ── 2026-07 v2.6.4 — ERR_ABORTED false-failure guard ──
+                        # Affiliate offer trackers (anp8ry2wtrk.com, dozens
+                        # of similar) instant-JS-redirect from the landing
+                        # URL to the final offer page. Chromium reports
+                        # `net::ERR_ABORTED` on the FIRST navigation
+                        # because the second one aborted it mid-flight —
+                        # but the browser DID land on the redirect target.
+                        # Detect this: if page.url is no longer blank and
+                        # the host differs from where we tried to go, the
+                        # visit landed and this is a false failure. Treat
+                        # as success (resp=None is fine, code below only
+                        # inspects `page.url` for landing detection).
+                        if "ERR_ABORTED" in err_str:
+                            try:
+                                _cur_url = (page.url or "").strip()
+                            except Exception:
+                                _cur_url = ""
+                            try:
+                                from urllib.parse import urlparse
+                                _target_host = (urlparse(_visit_target_url).netloc or "").lower()
+                                _cur_host = (urlparse(_cur_url).netloc or "").lower()
+                            except Exception:
+                                _target_host = _cur_host = ""
+                            _landed_elsewhere = (
+                                _cur_url
+                                and _cur_url != "about:blank"
+                                and not _cur_url.startswith("chrome-error://")
+                                and _cur_host
+                                and _cur_host != _target_host
+                            )
+                            if _landed_elsewhere:
+                                push_live_step(
+                                    job_id, i + 1, "browser", "info",
+                                    f"Tracker instant-redirect: goto aborted but browser landed on {_cur_host} — treating as success",
+                                )
+                                resp = None
+                                goto_exc = None
+                                break
+                            # Same-host ERR_ABORTED → retry once with
+                            # wait_until="commit" (server-response only,
+                            # no DOM-load wait) if we haven't already.
+                            if _wait_until != "commit":
+                                try:
+                                    push_live_step(
+                                        job_id, i + 1, "browser", "info",
+                                        "ERR_ABORTED same-host · retrying with wait_until=commit",
+                                    )
+                                    resp = await page.goto(
+                                        _visit_target_url, timeout=25000,
+                                        wait_until="commit", **_goto_referer_kw,
+                                    )
+                                    goto_exc = None
+                                    break
+                                except Exception as _ge2:
+                                    goto_exc = _ge2
+                                    err_str = str(_ge2)
+                                    # After the commit-retry, if page landed
+                                    # somewhere valid we still accept it.
+                                    try:
+                                        _cur_url2 = (page.url or "").strip()
+                                    except Exception:
+                                        _cur_url2 = ""
+                                    if (
+                                        _cur_url2
+                                        and _cur_url2 != "about:blank"
+                                        and not _cur_url2.startswith("chrome-error://")
+                                    ):
+                                        resp = None
+                                        goto_exc = None
+                                        break
                         is_tunnel = any(tok in err_str for tok in _TUNNEL_ERR_TOKENS)
                         if not is_tunnel or tunnel_attempt >= MAX_TUNNEL_RETRIES:
                             break
