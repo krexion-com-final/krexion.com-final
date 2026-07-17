@@ -142,13 +142,19 @@ def _mobile_ua_for_inapp() -> str:
     return random.choice(_MOBILE_UA_POOL_IOS)
 
 
-def _apply_inapp_preset_to_uas(user_agents: List[str], want_count: int) -> List[str]:
+def _apply_inapp_preset_to_uas(user_agents: List[str], want_count: int, preset_platform: str = "") -> List[str]:
     """Given the operator's UA pool + how many visits will run, return
     a MOBILE UA pool suitable for the in-app preset. Rules:
       • Empty input pool → generate `want_count` fresh mobile UAs.
       • Every MOBILE UA in input → kept as-is (already good).
       • Every DESKTOP UA in input → replaced with a mobile UA (a
         random mobile UA per slot, so the pool stays diverse).
+      • 2026-07 fix C: When `preset_platform` is provided (e.g. "tiktok"),
+        every mobile UA that already contains FOREIGN in-app markers of
+        a DIFFERENT platform (e.g. FBAN/FBAV, Instagram, LinkedInApp,
+        Snapchat) is REPLACED with a fresh mobile UA. This kills the
+        "Facebook for Android" leak reported by the customer where 1
+        click showed FB browser even though platform pool was 100% TikTok.
     Guarantees: returned list is never empty. `coerce_ua_for_platform`
     will then layer the FB/IG/TT in-app markers on top.
     Pure function — safe to call from job orchestrator.
@@ -165,6 +171,25 @@ def _apply_inapp_preset_to_uas(user_agents: List[str], want_count: int) -> List[
                 return "android"
             return ""
 
+    # 2026-07 fix C: strict in-app preset — foreign markers get scrubbed.
+    _pp = (preset_platform or "").strip().lower()
+    _FOREIGN_MARKERS: Dict[str, List[str]] = {
+        "tiktok":    ["fban", "fbav", "fb_iab", "fb4a", "instagram", "linkedinapp", "snapchat", "twitter"],
+        "facebook":  ["musical_ly", "aweme", "trill_", "bytedancewebview", "instagram", "linkedinapp", "snapchat"],
+        "instagram": ["musical_ly", "aweme", "trill_", "bytedancewebview", "fban", "fb_iab", "linkedinapp", "snapchat"],
+        "snapchat":  ["musical_ly", "aweme", "trill_", "fban", "fb_iab", "instagram", "linkedinapp"],
+        "linkedin":  ["musical_ly", "aweme", "trill_", "fban", "fb_iab", "instagram", "snapchat"],
+        "twitter":   ["musical_ly", "aweme", "trill_", "fban", "fb_iab", "instagram", "linkedinapp", "snapchat"],
+        "pinterest": ["musical_ly", "aweme", "trill_", "fban", "fb_iab", "instagram", "linkedinapp", "snapchat"],
+    }
+    _foreign_needles = _FOREIGN_MARKERS.get(_pp, [])
+
+    def _has_foreign_marker(u: str) -> bool:
+        if not _foreign_needles:
+            return False
+        ul = (u or "").lower()
+        return any(n in ul for n in _foreign_needles)
+
     if not user_agents:
         n = max(1, min(int(want_count or 20), 500))
         return [_mobile_ua_for_inapp() for _ in range(n)]
@@ -173,7 +198,7 @@ def _apply_inapp_preset_to_uas(user_agents: List[str], want_count: int) -> List[
         u = (ua or "").strip()
         if not u:
             continue
-        if _is_mob(u):
+        if _is_mob(u) and not _has_foreign_marker(u):
             out.append(u)
         else:
             out.append(_mobile_ua_for_inapp())
@@ -1162,6 +1187,62 @@ def _resolve_visit_referer(ua: str, cfg: Optional[Dict[str, Any]]) -> Tuple[str,
             plat = _platform_from_referer_url(ref)
             return ref, plat, "", {}
 
+        # ── 2026-07 CUSTOMER-REQUEST FIX A (v2.6.9) ────────────────────
+        # Operator-explicit Custom URL / random-list MUST win over pro-mode.
+        # Previously, when the operator picked mode="custom" + typed a
+        # landing-page URL AND also had Pro Mode ON with a platform pool,
+        # the pro-mode branch below ran first and generated a random
+        # `https://www.tiktok.com/@user/video/xxx` URL — completely
+        # ignoring the operator's explicit URL. The report proved this:
+        # only 8/22 clicks used the operator URL, the rest were random
+        # TikTok video URLs or Google fallbacks.
+        #
+        # Fix: if the operator EXPLICITLY picked a custom URL / list,
+        # short-circuit pro-mode entirely and honour their choice for
+        # every visit. Preset UA coercion still runs (browser still
+        # LOOKS like TikTok in-app) via `preset_platform` fallback.
+        _mode_early = (cfg.get("mode") or "auto").strip().lower()
+        _val_early  = (cfg.get("value") or "").strip()
+        if _mode_early == "custom" and _val_early:
+            _plat_early = _platform_from_referer_url(_val_early)
+            if not _plat_early:
+                _plat_early = str(cfg.get("preset_platform") or "").strip().lower()
+            _esp_early = _esp_from_referer_url(_val_early) if _plat_early == "email" else ""
+            # UTM parameters — respect operator's URL. If the operator's
+            # URL already has utm_source, we return empty utm_* so the
+            # engine won't append/overwrite anything on the outbound URL.
+            _has_op_utm = ("utm_source=" in _val_early.lower())
+            _extras_early: Dict[str, Any] = {}
+            if not _has_op_utm and _plat_early:
+                # Provide sensible utm defaults for the preset platform
+                # so downstream tracker gets utm_source=<platform> even
+                # when the operator forgot to add them.
+                _extras_early = {
+                    "sec_fetch": {},
+                    "utm_source": _plat_early,
+                    "utm_medium": "cpc" if _plat_early in ("tiktok","facebook","instagram","snapchat","twitter","x","pinterest","linkedin","youtube") else "referral",
+                    "utm_campaign": "",
+                    "network_click_referer": "",
+                }
+            return _val_early, _plat_early or "", _esp_early, _extras_early
+
+        if _mode_early == "random_list" and (cfg.get("value") or "").strip():
+            # Random list of operator-curated URLs — also wins over pro.
+            _lines = [ln.strip() for ln in (cfg.get("value") or "").splitlines() if ln.strip()]
+            if _lines:
+                _pick = random.choice(_lines)
+                _p = _platform_from_referer_url(_pick) or str(cfg.get("preset_platform") or "").strip().lower()
+                _e = _esp_from_referer_url(_pick) if _p == "email" else ""
+                _has_op_utm2 = ("utm_source=" in _pick.lower())
+                _ex2: Dict[str, Any] = {}
+                if not _has_op_utm2 and _p:
+                    _ex2 = {
+                        "sec_fetch": {}, "utm_source": _p,
+                        "utm_medium": "cpc" if _p in ("tiktok","facebook","instagram","snapchat","twitter","x","pinterest","linkedin","youtube") else "referral",
+                        "utm_campaign": "", "network_click_referer": "",
+                    }
+                return _pick, _p or "", _e, _ex2
+
         # ── 2026-06-11: PRO-MODE branch (weighted platform + email pools,
         # geo-localized search, social wrappers, in-app deep paths). Falls
         # back to legacy logic on ANY error so existing jobs are safe. ──
@@ -1460,11 +1541,18 @@ _REFERER_HOST_TO_PLATFORM: Tuple[Tuple[str, str], ...] = (
     ("telegram.me",   "telegram"),
     ("discord.com",   "discord"),
     ("discord.gg",    "discord"),
+    # 2026-07 v2.6.9 CUSTOMER FIX: messenger + more search hosts
+    ("messenger.com", "messenger"),
+    ("m.me",          "messenger"),
     ("google.",       "google"),    # google.com, google.co.uk, google.de …
     ("bing.com",      "bing"),
     ("duckduckgo.com","duckduckgo"),
     ("yahoo.com",     "yahoo"),
     ("yandex.",       "yandex"),
+    ("baidu.com",     "baidu"),
+    ("naver.com",     "naver"),
+    ("ecosia.org",    "ecosia"),
+    ("search.brave.com", "brave"),
 )
 
 
@@ -2969,6 +3057,10 @@ async def _probe_proxy_geo(
                     elif isinstance(tz, str):
                         result["timezone"] = tz or result["timezone"]
                     conn = data.get("connection") or {}
+                    # 2026-07 fix E: capture ISP/org for datacenter check
+                    result["isp"] = data.get("isp") or conn.get("isp") or ""
+                    result["org"] = conn.get("org") or data.get("org") or ""
+                    result["as_name"] = conn.get("asn") or ""
                     result["is_vpn"] = bool(
                         conn.get("type") in ("hosting", "datacenter")
                         or (str(conn.get("org") or "").lower().find("hosting") >= 0)
@@ -2982,7 +3074,7 @@ async def _probe_proxy_geo(
         try:
             r = await cli.get(
                 "http://ip-api.com/json/?fields=status,country,countryCode,region,regionName,city,"
-                "timezone,lat,lon,query,proxy,hosting"
+                "timezone,lat,lon,query,proxy,hosting,isp,org,as,asname,mobile"
             )
             if r.status_code == 200:
                 data = r.json()
@@ -2997,6 +3089,10 @@ async def _probe_proxy_geo(
                     result["lon"] = float(data.get("lon") or result["lon"])
                     result["timezone"] = data.get("timezone") or result["timezone"]
                     result["is_vpn"] = bool(data.get("proxy") or data.get("hosting"))
+                    # 2026-07 fix E: capture ISP fields for datacenter check
+                    result["isp"] = data.get("isp") or ""
+                    result["org"] = data.get("org") or ""
+                    result["as_name"] = data.get("as") or data.get("asname") or ""
                     return True
         except Exception as e:
             logger.debug(f"ip-api.com probe failed: {e}")
@@ -3034,6 +3130,10 @@ async def _probe_proxy_geo(
                     elif isinstance(tz, str):
                         result["timezone"] = tz or result["timezone"]
                     conn = data_iw.get("connection") or {}
+                    # 2026-07 fix E: capture ISP for datacenter check
+                    result["isp"] = data_iw.get("isp") or conn.get("isp") or ""
+                    result["org"] = conn.get("org") or data_iw.get("org") or ""
+                    result["as_name"] = conn.get("asn") or ""
                     result["is_vpn"] = bool(
                         conn.get("type") in ("hosting", "datacenter")
                         or (str(conn.get("org") or "").lower().find("hosting") >= 0)
@@ -3043,7 +3143,7 @@ async def _probe_proxy_geo(
                     # Attempt 2: ip-api.com via TLS-spoofed session
                     data_ia = await _tls_ad.get_json(
                         "http://ip-api.com/json/?fields=status,country,countryCode,region,"
-                        "regionName,city,timezone,lat,lon,query,proxy,hosting",
+                        "regionName,city,timezone,lat,lon,query,proxy,hosting,isp,org,as,asname,mobile",
                         proxy=proxy, ua=ua, timeout=30.0,
                     )
                     if data_ia and data_ia.get("status") == "success":
@@ -3059,6 +3159,10 @@ async def _probe_proxy_geo(
                         except (TypeError, ValueError):
                             pass
                         result["timezone"] = data_ia.get("timezone") or result["timezone"]
+                        # 2026-07 fix E: capture ISP fields
+                        result["isp"] = data_ia.get("isp") or ""
+                        result["org"] = data_ia.get("org") or ""
+                        result["as_name"] = data_ia.get("as") or data_ia.get("asname") or ""
                         result["is_vpn"] = bool(data_ia.get("proxy") or data_ia.get("hosting"))
                         ok = True
             except Exception as _tls_e:
@@ -3229,7 +3333,112 @@ async def _probe_proxy_geo(
                     logger.debug(f"VPN cross-check failed (non-blocking): {_xc_e}")
     except Exception as e:
         logger.debug(f"Proxy geo probe failed: {e}")
+
+    # ── 2026-07 CUSTOMER-REQUEST FIX E (v2.6.9) ────────────────────────
+    # ISP-name datacenter guard.
+    # Free/paid probes (ipwho.is, ip-api.com, proxycheck) occasionally
+    # miss well-known datacenter/proxy ISPs — the customer's report
+    # showed 9 clicks from "Internet Utilities Europe And Asia Limited"
+    # (a UK IP-broker/datacenter) that passed as "residential" through
+    # every provider. This ISP-name regex is a belt-and-suspenders layer:
+    # if the ISP / org string matches ANY well-known datacenter or
+    # proxy-broker pattern, we mark is_vpn=True. Never blocks legit
+    # residential ISPs (Comcast, AT&T, Optimum, Verizon, T-Mobile, EE,
+    # BT, Reliance, Jio, etc. — none of those match this regex).
+    try:
+        isp_str = ""
+        # Collect every ISP/org/AS-name field we can from the probe cache.
+        # The probes above stash them in different keys depending on which
+        # endpoint responded; we look at all of them.
+        for k in ("isp", "org", "as", "as_name", "asn_org", "provider", "connection_org"):
+            v = result.get(k)
+            if v and isinstance(v, str):
+                isp_str += " " + v
+        isp_str = isp_str.strip().lower()
+        if isp_str and _is_datacenter_or_proxy_isp(isp_str):
+            if not result.get("is_vpn"):
+                result["is_vpn"] = True
+                result["vpn_source"] = "isp-name-blocklist"
+                result["vpn_reason"] = f"Datacenter/proxy ISP detected: {isp_str[:80]}"
+    except Exception as _e_isp:
+        logger.debug(f"isp datacenter guard failed (non-blocking): {_e_isp}")
+
     return result
+
+
+# ── 2026-07 CUSTOMER-REQUEST FIX E (v2.6.9) ────────────────────────────
+# Datacenter/proxy-broker ISP regex. Comprehensive list based on the
+# most-abused ranges seen on fraud dashboards (2024-2026): AWS, GCP,
+# Azure, DigitalOcean, Linode, Hetzner, OVH, Vultr, Choopa, LeaseWeb,
+# M247, Packet, i3D, Datacamp, "Cloud Innovation", "Internet Utilities",
+# "Hurricane Electric", "Cogent", "Colocrossing", "Choopa", "Nexeon",
+# "SingleHop", "Enzu", "Ubiquity", "Server Central", plus the classic
+# "hosting / datacenter / vpn / proxy / server" keywords in the ISP name.
+_DATACENTER_ISP_PATTERNS: List[str] = [
+    r"\bamazon(\.com)?\b", r"\baws\b", r"\bec2\b",
+    r"\bgoogle(\s+cloud|\s+llc)?\b", r"\bgcp\b",
+    r"\bmicrosoft\b", r"\bazure\b",
+    r"\bdigital\s*ocean\b", r"\blinode\b", r"\bakamai\b",
+    r"\bhetzner\b", r"\bovh\b", r"\bvultr\b", r"\bchoopa\b",
+    r"\bleaseweb\b", r"\bm247\b", r"\bpacket(\.net)?\b",
+    r"\bi3d(\.net)?\b", r"\bdatacamp\b", r"\bcolocrossing\b",
+    r"\bnexeon\b", r"\bsinglehop\b", r"\benzu\b", r"\bubiquity\b",
+    r"\bserver\s*central\b", r"\bhurricane\s*electric\b",
+    r"\bcogent\b", r"\bcolo(cation)?\b",
+    r"\bhewlett\s*packard\b", r"\bhp\s*enterprise\b",
+    r"\bcloud\s*innovation\b",
+    r"\binternet\s+utilities\b",
+    r"\bcontabo\b", r"\bhostwinds\b", r"\bnamecheap\b",
+    r"\bcolo(x|s)?\b", r"\brackspace\b", r"\bkamatera\b",
+    r"\bquad\s*ninet\b", r"\bfiberstate\b",
+    r"\balibaba(\s+cloud)?\b", r"\btencent\s*cloud\b",
+    r"\bworldstream\b", r"\bfranteсh\b", r"\bfrantech\b",
+    r"\bbuyvm\b", r"\bincapsula\b", r"\bhostkey\b",
+    r"\bbandwagon(\s*host)?\b", r"\bramnode\b", r"\bracknerd\b",
+    r"\bzomro\b", r"\bstark\s*industries\b",
+    r"\brdp(\.sh)?\b", r"\brdphost(ings)?\b",
+    r"\bpsi\s*net\b", r"\bpalo\s*alto\b",
+    r"\bgcorelabs\b", r"\bgcore\b",
+    r"\bglobal\s*layer\b", r"\bcgi\s*group\b",
+    # Generic keyword tells — high precision because real residential
+    # ISP names never contain these words.
+    r"\bhosting\b", r"\bdatacenter\b", r"\bdata\s*center\b",
+    r"\bcolocation\b", r"\bserver\s*farm\b",
+    r"\bvpn\b", r"\bproxy\b", r"\bcloud\s+services?\b",
+    r"\bcloud\s+provider\b", r"\bcloud\s+platform\b",
+    r"\bvps\b", r"\bcloud\s+hosting\b",
+    r"\bdedicated\s+server\b", r"\bweb\s+hosting\b",
+    r"\bcolo\s*services?\b", r"\banonymizer\b",
+    r"\bip\s*broker\b", r"\bip\s*transit\b",
+]
+
+try:
+    import re as _re_isp
+    _DATACENTER_ISP_RE = _re_isp.compile(
+        "|".join(_DATACENTER_ISP_PATTERNS), _re_isp.IGNORECASE
+    )
+except Exception:
+    _DATACENTER_ISP_RE = None
+
+
+def _is_datacenter_or_proxy_isp(isp_str: str) -> bool:
+    """Return True if the ISP / org name matches any known datacenter /
+    proxy-broker pattern. Pure function, never raises.
+
+    Safe: only fires on VERY distinctive keywords / brands. Real
+    residential ISPs (Comcast, AT&T Enterprise, Verizon, T-Mobile,
+    Sprint, Optimum, EE, BT, Vodafone, Reliance, Jio, TIM, Movistar,
+    Telstra, etc.) do NOT match any pattern here.
+    """
+    try:
+        if not isp_str or not _DATACENTER_ISP_RE:
+            return False
+        s = str(isp_str).strip().lower()
+        if not s:
+            return False
+        return bool(_DATACENTER_ISP_RE.search(s))
+    except Exception:
+        return False
 
 
 async def _probe_proxy_target_reachable(
@@ -5080,6 +5289,72 @@ _VPN_BLOCK_PAGE_PHRASES = [
     "vpn usage detected",
     "vpn blocked",
     "no vpn allowed",
+    # 2026-07 v2.6.9 CUSTOMER-REQUEST: Traxun Security Shield + generic
+    # third-party tracker block screens. These indicate the visit will
+    # NEVER convert — abort instantly to save proxy budget.
+    "access denied",
+    "vpn/proxy connection blocked",
+    "vpn proxy connection blocked",
+    "proxy connection blocked",
+    "vpn/proxy blocked",
+    "traxun security shield",
+]
+
+
+# ── 2026-07 v2.6.9 CUSTOMER-REQUEST: Generic tracker-side block ────────
+# When a third-party tracker (Traxun, Voluum, RedTrack, Binom, etc.)
+# rejects the visit with any of these phrases, the visit is DEAD:
+#   • "Duplicate Access — You have already visited this campaign"
+#   • "Close Manually — Browser security stopped auto-close"
+#   • "Access Denied — VPN/proxy connection blocked"
+# The engine should:
+#   1. Detect the phrase INSTANTLY (< 500 ms after page load)
+#   2. Close the tab and abort the visit
+#   3. Move to the NEXT visit without wasting proxy time
+# This runs BEFORE any form-fill / redirect chase / long wait, so the
+# saving on wasted proxy time can be 10-30 seconds per blocked visit.
+_TRACKER_HARD_BLOCK_PHRASES = [
+    # Duplicate visitor / already-clicked screens
+    "duplicate access",
+    "you have already visited this campaign",
+    "you have already visited",
+    "already visited this campaign",
+    "already clicked this campaign",
+    "already accessed this campaign",
+    "already registered on this campaign",
+    "click already recorded",
+    # "Close manually" — browser-security abandonment screen
+    "close manually",
+    "close this tab",
+    "browser security stopped auto-close",
+    "browser security has stopped",
+    "auto-close disabled",
+    "please close this tab",
+    "please close this window",
+    # Generic access-denied variants
+    "access denied",
+    "your access has been denied",
+    "access has been blocked",
+    "your access is restricted",
+    "your access is not allowed",
+    # Traxun-branded shield (from customer screenshots)
+    "traxun security shield",
+    "traxun shield",
+    # Common IPQS / anti-fraud tracker screens
+    "traffic quality check failed",
+    "quality check failed",
+    "click fraud detected",
+    "invalid click detected",
+    "suspicious activity detected",
+    "click has been flagged",
+    # Voluum / RedTrack / Binom hard-block screens
+    "campaign is currently paused",
+    "campaign not available",
+    "offer not available in your country",
+    "this offer is unavailable",
+    "offer expired",
+    "campaign has been paused",
+    "no offers available",
 ]
 
 
@@ -5129,6 +5404,74 @@ async def _detect_offer_vpn_block(page: "Page") -> Tuple[bool, str]:
             snippet = body_text[start:end].strip().replace("\n", " ")
             return True, snippet[:240]
     return False, ""
+
+
+async def _detect_offer_tracker_hard_block(
+    page: "Page",
+    extra_patterns: Optional[List[str]] = None,
+) -> Tuple[bool, str, str]:
+    """
+    2026-07 v2.6.9 CUSTOMER-REQUEST — Generic third-party tracker
+    hard-block detector.
+
+    Detects landing pages like:
+        • Traxun "ACCESS DENIED — VPN/PROXY CONNECTION BLOCKED"
+        • Traxun "DUPLICATE ACCESS — You have already visited this campaign"
+        • Traxun "CLOSE MANUALLY — Browser security stopped auto-close"
+        • Voluum / RedTrack / Binom / IPQS analogues
+
+    Signals the caller to ABORT the visit instantly (no form-fill, no
+    long wait, no redirect chase). The IP is burnt to the in-job set
+    AND persisted to rut_burnt_ips so no future visit uses it again.
+
+    Args:
+        page: Playwright Page
+        extra_patterns: optional list of extra phrases the customer
+                        configured for their own tracker. Merged with
+                        the built-in pool. Comparison is case-insensitive
+                        and substring-based.
+
+    Returns:
+        (is_hard_block, matched_phrase, snippet)
+        - is_hard_block: True if any phrase matched
+        - matched_phrase: the exact phrase that matched (for logs)
+        - snippet: 240-char context around the match
+        Any exception → (False, "", "").
+    """
+    try:
+        # Read a slightly larger window than the other detectors so we
+        # catch phrases in the middle of longer marketing pages too.
+        body_text = await page.evaluate(
+            "() => (document.body ? document.body.innerText : '').toLowerCase().slice(0, 12000)"
+        )
+    except Exception:
+        return False, "", ""
+    if not body_text:
+        return False, "", ""
+
+    # Merge extra customer patterns with builtins. Customer patterns are
+    # checked FIRST so their most-common tracker phrase wins the match
+    # log message.
+    patterns: List[str] = []
+    if extra_patterns:
+        for p in extra_patterns:
+            if isinstance(p, str):
+                p_norm = p.strip().lower()
+                if p_norm and p_norm not in patterns:
+                    patterns.append(p_norm)
+    for p in _TRACKER_HARD_BLOCK_PHRASES:
+        p_norm = p.strip().lower()
+        if p_norm and p_norm not in patterns:
+            patterns.append(p_norm)
+
+    for phrase in patterns:
+        if phrase in body_text:
+            idx = body_text.find(phrase)
+            start = max(0, idx - 40)
+            end = min(len(body_text), idx + 160)
+            snippet = body_text[start:end].strip().replace("\n", " ")
+            return True, phrase, snippet[:240]
+    return False, "", ""
 
 
 # ─── 2026-05 — PRE-BROWSER offer-side duplicate/VPN probe ──────────
@@ -6197,6 +6540,25 @@ async def run_real_user_traffic_job(
     # "Facebook In-App Browser" (or IG / TT / etc.) as the browser
     # for every visit — exactly like real ad-click traffic.
     inapp_browser_preset: str = "",
+    # ── 2026-07 v2.6.9 CUSTOMER-REQUEST — Tracker hard-block detection ─
+    # When the third-party tracker (Traxun / Voluum / RedTrack / Binom /
+    # IPQS-guarded landing) shows a hard-block screen like:
+    #   • "ACCESS DENIED — VPN/PROXY CONNECTION BLOCKED"
+    #   • "DUPLICATE ACCESS — You have already visited this campaign"
+    #   • "CLOSE MANUALLY — Browser security stopped auto-close"
+    # the visit will NEVER convert. Detect it instantly (< 500 ms after
+    # navigation settles) and ABORT so the operator's proxy budget +
+    # session time are preserved.
+    #
+    # abort_on_tracker_block: master toggle (default ON — safe because
+    #   the phrase-list is highly specific and won't false-positive on
+    #   normal offer pages).
+    # tracker_block_extra_patterns: newline-separated list of extra
+    #   phrases the operator wants matched (their own tracker's block
+    #   copy, e.g. "TrafficArmor · Suspicious click detected"). Merged
+    #   with the built-in pool at detection time.
+    abort_on_tracker_block: bool = True,
+    tracker_block_extra_patterns: str = "",
 ):
     """
     Main orchestrator. Emits progress into RUT_JOBS[job_id].
@@ -6243,11 +6605,20 @@ async def run_real_user_traffic_job(
             referer_match_ua_to_platform = True
             referer_pass_to_offer = True
             _preset_platform_for_ua = _inapp_preset_key
+            # ── 2026-07 CUSTOMER-REQUEST FIX G (v2.6.9) ──────────────
+            # When an in-app preset is active, auto-enforce the strictest
+            # anti-fraud policies. Customer's report showed VPN/proxy +
+            # duplicate IP leaks even with preset ON. These are per-visit
+            # filters that MUST be on for the preset to make sense — a
+            # TikTok in-app click from a datacenter IP or a repeated IP
+            # is an instant fraud tell on Anura/IPQS/Voluum.
+            skip_vpn = True
+            skip_duplicate_ip = True
             # Replace desktop UAs with mobile UAs (only mobile UAs
             # can be coerced with in-app markers — desktop UAs are
             # left unchanged by coerce_ua_for_platform by design).
             _orig_ua_count = len(user_agents or [])
-            user_agents = _apply_inapp_preset_to_uas(user_agents, total_clicks)
+            user_agents = _apply_inapp_preset_to_uas(user_agents, total_clicks, preset_platform=_inapp_preset_key)
             try:
                 _log_ref = referer_value if _op_had_custom_url else _preset_referer_url
                 push_live_step(
@@ -6256,6 +6627,14 @@ async def run_real_user_traffic_job(
                     f"referer={_log_ref} · UA pool: {_orig_ua_count} in → "
                     f"{len(user_agents)} mobile UAs out (Android+iOS mix)"
                     + (" · operator's custom URL preserved" if _op_had_custom_url else "")
+                )
+                # 2026-07 v2.6.9 — Transparent strict-mode announcement
+                push_live_step(
+                    job_id, 0, "preset", "info",
+                    f"⚡ Strict Mode auto-enforced by preset: "
+                    f"skip_vpn=ON · skip_duplicate_ip=ON · match_ua_to_referer=ON · "
+                    f"pass_referer_to_offer=ON · foreign_inapp_markers=STRIPPED · "
+                    f"datacenter_isp_blocklist=ACTIVE"
                 )
             except Exception:
                 pass
@@ -6296,6 +6675,14 @@ async def run_real_user_traffic_job(
         # TikTok in-app UA markers so anti-fraud reports "TikTok"). Empty
         # → resolver falls back to legacy platform-from-URL detection.
         "preset_platform": _preset_platform_for_ua,
+        # 2026-07 v2.6.9 CUSTOMER-REQUEST — tracker hard-block config,
+        # threaded through `_referer_cfg` so the per-visit detector at
+        # process_one() line ~9433 can read them without extra plumbing.
+        "abort_on_tracker_block": bool(abort_on_tracker_block),
+        "tracker_block_extra_patterns": [
+            ln.strip() for ln in (tracker_block_extra_patterns or "").splitlines()
+            if ln.strip()
+        ],
     }
 
     # Guarantee chromium is installed BEFORE launching any visits.
@@ -7943,16 +8330,12 @@ async def run_real_user_traffic_job(
                 )
 
                 # 2026-06-14: APPEND REALISTIC UTM/CAMPAIGN TAGS TO URL.
-                # Earlier the pro-mode resolver BUILT utm_source/medium/
-                # campaign but never wrote them to the target URL — the
-                # offer's dashboard then showed static "fb_ads" (whatever
-                # the operator hardcoded) and the realism layer was lost.
-                # Real Facebook/TikTok/Google ad clicks ALWAYS carry their
-                # own utm_* tagging so affiliate trackers can attribute
-                # the click to the right campaign. We now write the
-                # generated UTMs to the URL as additional query params,
-                # but ONLY when the operator did NOT already include
-                # those keys in the link target (so manual overrides win).
+                # 2026-07 v2.6.9 CUSTOMER FIX F: If the operator's URL
+                # already includes utm_source/medium/campaign, DO NOT
+                # overwrite — respect their explicit choice. This was
+                # already the behaviour for missing keys, but we now
+                # also log when we're skipping so ops can see the
+                # decision in the live console.
                 try:
                     _utm_src = (_pro_extras or {}).get("utm_source") or ""
                     _utm_med = (_pro_extras or {}).get("utm_medium") or ""
@@ -7962,6 +8345,7 @@ async def run_real_user_traffic_job(
                         _u = urlparse(_visit_target_url)
                         _existing = dict(parse_qsl(_u.query, keep_blank_values=True))
                         _changed = False
+                        # Operator's URL utm always wins — only fill gaps.
                         if _utm_src and "utm_source" not in _existing:
                             _existing["utm_source"] = _utm_src
                             _changed = True
@@ -9070,8 +9454,9 @@ async def run_real_user_traffic_job(
                 # We check duplicate FIRST (more specific), then VPN.
                 # Same handling for both — only the status reason text
                 # and live-step message differ.
-                _block_reason = ""          # "duplicate_ip" or "vpn"
+                _block_reason = ""          # "duplicate_ip" or "vpn" or "tracker_block"
                 _block_snippet = ""
+                _block_phrase = ""
                 try:
                     _is_dup_block, _dup_snippet = await _detect_offer_duplicate_ip_block(page)
                 except Exception:
@@ -9087,6 +9472,25 @@ async def run_real_user_traffic_job(
                     if _is_vpn_block:
                         _block_reason = "vpn"
                         _block_snippet = _vpn_snippet
+                    else:
+                        # 2026-07 v2.6.9 CUSTOMER-REQUEST — 3rd-party tracker
+                        # hard-block detection (Traxun / Voluum / RedTrack /
+                        # Binom "Access Denied" / "Duplicate Access" /
+                        # "Close Manually" style screens). Runs only when
+                        # the operator has abort_on_tracker_block=True in
+                        # this job (default ON via preset auto-force).
+                        if bool(_referer_cfg.get("abort_on_tracker_block", True)):
+                            _extra_patterns = _referer_cfg.get("tracker_block_extra_patterns") or []
+                            try:
+                                _is_trk_block, _trk_phrase, _trk_snippet = await _detect_offer_tracker_hard_block(
+                                    page, extra_patterns=_extra_patterns
+                                )
+                            except Exception:
+                                _is_trk_block, _trk_phrase, _trk_snippet = (False, "", "")
+                            if _is_trk_block:
+                                _block_reason = "tracker_block"
+                                _block_snippet = _trk_snippet
+                                _block_phrase = _trk_phrase
                 if _block_reason:
                     _burned_ip = (entry.get("exit_ip") or "").strip()
                     # In-job set update (instant — affects next probe in this job)
@@ -9109,7 +9513,11 @@ async def run_real_user_traffic_job(
                     # Screenshot for evidence (different name per reason so
                     # the ZIP report makes the reason obvious at a glance).
                     try:
-                        _shot_suffix = "dup_ip" if _block_reason == "duplicate_ip" else "vpn_block"
+                        _shot_suffix = (
+                            "dup_ip" if _block_reason == "duplicate_ip"
+                            else ("vpn_block" if _block_reason == "vpn"
+                                  else "tracker_block")
+                        )
                         shot_path = shots_dir / f"visit_{i+1:05d}_{_shot_suffix}.png"
                         await page.screenshot(path=str(shot_path), full_page=False)
                         entry["screenshot"] = shot_path.name
@@ -9129,11 +9537,7 @@ async def run_real_user_traffic_job(
                             f"Offer-side duplicate IP block · burning {_burned_ip or '?'} "
                             f"· persisted to rut_burnt_ips · retrying with fresh IP next visit"
                         )
-                    else:
-                        # Reuse the existing skipped_vpn status so the
-                        # dashboard counters and downstream reports
-                        # categorise this correctly without needing a
-                        # new bucket.
+                    elif _block_reason == "vpn":
                         entry["status"] = "skipped_vpn"
                         entry["error"] = (
                             f"Offer-site flagged exit-IP {_burned_ip or '?'} as VPN/proxy "
@@ -9142,6 +9546,18 @@ async def run_real_user_traffic_job(
                         _live_msg = (
                             f"Offer-side VPN/proxy detection · burning {_burned_ip or '?'} "
                             f"· persisted to rut_burnt_ips · retrying with fresh IP next visit"
+                        )
+                    else:
+                        # tracker_block
+                        entry["status"] = "skipped_tracker_block"
+                        entry["error"] = (
+                            f"Tracker rejected visit (\"{_block_phrase}\"): "
+                            f"{(_block_snippet or 'tracker hard-block screen')[:120]}"
+                        )
+                        _live_msg = (
+                            f"⛔ Tracker hard-block detected — instant abort · "
+                            f"phrase=\"{_block_phrase}\" · IP {_burned_ip or '?'} burnt · "
+                            f"proxy budget saved, moving to next visit"
                         )
                     push_live_step(
                         job_id, i + 1, "filter", "skipped",

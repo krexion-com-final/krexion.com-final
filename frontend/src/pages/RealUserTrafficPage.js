@@ -491,6 +491,13 @@ export default function RealUserTrafficPage() {
   // and link-stats all increment naturally. OFF (default) keeps the
   // preview-pod auto-bypass so residential proxies don't hit Cloudflare 403.
   const [forceTrackerUrl, setForceTrackerUrl] = useState(false);
+  // 2026-07 v2.6.9 CUSTOMER-REQUEST — Tracker hard-block detection.
+  // When ON: any visit that lands on a "Access Denied" / "Duplicate
+  // Access" / "Close Manually" screen is instantly aborted so the IP
+  // is burnt and the visit slot retries with a fresh proxy (saving
+  // 10-30 s of wasted proxy time per blocked visit).
+  const [abortOnTrackerBlock, setAbortOnTrackerBlock] = useState(true);
+  const [trackerBlockExtraPatterns, setTrackerBlockExtraPatterns] = useState("");
 
   // Form-fill toggle
   const [formFillEnabled, setFormFillEnabled] = useState(false);
@@ -2069,6 +2076,9 @@ export default function RealUserTrafficPage() {
       fd.append("follow_redirect", String(followRedirect));
       fd.append("no_repeated_proxy", String(noRepeatedProxy));
       fd.append("force_tracker_url", String(forceTrackerUrl));
+      // 2026-07 v2.6.9 CUSTOMER-REQUEST — tracker hard-block detection
+      fd.append("abort_on_tracker_block", String(abortOnTrackerBlock));
+      fd.append("tracker_block_extra_patterns", trackerBlockExtraPatterns || "");
       // ProxyJet Auto Mode — when ON the backend ignores proxies/use_stored_proxies/upload_proxy_id
       // and instead asks proxyjet_module to generate a fresh batch of
       // unique residential proxies (one-per-visit, no exit-IP ever reused).
@@ -4783,7 +4793,36 @@ export default function RealUserTrafficPage() {
                 </span>
               </span>
             </CheckRow>
+            {/* 2026-07 v2.6.9 CUSTOMER-REQUEST — 3rd-party tracker hard-block detection */}
+            <CheckRow testId="rut-abort-on-tracker-block" checked={abortOnTrackerBlock} onChange={setAbortOnTrackerBlock}>
+              <span className="text-zinc-300">
+                ⛔ Abort on tracker hard-block
+                <span className="text-zinc-500 text-xs ml-2">
+                  (Traxun / Voluum / RedTrack "Access Denied" · "Duplicate Access" · "Close Manually" screens → instant visit abort, save proxy budget)
+                </span>
+              </span>
+            </CheckRow>
           </div>
+          {/* Custom tracker-block patterns textarea (only visible when the toggle is ON) */}
+          {abortOnTrackerBlock && (
+            <div className="pt-4 border-t border-zinc-800 mt-3">
+              <label className="text-xs text-zinc-400 flex items-center gap-2 mb-2">
+                <span>🛡️ Custom tracker-block phrases</span>
+                <span className="text-zinc-600">(one per line — case-insensitive substring match)</span>
+              </label>
+              <textarea
+                data-testid="rut-tracker-block-patterns"
+                value={trackerBlockExtraPatterns}
+                onChange={(e) => setTrackerBlockExtraPatterns(e.target.value)}
+                placeholder={"Access denied\nDuplicate access\nClose manually\nTraxun Security Shield\nYour tracker's custom block message here…"}
+                className="w-full text-xs bg-zinc-950 border border-zinc-800 rounded p-2 text-zinc-200 font-mono min-h-[90px] resize-y focus:border-purple-700 outline-none"
+                rows={4}
+              />
+              <p className="text-[11px] text-zinc-500 mt-1">
+                ℹ️ Built-in phrases already include Traxun/Voluum/RedTrack/Binom common blocks. Add ONLY your tracker's extra phrases here.
+              </p>
+            </div>
+          )}
         </CardContent>
       </Card>
 

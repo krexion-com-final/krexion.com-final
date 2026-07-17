@@ -8239,6 +8239,11 @@ async def _rut_prepare_and_run(
             referer_match_ua_to_platform=bool(params.get("referer_match_ua_to_platform", True)),
             # 2026-07 v2.2.1 — In-App Browser Preset (one-click social preset)
             inapp_browser_preset=str(params.get("inapp_browser_preset") or ""),
+            # 2026-07 v2.6.9 CUSTOMER-REQUEST — 3rd-party tracker hard-block
+            # detection (Traxun / Voluum / RedTrack / Binom "Access Denied",
+            # "Duplicate Access", "Close Manually" screens).
+            abort_on_tracker_block=bool(params.get("abort_on_tracker_block", True)),
+            tracker_block_extra_patterns=str(params.get("tracker_block_extra_patterns") or ""),
         )
     except Exception as e:  # noqa: BLE001
         logger.exception(f"_rut_prepare_and_run crashed for job {job_id}: {e}")
@@ -8620,6 +8625,12 @@ async def rut_create_job(
     # like real in-app ad-click traffic. See
     # `run_real_user_traffic_job.inapp_browser_preset` for details.
     inapp_browser_preset: str = Form(""),
+    # ── 2026-07 v2.6.9 CUSTOMER-REQUEST — Tracker hard-block detection ──
+    # abort_on_tracker_block: master toggle (default ON).
+    # tracker_block_extra_patterns: newline-separated custom phrases the
+    #   operator wants matched (for their own tracker's block copy).
+    abort_on_tracker_block: bool = Form(True),
+    tracker_block_extra_patterns: str = Form(""),
     # ── 2026-01 v2.4.0 — Multi-Provider Proxy dropdown ──────────────
     # OPTIONAL user-selected proxy provider (see /api/proxy-providers).
     # When set, we resolve one proxy from the provider at job-start
@@ -9003,6 +9014,9 @@ async def rut_create_job(
         "referer_match_ua_to_platform": bool(referer_match_ua_to_platform),
         # 2026-07 v2.2.1 — In-App Browser Preset (one-click social preset)
         "inapp_browser_preset": (inapp_browser_preset or "").strip().lower()[:24],
+        # 2026-07 v2.6.9 CUSTOMER-REQUEST — Tracker hard-block detection
+        "abort_on_tracker_block": bool(abort_on_tracker_block),
+        "tracker_block_extra_patterns": (tracker_block_extra_patterns or "")[:4000],
     }
     # A job is auto-resumable on backend restart only if it has no in-memory
     # bytes attached (Mongo can't store huge UploadFile blobs efficiently

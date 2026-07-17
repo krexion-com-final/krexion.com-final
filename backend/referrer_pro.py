@@ -768,6 +768,54 @@ _UTM_VARIATIONS: Dict[str, Dict[str, List[str]]] = {
         "source": ["newsletter", "email", "broadcast"],
         "medium": ["email"],
     },
+    # 2026-07 v2.6.9 CUSTOMER FIX: add UTM variations for every remaining
+    # supported platform so the pro-mode resolver never returns empty
+    # utm_source (which used to show as blank on advertiser dashboards
+    # for messenger / whatsapp / telegram / discord traffic).
+    "messenger": {
+        "source": ["messenger", "fb_messenger", "meta_messenger"],
+        "medium": ["paid_social", "social", "chat", "message"],
+    },
+    "whatsapp": {
+        "source": ["whatsapp", "wa", "whatsapp_business"],
+        "medium": ["chat", "message", "referral"],
+    },
+    "telegram": {
+        "source": ["telegram", "tg", "telegram_ads"],
+        "medium": ["chat", "channel", "social"],
+    },
+    "discord": {
+        "source": ["discord", "discord_ads"],
+        "medium": ["social", "chat", "community"],
+    },
+    "duckduckgo": {
+        "source": ["duckduckgo", "ddg"],
+        "medium": ["organic", "search", "cpc"],
+    },
+    "yahoo": {
+        "source": ["yahoo", "yahoo_ads"],
+        "medium": ["cpc", "paid_search", "search"],
+    },
+    "yandex": {
+        "source": ["yandex", "yandex_direct"],
+        "medium": ["cpc", "paid_search", "search"],
+    },
+    "baidu": {
+        "source": ["baidu", "baidu_ads"],
+        "medium": ["cpc", "paid_search"],
+    },
+    "naver": {
+        "source": ["naver", "naver_ads"],
+        "medium": ["cpc", "paid_search"],
+    },
+    "ecosia": {
+        "source": ["ecosia"],
+        "medium": ["organic", "search"],
+    },
+    "brave": {
+        "source": ["brave"],
+        "medium": ["organic", "search"],
+    },
 }
 
 
@@ -866,6 +914,49 @@ _UTM_CAMPAIGN_TEMPLATES = {
         "{brand}_email_{audience}_{n}",
         "{brand}_drip_{audience}",
         "{brand}_blast_{month}_{n}",
+    ],
+    # 2026-07 v2.6.9 CUSTOMER FIX: add campaign templates for every
+    # platform so utm_campaign is never blank on the dashboard.
+    "messenger": [
+        "msgr_{brand}_{audience}_{creative}",
+        "{brand}_messenger_{objective}_{geo}",
+        "fbmsgr_{brand}_{month}",
+    ],
+    "whatsapp": [
+        "wa_{brand}_{audience}_{creative}",
+        "{brand}_whatsapp_{geo}_{month}",
+    ],
+    "telegram": [
+        "tg_{brand}_{audience}_{month}",
+        "{brand}_telegram_{creative}_{n}",
+    ],
+    "discord": [
+        "disc_{brand}_{audience}",
+        "{brand}_discord_{creative}_{n}",
+    ],
+    "duckduckgo": [
+        "ddg_{brand}_{geo}_{n}",
+        "{brand}_ddg_organic_{month}",
+    ],
+    "yahoo": [
+        "yh_{brand}_{geo}_{n}",
+        "{brand}_yahoo_{audience}_{month}",
+    ],
+    "yandex": [
+        "yd_{brand}_{geo}_{n}",
+        "{brand}_yandex_direct_{month}",
+    ],
+    "baidu": [
+        "bd_{brand}_{geo}_{n}",
+    ],
+    "naver": [
+        "nv_{brand}_{geo}_{n}",
+    ],
+    "ecosia": [
+        "ec_{brand}_{geo}",
+    ],
+    "brave": [
+        "br_{brand}_{geo}",
     ],
 }
 
@@ -991,6 +1082,14 @@ VALID_PLATFORM_KEYS = {
     "snapchat", "pinterest", "reddit", "linkedin", "whatsapp",
     "telegram", "discord", "google", "bing", "duckduckgo", "yahoo",
     "yandex", "email",
+    # 2026-07 v2.6.9 CUSTOMER FIX J: messenger was missing from the
+    # pool-parser whitelist. Preset "messenger" in RUT job → pool
+    # weight "messenger:100" was silently discarded → pro-mode returned
+    # empty referer → visit went out with no Referer + no platform. Now
+    # accepted so weighted pool honours it.
+    "messenger",
+    # Search alternates that show up in real capture data:
+    "baidu", "naver", "ecosia", "brave",
 }
 
 
@@ -1480,9 +1579,18 @@ def resolve_pro_visit(
             "pinterest":  "https://www.pinterest.com/",
             "reddit":     "https://www.reddit.com/",
             "linkedin":   "https://www.linkedin.com/",
-            "whatsapp":   "",
-            "telegram":   "",
-            "discord":    "",
+            "whatsapp":   "https://www.whatsapp.com/",
+            "telegram":   "https://t.me/",
+            "discord":    "https://discord.com/",
+            # 2026-07 v2.6.9 CUSTOMER FIX J: messenger fallback added
+            "messenger":  "https://www.messenger.com/",
+            "google":     "https://www.google.com/",
+            "bing":       "https://www.bing.com/",
+            "duckduckgo": "https://duckduckgo.com/",
+            "yahoo":      "https://search.yahoo.com/",
+            "yandex":     "https://yandex.com/",
+            "baidu":      "https://www.baidu.com/",
+            "naver":      "https://search.naver.com/",
         }
         ref = homepages.get(signal, "")
 

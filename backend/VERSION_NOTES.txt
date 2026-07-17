@@ -1,3 +1,61 @@
+# v2.6.9 — 2026-07-17 — Customer-Perfect Traffic + Tracker Hard-Block Auto-Abort
+#
+# CUSTOMER-FACING FIXES (from field report + Traxun screenshots):
+#
+#   A) CUSTOM URL WINS OVER PRO MODE (referer leak fix)
+#      Previously: operator set Custom URL + Pro Mode with platform pool
+#         → engine used random tiktok.com/@user/video/xxx as referer
+#         → only 8/22 clicks used operator URL
+#      Now: Custom URL / random-list is honoured for EVERY visit,
+#         Pro Mode falls back to UA-marker layer only.
+#
+#   B) NO MORE GOOGLE/EMPTY REFERER FALLBACK
+#      When UA can not be coerced to preset platform, legacy fallback
+#      used to return https://www.google.com/. Now uses preset home.
+#
+#   C) FOREIGN IN-APP MARKER STRIP
+#      UA pool with FBAN/FBAV UAs in a TikTok job → 1/22 clicks
+#      showed "Facebook for Android" browser. Now scrubbed cleanly.
+#
+#   D) STRICT MODE AUTO-FORCED BY PRESET
+#      In-app preset activation forces:
+#        · skip_vpn=ON  · skip_duplicate_ip=ON
+#        · match_ua_to_referer=ON  · pass_referer_to_offer=ON
+#
+#   E) DATACENTER/PROXY ISP BLOCKLIST (65+ patterns)
+#      Blocks Amazon, GCP, Azure, DigitalOcean, Linode, OVH, Hetzner,
+#      Vultr, Contabo, Kamatera, Racknerd, Alibaba/Tencent Cloud,
+#      HPE, Hurricane Electric, Cogent, LeaseWeb, M247, Choopa,
+#      "Internet Utilities", "Cloud Innovation", etc. — pure ISP-name
+#      regex on top of ipwho.is / ip-api.com / proxycheck output.
+#
+#   F) UTM PARAMETERS: preserved when operator supplies utm_source, else
+#      engine adds realistic platform-matched utm_source/medium/campaign.
+#
+#   G) MESSENGER/WHATSAPP/TELEGRAM/BAIDU/NAVER/ECOSIA/BRAVE support
+#      All 20+ platforms now have UTM variations + campaign templates +
+#      host-detection regex + valid pool weights.
+#
+#   H) TRACKER HARD-BLOCK AUTO-ABORT (NEW toggle, default ON)
+#      When landing page shows Traxun / Voluum / RedTrack / Binom
+#      "ACCESS DENIED / VPN PROXY BLOCKED", "DUPLICATE ACCESS /
+#      Already visited", "CLOSE MANUALLY / Browser security stopped"
+#      screens → visit is INSTANTLY aborted, IP burnt, next visit
+#      starts with fresh proxy. Saves 10-30 s per blocked visit.
+#      Custom phrases per-user via textarea (any tracker copy).
+#
+#   I) ISP FIELDS CAPTURED FROM GEO PROBE (isp / org / as_name)
+#      Enables the datacenter regex to actually see the ISP string.
+#
+# TECH DIFF:
+#   backend/real_user_traffic.py                 : +560 / -25
+#   backend/referrer_pro.py                      : +145 / -8
+#   backend/server.py                            : +9   / -0
+#   frontend/src/pages/RealUserTrafficPage.js    : +55  / -0
+#   backend/VERSION, desktop/__init__.py,
+#   electron-desktop/package.json                : 2.6.5/2.6.8 → 2.6.9
+
+
 # v2.6.8 — 2026-07-16 — RUT Customize Preset: full platform access + advanced options
 #
 # CUSTOMER-FACING FIXES (issue: "customize mein siraf preset ke default 4 platform hi
