@@ -7987,10 +7987,32 @@ async def run_real_user_traffic_job(
             except Exception:
                 _resolved_offer = None
             if _resolved_offer:
-                _url_to_probe = _resolved_offer
+                # 2026-02 DUPLICATE-CLICK FIX — Do NOT probe the full
+                # resolved offer click URL (`anp8ry2wtrk.com/click?tid=...`).
+                # Affiliate tracker endpoints record every HTTP hit as a
+                # real click, so the probe request (via the SAME proxy
+                # exit IP that the browser will use next) creates a
+                # click BEFORE the real browser visit — resulting in
+                # TWO clicks from the same IP on the affiliate dashboard
+                # (the second one gets flagged as duplicate/invalid).
+                #
+                # Instead, probe only the offer's DOMAIN ROOT — this
+                # verifies the proxy can reach the affiliate host
+                # (DNS + TCP + TLS + edge CDN) without touching any
+                # click-recording endpoint. If root returns anything
+                # (200, 301, 403, 404) the proxy is confirmed live.
+                try:
+                    from urllib.parse import urlparse as _rp_up, urlunparse as _rp_uu
+                    _r_u = _rp_up(_resolved_offer)
+                    if _r_u.scheme and _r_u.netloc:
+                        _url_to_probe = _rp_uu((_r_u.scheme, _r_u.netloc, "/", "", "", ""))
+                    else:
+                        _url_to_probe = _resolved_offer
+                except Exception:
+                    _url_to_probe = _resolved_offer
                 push_live_step(
                     job_id, i + 1, "filter", "info",
-                    f"Tracker resolves to offer → probing {_url_to_probe[:80]}",
+                    f"Tracker resolves to offer → probing domain root {_url_to_probe[:80]} (no click)",
                 )
             else:
                 # Local resolution failed — fall back to probing the
@@ -9057,24 +9079,48 @@ async def run_real_user_traffic_job(
                                 _cur_host = (urlparse(_cur_url).netloc or "").lower()
                             except Exception:
                                 _target_host = _cur_host = ""
-                            _landed_elsewhere = (
+                            # ── 2026-02 DUPLICATE-CLICK FIX ──────────────
+                            # ERR_ABORTED means Chromium cancelled the
+                            # navigation MID-flight — but the INITIAL
+                            # HTTP request has ALREADY been sent to the
+                            # tracker (that's the whole point of "abort":
+                            # the response was received, then a NEW
+                            # navigation superseded it). If page.url is
+                            # anything other than about:blank or a
+                            # chrome-error page, the browser has landed
+                            # somewhere valid AND the affiliate tracker
+                            # has already recorded the click. Retrying
+                            # here would issue a SECOND HTTP GET to the
+                            # SAME URL from the SAME proxy exit IP →
+                            # duplicate click on the affiliate dashboard
+                            # (root cause of the "17 clicks / 16 invalid"
+                            # customer report). Treat any valid URL as
+                            # SUCCESS regardless of same-host vs cross-
+                            # host — the click already fired.
+                            _visit_already_fired = bool(
                                 _cur_url
                                 and _cur_url != "about:blank"
                                 and not _cur_url.startswith("chrome-error://")
-                                and _cur_host
-                                and _cur_host != _target_host
+                                and not _cur_url.startswith("data:")
                             )
-                            if _landed_elsewhere:
-                                push_live_step(
-                                    job_id, i + 1, "browser", "info",
-                                    f"Tracker instant-redirect: goto aborted but browser landed on {_cur_host} — treating as success",
-                                )
+                            if _visit_already_fired:
+                                if _cur_host and _cur_host != _target_host:
+                                    push_live_step(
+                                        job_id, i + 1, "browser", "info",
+                                        f"Tracker instant-redirect: goto aborted but browser landed on {_cur_host} — treating as success",
+                                    )
+                                else:
+                                    push_live_step(
+                                        job_id, i + 1, "browser", "info",
+                                        "Same-host JS redirect: initial HTTP request fired · skipping retry to avoid duplicate click",
+                                    )
                                 resp = None
                                 goto_exc = None
                                 break
-                            # Same-host ERR_ABORTED → retry once with
-                            # wait_until="commit" (server-response only,
-                            # no DOM-load wait) if we haven't already.
+                            # Genuine failure — URL is blank or chrome-
+                            # error page. Retry once with wait_until=
+                            # "commit" (server-response only, no DOM-load
+                            # wait) if we haven't already.
                             if _wait_until != "commit":
                                 try:
                                     push_live_step(
