@@ -132,3 +132,21 @@ User request: "customer preset chose kre like social media to os k related he sa
 ## Suggestion (retention nudge — future)
 Add a small "Share preset" button on each saved preset row → generates a signed one-time-import URL. Team accounts / affiliate mentors can then send their proven configs to sub-users with one click. Increases stickiness and reduces "how do I set up a good campaign?" support tickets significantly.
 
+
+## 2026-07-18 — v2.6.10 Released ✅
+**Commit:** `17204d2` on `origin/main` (auto-deploys to VPS)
+
+Fixes deployed:
+- RUT engine strict duplicate-IP dedup (Bug: 8 IPs → 17 clicks)
+- Everflow "Traffic from proxies is blocked" phrase-burn (6 variants)
+- Custom referrer URL always wins over pro-mode (Bug: getstimulus.ai leaked to l.facebook.com)
+- Proxy provider unique-IP + non-VPN guarantee (probe via ip-api.com, 7-day Mongo cache)
+- New endpoint: `POST /api/proxy-providers/{id}/ip-quality-check`
+- New endpoint: `GET /api/docs/proxy-provider-template/view` (13KB HTML)
+- Frontend: Templates btn + IP Quality Guarantee toggles + ShieldCheck quality dialog
+
+Files changed: 6 files, +963 / -25 lines. 100% backward compat. Zero deletion.
+
+## Post-deploy checklist (customer-side)
+- Old customers using existing providers → auto-inherit `strict_unique_ip=True` + `skip_datacenter_ip=True` (safe defaults). No action needed.
+- Admin panel > Releases page → v2.6.10 will surface for quick release to customer PCs.
