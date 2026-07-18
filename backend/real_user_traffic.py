@@ -84,27 +84,42 @@ def _realistic_fallback_ua() -> str:
 # Empty preset = zero behavioural change (backward-compatible).
 # ──────────────────────────────────────────────────────────────────────
 _MOBILE_UA_POOL_IOS: Tuple[str, ...] = (
-    # 2026-07 v2.2.5 update — iOS 26.x bases matching this codebase's
-    # convention (Apple's WWDC-2025 year-based version renaming; the
-    # device pool in server.py already uses iOS 26_1 through 26_4_1).
-    # Earlier v2.2.1 shipped iOS 17/18 bases which drifted from the
-    # rest of the codebase and some fraud parsers noticed the 2-year
-    # gap between the UA-declared OS ("iOS 17.x") and the visit's
-    # declared iPhone model era ("iPhone 15/16 Pro").
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 26_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 26_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 26_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 26_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 26_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 26_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1",
+    # 2026-02 v2.2.6 update — iOS 26.x Safari with Apple's FROZEN UA
+    # behaviour. Since iOS 26 (Sep 2025) Apple permanently freezes the
+    # OS version token in the UA at "iPhone OS 18_6" for privacy /
+    # fingerprint protection. Only the Safari `Version/26.x` token
+    # increments per point-release. Real Safari on iOS 26 sends exactly:
+    #   Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X)
+    #   AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.x
+    #   Mobile/15E148 Safari/604.1
+    # Refs: nielsleenheer.com/articles/2025/the-user-agent-string-of-
+    # safari-on-ios-26-and-macos-26/ · pxlnv.com/blog/updating-the-
+    # record-on-ios-26/ · singular.net frozen-safari-user-agent.
+    # Earlier v2.2.5 shipped `iPhone OS 26_x like Mac OS X` which real
+    # Safari NEVER emits — anti-fraud parsers that cross-check `iPhone
+    # OS <n>` against Apple's official UA spec would flag every visit.
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.4 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.3 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.2 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1",
 )
 _MOBILE_UA_POOL_ANDROID: Tuple[str, ...] = (
-    "Mozilla/5.0 (Linux; Android 14; SM-S928B Build/UP1A.231005.007; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/128.0.6613.146 Mobile Safari/537.36",
-    "Mozilla/5.0 (Linux; Android 14; SM-A556B Build/UP1A.231005.007; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/127.0.6533.120 Mobile Safari/537.36",
-    "Mozilla/5.0 (Linux; Android 13; Pixel 7 Build/TQ3A.230901.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/128.0.6613.99 Mobile Safari/537.36",
-    "Mozilla/5.0 (Linux; Android 14; SM-G998B Build/UP1A.231005.007; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/126.0.6478.183 Mobile Safari/537.36",
-    "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro Build/UP1A.231005.007; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/128.0.6613.146 Mobile Safari/537.36",
-    "Mozilla/5.0 (Linux; Android 13; SM-A536B Build/TP1A.220624.014; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/127.0.6533.99 Mobile Safari/537.36",
+    # 2026-02 v2.2.6 update — Chrome 146 is stable (rolled out Feb 25,
+    # 2026 per chromereleases.googleblog.com). Android 15 dominates on
+    # 2025-2026 flagship models (Galaxy S25, Pixel 9, OnePlus 13);
+    # Android 14 remains the largest tail on 2024 devices. Fresh build
+    # tags + model diversity so the pool never sends the exact same
+    # WebView UA back-to-back — matches the browser_profile_module.py
+    # Chrome 147-149 desktop pool the operator's own UA generator uses.
+    "Mozilla/5.0 (Linux; Android 15; SM-S931B Build/AP3A.240905.015; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/146.0.7432.116 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro Build/AP3A.240905.015; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/146.0.7432.107 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 15; Pixel 9 Build/AP3A.240905.015; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/145.0.7632.120 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 15; SM-S928B Build/AP3A.240905.015; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/146.0.7432.116 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 14; SM-A556B Build/UP1A.231005.007; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/145.0.7632.99 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro Build/UP1A.231005.007; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/146.0.7432.107 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 14; SM-S928B Build/UP1A.231005.007; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/145.0.7632.99 Mobile Safari/537.36",
+    "Mozilla/5.0 (Linux; Android 14; SM-G998B Build/UP1A.231005.007; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/144.0.7527.183 Mobile Safari/537.36",
 )
 
 # Maps preset value → Referer URL used by the engine.
