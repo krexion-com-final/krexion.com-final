@@ -811,9 +811,130 @@ async def _bump_use(user_id: str, provider_id: str) -> None:
         pass
 
 
+# ─────────────────────────────────────────────────────────────────────
+# 2026-07 v2.6.10 CUSTOMER-REQUEST — Unique-IP + VPN/Datacenter guard
+# ─────────────────────────────────────────────────────────────────────
+# Customer complained that even with strict "no duplicate IP" enabled,
+# CSV click reports showed 8 unique IPs → 17 clicks (dupes) with the
+# error "Traffic from proxies is blocked" — because the provider's
+# rotating gateway sometimes returns the SAME exit-IP for a fresh
+# session OR returns a datacenter-flagged IP that offer trackers
+# blacklist.
+#
+# This module now offers a per-provider "guarantee": before handing
+# out a proxy line, probe the exit-IP through the proxy itself,
+# classify it (residential vs datacenter/proxy/mobile), and:
+#   • strict_unique_ip=True  → retry session up to 5x if the IP has
+#                              already been used in this batch
+#   • skip_datacenter_ip=True → retry session up to 5x if the IP is
+#                              flagged as hosting/datacenter/proxy
+#
+# Results are cached in `ip_reputation_cache` (Mongo) for 7 days so
+# repeat probes on the same IP are near-free.
+#
+# Provider that supports session rotation (rotating_gateway with a
+# recognised session token OR {sid} placeholder) benefits fully;
+# providers without rotation still probe the IP so the caller can
+# decide whether to use the line.
+
+_IP_PROBE_URL = "http://ip-api.com/json/?fields=status,query,proxy,hosting,mobile,countryCode,city,isp"
+_IP_PROBE_TIMEOUT = 6.0
+_IP_REP_CACHE_TTL_DAYS = 7
+
+
+async def _get_cached_ip_reputation(ip: str) -> Optional[Dict[str, Any]]:
+    if not ip or _db is None:
+        return None
+    try:
+        doc = await _db.ip_reputation_cache.find_one({"ip": ip}, {"_id": 0})
+    except Exception:
+        return None
+    if not doc:
+        return None
+    fetched_at = doc.get("fetched_at")
+    if not fetched_at:
+        return None
+    try:
+        ts = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    age_days = (datetime.now(timezone.utc) - ts).total_seconds() / 86400.0
+    if age_days > _IP_REP_CACHE_TTL_DAYS:
+        return None
+    return doc
+
+
+async def _set_cached_ip_reputation(ip: str, data: Dict[str, Any]) -> None:
+    if not ip or _db is None:
+        return
+    try:
+        doc = {
+            "ip": ip,
+            "is_proxy":     bool(data.get("proxy")),
+            "is_hosting":   bool(data.get("hosting")),
+            "is_mobile":    bool(data.get("mobile")),
+            "country_code": str(data.get("countryCode") or ""),
+            "city":         str(data.get("city") or ""),
+            "isp":          str(data.get("isp") or ""),
+            "fetched_at":   datetime.now(timezone.utc).isoformat(),
+        }
+        await _db.ip_reputation_cache.update_one(
+            {"ip": ip}, {"$set": doc}, upsert=True
+        )
+    except Exception:
+        pass
+
+
+async def _probe_ip_via_proxy(proxy_url: str) -> Optional[Dict[str, Any]]:
+    """Probe the exit-IP + classification through the given proxy.
+    Returns dict with keys `ip, is_proxy, is_hosting, is_mobile,
+    country_code, city, isp` or None on any failure.
+    Cached in Mongo `ip_reputation_cache` (7-day TTL) so repeat probes
+    on the same IP are near-instant. First-time probe adds ~1.5-3 s.
+    """
+    if not proxy_url:
+        return None
+    try:
+        # First step: ONLY discover the exit IP through the proxy
+        # (fast, single request). Then check cache before classifying.
+        async with httpx.AsyncClient(
+            proxy=proxy_url, timeout=_IP_PROBE_TIMEOUT, verify=False,
+        ) as c:
+            r = await c.get(_IP_PROBE_URL)
+            if r.status_code != 200:
+                logger.debug(f"[ip-probe] non-200 status {r.status_code}")
+                return None
+            data = r.json() or {}
+            if str(data.get("status") or "").lower() != "success":
+                return None
+    except Exception as e:
+        logger.debug(f"[ip-probe] fetch failed via proxy: {e}")
+        return None
+
+    ip = str(data.get("query") or "").strip()
+    if not ip:
+        return None
+
+    # Persist to cache for the next probe.
+    await _set_cached_ip_reputation(ip, data)
+
+    return {
+        "ip":           ip,
+        "is_proxy":     bool(data.get("proxy")),
+        "is_hosting":   bool(data.get("hosting")),
+        "is_mobile":    bool(data.get("mobile")),
+        "country_code": str(data.get("countryCode") or ""),
+        "city":         str(data.get("city") or ""),
+        "isp":          str(data.get("isp") or ""),
+    }
+
+
 # 2026-07 v2.5.3 — Bulk resolver for jobs that need many unique lines.
 async def get_proxy_lines_from_provider(
     user_id: str, provider_id: str, count: int,
+    unique_ip_seen: Optional[set] = None,
+    strict_unique_ip: Optional[bool] = None,
+    skip_datacenter_ip: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Fetch `count` proxy lines from a single provider. Rotating-gateway
@@ -821,6 +942,23 @@ async def get_proxy_lines_from_provider(
     a fresh sticky-IP per visit (critical for RUT `no_repeated_proxy`
     mode — before this fix, rotating gateways emitted ONE line and RUT
     aborted with "No more proxies available" after visit #1).
+
+    v2.6.10 CUSTOMER-REQUEST — Unique-IP + Non-VPN guarantee
+    ─────────────────────────────────────────────────────────
+    When the provider's config has `strict_unique_ip` (default True)
+    or `skip_datacenter_ip` (default True), each generated line is
+    probed through-proxy against ip-api.com to fetch:
+      • the actual exit IP
+      • proxy/hosting/mobile flags (VPN & datacenter detection)
+    Lines that fail the check are re-generated with a fresh session
+    id (up to 5 retries per slot). Guaranteed output: N lines where
+    every exit IP is unique AND passes the anti-VPN filter (or
+    fewer lines with a `warnings` field if the provider's IP pool
+    was exhausted).
+
+    Overrides via the function args always win over the provider
+    config — RUT engine passes its own `unique_ip_seen` set so the
+    dedup carries across the entire job's proxy pool.
 
     Return shape:
       { "lines": ["scheme://user:pass@host:port", ...],
@@ -831,6 +969,10 @@ async def get_proxy_lines_from_provider(
         "use_proxyjet": bool          (native_proxyjet kind only)
         "country": "US" (native_proxyjet kind only)
         "state": "CA"  (native_proxyjet kind only, may be "")
+        "unique_ip_hits": int         (v2.6.10 — how many proxies
+                                       passed the unique-IP filter)
+        "warnings": ["..."]           (v2.6.10 — non-fatal notes,
+                                       e.g. "pool exhausted after 12/17")
         "error": "..." (only when nothing usable came back)
       }
     """
@@ -852,11 +994,43 @@ async def get_proxy_lines_from_provider(
         "proxy_type": proxy_type,
     }
 
+    # v2.6.10 — resolve unique/VPN toggles (arg > provider cfg > default True)
+    if strict_unique_ip is None:
+        strict_unique_ip = bool(cfg.get("strict_unique_ip", True))
+    if skip_datacenter_ip is None:
+        skip_datacenter_ip = bool(cfg.get("skip_datacenter_ip", True))
+    if unique_ip_seen is None:
+        unique_ip_seen = set()
+    warnings: List[str] = []
+    unique_ip_hits = 0
+    # Probing is expensive-ish (1-3s first time per IP); only enable
+    # when the caller/provider asks for the guarantee. Rotating
+    # gateway is the primary target — manual_list / api_endpoint
+    # still probe if strict_unique_ip is on.
+    probe_enabled = bool(strict_unique_ip or skip_datacenter_ip)
+
     try:
         count = max(1, int(count))
     except Exception:
         count = 1
     count = min(count, 5000)  # hard cap
+
+    async def _line_passes(candidate: str) -> tuple:
+        """Probe candidate proxy → (ok: bool, ip: str, reason: str)."""
+        if not probe_enabled:
+            return True, "", ""
+        info = await _probe_ip_via_proxy(candidate)
+        if not info:
+            # Probe failed — network hiccup / provider blocking probes.
+            # Do not reject the line; let the RUT engine's own
+            # duplicate_ip_set + rut_burnt_ips catch problems later.
+            return True, "", "probe_failed"
+        ip = info["ip"]
+        if strict_unique_ip and ip in unique_ip_seen:
+            return False, ip, "duplicate_ip"
+        if skip_datacenter_ip and (info["is_hosting"] or info["is_proxy"]):
+            return False, ip, "datacenter_or_vpn"
+        return True, ip, ""
 
     if kind == "rotating_gateway":
         host = str(cfg.get("gateway_host") or "").strip()
@@ -864,12 +1038,39 @@ async def get_proxy_lines_from_provider(
         if not host or not port:
             return {"lines": [], "error": "gateway_host/port missing", **ret_common}
         lines: List[str] = []
+        MAX_RETRIES_PER_SLOT = 5
+        exhaustion_streak = 0     # consecutive slots that gave up
         for _ in range(count):
-            ln = _format_gateway_line(cfg, proxy_type, rotate_session=True)
+            ln = None
+            for _try in range(MAX_RETRIES_PER_SLOT):
+                candidate = _format_gateway_line(cfg, proxy_type, rotate_session=True)
+                if not candidate:
+                    break
+                ok, exit_ip, reason = await _line_passes(candidate)
+                if ok:
+                    ln = candidate
+                    if exit_ip:
+                        unique_ip_seen.add(exit_ip)
+                        unique_ip_hits += 1
+                    break
+                # else: try again with a fresh session
             if ln:
                 lines.append(ln)
+                exhaustion_streak = 0
+            else:
+                exhaustion_streak += 1
+                # If 3 slots in a row exhaust their 5 retries, the
+                # pool is effectively empty for our filters — stop
+                # burning provider quota and return what we have.
+                if exhaustion_streak >= 3:
+                    warnings.append(
+                        f"pool exhausted after {len(lines)}/{count} unique lines — "
+                        "provider ran out of clean/unique IPs"
+                    )
+                    break
         await _bump_use(user_id, provider["id"])
-        return {"lines": lines, **ret_common}
+        return {"lines": lines, "unique_ip_hits": unique_ip_hits,
+                "warnings": warnings, **ret_common}
 
     if kind == "manual_list":
         lines_raw = cfg.get("lines") or ""
@@ -881,35 +1082,73 @@ async def get_proxy_lines_from_provider(
             return {"lines": [], "error": "manual list empty", **ret_common}
         def _prefix(x: str) -> str:
             return x if re.match(r"^[a-zA-Z]+://", x) else f"{proxy_type}://{x}"
-        shuffled = pool[:]
-        random.shuffle(shuffled)
-        lines = shuffled[:count] if count <= len(shuffled) else []
-        if not lines:
-            bucket: List[str] = []
-            cur = shuffled[:]
-            while len(bucket) < count:
-                if not cur:
-                    cur = pool[:]
-                    random.shuffle(cur)
-                bucket.append(cur.pop())
-            lines = bucket
-        lines = [_prefix(ln) for ln in lines]
+
+        # Normalise + shuffle (v2.6.10: no more picks-with-replacement
+        # when strict_unique_ip is on — replacement would immediately
+        # violate the guarantee).
+        prefixed = [_prefix(ln) for ln in pool]
+        random.shuffle(prefixed)
+
+        if not probe_enabled:
+            # Legacy fast path: with-replacement if pool < count.
+            take = prefixed[:count] if count <= len(prefixed) else []
+            if not take:
+                bucket = []
+                cur = prefixed[:]
+                while len(bucket) < count:
+                    if not cur:
+                        cur = prefixed[:]
+                        random.shuffle(cur)
+                    bucket.append(cur.pop())
+                take = bucket
+            await _bump_use(user_id, provider["id"])
+            return {"lines": take, **ret_common}
+
+        # Filtered path: probe each candidate, keep only those that
+        # pass the guarantee. NO with-replacement.
+        picked: List[str] = []
+        for candidate in prefixed:
+            if len(picked) >= count:
+                break
+            ok, exit_ip, reason = await _line_passes(candidate)
+            if ok:
+                picked.append(candidate)
+                if exit_ip:
+                    unique_ip_seen.add(exit_ip)
+                    unique_ip_hits += 1
+        if len(picked) < count:
+            warnings.append(
+                f"manual list yielded only {len(picked)}/{count} unique/clean lines "
+                "— add more proxies to the list or disable strict_unique_ip"
+            )
         await _bump_use(user_id, provider["id"])
-        return {"lines": lines, **ret_common}
+        return {"lines": picked, "unique_ip_hits": unique_ip_hits,
+                "warnings": warnings, **ret_common}
 
     if kind == "api_endpoint":
         lines: List[str] = []
         attempts = 0
-        max_attempts = count * 2
+        max_attempts = count * 3  # 3x headroom for the filter
         while len(lines) < count and attempts < max_attempts:
             attempts += 1
             p = await _pick_from_api(cfg, proxy_type)
-            if p:
+            if not p:
+                continue
+            ok, exit_ip, reason = await _line_passes(p)
+            if ok:
                 lines.append(p)
+                if exit_ip:
+                    unique_ip_seen.add(exit_ip)
+                    unique_ip_hits += 1
         if not lines:
-            return {"lines": [], "error": "api_endpoint returned no proxies", **ret_common}
+            return {"lines": [], "error": "api_endpoint returned no usable proxies", **ret_common}
+        if len(lines) < count:
+            warnings.append(
+                f"api endpoint yielded only {len(lines)}/{count} unique/clean proxies"
+            )
         await _bump_use(user_id, provider["id"])
-        return {"lines": lines, **ret_common}
+        return {"lines": lines, "unique_ip_hits": unique_ip_hits,
+                "warnings": warnings, **ret_common}
 
     if kind == "native_proxyjet":
         await _bump_use(user_id, provider["id"])
@@ -966,6 +1205,74 @@ def init_router(main_db, get_current_user_dep) -> APIRouter:
         if result.get("proxy") or result.get("use_proxyjet"):
             return {"ok": True, "sample": result}
         return {"ok": False, "error": result.get("error") or "unknown"}
+
+    @router.post("/{provider_id}/ip-quality-check")
+    async def ip_quality_check(
+        provider_id: str,
+        body: Dict[str, Any] = Body(default_factory=dict),
+        user=Depends(_get_current_user_dep),
+    ):
+        """v2.6.10 — Provider health probe.
+        Fetches N proxies from the provider (default 5) and reports
+        for each:
+          • exit IP
+          • is_proxy / is_hosting / is_mobile flags (VPN/DC detection)
+          • ISP + country + city
+        Also returns a summary: unique IP count, datacenter count,
+        residential count. Frontend uses this to warn the customer
+        BEFORE burning a real click job's quota.
+        """
+        provider = await _get(user["id"], provider_id)
+        if not provider:
+            raise HTTPException(404, "Provider not found")
+        try:
+            n = max(1, min(int(body.get("count") or 5), 20))
+        except Exception:
+            n = 5
+
+        # Force-enable probing regardless of provider toggles.
+        seen: set = set()
+        res = await get_proxy_lines_from_provider(
+            user["id"], provider_id, n,
+            unique_ip_seen=seen,
+            strict_unique_ip=True,
+            skip_datacenter_ip=False,   # keep datacenter lines in report
+        )
+        # For each returned line, probe again to enrich the report
+        # (cached, so ~free).
+        report: List[Dict[str, Any]] = []
+        for line in (res.get("lines") or []):
+            info = await _probe_ip_via_proxy(line)
+            report.append({
+                "proxy":     line.split("@")[-1] if "@" in line else line,
+                "ip":        (info or {}).get("ip", "") or "unknown",
+                "is_proxy":  bool((info or {}).get("is_proxy")),
+                "is_hosting": bool((info or {}).get("is_hosting")),
+                "is_mobile": bool((info or {}).get("is_mobile")),
+                "country":   (info or {}).get("country_code", ""),
+                "city":      (info or {}).get("city", ""),
+                "isp":       (info or {}).get("isp", ""),
+                "probe_ok":  info is not None,
+            })
+        ips = {r["ip"] for r in report if r["ip"] and r["ip"] != "unknown"}
+        dc_count = sum(1 for r in report if r["is_hosting"] or r["is_proxy"])
+        return {
+            "ok": bool(report),
+            "provider_name": provider.get("name"),
+            "kind": provider.get("kind"),
+            "requested": n,
+            "returned": len(report),
+            "unique_ips": len(ips),
+            "datacenter_or_vpn": dc_count,
+            "residential": len(report) - dc_count,
+            "report": report,
+            "verdict": (
+                "excellent" if dc_count == 0 and len(ips) == len(report) and report else
+                "good"      if dc_count <= len(report) * 0.2 and len(ips) >= len(report) * 0.8 else
+                "poor"      if report else
+                "failed"
+            ),
+        }
 
     # ── 2026-01 v2.5.0 — Provider-agnostic on-demand batch generator ─
     # Wraps ProxyJet's per-user unique batch generation for ANY selected

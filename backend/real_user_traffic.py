@@ -5298,6 +5298,21 @@ _VPN_BLOCK_PAGE_PHRASES = [
     "proxy connection blocked",
     "vpn/proxy blocked",
     "traxun security shield",
+    # 2026-07 CUSTOMER-REQUEST v2.6.10 — Everflow / HasOffers / CAKE
+    # tracker-side "proxy detected" hard-block. Customer CSV showed
+    # 17 clicks landing on the offer's tracker with Error Message
+    # "Traffic from proxies is blocked" — every duplicated exit-IP
+    # was one of these blocked visits. Adding the phrase here means
+    # the pre-probe detects the block, burns the exit-IP into the
+    # in-job `duplicate_ip_set` AND persists it to `rut_burnt_ips`,
+    # so the SAME IP is never handed out again in the same job or
+    # any future job.
+    "traffic from proxies is blocked",
+    "traffic from proxy is blocked",
+    "proxy traffic is blocked",
+    "proxy traffic blocked",
+    "traffic from vpn is blocked",
+    "traffic from vpns is blocked",
 ]
 
 
@@ -6639,6 +6654,31 @@ async def run_real_user_traffic_job(
             except Exception:
                 pass
 
+    # ── 2026-07 v2.6.10 CUSTOMER-REQUEST FIX (referrer honouring) ─────
+    # Guarantee that if the operator EXPLICITLY provided a Custom
+    # Referrer URL, that exact URL is used for EVERY visit — no pro-
+    # mode override, no platform_pool leak. Customer report showed
+    # `https://getstimulus.ai/` was configured but the offer's tracker
+    # recorded random TikTok/Instagram/Facebook URLs from pro-mode.
+    # Root cause: `referer_pro_mode=True` state was leftover from a
+    # previously-selected Traffic-Source preset (`mixed_realistic`
+    # etc.) and never got reset when the operator switched to
+    # "Custom (Advanced)" mode. Even though `_resolve_visit_referer`
+    # has a "custom-wins-over-pro" early branch, some edge paths
+    # (e.g. auto-inferred `mode` mid-run) could still fall through.
+    #
+    # Fix: at the SINGLE point where the job-level referer config is
+    # committed, if `referer_value` is a non-empty URL, hard-force
+    # mode="custom" AND pro_mode=False. This is the operator's
+    # explicit instruction — no realism layer, no weighted pool.
+    _op_custom_url_final = str(referer_value or "").strip()
+    if _op_custom_url_final and _op_custom_url_final.startswith(("http://", "https://")):
+        referer_mode = "custom"
+        referer_pro_mode = False
+        # Custom URL only meaningful when override is enabled; otherwise
+        # the resolver short-circuits to legacy UA-derived Referer.
+        referer_override_enabled = True
+
     # ── 2026-06: Build referrer-override cfg ONCE per job ─────────────
     # Closed-over by the inner `process_one` worker → `_resolve_visit_referer`
     # is called per visit with this exact dict. When `enabled=False` the
@@ -7875,6 +7915,29 @@ async def run_real_user_traffic_job(
             entry["error"] = "Exit IP already clicked this link before"
             push_live_step(job_id, i + 1, "filter", "skipped", f"Duplicate IP {geo['exit_ip']}")
             return await _record(job_id, entry, report, report_lock, db)
+
+        # ── 2026-07 v2.6.10 CUSTOMER-REQUEST FIX (duplicate-IP hardening) ──
+        # Even when skip_duplicate_ip is ON, the previous non-ProxyJet
+        # code path only CHECKED the set — it never ADDED the exit-IP
+        # to the in-memory `duplicate_ip_set` after picking. Result:
+        # if the operator's proxy list contained a static / semi-static
+        # proxy (e.g. a dedicated ISP proxy that always returns the same
+        # exit IP), OR two parallel workers both landed on the same IP
+        # from a rotating residential pool, the SAME exit IP could be
+        # used 2-3+ times in one job. Customer's CSV proved this:
+        # 8 unique IPs produced 17 clicks (IP 74.102.81.241 × 3 etc.).
+        #
+        # Fix: as soon as an exit-IP passes the dedup gate, RESERVE it
+        # by adding to the in-memory set. Any subsequent visit that
+        # probes the same IP (parallel worker OR same static proxy)
+        # will hit the "already in set" branch above and be skipped.
+        # ProxyJet path already reserves at line 7710 — this closes
+        # the gap for operator-supplied proxies.
+        if skip_duplicate_ip and duplicate_ip_set is not None and geo.get("exit_ip"):
+            try:
+                duplicate_ip_set.add(geo["exit_ip"])
+            except Exception:
+                pass
 
         # ── 2026-01: Target-URL reachability pre-check ──────────────
         # The geo probe (ipwho.is / ip-api.com) only confirms the

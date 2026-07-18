@@ -8684,7 +8684,21 @@ async def rut_create_job(
             if _pp_bulk is not None:
                 # Bulk fetch — one line per planned click so RUT's
                 # no_repeated_proxy dedup has enough headroom.
-                _pp_res = await _pp_bulk(user["id"], proxy_provider_id, int(total_clicks) or 1)
+                # v2.6.10 CUSTOMER-REQUEST: pass a shared unique_ip_seen
+                # set so the provider guarantees non-duplicate + non-VPN
+                # IPs BEFORE the visits start. This closes the gap where
+                # the offer's tracker recorded duplicate blocked IPs.
+                _pp_unique_ip_seen: set = set()
+                _pp_res = await _pp_bulk(
+                    user["id"], proxy_provider_id, int(total_clicks) or 1,
+                    unique_ip_seen=_pp_unique_ip_seen,
+                    # Provider config's own toggles (default True) win
+                    # when the caller passes None. RUT always wants the
+                    # guarantee, so we force it ON here regardless of
+                    # the provider config — no admin-flippable footgun.
+                    strict_unique_ip=True,
+                    skip_datacenter_ip=True,
+                )
                 if _pp_res.get("use_proxyjet"):
                     use_proxyjet_auto = True
                     if _pp_res.get("country"):
@@ -22490,6 +22504,287 @@ async def vr_lint_steps(req: VRLintStepsReq, user: dict = Depends(get_current_us
 
 
 app.include_router(api_router)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 2026-07 v2.6.10 — Proxy Provider template docs page (HTML)
+# CUSTOMER-REQUEST: /api/docs/proxy-provider-template/view — one clean
+# page a customer can open to see the exact host/port/username/pass
+# format each of the 8 auto-detected providers uses, plus placeholder
+# cheat-sheet, plus Smart-Paste hint. Renders standalone HTML with
+# copy-to-clipboard code blocks; no auth required (docs).
+# ─────────────────────────────────────────────────────────────────────
+from fastapi.responses import HTMLResponse  # noqa: E402
+
+
+@app.get("/api/docs/proxy-provider-template/view", response_class=HTMLResponse)
+async def proxy_provider_template_docs():
+    html = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Krexion — Proxy Provider Template Reference</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<style>
+:root{
+  --bg:#0b0d10;--panel:#141820;--border:#252b36;
+  --text:#e6edf3;--dim:#8b949e;--accent:#00d4ff;--good:#3fb950;--warn:#d29922;
+  --code:#161b22;--mono:'JetBrains Mono','SF Mono',ui-monospace,Menlo,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+     font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+     line-height:1.55;font-size:15px}
+.wrap{max-width:960px;margin:0 auto;padding:48px 32px 96px}
+h1{font-size:36px;font-weight:800;letter-spacing:-.02em;margin:0 0 8px}
+.subtitle{color:var(--dim);font-size:16px;margin-bottom:36px}
+h2{font-size:22px;font-weight:700;margin:44px 0 12px;padding-bottom:8px;
+   border-bottom:1px solid var(--border)}
+h3{font-size:16px;font-weight:600;margin:22px 0 8px;color:var(--accent)}
+p{margin:0 0 12px}
+.pill{display:inline-block;padding:2px 10px;border-radius:12px;
+      font-size:12px;font-weight:600;background:#1f2732;color:var(--dim);
+      margin-right:6px}
+.pill.good{background:rgba(63,185,80,.15);color:var(--good)}
+.pill.warn{background:rgba(210,153,34,.15);color:var(--warn)}
+pre{background:var(--code);border:1px solid var(--border);border-radius:8px;
+    padding:14px 16px;overflow-x:auto;font-family:var(--mono);
+    font-size:13px;line-height:1.5;position:relative;margin:8px 0 16px}
+code{font-family:var(--mono);background:rgba(255,255,255,.06);
+     padding:1px 6px;border-radius:4px;font-size:13px}
+.copy{position:absolute;top:8px;right:8px;background:var(--panel);
+      border:1px solid var(--border);color:var(--dim);padding:4px 10px;
+      border-radius:4px;font-size:11px;cursor:pointer;font-family:inherit}
+.copy:hover{color:var(--text);border-color:var(--accent)}
+table{width:100%;border-collapse:collapse;font-size:13px;margin:12px 0}
+th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--border)}
+th{color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;
+   letter-spacing:.05em}
+td code{background:transparent;padding:0;color:var(--accent)}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:12px 0}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:8px;
+      padding:16px}
+.card h3{margin-top:0}
+ul{padding-left:20px;margin:8px 0 16px}
+li{margin-bottom:6px}
+.tip{background:rgba(0,212,255,.06);border-left:3px solid var(--accent);
+     padding:12px 14px;border-radius:0 6px 6px 0;margin:14px 0}
+.warn-box{background:rgba(210,153,34,.06);border-left:3px solid var(--warn);
+     padding:12px 14px;border-radius:0 6px 6px 0;margin:14px 0}
+footer{margin-top:56px;padding-top:20px;border-top:1px solid var(--border);
+       color:var(--dim);font-size:12px}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+@media(max-width:640px){.grid{grid-template-columns:1fr}.wrap{padding:24px 16px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Proxy Provider Template Reference</h1>
+<p class="subtitle">
+  Krexion auto-detects 8 major residential/mobile proxy providers by
+  gateway hostname and applies the correct geo/session syntax for you.
+  You only need to enter <b>host, port, username, password</b> — everything
+  else is automatic.
+</p>
+
+<div class="tip">
+  <b>Tip — Skip this page entirely:</b> Go to <a href="/proxies/providers">Proxies › Providers</a>
+  and click <b>Smart Paste</b>. Paste ANY line format (with or without
+  scheme, credentials, comma-separated etc.) and Krexion will parse it,
+  auto-detect the provider, and prefill everything.
+</div>
+
+<h2>How auto-detection works</h2>
+<p>When you save a provider with a recognised <b>gateway host</b>,
+   Krexion knows that provider's targeting DSL. When you later pick
+   country / state / city / ZIP / ASN / sticky-session minutes in the
+   Provider settings, those values are injected into the username in
+   the format the provider expects — no manual formatting.</p>
+
+<div class="tip">
+  For providers not in this list, add the placeholders
+  <code>{country} {state} {city} {zip} {asn} {sid} {ttl}</code> anywhere
+  in the username field. Krexion replaces them per-request.
+</div>
+
+<h2>Supported providers (auto-detected by hostname)</h2>
+<table>
+<thead><tr>
+  <th>Provider</th><th>Detects on host containing</th>
+  <th>Session TTL cap</th><th>Geo fields</th>
+</tr></thead>
+<tbody>
+<tr><td>DataImpulse</td><td><code>dataimpulse.com</code></td>
+    <td>120 min</td><td>country / state / city / zip / asn</td></tr>
+<tr><td>Bright Data</td><td><code>brd.superproxy.io</code>, <code>luminati.io</code></td>
+    <td>30 min</td><td>country / state / city / zip / asn</td></tr>
+<tr><td>Oxylabs</td><td><code>oxylabs.io</code>, <code>pr.oxylabs.io</code></td>
+    <td>30 min</td><td>country / state / city / zip / asn</td></tr>
+<tr><td>Smartproxy / Decodo</td><td><code>smartproxy.com</code>, <code>decodo.com</code></td>
+    <td>30 min</td><td>country / state / city / zip / asn</td></tr>
+<tr><td>IPRoyal</td><td><code>iproyal.com</code></td>
+    <td>60 min</td><td>country / state / city / zip / asn</td></tr>
+<tr><td>ProxyEmpire</td><td><code>proxyempire.io</code></td>
+    <td>60 min</td><td>country / state (region) / city / zip / asn</td></tr>
+<tr><td>Soax</td><td><code>soax.com</code></td>
+    <td>60 min</td><td>country / state (region) / city / zip / isp</td></tr>
+<tr><td>PacketStream</td><td><code>packetstream.io</code></td>
+    <td>—</td><td>country / state / city / zip / asn</td></tr>
+</tbody>
+</table>
+
+<h2>Ready-to-paste examples</h2>
+<p>Copy any of these into <b>Smart Paste</b> to auto-create the provider.
+   Replace the placeholder credentials with your own.</p>
+
+<div class="grid">
+<div class="card">
+<h3>DataImpulse (residential)</h3>
+<pre><button class="copy" onclick="copyPre(this)">Copy</button>http://YOUR_USER:YOUR_PASS@gw.dataimpulse.com:823</pre>
+<span class="pill good">Sticky sessions</span><span class="pill">country/state/city/zip</span>
+</div>
+
+<div class="card">
+<h3>Bright Data (residential)</h3>
+<pre><button class="copy" onclick="copyPre(this)">Copy</button>http://brd-customer-hlXXXXX-zone-resi:YOUR_PASS@brd.superproxy.io:22225</pre>
+<span class="pill good">Sticky sessions</span><span class="pill">country/state/city/zip/asn</span>
+</div>
+
+<div class="card">
+<h3>Oxylabs (residential)</h3>
+<pre><button class="copy" onclick="copyPre(this)">Copy</button>http://customer-USERNAME-cc-us:YOUR_PASS@pr.oxylabs.io:7777</pre>
+<span class="pill good">Sticky sessions</span><span class="pill">country/state/city/zip/asn</span>
+</div>
+
+<div class="card">
+<h3>Smartproxy / Decodo (residential)</h3>
+<pre><button class="copy" onclick="copyPre(this)">Copy</button>http://user-USERNAME-country-us:YOUR_PASS@gate.smartproxy.com:7000</pre>
+<span class="pill good">Sticky sessions</span><span class="pill">country/state/city/zip/asn</span>
+</div>
+
+<div class="card">
+<h3>IPRoyal (residential)</h3>
+<pre><button class="copy" onclick="copyPre(this)">Copy</button>http://USERNAME_country-us_state-florida:YOUR_PASS@geo.iproyal.com:12321</pre>
+<span class="pill good">Sticky sessions</span><span class="pill">country/state/city/zip/asn</span>
+</div>
+
+<div class="card">
+<h3>Soax (residential)</h3>
+<pre><button class="copy" onclick="copyPre(this)">Copy</button>http://package_USERNAME;country-us;region-florida:YOUR_PASS@proxy.soax.com:5000</pre>
+<span class="pill good">Sticky sessions</span><span class="pill">country/region/city/zip/isp</span>
+</div>
+
+<div class="card">
+<h3>ProxyEmpire (residential)</h3>
+<pre><button class="copy" onclick="copyPre(this)">Copy</button>http://package-XXX-country-us-region-fl:YOUR_PASS@rotating.proxyempire.io:9000</pre>
+<span class="pill good">Sticky sessions</span><span class="pill">country/region/city/zip/asn</span>
+</div>
+
+<div class="card">
+<h3>PacketStream</h3>
+<pre><button class="copy" onclick="copyPre(this)">Copy</button>http://USERNAME_country-UnitedStates_state-FL:YOUR_PASS@proxy.packetstream.io:31112</pre>
+<span class="pill">country/state/city</span>
+</div>
+</div>
+
+<h2>Custom / unknown provider — placeholder cheat-sheet</h2>
+<p>If your provider isn't listed above, no problem. Add these
+   placeholder tokens anywhere inside the <b>username</b> field and
+   Krexion substitutes them per request:</p>
+
+<table>
+<thead><tr><th>Placeholder</th><th>Meaning</th><th>Fed from</th></tr></thead>
+<tbody>
+<tr><td><code>{country}</code></td><td>2-letter country code</td>
+    <td>Provider settings → Country dropdown</td></tr>
+<tr><td><code>{state}</code></td><td>State / region code or name</td>
+    <td>Provider settings → State field</td></tr>
+<tr><td><code>{city}</code></td><td>City name (URL-safe)</td>
+    <td>Provider settings → City field</td></tr>
+<tr><td><code>{zip}</code></td><td>Postal / ZIP code</td>
+    <td>Provider settings → ZIP field</td></tr>
+<tr><td><code>{asn}</code></td><td>ASN number</td>
+    <td>Provider settings → ASN field</td></tr>
+<tr><td><code>{sid}</code></td><td>Fresh 8-digit session id — <b>rotates automatically per request</b></td>
+    <td>Auto-generated</td></tr>
+<tr><td><code>{ttl}</code></td><td>Sticky-session lifetime (minutes)</td>
+    <td>Provider settings → Sticky minutes</td></tr>
+</tbody>
+</table>
+
+<h3>Example — custom gateway with full DSL</h3>
+<pre><button class="copy" onclick="copyPre(this)">Copy</button>http://user-cc={country}-st={state}-sid={sid}-ttl={ttl}:YOUR_PASS@your-provider.example.com:1080</pre>
+
+<h2>Unique-IP + Non-VPN guarantee (v2.6.10)</h2>
+<p>When enabled, Krexion probes each fetched proxy through-line
+   against <code>ip-api.com</code> and:</p>
+<ul>
+  <li><b>strict_unique_ip</b> (default ON) — retries the session up to
+      5× if the exit IP has already been used in the batch. Result: N
+      truly unique IPs.</li>
+  <li><b>skip_datacenter_ip</b> (default ON) — retries the session up
+      to 5× if the IP is flagged as datacenter / hosting / VPN. Result:
+      only residential/mobile IPs reach the tracker.</li>
+</ul>
+
+<div class="warn-box">
+  <b>Trade-off:</b> First-time probing adds ~1-3 seconds per proxy.
+  Results are cached in Mongo for 7 days per IP, so repeat runs on
+  the same IP pool are near-instant.
+</div>
+
+<h2>Health check before you spend clicks</h2>
+<p>On the Providers page, click <b>IP Quality Check</b> on any provider.
+   Krexion fetches 5 sample proxies, probes each one, and shows you:</p>
+<ul>
+  <li>Exit IPs (unique count vs total)</li>
+  <li>Residential / datacenter / mobile breakdown</li>
+  <li>Per-IP ISP, country, city</li>
+  <li>Verdict: <span class="pill good">excellent</span> / <span class="pill">good</span> / <span class="pill warn">poor</span></li>
+</ul>
+<p>Poor result → change provider or open a support ticket with them
+   before you waste a click job's quota.</p>
+
+<h2>API reference (for power users)</h2>
+<table>
+<thead><tr><th>Endpoint</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>POST /api/proxy-providers/_smart-parse</code></td>
+    <td>Parse any pasted string(s), suggest provider config.</td></tr>
+<tr><td><code>POST /api/proxy-providers</code></td>
+    <td>Create a provider (kind + config).</td></tr>
+<tr><td><code>POST /api/proxy-providers/&#123;id&#125;/test</code></td>
+    <td>Fetch one proxy, verify credentials.</td></tr>
+<tr><td><code>POST /api/proxy-providers/&#123;id&#125;/ip-quality-check</code></td>
+    <td>Fetch N proxies, probe each, return quality report.</td></tr>
+<tr><td><code>POST /api/proxy-providers/&#123;id&#125;/generate-batch</code></td>
+    <td>Return N unique proxy lines for a job.</td></tr>
+<tr><td><code>GET /api/proxy-providers/&#123;id&#125;/targeting-profile</code></td>
+    <td>Which geo fields this provider supports.</td></tr>
+</tbody>
+</table>
+
+<footer>
+  Krexion v2.6.10 — Proxy Provider Reference &nbsp;·&nbsp;
+  <a href="/proxies/providers">Open Providers Page</a>
+</footer>
+</div>
+<script>
+function copyPre(btn){
+  const pre = btn.parentElement;
+  const text = pre.innerText.replace(/^Copy\\n/, '');
+  navigator.clipboard.writeText(text).then(()=>{
+    const orig = btn.innerText;
+    btn.innerText = 'Copied';
+    setTimeout(()=>btn.innerText = orig, 1200);
+  });
+}
+</script>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
 
 # ─────────────────────────────────────────────────────────────────────
 # 2026-06-11: Referrer Pro module (weighted pools + AI keyword gen)

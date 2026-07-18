@@ -1,3 +1,104 @@
+# v2.6.10 — 2026-07-18 — Duplicate-IP Elimination + Custom Referrer Guarantee + Provider IP Quality Layer
+#
+# CUSTOMER-FACING FIXES (from field report + click CSV forensics):
+#
+#   A) STRICT DUPLICATE-IP DEDUPLICATION (RUT engine)
+#      Previously: even with skip_duplicate_ip=ON, the non-ProxyJet
+#         path only CHECKED the duplicate set — it never ADDED the
+#         picked exit-IP to the set. Static/rotating proxies that
+#         returned the same exit IP could get used 2-3× in one job.
+#         Customer CSV proved it: 8 unique IPs produced 17 clicks
+#         (IP 74.102.81.241 × 3, 70.132.185.193 × 3, etc.).
+#      Now: as soon as an exit-IP passes the dedup gate, it is
+#         RESERVED in the in-job set. Parallel workers + subsequent
+#         picks are guaranteed unique. ProxyJet path already reserved
+#         at line 7710; this closes the gap for operator proxies.
+#
+#   B) EVERFLOW "TRAFFIC FROM PROXIES IS BLOCKED" PHRASE-BURN
+#      Previously: the exact tracker phrase "Traffic from proxies is
+#         blocked" was missing from _VPN_BLOCK_PAGE_PHRASES → pre-probe
+#         did not detect the block → burnt IP never persisted →
+#         same IP re-picked, blocked again.
+#      Now: 6 phrase variants added ("traffic from proxies/proxy is
+#         blocked", "proxy traffic blocked", "traffic from vpn is
+#         blocked" + variants). First block detection burns the IP
+#         into duplicate_ip_set AND rut_burnt_ips (cross-job).
+#
+#   C) CUSTOM REFERRER URL ALWAYS WINS OVER PRO MODE
+#      Previously: leftover state from a previously-picked Traffic-
+#         Source Preset (mixed_realistic etc.) kept `referer_pro_mode=
+#         True` + `referer_platform_weights` populated. Even after
+#         switching to "Custom (Advanced)" with a hard-set URL like
+#         `https://getstimulus.ai/`, some paths could still emit
+#         pro-mode outputs (l.facebook.com/l.php wrappers, deep
+#         tiktok.com/@user/video URLs).
+#      Now: at the SINGLE point where the job's referer cfg is
+#         committed, if `referer_value` is a non-empty http(s) URL,
+#         it hard-forces `mode="custom"` + `pro_mode=False` +
+#         `override_enabled=True`. Preset UA coercion still runs
+#         (browser reports as TikTok in-app etc.), only referer
+#         changes.
+#
+#   D) PROXY PROVIDER: UNIQUE-IP + NON-VPN GUARANTEE (Phase A+D)
+#      NEW `get_proxy_lines_from_provider()` params:
+#         · unique_ip_seen: set (shared across the job)
+#         · strict_unique_ip: bool (default True, force True in RUT)
+#         · skip_datacenter_ip: bool (default True, force True in RUT)
+#      NEW `_probe_ip_via_proxy(proxy_url)`:
+#         Fetches exit IP + classification through the proxy itself
+#         via ip-api.com/json → returns is_proxy / is_hosting /
+#         is_mobile / country / city / isp. 6s timeout.
+#      NEW `ip_reputation_cache` (Mongo, 7-day TTL): repeat probes
+#         near-instant. Provider auto-rotates session ID up to 5×
+#         per slot if a duplicate or datacenter IP comes back; if
+#         3 slots exhaust in a row → stops burning provider quota
+#         and returns partial batch + warnings.
+#      Result: RUT engine now receives a pre-filtered stream of
+#         guaranteed-unique, residential/mobile IPs.
+#
+#   E) PROVIDER IP QUALITY CHECK (Phase A)
+#      NEW endpoint: POST /api/proxy-providers/{id}/ip-quality-check
+#      Fetches 5 sample proxies, probes each, returns per-IP report
+#      + summary (unique / residential / DC-VPN counts) + verdict
+#      (excellent / good / poor / failed). Customer sees provider
+#      health BEFORE spending click quota.
+#
+#   F) PROVIDER TEMPLATE DOCS PAGE (Phase B)
+#      NEW endpoint: GET /api/docs/proxy-provider-template/view
+#      Standalone 13KB HTML page (no auth) with ready-to-paste
+#      examples for all 8 auto-detected providers (DataImpulse,
+#      Bright Data, Oxylabs, Smartproxy/Decodo, IPRoyal, ProxyEmpire,
+#      Soax, PacketStream) + placeholder cheat-sheet ({country},
+#      {state}, {sid}, {ttl}, etc.) + API reference. Copy-to-
+#      clipboard on every code block.
+#
+#   G) FRONTEND: IP QUALITY UI (Phase C)
+#      · "Templates" button (top-right of Proxy Providers tab) →
+#        opens the docs page in a new tab.
+#      · Add/Edit dialog now shows "IP Quality Guarantee" section
+#        with 2 toggles: Strict unique IP + Skip datacenter/VPN IPs
+#        (both default ON).
+#      · ShieldCheck icon in every provider row → opens a rich
+#        IP Quality Check dialog with 4 stat cards, verdict banner
+#        (color-coded), and per-IP table (Exit IP / Country / ISP /
+#        type badge).
+#
+# TECH DIFF:
+#   backend/proxy_provider_module.py        +347 / -20  (helpers, cache, guarantee, quality endpoint)
+#   backend/server.py                       +297 / -1   (RUT wiring + Docs HTML)
+#   backend/real_user_traffic.py            +63  / -1   (v2.6.10 fixes A/B/C)
+#   frontend/src/pages/ProxyProvidersTab.js +178 / -3   (toggles, quality dialog, docs btn)
+#   backend/VERSION                          2.6.9 → 2.6.10
+#
+# BACKWARD COMPAT: 100%.
+#   · Existing providers auto-inherit `strict_unique_ip=True` +
+#     `skip_datacenter_ip=True` defaults (safe by default). Customer
+#     can turn either off per-provider for max throughput.
+#   · RUT jobs without a proxy_provider_id → unchanged legacy flow.
+#   · All existing endpoints unchanged; only new ones added.
+#
+# ─────────────────────────────────────────────────────────────────────
+
 # v2.6.9 — 2026-07-17 — Customer-Perfect Traffic + Tracker Hard-Block Auto-Abort
 #
 # CUSTOMER-FACING FIXES (from field report + Traxun screenshots):
