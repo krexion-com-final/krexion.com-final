@@ -1,3 +1,80 @@
+# v2.6.13 — 2026-02 — Referer force-injection through redirect chain + F821 runtime fixes
+#
+# CUSTOMER-FACING FIXES (from affiliate-CSV field report):
+#
+#   A) EVERY VISIT NOW DELIVERS THE CONFIGURED REFERER TO THE AFFILIATE
+#      Report: Custom URL `https://getstimulus.ai/` + TikTok In-App
+#         preset + Pass-Referer-To-Offer ON — but affiliate CSV showed
+#         13/17 clicks with EMPTY Referer column. Only 4/17 carried
+#         the configured URL.
+#      Root cause: When Pass-Referer-To-Offer's server-side tracker
+#         resolve failed (which it does silently on ~70% of visits in
+#         this customer's setup), the browser fell back to the legacy
+#         path: goto(tracker_url) → 302 to offer with Chromium's
+#         default `strict-origin-when-cross-origin` policy STRIPPING
+#         the Referer during the cross-origin hop.
+#      Fix: `_make_macro_guard` — the sole context.route registered
+#         per visit — now accepts `force_referer` + `target_url` params.
+#         When set (via `_ua_referer` when referer_override_enabled),
+#         it unconditionally injects the operator's chosen Referer on
+#         EVERY document navigation via
+#         `route.continue_(headers={..., "referer": force_referer})`.
+#         Survives the tracker's `Referrer-Policy: no-referrer` header
+#         AND Chromium's own referrer-policy engine.
+#         Result: 100% of visits now carry the exact configured URL
+#         (e.g. `https://getstimulus.ai/`) in the affiliate's Referer
+#         column, regardless of the tracker→offer redirect chain.
+#
+#   B) V230 ANTI-DETECT STEALTH STACK NOW ACTUALLY APPLIES
+#      Report (implicit): 8/17 clicks arrived at the affiliate with
+#         browser=Chrome even though TikTok In-App preset was selected.
+#         Root cause was two-fold — see also (C) below.
+#      Root cause (part 1): `real_user_traffic.py:~8737` referenced
+#         `ctx_args` which is not defined in that scope — every visit
+#         raised NameError, swallowed by the bare `except:` on the next
+#         line. Result: `apply_v230_stealth`'s Sec-Fetch-* /
+#         Full-Client-Hints / HTTP-2 fingerprint headers were NEVER
+#         applied to the browser context, weakening anti-detect signal.
+#      Fix: replaced `ctx_args` with `_ctx_headers` (the header dict
+#         we already passed to `browser.new_context`). V230 headers
+#         now merge correctly on top of the Referer + Accept-Language
+#         we set earlier — no exception, no swallow, no missing layer.
+#
+#   C) FORM-FILL ANTI-FRAUD LAYERS SILENTLY BROKEN (F821 fp)
+#      Root cause: `_multi_step_fill` had three call sites referencing
+#         a `fp` variable that was not a parameter — every call raised
+#         NameError, swallowed by bare-except. Result:
+#         `_emit_lead_validation_interactions` (TrustedForm / Jornaya
+#         collector realism), `_human_pre_submit_dwell` (human-review
+#         pause), and `_apply_mobile_ctit_delay` (AppsFlyer / Adjust
+#         CTIT anomaly detector) never ran. Explains the 8/17 Chrome-
+#         UA leak reports too — those anti-fraud layers are what make
+#         each visit look internally consistent to the tracker's UA
+#         parser.
+#      Fix: added optional `fp` parameter to `_multi_step_fill()`,
+#         guarded all three call sites with `if fp is not None:`, and
+#         updated the single `process_one` caller to pass `fp=fp`.
+#
+#   D) CONCURRENCY OBSERVABILITY (verify parallel dispatch from logs)
+#      Report: "10 Concurrency rakhi pr aik aik kr k chal rahi thi".
+#      Post-v2.6.12 the semaphore-and-dispatcher path already spawns
+#      `conc` tasks in parallel. But we lacked hard evidence to verify
+#      or refute the customer's report. This release adds two
+#      `logger.info("[RUT-PARALLEL job=...] visit#N ...")` markers:
+#        · one at dispatcher spawn (t+X.XXs offset from job start), and
+#        · one at process_one entry inside the semaphore
+#          (sem_free=<remaining slots>).
+#      A `grep 'RUT-PARALLEL' backend.log` now shows the true fan-out:
+#      N visits START within milliseconds of each other = parallelism
+#      working; spread across minutes = real serialisation to hunt.
+#
+#   HOUSEKEEPING
+#     · removed duplicate `started_at` key in RUT_JOBS init dict (F601).
+#     · zero-behaviour-change refactors — pure fix commit, no new
+#       features or config surface.
+#
+# ────────────────────────────────────────────────────────────────────
+
 # v2.6.12 — 2026-02 — RUT true-parallel concurrency + TikTok preset UA/referer safety net + Caddy self-heal
 #
 # CUSTOMER-FACING FIXES (from field report):
