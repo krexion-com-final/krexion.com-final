@@ -6694,6 +6694,38 @@ async def run_real_user_traffic_job(
         # the resolver short-circuits to legacy UA-derived Referer.
         referer_override_enabled = True
 
+    # ── 2026-02 v2.6.11 PRESET SAFETY NET ────────────────────────────
+    # Customer report: "TikTok in app browser select kia th … kisi pr
+    # browser chrome show hoa or reffer blank aya".
+    # Two failure modes existed:
+    #   1. `coerce_ua_for_platform` (in referrer_pro) can silently return
+    #      the UA unchanged for edge-case mobile UAs that don't match its
+    #      regexes exactly — so 1-2 visits out of 20 kept the raw Chrome
+    #      Mobile UA and the affiliate tracker recorded "Chrome" not
+    #      "TikTok WebView".
+    #   2. If `referer_value` was blank AND the operator picked a preset
+    #      that maps to a canonical platform URL, `_resolve_visit_referer`
+    #      could still return empty when the pro-mode branch failed and
+    #      the auto branch didn't have a UA-derivable referer for that
+    #      exact UA form.
+    #
+    # Safety net (only when a preset is active):
+    #   · Force `referer_match_ua_to_platform = True` so per-visit
+    #     coercion always runs (belt on top of the earlier line 6635).
+    #   · If the operator DID NOT supply a custom URL, hard-set
+    #     `referer_value` to the preset's canonical home URL AND
+    #     `referer_mode = "custom"` so every visit gets a non-blank
+    #     referer (either the operator's URL or the preset home).
+    #   · Force `referer_override_enabled = True` so the resolver's
+    #     custom-URL early-return branch always fires.
+    if _inapp_preset_key and _inapp_preset_key != "none":
+        _preset_home = _INAPP_PRESET_REFERER.get(_inapp_preset_key, "")
+        referer_match_ua_to_platform = True
+        referer_override_enabled = True
+        if not str(referer_value or "").strip() and _preset_home:
+            referer_value = _preset_home
+            referer_mode = "custom"
+
     # ── 2026-06: Build referrer-override cfg ONCE per job ─────────────
     # Closed-over by the inner `process_one` worker → `_resolve_visit_referer`
     # is called per visit with this exact dict. When `enabled=False` the
@@ -10762,11 +10794,33 @@ async def run_real_user_traffic_job(
         # When PacingEngine is on (`_pacing_offsets` populated), use its
         # per-index cumulative offset instead so visits don't arrive at
         # perfectly even intervals (real users have bursts + lulls).
+        #
+        # 2026-02 v2.6.11 CONCURRENCY FIX — When the operator sets
+        # concurrency > 1 AND delay_between > 0, previously each worker
+        # waited `i * delay_between` before acquiring the semaphore. With
+        # e.g. concurrency=5 + delay_between=30, worker#0 fired at t=0,
+        # worker#1 at t=30, worker#2 at t=60 … so visits appeared to run
+        # SEQUENTIALLY even though the semaphore was permitting 5 parallel
+        # slots. Customer report: "5 concurrency rakhi pr aik aik kr k
+        # visit pr kaam ho raha th".
+        #
+        # New behaviour when PacingEngine is OFF and delay_between > 0:
+        #     offset = (i // conc) * delay_between
+        # This staggers by BATCHES of size `conc` instead of individual
+        # visits — the first `conc` workers all fire at t=0 (true
+        # parallelism), the next batch at t=delay_between, and so on.
+        # Total job duration drops from N*delay to (N/conc)*delay, which
+        # matches the operator's expectation from the concurrency slider.
+        # PacingEngine mode is unchanged (log-normal jitter already
+        # produces parallelism-friendly offsets).
         _target_offset = 0.0
         if _pacing_offsets is not None and i < len(_pacing_offsets):
             _target_offset = float(_pacing_offsets[i])
         elif delay_between > 0:
-            _target_offset = float(i) * float(delay_between)
+            if conc > 1:
+                _target_offset = float(i // conc) * float(delay_between)
+            else:
+                _target_offset = float(i) * float(delay_between)
 
         if _target_offset > 0:
             target_t = state["start_time"] + _target_offset
