@@ -1,3 +1,82 @@
+# v2.6.12 — 2026-02 — RUT true-parallel concurrency + TikTok preset UA/referer safety net + Caddy self-heal
+#
+# CUSTOMER-FACING FIXES (from field report):
+#
+#   A) CONCURRENCY SLIDER NOW ACTUALLY RUNS IN PARALLEL
+#      Report: "5 Concurrency rakhi pr jab job chal rahi th to siraf
+#         aik aik kr k visit pr kam ho raha th jab k jitni Concurrency
+#         rakhi otni he chalni chahye"
+#      Root cause: worker(i)'s pre-semaphore wait was calculated as
+#         _target_offset = i * delay_between  → worker#0 fired t=0,
+#         worker#1 fired t=delay, worker#2 fired t=2*delay ... even
+#         though the semaphore permitted `conc` parallel slots. Result:
+#         SEQUENTIAL job behaviour regardless of the slider value.
+#      Fix: batch-based staggering when concurrency > 1:
+#         _target_offset = (i // conc) * delay_between
+#         First `conc` workers all fire at t=0 (true parallelism);
+#         next batch at t=delay_between; and so on. Total job duration
+#         drops from N*delay to (N/conc)*delay — exactly what the
+#         concurrency slider promises. PacingEngine path (log-normal
+#         jitter) unchanged. Concurrency=1 fallback preserved.
+#
+#   B) TIKTOK IN-APP PRESET NO LONGER LEAKS "CHROME" UA / BLANK REFERER
+#      Report: "kisi pr browser chrome show hoa or reffer blank aya
+#         jab k tiktok in app browser select kia th or reffer landing
+#         page diya th"
+#      Root cause: `coerce_ua_for_platform` (in referrer_pro) silently
+#         returns the UA unchanged for edge-case mobile UAs that don't
+#         exactly match its regexes. And the referer resolver could
+#         fall through to blank when pro-mode's branch didn't produce
+#         a URL for a specific UA form. Result: 1-2 visits in a batch
+#         of 20 recorded as "Chrome + no referer" on the affiliate.
+#      Safety net (only when an in-app preset is active):
+#         · Force referer_match_ua_to_platform = True (belt on top of
+#           the existing per-preset toggle)
+#         · Force referer_override_enabled = True
+#         · If operator DIDN'T supply a custom URL, hard-set
+#           referer_value to the preset's canonical home
+#           (tiktok.com / instagram.com etc.) + referer_mode='custom'.
+#           GUARANTEES every visit has a non-blank Referer header.
+#      Operator's own custom landing-page URL still wins when provided.
+#
+#   C) CADDY SELF-HEAL — Caddyfile NOW TRACKED IN GIT
+#      Report: "krexion.com chal ni rahi check krna kia issue hai"
+#      Root cause: v2.6.11 deploy's `rsync --delete /opt/krexion/`
+#         wiped /opt/krexion/Caddyfile (file wasn't in git). After
+#         the VPS rebooted, Docker auto-created an empty directory
+#         at the bind-mount source path → krexion-caddy container
+#         crashed with exit 127 → ports 80/443 refused connections.
+#      Fix: Caddyfile is now tracked in the repo root. Future deploys
+#         re-sync it correctly (rsync no longer treats it as untracked).
+#         New `.github/workflows/fix-caddy.yml` provides a one-click
+#         recovery path for the same failure mode in future.
+#
+#   D) DUPLICATE-IP OFFER-CLICK GUARANTEE STAYS INTACT (from v2.6.11)
+#      Fresh testing confirms: RUT engine hits the tracker exactly
+#      ONCE per visit — reachability probe uses domain-root only
+#      (no click record), ERR_ABORTED gate accepts any valid landed
+#      URL as success (no duplicate goto). Affiliate reports: 1 IP
+#      == 1 valid click, zero Error 21/23 spam.
+#
+# TECH DIFF SUMMARY:
+#   backend/real_user_traffic.py     +55 / -1   (concurrency + preset safety)
+#   Caddyfile                        NEW (2.5KB reverse proxy config)
+#   .github/workflows/fix-caddy.yml  NEW (VPS recovery workflow)
+#   .github/workflows/recover-services.yml  NEW (generic recovery)
+#   .github/workflows/recover-caddy.yml     NEW (caddy-specific diagnostic)
+#   backend/VERSION                  2.6.11 → 2.6.12
+#   electron-desktop/package.json    2.6.11 → 2.6.12
+#   desktop/__init__.py              2.6.11 → 2.6.12
+#
+# BACKWARD COMPAT: 100%.
+#   · Concurrency=1 jobs: identical behaviour to v2.6.11.
+#   · Jobs without an in-app preset: preset safety net is a pure no-op.
+#   · No API contract changes, no schema changes, no removed endpoints.
+#
+# VERIFIED: testing_agent_v3 iterations 1-4 (all PASS, 100% success).
+#
+# ─────────────────────────────────────────────────────────────────────
+
 # v2.6.11 — 2026-02 — Duplicate-IP click leak (RUT probe + ERR_ABORTED retry) + Feb-2026 UA refresh
 #
 # CUSTOMER-FACING FIXES (from click-report forensics + audit):
