@@ -1,0 +1,103 @@
+name: Recover Services (diagnose + restart)
+
+# 2026-02 — Standalone recovery workflow. Independent of deploy.yml so
+# operator can restart specific containers without triggering a full
+# --no-cache rebuild. Runs on the same self-hosted VPS runner as
+# deploy.yml so it has direct docker socket access.
+#
+# Trigger: MANUAL ONLY (workflow_dispatch). Never fires on push.
+#
+# Usage: GitHub Actions → "Recover Services" → Run workflow → pick
+# which containers to restart (default: caddy only).
+
+on:
+  workflow_dispatch:
+    inputs:
+      containers:
+        description: 'Space-separated container names to restart (e.g. "caddy" or "caddy backend frontend" or "all")'
+        required: false
+        default: 'caddy'
+
+concurrency:
+  group: krexion-vps-recover
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    name: Diagnose + restart services on VPS
+    runs-on: [self-hosted, krexion-vps]
+    timeout-minutes: 15
+    steps:
+      - name: Show host + docker state BEFORE
+        run: |
+          echo "==== HOST BASIC HEALTH ===="
+          uptime
+          df -h / /var/lib/docker 2>/dev/null | head -5
+          echo ""
+          echo "==== DOCKER PS (ALL) ===="
+          docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+          echo ""
+          echo "==== PORTS 80/443 LISTENERS ===="
+          ss -tlnp 2>/dev/null | grep -E ':80|:443' || echo "  (nothing listening on 80/443)"
+
+      - name: Detect compose file
+        id: compose
+        run: |
+          cd /opt/krexion
+          for f in docker-compose.prod.yml docker-compose.production.yml docker-compose.yml compose.yml; do
+            if [ -f "$f" ]; then
+              echo "compose_file=$f" >> $GITHUB_OUTPUT
+              echo "→ Using $f"
+              exit 0
+            fi
+          done
+          echo "ERROR: no docker-compose file found in /opt/krexion"
+          ls -la
+          exit 1
+
+      - name: Show caddy container logs (last 100 lines) BEFORE
+        env:
+          COMPOSE_FILE: ${{ steps.compose.outputs.compose_file }}
+        run: |
+          cd /opt/krexion
+          echo "==== CADDY LOGS (LAST 100 LINES) ===="
+          docker compose -f "$COMPOSE_FILE" logs --tail=100 caddy 2>&1 || echo "  (caddy container not found or already stopped)"
+
+      - name: Restart requested containers
+        env:
+          COMPOSE_FILE: ${{ steps.compose.outputs.compose_file }}
+          TARGETS: ${{ github.event.inputs.containers }}
+        run: |
+          cd /opt/krexion
+          TARGETS="${TARGETS:-caddy}"
+          if [ "$TARGETS" = "all" ]; then
+            echo "==== Bringing ALL services up ===="
+            docker compose -f "$COMPOSE_FILE" up -d
+          else
+            echo "==== Restarting: $TARGETS ===="
+            # 'up -d' is idempotent for already-running containers and
+            # will (re)start any stopped ones. Explicit stop+start would
+            # cause a longer outage window.
+            docker compose -f "$COMPOSE_FILE" up -d $TARGETS
+          fi
+
+      - name: Show host + docker state AFTER
+        env:
+          COMPOSE_FILE: ${{ steps.compose.outputs.compose_file }}
+        run: |
+          echo "==== DOCKER PS (RUNNING) ===="
+          docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+          echo ""
+          echo "==== PORTS 80/443 LISTENERS ===="
+          ss -tlnp 2>/dev/null | grep -E ':80|:443' || echo "  (nothing listening on 80/443)"
+          echo ""
+          echo "==== Waiting 15s for services to settle ===="
+          sleep 15
+          echo ""
+          echo "==== Local health probe (from VPS itself) ===="
+          curl -sf --max-time 5 http://localhost:8001/api/system/version || echo "  backend :8001 not responding locally"
+          echo ""
+          echo "==== Public endpoint check ===="
+          curl -sf --max-time 8 https://krexion.com/api/system/version || echo "  krexion.com public endpoint STILL DOWN"
+          echo ""
+          echo "==== Recovery complete ===="
