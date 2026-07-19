@@ -1,0 +1,70 @@
+# ─────────────────────────────────────────────────────────────────
+# Krexion Caddy config — 2026-02 restored after accidental deletion
+# ─────────────────────────────────────────────────────────────────
+# Mounted into the krexion-caddy container at /etc/caddy/Caddyfile.
+# Reverse-proxies public HTTPS to the internal docker services on the
+# krexion-net network (backend:8001, frontend:80).
+#
+# WHY THIS FILE LIVES IN THE REPO NOW:
+#   Previously the Caddyfile was managed manually on the VPS. During
+#   the v2.6.11 deploy, `rsync --delete` on the deploy step wiped it
+#   because it wasn't in the git repo. When the VPS rebooted, Docker
+#   auto-created an empty directory at that path, and Caddy crashed
+#   with exit 127 (mount source is a directory, dest is a file).
+#
+#   Keeping the Caddyfile in git means future deploys will re-sync
+#   the correct content and rsync won't wipe it again.
+
+{
+    email admin@krexion.com
+    # Never let a scanned bogus Host header (e.g. 62.146.238.50) match
+    # a real site block — return 308 to canonical HTTPS instead.
+    servers {
+        trusted_proxies static private_ranges
+    }
+}
+
+krexion.com, www.krexion.com {
+    encode gzip zstd
+
+    # Backend API — everything under /api/*
+    handle /api/* {
+        reverse_proxy backend:8001 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # WebSocket / SSE compatibility for backend live-visit streams
+    @backend_ws {
+        path /api/*/stream* /api/*/ws* /api/live-visits* /api/visual-recorder/*/ws*
+    }
+    handle @backend_ws {
+        reverse_proxy backend:8001 {
+            transport http {
+                versions 1.1 h2c
+            }
+        }
+    }
+
+    # Everything else → React frontend (nginx serves it on port 80)
+    handle {
+        reverse_proxy frontend:80 {
+            header_up Host {host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    log {
+        output stdout
+        format json
+        level INFO
+    }
+}
+
+# Catch-all for direct-IP scans and bogus Host headers — 308 to root
+:80, :443 {
+    redir https://krexion.com{uri} permanent
+}

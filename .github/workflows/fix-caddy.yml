@@ -1,0 +1,99 @@
+name: Fix Caddy (restore Caddyfile + restart)
+
+# 2026-02 v3 — Definitive fix. Root cause: /opt/krexion/Caddyfile was
+# deleted by rsync --delete during v2.6.11 deploy (file wasn't in the
+# repo). VPS then rebooted and Docker auto-created an empty DIRECTORY
+# at that path. Caddy container crashed with exit 127 because it tries
+# to bind-mount a file, not a directory.
+#
+# This workflow:
+#   1. Removes the wrongly-created directory /opt/krexion/Caddyfile
+#   2. Copies the actual Caddyfile (now in repo) from workspace
+#      to /opt/krexion/Caddyfile
+#   3. Ensures caddy container is on the krexion-net network so it
+#      can reach backend:8001 and frontend:80
+#   4. docker start krexion-caddy
+#   5. Verifies public endpoint
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: krexion-vps-fix-caddy
+  cancel-in-progress: false
+
+jobs:
+  fix-caddy:
+    name: Restore Caddyfile + start krexion-caddy
+    runs-on: [self-hosted, krexion-vps]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Inspect current /opt/krexion/Caddyfile state
+        run: |
+          echo "==== BEFORE ===="
+          ls -la /opt/krexion/Caddyfile 2>&1 || echo "  (not present)"
+          echo ""
+          if [ -d /opt/krexion/Caddyfile ]; then
+            echo "  → It's a DIRECTORY (Docker auto-created). Will delete."
+            ls -la /opt/krexion/Caddyfile
+          elif [ -f /opt/krexion/Caddyfile ]; then
+            echo "  → It's a FILE. Backing up to /opt/krexion/Caddyfile.pre-fix.$(date +%s)"
+            cp /opt/krexion/Caddyfile /opt/krexion/Caddyfile.pre-fix.$(date +%s)
+          fi
+
+      - name: Remove wrongly-created directory (if any) + restore file
+        run: |
+          if [ -d /opt/krexion/Caddyfile ]; then
+            rm -rf /opt/krexion/Caddyfile
+            echo "  removed dir /opt/krexion/Caddyfile"
+          fi
+          # Copy fresh Caddyfile from repo workspace to /opt/krexion/
+          cp Caddyfile /opt/krexion/Caddyfile
+          chmod 644 /opt/krexion/Caddyfile
+          echo "==== AFTER ===="
+          ls -la /opt/krexion/Caddyfile
+          echo ""
+          echo "==== First 30 lines of the restored Caddyfile ===="
+          head -30 /opt/krexion/Caddyfile
+
+      - name: Ensure caddy is on krexion-net (idempotent)
+        run: |
+          echo "==== Attach caddy to krexion-net (if not already) ===="
+          docker network connect krexion-net krexion-caddy 2>&1 || echo "  (already attached or attach ignored)"
+
+      - name: Start krexion-caddy
+        run: |
+          echo "==== docker start krexion-caddy ===="
+          docker start krexion-caddy 2>&1 || echo "  start returned non-zero"
+          sleep 8
+          echo ""
+          echo "==== Post-start docker ps ===="
+          docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep -i caddy
+          echo ""
+          echo "==== Post-start caddy logs (last 60) ===="
+          docker logs --tail=60 krexion-caddy 2>&1
+
+      - name: Verify port + public endpoint
+        run: |
+          echo "==== ss listeners on 80/443 ===="
+          ss -tlnp 2>/dev/null | grep -E ':80|:443' || echo "  (nothing listening)"
+          echo ""
+          echo "==== Public endpoint probe ===="
+          for i in 1 2 3 4 5 6; do
+            RESP=$(curl -sf --max-time 8 https://krexion.com/api/system/version 2>&1)
+            if [ -n "$RESP" ]; then
+              echo "  ✅ try $i: $RESP"
+              exit 0
+            fi
+            echo "  ...try $i: still down"
+            sleep 5
+          done
+          echo ""
+          echo "==== Extra info on failure ===="
+          docker logs --tail=30 krexion-caddy 2>&1
+          echo ""
+          echo "  ⚠ public endpoint STILL not responding"
+          exit 1
