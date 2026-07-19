@@ -1,0 +1,110 @@
+name: Recover Caddy (direct docker start + diagnose)
+
+# 2026-02 — Second-attempt recovery. First `recover-services.yml`
+# discovered that `krexion-caddy` is a MANUALLY-managed container
+# (not present in repo docker-compose.yml services) that crashed
+# with exit code 127 after a VPS reboot ~5h before we ran diagnostics.
+#
+# This workflow bypasses docker compose (which returned "no such
+# service: caddy") and works directly with the container via
+# `docker start` + `docker logs`, plus surfaces the Caddyfile
+# configuration so operator can see WHY exit 127 happened.
+#
+# Trigger: MANUAL ONLY. Additive — no existing files touched.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: krexion-vps-recover-caddy
+  cancel-in-progress: false
+
+jobs:
+  recover-caddy:
+    name: Diagnose exit-127 + docker start krexion-caddy
+    runs-on: [self-hosted, krexion-vps]
+    timeout-minutes: 10
+    steps:
+      - name: Container state
+        run: |
+          echo "==== docker ps -a | grep caddy ===="
+          docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' | grep -i caddy || echo "  (no caddy container)"
+
+      - name: Container inspect (config + mounts)
+        run: |
+          echo "==== docker inspect krexion-caddy ===="
+          docker inspect krexion-caddy 2>/dev/null \
+            | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)[0]
+    cfg = d.get('Config', {})
+    hcfg = d.get('HostConfig', {})
+    state = d.get('State', {})
+    print('State :', state.get('Status'), '| ExitCode:', state.get('ExitCode'), '| Error:', state.get('Error'))
+    print('Image :', cfg.get('Image'))
+    print('Cmd   :', cfg.get('Cmd'))
+    print('Entrypoint:', cfg.get('Entrypoint'))
+    print('WorkingDir:', cfg.get('WorkingDir'))
+    print('Env   :')
+    for e in cfg.get('Env', []): print('  ', e)
+    print('Mounts:')
+    for m in d.get('Mounts', []): print(f\"   {m.get('Type')} {m.get('Source')} -> {m.get('Destination')} (rw={m.get('RW')})\")
+    print('Ports (HostConfig.PortBindings):')
+    for p, b in (hcfg.get('PortBindings') or {}).items(): print(f'   {p} -> {b}')
+    print('RestartPolicy:', hcfg.get('RestartPolicy'))
+    print('NetworkMode  :', hcfg.get('NetworkMode'))
+except Exception as e:
+    print('inspect parse error:', e)
+"
+
+      - name: Container logs (last 300 lines)
+        run: |
+          echo "==== docker logs krexion-caddy --tail=300 ===="
+          docker logs --tail=300 krexion-caddy 2>&1 || echo "  (no logs)"
+
+      - name: Find Caddyfile on host
+        run: |
+          echo "==== Searching for Caddyfile / caddy config on host ===="
+          for p in /etc/caddy /opt/caddy /opt/krexion/caddy /opt/krexion/deployment /opt/krexion/nginx /root/caddy; do
+            if [ -e "$p" ]; then
+              echo "-- $p --"
+              ls -la "$p" 2>&1 | head -20
+            fi
+          done
+          find /opt -maxdepth 5 -iname "Caddyfile*" 2>/dev/null | head -10
+          find /etc -maxdepth 3 -iname "Caddyfile*" 2>/dev/null | head -10
+
+      - name: Try docker start krexion-caddy
+        run: |
+          echo "==== docker start krexion-caddy ===="
+          if docker start krexion-caddy 2>&1; then
+            echo "  ✅ start command accepted"
+          else
+            echo "  ❌ start failed"
+          fi
+          sleep 5
+          echo ""
+          echo "==== Post-start status ===="
+          docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep -i caddy
+          echo ""
+          echo "==== Post-start logs (last 100) ===="
+          docker logs --tail=100 krexion-caddy 2>&1 | head -100
+
+      - name: Port + endpoint verification
+        run: |
+          echo "==== ss listeners on 80/443 ===="
+          ss -tlnp 2>/dev/null | grep -E ':80|:443' || echo "  (nothing listening)"
+          echo ""
+          echo "==== Public endpoint check ===="
+          for i in 1 2 3 4; do
+            if curl -sf --max-time 8 https://krexion.com/api/system/version; then
+              echo ""
+              echo "  ✅ public endpoint UP on try $i"
+              exit 0
+            fi
+            echo "  ...retry $i"
+            sleep 4
+          done
+          echo ""
+          echo "  ⚠ public endpoint still not responding — investigate logs above"
