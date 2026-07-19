@@ -2867,10 +2867,34 @@ async def _stuck_watchdog(page, job_id: str, visit_index: int,
 
 
 
-def _make_macro_guard(job_id: str, visit_index: int):
+def _make_macro_guard(job_id: str, visit_index: int, force_referer: str = "", target_url: str = ""):
     """Return a Playwright route handler closure bound to this visit's
     `(job_id, visit_index)` so the macro-leak telemetry record contains
-    the right context. Returned handler is `async def`."""
+    the right context. Returned handler is `async def`.
+
+    2026-02 v2.6.13 — `force_referer` support:
+        When a custom Referer URL is configured for the job (Custom URL
+        mode + optional preset), Chromium's default referrer-policy
+        strips the Referer to just the origin on cross-origin redirects
+        (tracker → offer). This surfaced as the customer report where
+        13/17 clicks arrived at the affiliate with an EMPTY Referer
+        column even though "Custom URL (same for every visit)" +
+        `https://getstimulus.ai/` were configured.
+
+        Setting `force_referer` makes this handler unconditionally inject
+        the configured Referer header on EVERY top-level document
+        navigation for THIS visit — the initial tracker request AND
+        every redirect follow-up. This survives `Referrer-Policy:
+        no-referrer` responses from intermediate hops, giving the
+        affiliate a consistent Referer column across all visits.
+
+        `target_url` is stored for future use (e.g. skipping the force
+        on requests to origins we don't own); currently we force on
+        every document navigation because it's the safest default —
+        real browsers DO carry the last-known Referer through their
+        entire redirect chain when their referrer-policy is
+        `unsafe-url` (many social platforms explicitly set this).
+    """
     async def _handler(route, request):
         try:
             url = request.url or ""
@@ -2903,6 +2927,36 @@ def _make_macro_guard(job_id: str, visit_index: int):
                     except Exception:
                         pass
                 return
+
+            # 2026-02 v2.6.13 — Referer force-injection for document
+            # navigations. Only applies when `force_referer` was set for
+            # this visit AND the request is a top-level navigation
+            # (main_frame document). Sub-resource requests (images, JS,
+            # XHR, etc.) inherit the page-level Referer automatically
+            # via Chromium's own referrer-policy engine, so we don't
+            # need to touch them.
+            if force_referer:
+                try:
+                    rtype = (request.resource_type or "").lower()
+                except Exception:
+                    rtype = ""
+                if rtype == "document":
+                    try:
+                        _hdrs = dict(request.headers or {})
+                        # Playwright normalises header keys to lower-case.
+                        # Set both `referer` (Chromium expects lower-case
+                        # per HTTP/2 spec) and remove any conflicting
+                        # capitalised variant that might have been added.
+                        _hdrs.pop("Referer", None)
+                        _hdrs["referer"] = force_referer
+                        await route.continue_(headers=_hdrs)
+                        return
+                    except Exception:
+                        # Any failure here MUST fall back to the default
+                        # continue below — never break a visit because
+                        # of referer-injection edge cases.
+                        pass
+
             await route.continue_()
         except Exception:
             try:
@@ -6901,7 +6955,6 @@ async def run_real_user_traffic_job(
         "skipped_dead_proxy": 0,
         "invalid_data": 0,
         "failed": 0,
-        "started_at": datetime.now(timezone.utc).isoformat(),
         "events": [],
         "form_fill_enabled": form_fill_enabled,
         "state_match_enabled": state_match_enabled,
@@ -8734,7 +8787,13 @@ async def run_real_user_traffic_job(
                 _v230_r = await _v230_apply(context, ua=ua, viewport=fp.get("viewport") or {"width": 1920, "height": 1080}, platform=_kx_platform or "")
                 _v_hdrs = _v230_r.get("headers") or {}
                 if _v_hdrs:
-                    _cur = dict(ctx_args.get("extra_http_headers") or {})
+                    # 2026-02 v2.6.13 fix — `ctx_args` was never defined in
+                    # this scope (F821 NameError swallowed by bare except).
+                    # The intended source is the `_ctx_headers` dict we
+                    # already built for browser.new_context(). Merging
+                    # v230's Sec-Fetch/CH-UA extras on top preserves the
+                    # Referer + Accept-Language we set earlier.
+                    _cur = dict(_ctx_headers or {})
                     _cur.update(_v_hdrs)
                     await context.set_extra_http_headers(_cur)
             except Exception:
@@ -8753,7 +8812,18 @@ async def run_real_user_traffic_job(
             # legitimate flow page so the form-fill steps can run.
             await context.route(
                 "**/*",
-                _make_macro_guard(job_id, i + 1),
+                _make_macro_guard(
+                    job_id, i + 1,
+                    # 2026-02 v2.6.13 — force Referer through the entire
+                    # tracker → offer redirect chain when the operator
+                    # explicitly configured a Custom Referrer URL. Fixes
+                    # the "13/17 empty referer" report by making the
+                    # affiliate always see the configured URL (e.g.
+                    # https://getstimulus.ai/) regardless of the
+                    # tracker's Referrer-Policy header.
+                    force_referer=(_ua_referer or "") if bool(_referer_cfg.get("enabled")) else "",
+                    target_url=_visit_target_url or "",
+                ),
             )
 
             if True:
@@ -10163,6 +10233,7 @@ async def run_real_user_traffic_job(
                                 pre_submit_cb=_pre_submit_cb,
                                 job_id=job_id,           # 2026-06: manual takeover pause hook (heuristic path)
                                 visit_idx=i + 1,         # 2026-06: manual takeover pause hook (heuristic path)
+                                fp=fp,                   # 2026-02 v2.6.13: fingerprint for lead-validation + CTIT (F821 fix)
                             )
                             if _pre_submit_shots:
                                 entry["pre_submit_screenshots"] = _pre_submit_shots
@@ -10842,6 +10913,19 @@ async def run_real_user_traffic_job(
             # run to completion regardless of target_drain_event.
             if cancel_event.is_set() or target_drain_event.is_set():
                 return
+            # 2026-02 v2.6.13 — CONCURRENCY OBSERVABILITY
+            # Log the moment this visit's process_one loop starts, so a
+            # `grep RUT-PARALLEL` shows N visits entering process_one at
+            # near-identical timestamps when concurrency is working.
+            # Customer reports of "aik aik kr k chal rahi" can be
+            # verified/refuted from these entries alone.
+            try:
+                logger.info(
+                    f"[RUT-PARALLEL job={job_id}] visit#{i + 1} process_one START "
+                    f"(sem_free={semaphore._value})"
+                )
+            except Exception:
+                pass
             # ── 2026-05 — Offer-block retry loop ─────────────────────
             # When ProxyJet on-demand mode is on, process_one() may
             # raise _OfferBlockRetryNeeded if the offer rejects the
@@ -11123,6 +11207,13 @@ async def run_real_user_traffic_job(
             # delay-between-visits behaviour is preserved.
             in_flight: set = set()
             attempt_counter = 0
+            # 2026-02 v2.6.13 — CONCURRENCY OBSERVABILITY
+            # Track wall-clock dispatch times so the customer's
+            # "aik aik kr k chal rahi" report can be verified from
+            # supervisor logs. Every worker enter/exit gets stamped so
+            # a `grep RUT-PARALLEL` on the backend log shows the true
+            # dispatch fan-out.
+            _dispatch_t0 = time.time()
             try:
                 while True:
                     if cancel_event.is_set() or target_drain_event.is_set():
@@ -11141,6 +11232,10 @@ async def run_real_user_traffic_job(
                         in_flight.add(t)
                         t.add_done_callback(in_flight.discard)
                         _register_visit_task(attempt_counter, t)
+                        logger.info(
+                            f"[RUT-PARALLEL job={job_id}] visit#{attempt_counter + 1} dispatched "
+                            f"at t+{time.time() - _dispatch_t0:.2f}s · in_flight={len(in_flight)}/{conc}"
+                        )
                         attempt_counter += 1
                     if not in_flight:
                         await asyncio.sleep(0.2)
@@ -15406,6 +15501,7 @@ async def _multi_step_fill(
     pre_submit_cb: Optional[Callable[[str], Awaitable[None]]] = None,
     job_id: Optional[str] = None,        # 2026-06 — manual takeover pause hook
     visit_idx: Optional[int] = None,     # 2026-06 — manual takeover pause hook
+    fp: Optional[Dict[str, Any]] = None, # 2026-02 v2.6.13 — fingerprint for lead-validation / CTIT helpers (F821 fix)
 ) -> Dict[str, Any]:
     """
     The pre_submit_cb (if provided) is invoked RIGHT BEFORE each attempt
@@ -15556,7 +15652,8 @@ async def _multi_step_fill(
         # focus/keydown/keyup/input/blur chain ever fired. Pure-additive
         # — runs only when the helper is importable, safe-failed inside.
         try:
-            await _emit_lead_validation_interactions(page, fp)
+            if fp is not None:
+                await _emit_lead_validation_interactions(page, fp)
         except Exception:
             pass
         # 2026-01 Phase 4 (re-wire): pre-submit dwell — adds a realistic
@@ -15565,7 +15662,8 @@ async def _multi_step_fill(
         # final step only so multi-step survey funnels don't accumulate
         # extra latency on intermediate pages.
         try:
-            await _human_pre_submit_dwell(page, fp)
+            if fp is not None:
+                await _human_pre_submit_dwell(page, fp)
         except Exception:
             pass
         # 2026-01 Phase 4b: Mobile CTIT delay — env-gated opt-in. Adds
@@ -15574,9 +15672,10 @@ async def _multi_step_fill(
         # see a natural distribution. Default OFF (env var must be
         # explicitly set), so existing customer flows are unchanged.
         try:
-            _ctit = await _apply_mobile_ctit_delay(fp)
-            if _ctit > 0:
-                logger.debug(f"[CTIT] Applied mobile install-time delay: {_ctit}s")
+            if fp is not None:
+                _ctit = await _apply_mobile_ctit_delay(fp)
+                if _ctit > 0:
+                    logger.debug(f"[CTIT] Applied mobile install-time delay: {_ctit}s")
         except Exception:
             pass
         await _click_submit(page)
