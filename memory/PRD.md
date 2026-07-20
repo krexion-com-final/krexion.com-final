@@ -1,5 +1,5 @@
 # Krexion — PRD (Product Requirements Document)
-_Last updated: 2026-02-20 · Session v2.6.16_
+_Last updated: 2026-02-20 · Session v2.6.17_
 
 ## Original Problem Statement
 Customer runs a self-hosted RUT (Real-User-Traffic) SaaS. Repo:
@@ -13,7 +13,15 @@ save-to-github done via Emergent's platform button.
 - **v2.6.4** (unpushed staging): ERR_ABORTED false-failure guard + desktop-UA-to-mobile swap for in-app platforms + blank-referer safety net.
 - **v2.6.5**: In-App Browser Preset now preserves operator's Custom Referrer URL — TikTok/FB/IG etc. preset only overrides referer when operator hasn't picked one. Fixes real ad-flow simulation.
 - **v2.6.15**: Duplicate-IP fix ATTEMPT #1 — disabled the SECOND pre-browser probe (`_probe_offer_duplicate_via_proxy`). Insufficient — still 100% failure on samsclub01.
-- **v2.6.16** (current): Duplicate-IP DEFINITIVE fix — skip the FIRST pre-flight reachability probe (`_probe_proxy_target_reachable`) for tracker targets. Root cause was that this probe issued an httpx HEAD/GET to the resolved offer's domain root via the SAME exit IP the browser would use ~1-3s later. Strict trackers (Traxun, Voluum, RedTrack, Binom, ClickFlare) indexed the IP on this HEAD and served HTTP 403 "Duplicate IP" when the browser goto arrived. Fix skips probe for tracker targets (uses `_url_host_matches_bypass()` — matches parent domains too); browser goto is now the SOLE HTTP touch. Non-tracker direct URLs still probed. Regression tests at `backend/tests/test_duplicate_ip_v2_6_16_fix.py`.
+- **v2.6.16**: Duplicate-IP DEFINITIVE probe-elimination — skipped the FIRST pre-flight `_probe_proxy_target_reachable` for tracker targets. Live Activity confirmed the fix was active, but jobs still failed with `skipped_duplicate_ip` on every visit — deep dive uncovered THREE additional root causes.
+- **v2.6.17** (current): COMPREHENSIVE duplicate-IP fix pack addressing all remaining root causes:
+  1. **Per-offer scoping** in `rut_burnt_ips` loader — burns on offer A no longer block offers B/C/D.
+  2. **Removed `"access denied"`** from `_VPN_BLOCK_PAGE_PHRASES` + added HTTP-status gate (2xx + body>20KB skips phrase matching) — kills false-positive VPN burns on legit 200-OK pages.
+  3. **TLS prewarm guard** — force-off for tracker targets so curl_cffi doesn't double-hit the offer via same exit IP.
+  4. **TTL auto-expire** on `rut_burnt_ips` (60 days default, env-overridable via `RUT_BURNT_IP_TTL_DAYS`) + compound indexes on `(user_ids, offer_urls)`.
+  5. **Admin cleanup endpoints** — `GET /api/admin/rut-burnt-ips/stats`, `POST /preview`, `POST /purge` with filter-required guards.
+  6. **Admin UI** — new `<BurntIPCleanupSection/>` in `/admin/system-maintenance`: stats card, filter inputs (offer URL contains, reason dropdown, burnt-before date), preview→confirm→delete flow.
+  9 pytest regression tests (all pass), full VERSION_NOTES.txt changelog with customer runbook.
 
 ## Post-v2.6.5 Collaborator Releases (I've read these)
 - v2.6.7: Baseline referrer system doc (`memory/REFERRER_SYSTEM_DOCUMENTATION.md`)
@@ -62,8 +70,14 @@ MVP scope (~1 week):
 - P1: Share Preset feature; Referer Verifier module; Custom platform definition; Auto-update pool refresh
 - P2: Iframe-inheritance mode; A/B testable presets; Full 3-hop redirect chain
 
-## Deployment Status (v2.6.16 — this session)
-- Pushed to origin/main: commit 47b30ea
+## Deployment Status (v2.6.17 — this session)
+- Pushed to origin/main: commit 8b2ac03
 - Workflows triggered (all 3): Deploy VPS + Electron desktop + Native Windows
 - Expected completion: 25-40 min from push
-- Customer will verify by rerunning samsclub01 campaign — visits should land HTTP 200/302 with no `skipped_duplicate_ip` rows in Recent Visits table. Live Activity should now show "Tracker target detected (krexion.com) — skipping pre-flight reachability probe to avoid duplicate-IP burn" instead of "Offer reachable via proxy (TLS 200)" before each browser open.
+- Customer will validate by:
+  1. Log in as admin → System Maintenance → Burnt-IP Blocklist Cleanup
+  2. Offer URL contains: "samsclub01", Burnt before: pre-deploy ISO date
+  3. Preview → Delete N rows
+  4. Rerun samsclub01 RUT job
+  5. Live Activity should show `Loaded blocklist (0-few IPs — scoped to this offer)` and every visit should get a truly unique IP with no `skipped_duplicate_ip` rows.
+- If Traxun still returns 403 on fresh IPs → that's the external fraud detection (DataImpulse pool blacklisted by Traxun); customer will switch provider or use sticky sessions.
