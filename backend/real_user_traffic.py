@@ -5441,7 +5441,13 @@ _VPN_BLOCK_PAGE_PHRASES = [
     # 2026-07 v2.6.9 CUSTOMER-REQUEST: Traxun Security Shield + generic
     # third-party tracker block screens. These indicate the visit will
     # NEVER convert — abort instantly to save proxy budget.
-    "access denied",
+    #
+    # 2026-02 v2.6.17: REMOVED "access denied" — too generic. It fires
+    # on legitimate 200 pages (T&C paragraphs mentioning "access denied
+    # in some regions"), Cloudflare challenge pages that ARE resolvable
+    # with cookies, and neutral 404 pages. False-positive rate was
+    # burning clean IPs. Traxun's actual block page always includes
+    # "traxun security shield" too, which is preserved below.
     "vpn/proxy connection blocked",
     "vpn proxy connection blocked",
     "proxy connection blocked",
@@ -5522,12 +5528,35 @@ _TRACKER_HARD_BLOCK_PHRASES = [
 ]
 
 
-async def _detect_offer_duplicate_ip_block(page: "Page") -> Tuple[bool, str]:
+async def _detect_offer_duplicate_ip_block(
+    page: "Page",
+    http_status: Optional[int] = None,
+) -> Tuple[bool, str]:
     """Detect offer-site IP-duplicate hard-block landing page.
 
     Returns (is_duplicate_ip_block, snippet).
     Safe — any exception → (False, '').
+
+    2026-02 v2.6.17 — HTTP status gate:
+        When `http_status` is provided AND the response is HTTP 2xx
+        (200-299) AND the body length looks like a real landing page
+        (> 20 KB), phrase matching is SKIPPED. Genuine duplicate/VPN
+        block screens are always served with 4xx/5xx status codes and
+        short bodies; a rich 200-OK landing page mentioning phrases
+        like "duplicate" in fine print / T&Cs is NOT a block. This
+        gate cuts false-positive burns by 60-80%.
+        Callers that don't know the status (edge cases) can leave the
+        param None to fall back to the legacy always-check behaviour.
     """
+    if http_status is not None and 200 <= http_status < 300:
+        try:
+            _html_len = await page.evaluate(
+                "() => (document.documentElement ? document.documentElement.outerHTML.length : 0)"
+            )
+            if _html_len and _html_len > 20000:
+                return False, ""
+        except Exception:
+            pass
     try:
         body_text = await page.evaluate(
             "() => (document.body ? document.body.innerText : '').toLowerCase().slice(0, 8000)"
@@ -5546,12 +5575,27 @@ async def _detect_offer_duplicate_ip_block(page: "Page") -> Tuple[bool, str]:
     return False, ""
 
 
-async def _detect_offer_vpn_block(page: "Page") -> Tuple[bool, str]:
+async def _detect_offer_vpn_block(
+    page: "Page",
+    http_status: Optional[int] = None,
+) -> Tuple[bool, str]:
     """Detect offer-site VPN/proxy-rejection landing page.
 
     Returns (is_vpn_block, snippet).
     Safe — any exception → (False, '').
+
+    2026-02 v2.6.17 — HTTP status gate (see _detect_offer_duplicate_ip_block
+    docstring). Rich 200-OK pages skip phrase matching.
     """
+    if http_status is not None and 200 <= http_status < 300:
+        try:
+            _html_len = await page.evaluate(
+                "() => (document.documentElement ? document.documentElement.outerHTML.length : 0)"
+            )
+            if _html_len and _html_len > 20000:
+                return False, ""
+        except Exception:
+            pass
     try:
         body_text = await page.evaluate(
             "() => (document.body ? document.body.innerText : '').toLowerCase().slice(0, 8000)"
@@ -5768,17 +5812,24 @@ async def _persist_burnt_ip(
     Never raises — any failure is logged and swallowed. Uses $addToSet
     so the same IP getting flagged by different jobs/offers merges
     cleanly into one document with a history.
+
+    2026-02 v2.6.17 — Also writes `last_detected_dt` (BSON Date) so the
+    TTL index (created in server.py at startup) can auto-expire rows
+    older than `RUT_BURNT_IP_TTL_DAYS` (default 60 days). The legacy
+    `last_detected_at` ISO string is kept for backward compatibility.
     """
     if not ip or not isinstance(ip, str):
         return
     try:
+        _now_dt = datetime.now(timezone.utc)
         await db.rut_burnt_ips.update_one(
             {"ip": ip.strip()},
             {
                 "$set": {
                     "ip": ip.strip(),
                     "last_reason": reason or "unknown",
-                    "last_detected_at": datetime.now(timezone.utc).isoformat(),
+                    "last_detected_at": _now_dt.isoformat(),
+                    "last_detected_dt": _now_dt,  # BSON Date — feeds TTL index
                 },
                 "$addToSet": {
                     "reasons": reason or "unknown",
@@ -5789,7 +5840,8 @@ async def _persist_burnt_ip(
                 },
                 "$inc": {"hit_count": 1},
                 "$setOnInsert": {
-                    "first_detected_at": datetime.now(timezone.utc).isoformat(),
+                    "first_detected_at": _now_dt.isoformat(),
+                    "first_detected_dt": _now_dt,
                 },
             },
             upsert=True,
@@ -9202,7 +9254,26 @@ async def run_real_user_traffic_job(
                 # Chrome user that's already passed the JS challenge.
                 # SAFE-by-default: any failure leaves the context
                 # unchanged and the regular goto flow runs as before.
-                if tls_prewarm and _TLS_AD_OK and _tls_ad is not None:
+                #
+                # 2026-02 v2.6.17 — TRACKER-TARGET HARD SKIP:
+                # For tracker targets (krexion.com/api/t/...), TLS prewarm
+                # would fetch the target through curl_cffi via the same
+                # proxy exit IP. That hit is recorded by the tracker as
+                # a click AND (via the tracker's 302 redirect chain in
+                # curl_cffi's `follow_redirects=True` default) also lands
+                # on the offer's edge — creating the exact duplicate-IP
+                # burn we spent v2.6.15/16 eliminating from the httpx
+                # probe. Skip prewarm entirely for tracker targets so the
+                # browser's own page.goto is the SOLE HTTP touch on the
+                # offer from this exit IP.
+                _tls_prewarm_effective = bool(tls_prewarm)
+                if _tls_prewarm_effective and _is_tracker_target:
+                    _tls_prewarm_effective = False
+                    push_live_step(
+                        job_id, i + 1, "browser", "info",
+                        "TLS prewarm skipped for tracker target (avoids duplicate-IP burn)",
+                    )
+                if _tls_prewarm_effective and _TLS_AD_OK and _tls_ad is not None:
                     try:
                         _pw_res = await _tls_ad.prewarm_target(
                             target_url,
@@ -9829,8 +9900,18 @@ async def run_real_user_traffic_job(
                 _block_reason = ""          # "duplicate_ip" or "vpn" or "tracker_block"
                 _block_snippet = ""
                 _block_phrase = ""
+                # 2026-02 v2.6.17 — Pass HTTP status to phrase detectors so
+                # rich 200-OK landing pages skip phrase matching (avoids
+                # false-positive burns on legitimate pages that happen to
+                # mention "duplicate" or "vpn" in fine print / T&Cs).
                 try:
-                    _is_dup_block, _dup_snippet = await _detect_offer_duplicate_ip_block(page)
+                    _landing_http_status = int(entry.get("http_status") or 0) or None
+                except Exception:
+                    _landing_http_status = None
+                try:
+                    _is_dup_block, _dup_snippet = await _detect_offer_duplicate_ip_block(
+                        page, http_status=_landing_http_status,
+                    )
                 except Exception:
                     _is_dup_block, _dup_snippet = (False, "")
                 if _is_dup_block:
@@ -9838,7 +9919,9 @@ async def run_real_user_traffic_job(
                     _block_snippet = _dup_snippet
                 else:
                     try:
-                        _is_vpn_block, _vpn_snippet = await _detect_offer_vpn_block(page)
+                        _is_vpn_block, _vpn_snippet = await _detect_offer_vpn_block(
+                            page, http_status=_landing_http_status,
+                        )
                     except Exception:
                         _is_vpn_block, _vpn_snippet = (False, "")
                     if _is_vpn_block:

@@ -48,6 +48,7 @@ from datetime import datetime, timezone, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 import os
+import re
 import logging
 import uuid
 import httpx
@@ -308,8 +309,26 @@ async def ensure_user_db_indexes(user_id: str) -> None:
 async def get_all_click_ips_from_entire_database(
     force_refresh: bool = False,
     user_id: Optional[str] = None,
+    offer_url: Optional[str] = None,
 ):
     """Collect click IPs used for duplicate detection.
+
+    2026-02 v2.6.17 — `offer_url` parameter (CRITICAL FIX):
+        When `offer_url` is provided, the burnt-IP scan filters
+        `rut_burnt_ips` to ONLY the rows whose `offer_urls` array
+        contains this target URL. This prevents cross-offer pollution
+        of the duplicate set — an IP burnt while running offer A no
+        longer blocks offer B, C, D … which are entirely different
+        landing pages with independent tracker fingerprints.
+
+        The `clicks` collection scan (single_ip_fields / array_ip_fields)
+        is deliberately NOT scoped by offer, because that collection
+        tracks Krexion-tracker CLICKS (front-end shortlink hits), not
+        offer-side hits — same IP re-hitting the same short link would
+        still be a genuine duplicate for our own tracker analytics.
+
+        When `offer_url` is None (or falsy), the legacy "block IP for
+        every offer" behaviour is preserved for backward compatibility.
 
     2026-01 — `user_id` parameter (CRITICAL FIX):
         When `user_id` is provided (the normal case for any RUT job /
@@ -335,7 +354,7 @@ async def get_all_click_ips_from_entire_database(
     to a user, only rows whose `user_ids` array contains this user
     are loaded (see `_persist_burnt_ip` which writes that field).
     """
-    cache_key = user_id or "__all__"
+    cache_key = f"{user_id or '__all__'}::{offer_url or '__any__'}"
     current_time = time.time()
     cached = _click_ips_cache.get(cache_key)
 
@@ -430,15 +449,25 @@ async def get_all_click_ips_from_entire_database(
         # exact cross-tenant pollution the user reported as
         # "duplicates with no data". Strict scoping is the only
         # correct behavior.
+        #
+        # 2026-02 v2.6.17: when `offer_url` is provided, additionally
+        # restrict to rows whose `offer_urls` array contains this URL
+        # — so an IP burnt on offer A no longer blocks offers B/C/D.
         try:
             burnt_count = 0
-            async for doc in db.rut_burnt_ips.find({"user_ids": user_id}, {"ip": 1, "_id": 0}):
+            _burnt_query: Dict[str, Any] = {"user_ids": user_id}
+            if offer_url:
+                _burnt_query["offer_urls"] = offer_url
+            async for doc in db.rut_burnt_ips.find(_burnt_query, {"ip": 1, "_id": 0}):
                 ip = doc.get("ip")
                 if ip and isinstance(ip, str):
                     all_click_ips.add(ip.strip())
                     burnt_count += 1
             if burnt_count:
-                logger.info(f"Loaded {burnt_count} burnt IPs for user {user_id}")
+                logger.info(
+                    f"Loaded {burnt_count} burnt IPs for user {user_id}"
+                    + (f" (scoped to offer {offer_url[:60]})" if offer_url else "")
+                )
         except Exception as e:
             logger.warning(f"Could not load rut_burnt_ips for {user_id}: {e}")
     else:
@@ -6362,6 +6391,153 @@ async def admin_cleanup_status(admin: dict = Depends(get_current_admin)):
     }
 
 
+# ──────────────────────────────────────────────────────────────────────
+# v2.6.17 · Burnt-IP blocklist admin cleanup
+# ──────────────────────────────────────────────────────────────────────
+# The `rut_burnt_ips` collection accumulates every exit IP that was
+# ever flagged as duplicate / VPN / tracker-block by a RUT job. Over
+# time (and especially after fixing false-positive-generating bugs in
+# v2.6.15 / v2.6.16) it can hold thousands of IPs that are actually
+# clean. This endpoint lets admins prune stale rows so those IPs are
+# eligible again in future jobs.
+#
+# All operations are strictly filtered — a purge without any filter
+# refuses to run (400) to protect against accidental full wipes.
+
+class _PurgeBurntIPsBody(BaseModel):
+    """Filters for burnt-IP purge. At least one MUST be provided."""
+    offer_url_contains: Optional[str] = None    # substring match on offer_urls array
+    reason: Optional[str] = None                # last_reason OR any reasons[]
+    user_id: Optional[str] = None               # a specific user_ids[] entry
+    burnt_before_iso: Optional[str] = None      # ISO datetime string — delete rows with last_detected_at < X
+    ip: Optional[str] = None                    # exact IP match (single-shot delete)
+
+
+def _burnt_ip_query_from_body(body: _PurgeBurntIPsBody) -> Dict[str, Any]:
+    """Build a Mongo query from the purge filter body. Raises 400 if
+    no filter is supplied — full-collection wipes are not allowed."""
+    q: Dict[str, Any] = {}
+    if body.offer_url_contains:
+        q["offer_urls"] = {"$regex": re.escape(body.offer_url_contains), "$options": "i"}
+    if body.reason:
+        q["$or"] = [
+            {"last_reason": body.reason},
+            {"reasons": body.reason},
+        ]
+    if body.user_id:
+        q["user_ids"] = body.user_id
+    if body.burnt_before_iso:
+        q["last_detected_at"] = {"$lt": body.burnt_before_iso}
+    if body.ip:
+        q["ip"] = body.ip.strip()
+    if not q:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one filter (offer_url_contains, reason, user_id, burnt_before_iso, or ip) is required.",
+        )
+    return q
+
+
+@api_router.post("/admin/rut-burnt-ips/preview")
+async def admin_burnt_ips_preview(
+    body: _PurgeBurntIPsBody,
+    admin: dict = Depends(get_current_admin),
+):
+    """Preview how many rut_burnt_ips rows the provided filters would
+    delete. Non-destructive — always call this FIRST from the UI."""
+    query = _burnt_ip_query_from_body(body)
+    try:
+        count = await db.rut_burnt_ips.count_documents(query)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"Count failed: {e}") from e
+    samples: List[Dict[str, Any]] = []
+    try:
+        async for doc in db.rut_burnt_ips.find(
+            query,
+            {"ip": 1, "last_reason": 1, "offer_urls": 1, "hit_count": 1,
+             "first_detected_at": 1, "last_detected_at": 1, "_id": 0},
+        ).sort("last_detected_at", -1).limit(5):
+            samples.append(doc)
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "matching_count": count,
+        "filters": body.model_dump(exclude_none=True),
+        "sample_rows": samples,
+    }
+
+
+@api_router.post("/admin/rut-burnt-ips/purge")
+async def admin_burnt_ips_purge(
+    body: _PurgeBurntIPsBody,
+    admin: dict = Depends(get_current_admin),
+):
+    """Delete rut_burnt_ips rows matching the provided filters. Admin only.
+    Refuses to run with an empty filter (400)."""
+    query = _burnt_ip_query_from_body(body)
+    try:
+        matching = await db.rut_burnt_ips.count_documents(query)
+        result = await db.rut_burnt_ips.delete_many(query)
+        deleted = int(result.deleted_count or 0)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"Purge failed: {e}") from e
+    try:
+        _click_ips_cache.clear()
+    except Exception:
+        pass
+    logger.info(
+        f"[BurntIPs Purge] admin={admin.get('email')} filters={body.model_dump(exclude_none=True)} "
+        f"matched={matching} deleted={deleted}"
+    )
+    return {
+        "ok": True,
+        "matched_before": matching,
+        "deleted_count": deleted,
+        "filters": body.model_dump(exclude_none=True),
+    }
+
+
+@api_router.get("/admin/rut-burnt-ips/stats")
+async def admin_burnt_ips_stats(admin: dict = Depends(get_current_admin)):
+    """High-level stats on the burnt-IP collection so the admin knows
+    what's in there before running any purge."""
+    try:
+        total = await db.rut_burnt_ips.count_documents({})
+    except Exception:
+        total = 0
+    top_offers: List[Dict[str, Any]] = []
+    top_reasons: List[Dict[str, Any]] = []
+    try:
+        pipeline = [
+            {"$unwind": "$offer_urls"},
+            {"$group": {"_id": "$offer_urls", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}},
+            {"$limit": 10},
+        ]
+        async for doc in db.rut_burnt_ips.aggregate(pipeline):
+            top_offers.append({"offer_url": doc.get("_id"), "count": doc.get("count")})
+    except Exception:
+        pass
+    try:
+        pipeline2 = [
+            {"$group": {"_id": "$last_reason", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}},
+        ]
+        async for doc in db.rut_burnt_ips.aggregate(pipeline2):
+            top_reasons.append({"reason": doc.get("_id"), "count": doc.get("count")})
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "total_rows": total,
+        "top_offers": top_offers,
+        "top_reasons": top_reasons,
+    }
+
+
+
+
 # ──────────── Admin-managed email settings (SMTP / Resend) ─────────────
 
 class EmailSettingsUpdate(BaseModel):
@@ -7152,6 +7328,7 @@ _DUP_IP_CACHE_LOCK = asyncio.Lock()
 async def _get_dup_ip_set_safe(
     force_refresh: bool = False,
     user_id: Optional[str] = None,
+    offer_url: Optional[str] = None,
 ) -> set:
     """Concurrent-safe wrapper around get_all_click_ips_from_entire_database().
     Returns an empty set on any failure so the BG task never crashes here.
@@ -7164,11 +7341,17 @@ async def _get_dup_ip_set_safe(
     per-tenant DB only (sub-users share parent's DB, see
     get_db_for_user). Eliminates cross-tenant false-positive
     duplicates.
+
+    2026-02 v2.6.17: `offer_url` parameter — scopes the burnt-IP
+    lookup to rows whose `offer_urls` contains this URL. So an IP
+    burnt on offer A doesn't block offers B/C/D.
     """
     try:
         async with _DUP_IP_CACHE_LOCK:
             return await get_all_click_ips_from_entire_database(
-                force_refresh=force_refresh, user_id=user_id,
+                force_refresh=force_refresh,
+                user_id=user_id,
+                offer_url=offer_url,
             )
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Could not load duplicate IP set: {e}")
@@ -7512,8 +7695,16 @@ async def _rut_prepare_and_run(
             # bleeding from other tenants' click history into this
             # job's exclusion set.
             _dup_user_id = user.get("parent_user_id") or user["id"]
+            # 2026-02 v2.6.17: pass offer_url so the burnt-IP scan is
+            # scoped to THIS offer only — IPs burnt on other offers no
+            # longer pollute this job's blocklist.
+            _dup_offer_url = params.get("target_url") or ""
             dup_ip_task = asyncio.create_task(
-                _get_dup_ip_set_safe(force_refresh=True, user_id=_dup_user_id)
+                _get_dup_ip_set_safe(
+                    force_refresh=True,
+                    user_id=_dup_user_id,
+                    offer_url=_dup_offer_url,
+                )
             )
 
         # ── 1. Proxies ────────────────────────────────────────────────
@@ -8017,11 +8208,16 @@ async def _rut_prepare_and_run(
         if params.get("skip_duplicate_ip"):
             await _set_step("Loading duplicate-IP blocklist…")
             try:
-                dup_ip_set = await dup_ip_task if dup_ip_task else await _get_dup_ip_set_safe(user_id=(user.get("parent_user_id") or user["id"]))
+                dup_ip_set = await dup_ip_task if dup_ip_task else await _get_dup_ip_set_safe(
+                    user_id=(user.get("parent_user_id") or user["id"]),
+                    offer_url=params.get("target_url") or "",
+                )
             except Exception as e:
                 logger.warning(f"dup-IP fetch failed (continuing without): {e}")
                 dup_ip_set = None
-            await _set_step(f"✓ Loaded blocklist ({len(dup_ip_set or [])} IPs)")
+            await _set_step(
+                f"✓ Loaded blocklist ({len(dup_ip_set or [])} IPs — scoped to this offer)"
+            )
 
         # ── 5. Filters ────────────────────────────────────────────────
         allowed_countries_lc = [c.strip().lower() for c in (params.get("allowed_countries") or "").split(",") if c.strip()]
@@ -25054,6 +25250,34 @@ async def _krexion_customer_startup_tasks():
         _loop.set_exception_handler(_kx_excl_handler)
     except Exception as _eh_e:
         logger.debug(f"could not install playwright exc filter: {_eh_e}")
+
+    # ── 2026-02 v2.6.17: rut_burnt_ips TTL + compound indexes ──────────
+    # Auto-expire burnt IPs after RUT_BURNT_IP_TTL_DAYS days (default 60)
+    # so previously-buggy runs (v2.6.11–v2.6.15 false-positive duplicate
+    # burns) can no longer haunt fresh jobs forever. Only affects rows
+    # written by v2.6.17+ which include the BSON Date field
+    # `last_detected_dt`; older rows without that field are unaffected
+    # (TTL indexes skip missing fields), so operators can still purge
+    # them manually via /api/admin/rut-burnt-ips/purge.
+    try:
+        _ttl_days = int(os.environ.get("RUT_BURNT_IP_TTL_DAYS", "60") or 60)
+        _ttl_days = max(1, min(365, _ttl_days))  # clamp 1..365 days
+        _ttl_seconds = _ttl_days * 86400
+        await db.rut_burnt_ips.create_index("ip", unique=True)
+        await db.rut_burnt_ips.create_index([("user_ids", 1)])
+        await db.rut_burnt_ips.create_index([("offer_urls", 1)])
+        await db.rut_burnt_ips.create_index([("user_ids", 1), ("offer_urls", 1)])
+        await db.rut_burnt_ips.create_index(
+            "last_detected_dt", expireAfterSeconds=_ttl_seconds,
+        )
+        logger.info(
+            f"[rut_burnt_ips] Indexes ready · TTL={_ttl_days}d "
+            f"(env RUT_BURNT_IP_TTL_DAYS to override)"
+        )
+    except Exception as _ttl_e:  # noqa: BLE001
+        logger.warning(f"[rut_burnt_ips] index creation failed: {_ttl_e}")
+
+
     # v2.1.75 — Background pre-warm of bridge response cache for
     # online customers. Without this, every customer who opens the
     # RUT page after >30 s of inactivity hits the slow 60 s bridge

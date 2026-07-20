@@ -365,6 +365,9 @@ export default function SystemMaintenancePage() {
             )}
           </div>
         )}
+
+        {/* v2.6.17 — Burnt-IP Blocklist Cleanup */}
+        <BurntIPCleanupSection />
       </div>
 
       {/* Confirmation Modal */}
@@ -402,6 +405,261 @@ export default function SystemMaintenancePage() {
                 data-testid="cleanup-confirm-btn"
               >
                 {cleaning ? "Queuing…" : "Yes, Clean Now"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────
+// v2.6.17 — Burnt-IP Blocklist Cleanup Section
+// ────────────────────────────────────────────────────────────────
+// Lets admins prune stale entries from the `rut_burnt_ips` MongoDB
+// collection so previously flagged IPs (often false-positive burns
+// from v2.6.11-v2.6.15) become eligible again in future jobs.
+// All destructive ops are gated behind a Preview → Confirm flow.
+function BurntIPCleanupSection() {
+  const [stats, setStats] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
+  const [purging, setPurging] = useState(false);
+  const [filters, setFilters] = useState({
+    offer_url_contains: "",
+    reason: "",
+    burnt_before_iso: "",
+  });
+  const [preview, setPreview] = useState(null);
+  const [showConfirm, setShowConfirm] = useState(false);
+
+  const loadStats = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await axios.get(`${API}/admin/rut-burnt-ips/stats`, { headers: authHeaders() });
+      setStats(r.data);
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Could not load burnt-IP stats");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadStats(); }, [loadStats]);
+
+  const buildFilterPayload = () => {
+    const p = {};
+    if (filters.offer_url_contains.trim()) p.offer_url_contains = filters.offer_url_contains.trim();
+    if (filters.reason.trim()) p.reason = filters.reason.trim();
+    if (filters.burnt_before_iso.trim()) p.burnt_before_iso = filters.burnt_before_iso.trim();
+    return p;
+  };
+
+  const runPreview = async () => {
+    const payload = buildFilterPayload();
+    if (Object.keys(payload).length === 0) {
+      toast.error("Please set at least one filter (offer, reason, or date)");
+      return;
+    }
+    setPreviewing(true);
+    setPreview(null);
+    try {
+      const r = await axios.post(`${API}/admin/rut-burnt-ips/preview`, payload, { headers: authHeaders() });
+      setPreview(r.data);
+      if ((r.data?.matching_count || 0) === 0) {
+        toast.info("No matching rows to delete");
+      }
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Preview failed");
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
+  const runPurge = async () => {
+    setPurging(true);
+    try {
+      const payload = buildFilterPayload();
+      const r = await axios.post(`${API}/admin/rut-burnt-ips/purge`, payload, { headers: authHeaders() });
+      toast.success(`✓ Deleted ${r.data?.deleted_count || 0} burnt-IP rows`);
+      setShowConfirm(false);
+      setPreview(null);
+      await loadStats();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Purge failed");
+    } finally {
+      setPurging(false);
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-[var(--brand-border)] p-5 mt-6" data-testid="burnt-ips-cleanup-section">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+            <Trash2 size={16} className="text-orange-400" />
+            Burnt-IP Blocklist Cleanup
+          </h3>
+          <p className="text-xs text-[#A1A1AA] mt-1">
+            Prune false-positive IP burns from prior buggy versions (v2.6.11 – v2.6.15). Auto-TTL is now 60 days for new rows.
+          </p>
+        </div>
+        <button
+          onClick={loadStats}
+          disabled={loading}
+          className="p-2 text-[#A1A1AA] hover:text-white hover:bg-white/5 rounded-lg disabled:opacity-50"
+          data-testid="burnt-ips-refresh-btn"
+          title="Refresh stats"
+        >
+          <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
+        </button>
+      </div>
+
+      {/* Stats */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+        <div className="rounded-lg border border-[var(--brand-border)] p-3">
+          <div className="text-[10px] uppercase text-[#A1A1AA] tracking-wider">Total Rows</div>
+          <div className="text-xl font-bold text-white mt-1" data-testid="burnt-ips-total">
+            {stats?.total_rows ?? "—"}
+          </div>
+        </div>
+        <div className="rounded-lg border border-[var(--brand-border)] p-3">
+          <div className="text-[10px] uppercase text-[#A1A1AA] tracking-wider">Top Offer</div>
+          <div className="text-xs font-mono text-white mt-1 truncate">
+            {stats?.top_offers?.[0]?.offer_url?.slice(0, 40) || "—"}
+          </div>
+          <div className="text-[10px] text-[#A1A1AA]">
+            {stats?.top_offers?.[0]?.count || 0} IPs
+          </div>
+        </div>
+        <div className="rounded-lg border border-[var(--brand-border)] p-3">
+          <div className="text-[10px] uppercase text-[#A1A1AA] tracking-wider">Top Reason</div>
+          <div className="text-xs font-mono text-white mt-1 truncate">
+            {stats?.top_reasons?.[0]?.reason || "—"}
+          </div>
+          <div className="text-[10px] text-[#A1A1AA]">
+            {stats?.top_reasons?.[0]?.count || 0} IPs
+          </div>
+        </div>
+      </div>
+
+      {/* Filters */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
+        <div>
+          <label className="text-[10px] uppercase text-[#A1A1AA] tracking-wider block mb-1">Offer URL contains</label>
+          <input
+            type="text"
+            value={filters.offer_url_contains}
+            onChange={(e) => setFilters({ ...filters, offer_url_contains: e.target.value })}
+            placeholder="e.g. samsclub01"
+            className="w-full bg-[var(--brand-bg)] border border-[var(--brand-border)] rounded-lg px-3 py-2 text-sm text-white placeholder-[#71717A] focus:border-[#A78BFA] outline-none"
+            data-testid="burnt-ips-filter-offer"
+          />
+        </div>
+        <div>
+          <label className="text-[10px] uppercase text-[#A1A1AA] tracking-wider block mb-1">Reason (exact)</label>
+          <select
+            value={filters.reason}
+            onChange={(e) => setFilters({ ...filters, reason: e.target.value })}
+            className="w-full bg-[var(--brand-bg)] border border-[var(--brand-border)] rounded-lg px-3 py-2 text-sm text-white focus:border-[#A78BFA] outline-none"
+            data-testid="burnt-ips-filter-reason"
+          >
+            <option value="">(any)</option>
+            <option value="duplicate_ip">duplicate_ip</option>
+            <option value="vpn">vpn</option>
+            <option value="tracker_block">tracker_block</option>
+            <option value="unknown">unknown</option>
+          </select>
+        </div>
+        <div>
+          <label className="text-[10px] uppercase text-[#A1A1AA] tracking-wider block mb-1">Burnt before (ISO date)</label>
+          <input
+            type="text"
+            value={filters.burnt_before_iso}
+            onChange={(e) => setFilters({ ...filters, burnt_before_iso: e.target.value })}
+            placeholder="2026-02-20T00:00:00Z"
+            className="w-full bg-[var(--brand-bg)] border border-[var(--brand-border)] rounded-lg px-3 py-2 text-sm text-white placeholder-[#71717A] focus:border-[#A78BFA] outline-none"
+            data-testid="burnt-ips-filter-date"
+          />
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-2 mb-3">
+        <button
+          onClick={runPreview}
+          disabled={previewing}
+          className="px-4 py-2 text-sm border border-[#A78BFA]/40 hover:bg-[#A78BFA]/10 rounded-lg font-medium disabled:opacity-50"
+          data-testid="burnt-ips-preview-btn"
+        >
+          {previewing ? "Previewing…" : "Preview Match Count"}
+        </button>
+        {preview && preview.matching_count > 0 && (
+          <button
+            onClick={() => setShowConfirm(true)}
+            disabled={purging}
+            className="px-4 py-2 text-sm bg-red-500/80 hover:bg-red-500 rounded-lg font-medium disabled:opacity-50"
+            data-testid="burnt-ips-purge-btn"
+          >
+            Delete {preview.matching_count} rows
+          </button>
+        )}
+      </div>
+
+      {/* Preview panel */}
+      {preview && (
+        <div className="rounded-lg border border-[var(--brand-border)] bg-white/[.02] p-3 mb-3" data-testid="burnt-ips-preview-panel">
+          <div className="text-sm text-white mb-2">
+            <span className="text-[#A78BFA] font-bold">{preview.matching_count}</span> row(s) match the current filters
+          </div>
+          {preview.sample_rows?.length > 0 && (
+            <details className="text-xs text-[#A1A1AA]">
+              <summary className="cursor-pointer hover:text-white">Sample rows (last 5)</summary>
+              <div className="mt-2 space-y-1 font-mono text-[10px] overflow-x-auto">
+                {preview.sample_rows.map((r, i) => (
+                  <div key={i} className="whitespace-nowrap">
+                    <span className="text-[#A78BFA]">{r.ip}</span>
+                    <span> · {r.last_reason}</span>
+                    <span> · hits={r.hit_count}</span>
+                    <span> · offer=<span className="text-white">{(r.offer_urls?.[0] || "").slice(0, 40)}</span></span>
+                    <span> · last={r.last_detected_at?.slice(0, 19)}</span>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+
+      {/* Confirmation dialog */}
+      {showConfirm && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4" data-testid="burnt-ips-confirm-modal">
+          <div className="bg-[var(--brand-bg)] border border-[var(--brand-border)] rounded-xl p-6 max-w-md w-full">
+            <div className="flex items-center gap-2 mb-3">
+              <AlertTriangle size={20} className="text-red-400" />
+              <h3 className="text-lg font-semibold">Delete Burnt IPs?</h3>
+            </div>
+            <p className="text-sm text-[#A1A1AA] mb-2">
+              You are about to permanently delete <strong className="text-white">{preview?.matching_count || 0}</strong> row(s) from <code className="text-xs">rut_burnt_ips</code>.
+            </p>
+            <p className="text-xs text-emerald-300 mb-4">
+              These IPs will become eligible again for future RUT jobs. This does NOT delete click history.
+            </p>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setShowConfirm(false)}
+                className="px-4 py-2 text-sm border border-[var(--brand-border)] rounded-lg hover:bg-white/5"
+                data-testid="burnt-ips-confirm-cancel"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={runPurge}
+                disabled={purging}
+                className="px-4 py-2 text-sm bg-red-500 hover:bg-red-600 disabled:opacity-50 rounded-lg font-medium"
+                data-testid="burnt-ips-confirm-delete"
+              >
+                {purging ? "Deleting…" : "Yes, Delete"}
               </button>
             </div>
           </div>

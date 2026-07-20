@@ -1,3 +1,185 @@
+# v2.6.17 — 2026-02 — COMPREHENSIVE duplicate-IP fix pack
+# (per-offer scoping + burnt-IP cleanup + phrase tightening + TLS prewarm guard)
+#
+# CUSTOMER-FACING FIX (continuation of v2.6.15 / v2.6.16 samsclub01
+# incident — after v2.6.16 the pre-flight httpx reachability probe was
+# eliminated for tracker targets, but the customer STILL reported 100%
+# `skipped_duplicate_ip` on every visit + a mix of "Offer-side VPN/
+# proxy detection" false-positives on fresh IPs):
+#
+#    Report:  Live Activity showed the v2.6.16 fix WAS active
+#             ("Tracker target detected — skipping pre-flight …") yet
+#             the Recent Visits table was full of skipped_duplicate_ip
+#             rows with error "Exit IP already clicked this link before"
+#             AND some fresh IPs were being burned as VPN/proxy after
+#             the browser loaded a 403 block page.
+#
+#    Root cause A (blocking) — STALE `rut_burnt_ips` BLOCKLIST:
+#             The persistent `rut_burnt_ips` MongoDB collection had
+#             accumulated 2830+ IPs from earlier buggy versions
+#             (v2.6.11 – v2.6.15 all had the httpx probe firing
+#             creating false-positive duplicates). Every new job's
+#             preflight loaded that whole set into `duplicate_ip_set`
+#             and rejected every rotating-gateway IP that had ever
+#             been burned — even IPs that were burned ON DIFFERENT
+#             OFFERS. Error text "Exit IP already clicked this link
+#             before" comes from server.py's own pre-browser skip
+#             (line ~8137 of real_user_traffic.py), NOT from the
+#             offer's block page. It always fired before Playwright
+#             even got a chance.
+#
+#    Root cause B (aggravating) — CROSS-OFFER POLLUTION:
+#             `_persist_burnt_ip` correctly captured `offer_urls`
+#             per row, but the duplicate-check loader
+#             (`get_all_click_ips_from_entire_database`) never used
+#             it — an IP burned on offer A blocked offer B, C, D
+#             forever. Effective proxy pool shrank 5-10x with every
+#             new offer the customer tried.
+#
+#    Root cause C (false-positive) — OVER-BROAD VPN PHRASES:
+#             `_VPN_BLOCK_PAGE_PHRASES` contained "access denied" —
+#             a phrase that appears on Cloudflare challenge pages
+#             (which resolve fine after JS), 404 pages, T&C legal
+#             text, and hundreds of legitimate HTTP-200 landing pages.
+#             Every hit incorrectly burned the exit IP into
+#             `rut_burnt_ips` forever.
+#
+#    Root cause D (edge) — TLS PREWARM DOUBLE-HIT:
+#             When operators enabled `tls_prewarm=True`, curl_cffi
+#             fetched the target URL via the same proxy exit IP that
+#             the browser was about to use. For tracker targets, this
+#             would recreate the exact duplicate-IP burn that v2.6.15/
+#             v2.6.16 eliminated from the httpx probe path.
+#
+# FIXES (all applied atomically in this release):
+# ─────────────────────────────────────────────
+#
+#   1. PER-OFFER SCOPING (backend/server.py)
+#      `get_all_click_ips_from_entire_database()` and its wrapper
+#      `_get_dup_ip_set_safe()` now accept an `offer_url` parameter.
+#      The `rut_burnt_ips` scan filters by
+#      `{"user_ids": …, "offer_urls": <target_url>}` — burns on
+#      other offers no longer pollute this job's blocklist. The RUT
+#      job runner passes `params["target_url"]` through so the
+#      scoping is automatic per job.
+#
+#   2. TIGHTENED VPN PHRASE MATCHING (backend/real_user_traffic.py)
+#      • Removed "access denied" from `_VPN_BLOCK_PAGE_PHRASES`.
+#        Traxun's actual block screen always includes "traxun
+#        security shield" too, which is preserved.
+#      • Added HTTP-status gate to `_detect_offer_duplicate_ip_block`
+#        and `_detect_offer_vpn_block`: on HTTP 2xx responses with
+#        body length > 20 KB (real landing pages), phrase matching
+#        is SKIPPED. Rich 200-OK landings mentioning "duplicate" or
+#        "vpn" in fine print no longer burn clean IPs.
+#
+#   3. TLS PREWARM GUARD (backend/real_user_traffic.py)
+#      For tracker targets, `tls_prewarm=True` is force-flipped to
+#      False before curl_cffi fetches anything. Emits a Live-Activity
+#      note "TLS prewarm skipped for tracker target (avoids
+#      duplicate-IP burn)".
+#
+#   4. TTL AUTO-EXPIRE ON rut_burnt_ips (backend/server.py + real_user_traffic.py)
+#      • `_persist_burnt_ip` now also stores `last_detected_dt` /
+#        `first_detected_dt` as BSON `Date` values.
+#      • Startup event creates a TTL index on `last_detected_dt`
+#        with expireAfterSeconds = `RUT_BURNT_IP_TTL_DAYS * 86400`
+#        (env-overridable, default 60 days, clamped 1..365).
+#      • Also creates compound indexes on `(user_ids)`, `(offer_urls)`,
+#        and `(user_ids, offer_urls)` for fast scoped lookups.
+#
+#   5. ADMIN CLEANUP ENDPOINTS (backend/server.py)
+#      Three new admin-scoped endpoints:
+#        GET  /api/admin/rut-burnt-ips/stats
+#             → total row count, top 10 offers, top reasons
+#        POST /api/admin/rut-burnt-ips/preview  {filter body}
+#             → count + 5 sample rows matching the filters
+#        POST /api/admin/rut-burnt-ips/purge    {filter body}
+#             → deletes matching rows + invalidates the in-memory
+#               dup-IP cache so future jobs see the change instantly
+#      Filters accepted: `offer_url_contains` (case-insensitive
+#      regex), `reason` ("duplicate_ip" | "vpn" | "tracker_block" |
+#      …), `user_id`, `burnt_before_iso` (ISO string), `ip` (exact).
+#      Refuses to run with an empty filter body (400) — full-
+#      collection wipes are not allowed.
+#
+#   6. ADMIN UI (frontend/src/pages/SystemMaintenancePage.js)
+#      New "Burnt-IP Blocklist Cleanup" section under VPS Maintenance:
+#        • Real-time stats card (total rows, top offer, top reason)
+#        • Filter inputs (offer URL contains, reason dropdown,
+#          burnt-before ISO date)
+#        • "Preview Match Count" → count + sample rows
+#        • "Delete N rows" (only appears after preview) → confirm
+#          modal → deletes + refreshes stats
+#      All destructive actions require a preview first, then a
+#      Yes-Delete confirmation. Every element has a data-testid.
+#
+# EFFECT ON THE samsclub01 INCIDENT (customer-observable):
+# ───────────────────────────────────────────────────────
+#   Before v2.6.17:
+#       preflight: Loaded blocklist (2830 IPs)
+#       [job burns every rotating-gateway IP as duplicate before
+#        Playwright ever launches; job effectively dies]
+#
+#   After v2.6.17 (with cleanup run for pre-v2.6.16 rows):
+#       preflight: Loaded blocklist (X IPs — scoped to this offer)
+#       [only IPs burned FOR THIS OFFER count; new job runs to
+#        completion with 1 unique IP per visit]
+#
+# FILES TOUCHED
+# =============
+#   backend/server.py
+#     • get_all_click_ips_from_entire_database — offer_url param
+#     • _get_dup_ip_set_safe — offer_url param
+#     • RUT job runner — passes params["target_url"] through
+#     • NEW: /api/admin/rut-burnt-ips/{stats,preview,purge}
+#     • Startup event: TTL + compound indexes on rut_burnt_ips
+#     • `import re` added for admin purge regex
+#
+#   backend/real_user_traffic.py
+#     • _VPN_BLOCK_PAGE_PHRASES — removed "access denied"
+#     • _detect_offer_duplicate_ip_block — http_status gate
+#     • _detect_offer_vpn_block — http_status gate
+#     • process_one() — status pass-through to detectors
+#     • process_one() — TLS prewarm force-off for tracker targets
+#     • _persist_burnt_ip — writes BSON Date for TTL index
+#
+#   frontend/src/pages/SystemMaintenancePage.js
+#     • NEW: <BurntIPCleanupSection/> — full stats/filter/preview/purge UI
+#
+#   backend/VERSION            → 2.6.16 → 2.6.17
+#   electron-desktop/package.json → 2.6.16 → 2.6.17
+#   desktop/__init__.py        → 2.6.16 → 2.6.17
+#
+#   backend/tests/test_v2_6_17_comprehensive_fix.py (NEW — 9 tests)
+#   backend/tests/test_duplicate_ip_v2_6_16_fix.py (bumped to
+#                                                    ≥2.6.16 assert)
+#
+# HOW TO USE THE CLEANUP (customer runbook)
+# =========================================
+#   1. After VPS deploys v2.6.17, log in as admin, go to
+#      /admin/system-maintenance.
+#   2. Scroll to "Burnt-IP Blocklist Cleanup".
+#   3. Enter `Offer URL contains` = "samsclub01" (or the substring
+#      of the offer you want to reset).
+#   4. Set `Burnt before` = "2026-02-20T00:00:00Z" (pre-v2.6.17
+#      deploy).
+#   5. Click "Preview Match Count" — verify the row count.
+#   6. Click "Delete N rows" → confirm modal → done.
+#   7. Rerun your RUT job — Live Activity should now show
+#      "Loaded blocklist (0-few IPs — scoped to this offer)" and
+#      every visit gets a truly unique IP.
+#
+# COMPATIBILITY
+# =============
+# Fully backwards-compatible. Existing jobs / presets / providers /
+# proxies unaffected. Older `rut_burnt_ips` rows without
+# `last_detected_dt` are simply skipped by the TTL index (they can
+# still be deleted via the admin cleanup endpoint).
+#
+# ────────────────────────────────────────────────────────────────
+
+
 # v2.6.16 — 2026-02 — Duplicate-IP DEFINITIVE FIX (skip pre-flight
 # reachability probe for tracker targets)
 #

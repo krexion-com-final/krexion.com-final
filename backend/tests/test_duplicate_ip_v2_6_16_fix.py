@@ -22,10 +22,12 @@ def _rut_source() -> str:
     return RUT_FILE.read_text(encoding="utf-8")
 
 
-def test_version_bumped_to_2_6_16():
-    """VERSION file must be bumped."""
+def test_version_bumped_to_2_6_16_or_higher():
+    """VERSION file must be bumped to at least 2.6.16 (subsequent
+    releases like 2.6.17 also satisfy this v2.6.16 guarantee)."""
     version = (RUT_FILE.parent / "VERSION").read_text().strip()
-    assert version == "2.6.16", f"Expected 2.6.16, got {version!r}"
+    parts = tuple(int(p) for p in version.split("."))
+    assert parts >= (2, 6, 16), f"Expected >= 2.6.16, got {version!r}"
 
 
 def test_tracker_target_skips_reachability_probe():
