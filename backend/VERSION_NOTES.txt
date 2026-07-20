@@ -1,3 +1,89 @@
+# v2.6.14 — 2026-02 — Rotating-gateway proxy exhaustion fix + offer-block auto-retry for gateway mode
+#
+# CUSTOMER-FACING FIXES (from field report — RUT job died at 5/20 visits):
+#
+#   A) ROTATING GATEWAYS (DATAIMPULSE / OXYLABS / BRIGHT DATA / IPROYAL / SOAX / …)
+#      NO LONGER "EXHAUST" AFTER FIRST PICK
+#      Report: Customer configured DataImpulse Residential US Sticky-2hr
+#         (host: gw.dataimpulse.com:10000, username `sessid.{sid}` template),
+#         set Concurrency = 10 + Total Clicks = 20. Job ran ~5-6 visits,
+#         then every subsequent slot recorded
+#         "failed · No more proxies available (no_repeated_proxy = on)".
+#      Root cause: `pick_next_proxy()` added the raw gateway URL to
+#         `used_proxy_set` after the first fetch and returned None on
+#         every call thereafter. This is correct behaviour for a
+#         plain `ip:port:user:pass` static list, but WRONG for a
+#         rotating gateway — the gateway URL is meant to be re-dialled
+#         over and over, returning a NEW exit IP per TCP session.
+#      Fix: `_parse_proxy_line` now emits `is_rotating_gateway`
+#         (detected via `_detect_rotating_gateway`) for lines whose
+#         host matches a well-known provider suffix (dataimpulse,
+#         oxylabs, superproxy, brightdata, iproyal, soax, smartproxy,
+#         webshare, packetstream, geosurf, netnut, rayobyte,
+#         stormproxies, nimbleway, asocks, infatica, proxycheap,
+#         920proxy, coronium, pyproxy, ip2world, spaceproxy, abcproxy,
+#         hydraproxy, ipburger, shifter, and ~30 others), whose
+#         hostname begins with `gw.`, `gate.`, `pr.`, `residential.`,
+#         `rotating.`, `rotate.`, `isp.`, `sticky.`, `proxy.`, or
+#         `gateway.`, OR whose username contains a session marker
+#         (`sessid`, `session-`, `session_`, `sticky-`, `rotating`).
+#         Entries flagged rotating-gateway skip the `used_proxy_set`
+#         gate — each pick returns the same URL so the gateway
+#         re-dials for a new IP. Static lists still get the original
+#         single-use behaviour, so nothing regresses for operators
+#         loading a plain ip:port:user:pass file.
+#      Result: DataImpulse jobs (and every other well-known gateway
+#         provider) now run their full concurrency × total budget
+#         instead of dying at 5-6 visits.
+#
+#   B) OFFER-SIDE "DUPLICATE IP" BLOCK NOW AUTO-RETRIES ON A GATEWAY,
+#      NOT JUST ON PROXYJET-ON-DEMAND
+#      Report: Even when the gateway kept giving IPs, offers/trackers
+#         with strict duplicate-IP filters would reject 5/5 attempts
+#         and the visit terminated as `skipped_duplicate_ip` — even
+#         though re-dialling the gateway would immediately supply a
+#         fresh IP.
+#      Root cause: The offer-block retry loop (`_OfferBlockRetryNeeded`
+#         wrapper in worker()) was gated on `proxyjet_on_demand=True`
+#         only, so rotating-gateway users had `max_offer_retries=1`.
+#         The pre-browser httpx duplicate probe (~line 8268) and the
+#         post-load block handler (~line 9911) were also gated on
+#         `proxyjet_on_demand`, so gateway users didn't get the
+#         "silent retry with fresh IP, no wasted browser launch"
+#         experience ProxyJet users already had.
+#      Fix: Introduced `_can_retry_offer_block =
+#         bool(proxyjet_on_demand) or _has_rotating_gateway` locally
+#         in `run_real_user_traffic()`. All three gating sites now
+#         reference the combined flag. DataImpulse operators see the
+#         same silent-retry behaviour ProxyJet operators already had,
+#         capped at `proxyjet_unique_retry_cap` (default 50) per
+#         visit to prevent infinite loops on unrealistically strict
+#         filters.
+#      Result: Offer-side duplicate/VPN filters no longer terminate
+#         visits on rotating-gateway providers — the engine re-dials
+#         the gateway silently for a fresh IP up to 50× before giving
+#         up on the slot.
+#
+#   C) BEHAVIOUR NOTES / TROUBLESHOOTING (for the customer)
+#      · If the affiliate report still shows Chrome/WeChat/Facebook
+#        instead of TikTok after this release: the RUT-generated
+#        visits are NOT reaching the offer conversion page (see
+#        RUT report.xlsx column `error` — most likely
+#        `wait_for_text` step failing in your Automation JSON, or
+#        the offer's own bot filter). Fix the automation script or
+#        offer-side filter — the UA / referer are correct in the
+#        RUT report, but if the visit never reaches conversion the
+#        affiliate never records our click.
+#      · Concurrency verification: `grep RUT-PARALLEL` on backend
+#        log (`/var/log/krexion/backend.log` on VPS, or
+#        `%LOCALAPPDATA%\Krexion\logs` on Windows-native) — every
+#        visit dispatched within milliseconds of siblings = true
+#        parallelism confirmed.
+#      · Zero-behaviour-change refactor — no new config surface, no
+#        UI toggles, no backend-schema migration. Pure defect fix.
+#
+# ────────────────────────────────────────────────────────────────────
+
 # v2.6.13 — 2026-02 — Referer force-injection through redirect chain + F821 runtime fixes
 #
 # CUSTOMER-FACING FIXES (from affiliate-CSV field report):

@@ -3063,7 +3063,87 @@ def _parse_proxy_line(line: str) -> Optional[Dict[str, Any]]:
         out["username"] = user
     if pwd:
         out["password"] = pwd
+    # 2026-02 v2.6.14 — mark rotating-gateway lines so
+    # `no_repeated_proxy` does not treat the gateway URL as a single-use
+    # proxy. A rotating gateway (DataImpulse, Oxylabs, Bright Data,
+    # IPRoyal, Soax, Smartproxy, Webshare, Luminati) returns a
+    # DIFFERENT exit IP per TCP session — the URL itself is meant to be
+    # dialled over and over. The "Strict unique IP" toggle already
+    # handles IP-level uniqueness via `_probe_proxy_geo`, so we don't
+    # need URL-level suppression for these providers.
+    out["is_rotating_gateway"] = _detect_rotating_gateway(host, user or "")
     return out
+
+
+# 2026-02 v2.6.14 — signature list for well-known rotating gateways.
+# When a proxy line's hostname or username matches any of these, we
+# treat the URL as re-dialable (each new connection = new exit IP).
+_ROTATING_GATEWAY_HOSTS = (
+    "dataimpulse.com",
+    "oxylabs.io",
+    "brightdata.com", "superproxy.io", "brd.superproxy.io", "lum-superproxy.io",
+    "iproyal.com",
+    "soax.com",
+    "smartproxy.com", "smartproxy.net",
+    "webshare.io",
+    "packetstream.io",
+    "geosurf.io",
+    "shifter.io",
+    "netnut.io",
+    "rayobyte.com",
+    "storm.io", "stormproxies.com",
+    "proxyempire.io",
+    "nimbleway.com",
+    "asocks.com",
+    "infatica.io",
+    "proxy-cheap.com",
+    "proxysale.com",
+    "ipburger.com",
+    "hydraproxy.com",
+    "ip2world.com",
+    "spaceproxy.net",
+    "abcproxy.com",
+    "kocerroxy.com",
+    "922proxy.com",
+    "9proxy.com",
+    "coronium.io",
+    "pyproxy.com",
+)
+
+_ROTATING_GATEWAY_HOST_PREFIXES = (
+    "gw.", "gate.", "pr.", "residential.", "rotating.", "rotate.",
+    "isp.", "sticky.", "proxy.", "gateway.",
+)
+
+_ROTATING_GATEWAY_USER_MARKERS = (
+    "sessid", "session-", "session_", "sess-", "sess_",
+    "session=", "sessid=", "-session-", "_session_",
+    "rotating", "sticky", "sticky-",
+)
+
+def _detect_rotating_gateway(host: str, username: str) -> bool:
+    """Return True if the (host, username) pair looks like a rotating
+    gateway URL. Used by _parse_proxy_line + pick_next_proxy so the
+    `no_repeated_proxy` guard does not lock the operator out of their
+    own gateway after a single visit."""
+    host_l = (host or "").strip().lower()
+    user_l = (username or "").strip().lower()
+    if not host_l:
+        return False
+    # Well-known provider domain match (suffix).
+    for dom in _ROTATING_GATEWAY_HOSTS:
+        if host_l == dom or host_l.endswith("." + dom):
+            return True
+    # Common gateway hostname prefix.
+    for pfx in _ROTATING_GATEWAY_HOST_PREFIXES:
+        if host_l.startswith(pfx):
+            return True
+    # Username-embedded session/rotation markers.
+    if user_l:
+        for marker in _ROTATING_GATEWAY_USER_MARKERS:
+            if marker in user_l:
+                return True
+    return False
 
 
 async def _probe_proxy_geo(
@@ -6882,6 +6962,26 @@ async def run_real_user_traffic_job(
         await _finalise_and_persist(db, job_id, "failed", "No valid proxies after parsing")
         return
 
+    # 2026-02 v2.6.14 — rotating-gateway mode detection
+    # When ANY parsed proxy is flagged `is_rotating_gateway=True` we
+    # can safely retry duplicate-IP / VPN-block visits WITHOUT
+    # exhausting a fixed list (the gateway re-dials get fresh IPs
+    # every time). This flips on the same offer-block retry logic
+    # that `proxyjet_on_demand=True` already enjoys, so a DataImpulse
+    # / Oxylabs / Bright Data operator no longer sees a job die at
+    # 5/20 visits with "Duplicate IP" on every entry — instead each
+    # burnt IP triggers a silent re-dial for a fresh one, capped at
+    # `proxyjet_unique_retry_cap` (default 50) attempts per visit.
+    _has_rotating_gateway = any(
+        bool(p.get("is_rotating_gateway")) for p in parsed_proxies
+    )
+    _can_retry_offer_block = bool(proxyjet_on_demand) or _has_rotating_gateway
+    if _has_rotating_gateway:
+        logger.info(
+            f"[RUT job={job_id}] Rotating-gateway mode ACTIVE — offer-block "
+            f"retry enabled (cap={proxyjet_unique_retry_cap or 50}/visit)"
+        )
+
     uas = [u.strip() for u in user_agents if u and u.strip()]
     if not uas:
         await _finalise_and_persist(db, job_id, "failed", "No user agents provided")
@@ -7514,15 +7614,39 @@ async def run_real_user_traffic_job(
                 logger.debug(f"_live_remove_data_row failed: {e}")
 
     def pick_next_proxy() -> Optional[Dict[str, Any]]:
-        """Round-robin pick a proxy, respecting no_repeated_proxy."""
+        """Round-robin pick a proxy, respecting no_repeated_proxy.
+
+        2026-02 v2.6.14 — rotating-gateway safety net.
+            When `no_repeated_proxy=True` and the ONLY proxy line the
+            operator supplied is a rotating gateway (DataImpulse,
+            Oxylabs, Bright Data, IPRoyal, Soax, Smartproxy, Webshare,
+            …), the previous logic marked the gateway URL as "used"
+            after the first pick and returned None on every subsequent
+            call. Symptom: after 5-6 visits the job died with
+            "No more proxies available (no_repeated_proxy = on)" even
+            though the gateway can supply thousands of exit IPs.
+
+            The fix: for entries flagged `is_rotating_gateway` we do
+            NOT mark the URL as "used" — each new pick dials a fresh
+            TCP session and gets a new exit IP. IP-level uniqueness is
+            already enforced downstream by the "Strict unique IP"
+            probe (_probe_proxy_geo), which tracks EXIT IPs (not URLs)
+            in `used_ip_set`. Static list-style proxies still get the
+            original single-use behaviour, so nothing regresses for
+            operators loading a plain ip:port:user:pass list.
+        """
         if no_repeated_proxy:
             for _ in range(len(parsed_proxies)):
                 idx = state["proxy_idx"] % len(parsed_proxies)
                 state["proxy_idx"] += 1
-                raw = parsed_proxies[idx]["raw"]
+                px = parsed_proxies[idx]
+                if px.get("is_rotating_gateway"):
+                    # Rotating gateway — re-dialable, don't lock the URL.
+                    return px
+                raw = px["raw"]
                 if raw not in used_proxy_set:
                     used_proxy_set.add(raw)
-                    return parsed_proxies[idx]
+                    return px
             return None
         idx = state["proxy_idx"] % len(parsed_proxies)
         state["proxy_idx"] += 1
@@ -8158,10 +8282,17 @@ async def run_real_user_traffic_job(
         # retries with a fresh IP WITHOUT ever launching a browser
         # or producing a "Duplicate IP" thumbnail in Live Activity.
         #
-        # Skipped in legacy proxy-list mode (`proxyjet_on_demand=False`)
-        # because there's no IP-source loop to retry against — the
-        # existing post-load detector still catches those cases.
-        if proxyjet_on_demand:
+        # Skipped in legacy proxy-list mode (`proxyjet_on_demand=False`
+        # AND no rotating gateway detected) because there's no IP-source
+        # loop to retry against — the existing post-load detector still
+        # catches those cases.
+        #
+        # 2026-02 v2.6.14 — enabled for rotating-gateway mode too. The
+        # gateway can re-dial for a fresh IP just like ProxyJet, so the
+        # cheap httpx pre-probe (1-3s, no browser) saves ~30-60s per
+        # blocked visit and prevents the "Duplicate IP" thumbnails from
+        # cluttering Live Activity.
+        if _can_retry_offer_block:
             try:
                 _pre_blk, _pre_reason, _pre_snip = await _probe_offer_duplicate_via_proxy(
                     proxy, _url_to_probe, ua, timeout_s=12.0,
@@ -9804,7 +9935,16 @@ async def run_real_user_traffic_job(
                     # Legacy mode (proxyjet_on_demand=False) still records
                     # the entry as before since there's no IP-source loop
                     # to retry against.
-                    if proxyjet_on_demand:
+                    #
+                    # 2026-02 v2.6.14 — extended to also fire when the
+                    # operator's provider is a ROTATING GATEWAY (any
+                    # entry in parsed_proxies flagged is_rotating_gateway).
+                    # The gateway's next TCP session returns a fresh
+                    # exit IP just like ProxyJet on-demand does, so the
+                    # same retry-with-fresh-IP flow works identically —
+                    # customer stops seeing "No more proxies available"
+                    # / "5/20 visits blocked" reports.
+                    if _can_retry_offer_block:
                         raise _OfferBlockRetryNeeded(
                             reason=_block_reason,
                             burnt_ip=_burned_ip or "",
@@ -10939,7 +11079,7 @@ async def run_real_user_traffic_job(
             # when the offer's filter is unrealistically strict.
             max_offer_retries = (
                 max(1, int(proxyjet_unique_retry_cap or 50))
-                if proxyjet_on_demand else 1
+                if _can_retry_offer_block else 1
             )
             retry_attempts = 0
             while True:
