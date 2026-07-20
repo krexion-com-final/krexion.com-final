@@ -1,3 +1,87 @@
+# v2.6.16 — 2026-02 — Duplicate-IP DEFINITIVE FIX (skip pre-flight
+# reachability probe for tracker targets)
+#
+# CUSTOMER-FACING FIX (continuation of v2.6.15 — same samsclub01 /
+# traxun.online field report — user re-ran the job after v2.6.15
+# and duplicate-IP burn STILL occurred on every visit):
+#
+#    Report:  v2.6.15 disabled the SECOND pre-browser probe
+#             (`_probe_offer_duplicate_via_proxy`) but users still
+#             saw 100% duplicate-IP burn on every visit. Live
+#             Activity showed:
+#                filter: Tracker resolves to offer → probing
+#                        domain root https://track.traxun.online/
+#                filter: Offer reachable via proxy (TLS 200)
+#                browser: Opening https://krexion.com/api/t/samsclub01
+#                landing: 1/4 URL fully loaded (HTTP 403)
+#                filter: Offer-side duplicate IP block · burning …
+#
+#    Root cause:  The FIRST probe — `_probe_proxy_target_reachable`
+#                 at real_user_traffic.py line ~8250 — was STILL
+#                 issuing an httpx HEAD (or GET fallback) to the
+#                 RESOLVED offer's domain root (e.g. https://track.
+#                 traxun.online/) via the SAME exit IP the browser
+#                 was about to use for the real click. Strict
+#                 affiliate CDNs (Traxun, Voluum, RedTrack, Binom,
+#                 ClickFlare) index the exit IP on ANY HTTP touch —
+#                 including a HEAD on `/` — into their per-IP
+#                 duplicate-session table. When the browser goto
+#                 fired ~1-3 seconds later, the offer's edge saw
+#                 the SAME IP arriving a SECOND time within the
+#                 duplicate window → served the "Duplicate IP" HTML
+#                 page → HTTP 403 → burnt IP → skipped visit.
+#
+#                 v2.6.15's comment block correctly identified the
+#                 mechanism ("The reachability probe ALREADY hits
+#                 the domain root of the offer via httpx through
+#                 the same exit IP") but only disabled the second
+#                 probe. The primary probe was still running.
+#
+#    Fix:     For tracker targets (`target_url` host in
+#             `_bypass_hosts()`), SKIP the pre-flight reachability
+#             probe entirely. The browser's own `page.goto()` is
+#             now the SOLE HTTP touch on the affiliate offer's
+#             edge from this exit IP → 1 IP == 1 click, matching
+#             what strict duplicate detectors expect.
+#
+#             For DIRECT offer URLs (non-tracker targets), the
+#             probe still runs — those flows have no redirect
+#             chain, so the reachability probe IS the first hit
+#             anyway (equivalent to the browser goto), no duplicate
+#             risk.
+#
+#    Trade-off:  We give up the "dead-proxy pre-filter" for tracker
+#                flows in exchange for a working RUT flow. Dead
+#                proxies still fail cleanly inside the browser
+#                context (via the browser's own tunnel error),
+#                just with a slightly higher time cost per dead
+#                IP (~10-30s vs ~1-3s). Given the current 100%
+#                failure rate with the probe enabled, this is a
+#                MASSIVELY better trade.
+#
+# FILES TOUCHED
+# =============
+#   backend/real_user_traffic.py
+#       — process_one() pre-browser flow (line ~8202-8265): tracker
+#         targets now skip `_probe_proxy_target_reachable` entirely
+#         with an explanatory Live Activity step; non-tracker direct
+#         URLs still probe. Removed the (now-unused) `_resolve_
+#         tracker_via_localhost` call from this preflight — the
+#         actual visit path (lines 8757 and 9548) still resolves
+#         where legitimately needed.
+#   backend/VERSION      → 2.6.15 → 2.6.16
+#   electron-desktop/package.json → 2.6.15 → 2.6.16
+#   desktop/__init__.py  → 2.6.15 → 2.6.16
+#
+# COMPATIBILITY
+# =============
+#   Fully backwards-compatible. Existing jobs / presets / providers /
+#   proxies unaffected. Rotating-gateway retry, ProxyJet retry, and
+#   post-load block detection all unchanged.
+#
+# ────────────────────────────────────────────────────────────────
+
+
 # v2.6.15 — 2026-02 — Duplicate-IP false-positive fix (pre-browser
 # probe redundancy elimination)
 #

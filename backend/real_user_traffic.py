@@ -8199,71 +8199,63 @@ async def run_real_user_traffic_job(
             _t_host = (_t_up(target_url).hostname or "").lower()
         except Exception:
             _t_host = ""
-        _is_tracker_target = _t_host in _bypass_hosts()
+        _is_tracker_target = _t_host in _bypass_hosts() or _url_host_matches_bypass(target_url)
         _url_to_probe = target_url
-        if _is_tracker_target and geo.get("exit_ip"):
-            # Resolve the tracker server-side to find where it would
-            # send a real click from this exit IP.
-            try:
-                _resolved_offer = await _resolve_tracker_via_localhost(
-                    target_url, geo["exit_ip"], ua, timeout=8.0,
-                )
-            except Exception:
-                _resolved_offer = None
-            if _resolved_offer:
-                # 2026-02 DUPLICATE-CLICK FIX — Do NOT probe the full
-                # resolved offer click URL (`anp8ry2wtrk.com/click?tid=...`).
-                # Affiliate tracker endpoints record every HTTP hit as a
-                # real click, so the probe request (via the SAME proxy
-                # exit IP that the browser will use next) creates a
-                # click BEFORE the real browser visit — resulting in
-                # TWO clicks from the same IP on the affiliate dashboard
-                # (the second one gets flagged as duplicate/invalid).
-                #
-                # Instead, probe only the offer's DOMAIN ROOT — this
-                # verifies the proxy can reach the affiliate host
-                # (DNS + TCP + TLS + edge CDN) without touching any
-                # click-recording endpoint. If root returns anything
-                # (200, 301, 403, 404) the proxy is confirmed live.
-                try:
-                    from urllib.parse import urlparse as _rp_up, urlunparse as _rp_uu
-                    _r_u = _rp_up(_resolved_offer)
-                    if _r_u.scheme and _r_u.netloc:
-                        _url_to_probe = _rp_uu((_r_u.scheme, _r_u.netloc, "/", "", "", ""))
-                    else:
-                        _url_to_probe = _resolved_offer
-                except Exception:
-                    _url_to_probe = _resolved_offer
-                push_live_step(
-                    job_id, i + 1, "filter", "info",
-                    f"Tracker resolves to offer → probing domain root {_url_to_probe[:80]} (no click)",
-                )
-            else:
-                # Local resolution failed — fall back to probing the
-                # tracker URL itself via the proxy.
-                push_live_step(
-                    job_id, i + 1, "filter", "info",
-                    f"Tracker not resolvable server-side — probing target {_t_host} via proxy",
-                )
-        # Always run the reachability probe (target_url or resolved
-        # offer URL), even for tracker targets. Failure → skip.
-        _reach_ok, _reach_diag = await _probe_proxy_target_reachable(
-            proxy, _url_to_probe, ua, timeout_s=12.0,
-        )
-        if not _reach_ok:
-            entry["status"] = "skipped_dead_proxy"
-            entry["error"] = (
-                f"Proxy can't reach offer ({_reach_diag}) — skipped before browser launch"
-            )
+        # ── 2026-02 v2.6.16 DEFINITIVE DUPLICATE-IP FIX ─────────────
+        # ROOT CAUSE (field-confirmed on samsclub01 / traxun.online):
+        # For tracker targets (krexion.com/api/t/...) the pre-flight
+        # reachability probe below issues an httpx HEAD (or GET fallback)
+        # to the RESOLVED offer's domain root (e.g. https://track.traxun
+        # .online/) via the SAME proxy exit IP that the browser is
+        # about to use. Strict affiliate CDNs (Traxun, Voluum, RedTrack,
+        # Binom, ClickFlare) record the exit IP on ANY HTTP touch —
+        # including a HEAD on `/` — into their per-IP duplicate index.
+        # Milliseconds later when the browser navigates the tracker URL
+        # for real and the tracker 302-redirects to the offer, the offer
+        # sees the SAME IP arriving a SECOND time → HTTP 403 "Duplicate
+        # IP" page → IP is burnt, visit is skipped, whole job dies at
+        # 5-6 IPs. v2.6.15 only removed the SECOND probe; the primary
+        # reachability probe here was still burning the IP.
+        #
+        # FIX: for tracker targets, SKIP the reachability probe entirely.
+        # The browser's own goto is now the SOLE HTTP touch on the
+        # affiliate offer's edge from this exit IP → 1 IP == 1 click,
+        # matching what strict duplicate detectors expect. We give up
+        # the "dead proxy pre-filter" for tracker flows in exchange for
+        # a working RUT flow — a MUCH better trade (dead proxies still
+        # fail cleanly inside the browser context, just with a slightly
+        # higher time cost per dead IP, versus the current 100% failure).
+        #
+        # For DIRECT offer URLs (non-tracker targets), the probe stays
+        # — those flows don't have a redirect chain, so the reachability
+        # probe IS the first hit anyway (equivalent to the browser
+        # goto), no duplicate risk.
+        if _is_tracker_target:
             push_live_step(
-                job_id, i + 1, "filter", "skipped",
-                f"Dead proxy: {_reach_diag}",
+                job_id, i + 1, "filter", "info",
+                f"Tracker target detected ({_t_host}) — skipping pre-flight reachability probe to avoid duplicate-IP burn",
             )
-            return await _record(job_id, entry, report, report_lock, db)
-        push_live_step(
-            job_id, i + 1, "filter", "ok",
-            f"Offer reachable via proxy ({_reach_diag})",
-        )
+        else:
+            # Non-tracker direct offer URL — probe once via httpx.
+            # This IS the first hit on the offer (same as the browser
+            # goto would have been), so no duplicate risk.
+            _reach_ok, _reach_diag = await _probe_proxy_target_reachable(
+                proxy, _url_to_probe, ua, timeout_s=12.0,
+            )
+            if not _reach_ok:
+                entry["status"] = "skipped_dead_proxy"
+                entry["error"] = (
+                    f"Proxy can't reach offer ({_reach_diag}) — skipped before browser launch"
+                )
+                push_live_step(
+                    job_id, i + 1, "filter", "skipped",
+                    f"Dead proxy: {_reach_diag}",
+                )
+                return await _record(job_id, entry, report, report_lock, db)
+            push_live_step(
+                job_id, i + 1, "filter", "ok",
+                f"Offer reachable via proxy ({_reach_diag})",
+            )
 
         # ── 2026-05 — PRE-BROWSER duplicate / VPN block probe ──────
         # The reachability check above only confirms transport-level
