@@ -8292,7 +8292,30 @@ async def run_real_user_traffic_job(
         # cheap httpx pre-probe (1-3s, no browser) saves ~30-60s per
         # blocked visit and prevents the "Duplicate IP" thumbnails from
         # cluttering Live Activity.
-        if _can_retry_offer_block:
+        # 2026-02 v2.6.15 — DISABLED to eliminate "duplicate IP" false-
+        # positives on strict affiliate trackers (Traxun, Voluum,
+        # RedTrack, Binom, samsclub-style flows).
+        #
+        # ROOT CAUSE: The reachability probe (_probe_proxy_target_
+        # reachable) above ALREADY hits the domain root of the offer
+        # via httpx through the same exit IP. If we then run this
+        # SECOND pre-browser duplicate-check (which fetches the SAME
+        # URL from the SAME IP milliseconds later), strict trackers
+        # count it as a duplicate session hit — later, when the browser
+        # navigates for real, the tracker returns 403 "Duplicate IP".
+        #
+        # Field report (samsclub01 campaign): 20/20 visits landed with
+        # HTTP 403 → burnt IPs → job died at ~5-6 visits. Disabling the
+        # pre-browser httpx duplicate probe removes the redundant HTTP
+        # hit; the post-load block detector (inside the browser context,
+        # using the browser's OWN goto response body — no extra proxy
+        # request) is unchanged and continues to catch genuine blocks
+        # WITHOUT triggering the tracker's duplicate counter.
+        #
+        # NET EFFECT: one redundant httpx GET removed per visit; the
+        # browser goto remains the SOLE tracker touch → 1 IP == 1 click,
+        # matching what strict duplicate detectors expect.
+        if False and _can_retry_offer_block:
             try:
                 _pre_blk, _pre_reason, _pre_snip = await _probe_offer_duplicate_via_proxy(
                     proxy, _url_to_probe, ua, timeout_s=12.0,

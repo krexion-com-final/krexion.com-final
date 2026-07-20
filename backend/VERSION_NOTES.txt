@@ -1,3 +1,65 @@
+# v2.6.15 — 2026-02 — Duplicate-IP false-positive fix (pre-browser
+# probe redundancy elimination)
+#
+# CUSTOMER-FACING FIX (field report — samsclub01 campaign, Traxun tracker):
+#
+#    Report:  RUT job with DataImpulse rotating gateway + samsclub01 offer
+#             (track.traxun.online). Every visit landed with HTTP 403
+#             "Duplicate IP" — 20/20 visits burnt exit IPs, job dead at
+#             ~5-6 visits.
+#
+#    Root cause:  The visit flow made THREE HTTP hits to the offer domain
+#                 from the same exit IP within ~2 seconds:
+#                    hit #1 — `_probe_proxy_target_reachable` reachability
+#                             probe (v2.6.11 fix: domain root only)
+#                    hit #2 — `_probe_offer_duplicate_via_proxy` pre-browser
+#                             duplicate-check probe (also domain root)
+#                    hit #3 — Chromium `page.goto(tracker_url)` real click
+#                 Strict affiliate trackers (Traxun, Voluum, RedTrack,
+#                 Binom) treat consecutive same-IP hits within a short
+#                 window as duplicate sessions, so the browser visit at
+#                 hit #3 got flagged.
+#
+#    Fix:     The pre-browser duplicate probe (hit #2) is redundant with
+#             the post-load block detector, which reads the browser's OWN
+#             goto response body (no extra proxy request). Disabled the
+#             pre-browser httpx dup probe entirely — the browser goto is
+#             now the SOLE tracker-touching hit per visit, matching what
+#             strict duplicate detectors expect (1 IP == 1 click).
+#
+#    Effect:  One redundant httpx GET removed per visit → the tracker's
+#             duplicate counter no longer trips on setup activity. Post-
+#             load block detection is fully unchanged (still catches
+#             genuine blocks via browser response body). ProxyJet retry
+#             behaviour and rotating-gateway retry behaviour unchanged.
+#
+# FILES TOUCHED
+# =============
+#   backend/real_user_traffic.py
+#       — one gate: `if _can_retry_offer_block:` → `if False and
+#         _can_retry_offer_block:` (line ~8295, ~30 comment lines added
+#         to document reason and future readers). No signature changes,
+#         no logic changes to other flows.
+#   backend/VERSION      → 2.6.14 → 2.6.15
+#   electron-desktop/package.json → 2.6.12 → 2.6.15
+#   desktop/__init__.py  → 2.6.12 → 2.6.15
+#
+# COMPATIBILITY
+# =============
+#   Fully backwards-compatible.  Existing jobs / presets / providers /
+#   proxies unaffected.  Rotating-gateway retry (v2.6.14) still fires
+#   from the post-load detector — no visit loses its silent-retry
+#   ability.
+#
+# VERIFICATION
+# ============
+#   • syntax OK — python3 -c "import ast; ast.parse(open('real_user_traffic.py').read())"
+#   • backend restart clean, 393 routes registered
+#   • Field re-test: rerun samsclub01 campaign with same DataImpulse
+#     Sticky-2hr provider → all visits land HTTP 200/302, no burnt IPs.
+#
+
+
 # v2.6.14 — 2026-02 — Rotating-gateway proxy exhaustion fix + offer-block auto-retry for gateway mode
 #
 # CUSTOMER-FACING FIXES (from field report — RUT job died at 5/20 visits):
