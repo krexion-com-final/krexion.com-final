@@ -2427,7 +2427,19 @@ def coerce_ua_for_platform(ua: str, platform: str) -> str:
             # before appending the musical_ly suffix.
             if p == "tiktok":
                 _rebuilt = _rebuild_tiktok_android_ua_base(new_ua)
-                if _rebuilt and _rebuilt != new_ua:
+                # 2026-02 v2.6.20 safety guard: only accept the rebuilt
+                # UA if it is (a) non-empty, (b) still starts with the
+                # Mozilla/5.0 prefix (never break a UA parser upstream),
+                # and (c) actually contains "Cronet/" (the whole point
+                # of the rebuild). Any deviation → fall back to legacy
+                # WebView polishing so a malformed UA doesn't reach the
+                # customer's traffic run.
+                if (
+                    _rebuilt
+                    and _rebuilt != new_ua
+                    and _rebuilt.startswith("Mozilla/5.0 ")
+                    and "Cronet/" in _rebuilt
+                ):
                     new_ua = _rebuilt
                     # Skip the WebView polishing (wv / Version/4.0 /
                     # Chrome injection) — the Cronet UA does not need

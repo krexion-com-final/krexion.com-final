@@ -27,9 +27,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 REFERRER_FILE = REPO_ROOT / "referrer_pro.py"
 
 
-def test_version_bumped_to_2_6_19():
+def test_version_bumped_to_2_6_19_or_higher():
     v = (REPO_ROOT / "VERSION").read_text().strip()
-    assert v == "2.6.19", f"Expected 2.6.19, got {v!r}"
+    parts = tuple(int(p) for p in v.split("."))
+    assert parts >= (2, 6, 19), f"Expected >= 2.6.19, got {v!r}"
 
 
 def _get_rp():
