@@ -1,3 +1,94 @@
+# v2.6.19 — 2026-02 — TikTok Android UA REBUILD (Cronet base) —
+# the true architectural fix for the "Browser: Chrome" mis-detection
+#
+# CUSTOMER-FACING FIX (continuation of v2.6.18):
+#
+#    Report:  Customer re-ran the samsclub01 TikTok in-app job with
+#             v2.6.18 deployed. Traxun still labelled visits as
+#             "Browser: Chrome" (6), "Facebook for iOS" (3), "WeChat
+#             for iOS" (5), "Firefox" (2), "Whale mobile" (1). Even
+#             though v2.6.18 correctly scrubbed the third-party
+#             browser markers, plain-Chrome mobile UAs coming from
+#             the operator's uploaded pool were kept intact and
+#             `musical_ly_…` was only APPENDED at the tail.
+#
+#    Root cause:  Real TikTok Android app uses Google's Cronet HTTP
+#                 stack, NOT the standard Android WebView. Its UA
+#                 structure is:
+#                     Mozilla/5.0 (Linux; U; Android 14; en_US;
+#                                 SM-S928B; Build/UP1A.231005.007;
+#                                 Cronet/58.0.2991.0)
+#                                 musical_ly_… JsSdk/1.0 …
+#                 — NO `AppleWebKit/537.36`, NO `Chrome/xxx`,
+#                 NO `Mobile Safari/537.36`.
+#
+#                 Our old code took a plain Chrome mobile UA
+#                     Mozilla/5.0 (Linux; Android 15; SM-S931B; wv)
+#                         AppleWebKit/537.36 … Chrome/146.0.7432.116
+#                         Mobile Safari/537.36
+#                 and appended `musical_ly_…` at the tail — but
+#                 advertiser UA parsers (Traxun / Voluum / RedTrack /
+#                 Binom / IPQS / DataDome) scan for the FIRST
+#                 recognisable browser token. They locked onto
+#                 `Chrome/146` and `Mobile Safari/537.36` in the
+#                 middle, ignored the trailing musical_ly marker,
+#                 and reported the visit as Chrome. Same failure
+#                 mode for Safari mobile bases → reported as Safari.
+#
+#    Fix:  For TikTok Android specifically, `coerce_ua_for_platform`
+#          now REBUILDS the base UA into the real Cronet structure
+#          before appending the musical_ly suffix. Extracts the
+#          Android version + device model + build id from the input
+#          UA (so any Sec-CH-UA-Platform-Version / Accept-Language
+#          layer stays consistent), inserts a random Cronet version
+#          from a real-capture pool (`_TIKTOK_CRONET_VERSIONS`), and
+#          emits a UA the offer's parser can only classify as
+#          TikTok in-app.
+#
+#    Effect: TikTok Android visits will now be reported as
+#            "TikTok for Android" in every advertiser dashboard.
+#
+#    Other platforms unchanged: Facebook / Instagram / Snapchat /
+#    LinkedIn / Twitter Android REALLY DO use the standard Chrome
+#    WebView (real captures confirmed). Their UA keeps `Chrome/xxx
+#    Mobile Safari/537.36` before the app-marker bracket — exactly
+#    matching reality. Only TikTok Android needed the rebuild.
+#
+#    iOS behaviour unchanged: the v2.2.6 Safari/Version stripping
+#    for all in-app iOS UAs remains — that path was already
+#    correctly matching real captures.
+#
+# FILES TOUCHED
+# =============
+#   backend/referrer_pro.py
+#     • NEW `_TIKTOK_CRONET_VERSIONS` — 15 real Cronet versions
+#     • NEW `_rebuild_tiktok_android_ua_base(ua)` — extracts
+#       android_ver + device + build_id from an input WebView UA
+#       and rebuilds it into the Cronet form. Never raises.
+#     • `coerce_ua_for_platform` — for TikTok+Android calls the
+#       rebuild helper; for every other Android in-app platform
+#       (FB/IG/Snap/LI/TW/Pinterest) keeps the legacy WebView
+#       polishing code (which matches real captures for those apps).
+#
+#   backend/VERSION                    → 2.6.18 → 2.6.19
+#   electron-desktop/package.json      → 2.6.18 → 2.6.19
+#   desktop/__init__.py                → 2.6.18 → 2.6.19
+#
+#   backend/tests/test_v2_6_19_tiktok_ua_rebuild.py  (NEW — 6 tests)
+#   backend/tests/test_v2_6_18_browser_mix_and_utm_fix.py (version assert bumped)
+#
+# COMPATIBILITY
+# =============
+#   Fully backwards-compatible. Any input Android UA that does not
+#   match the WebView regex falls back to the legacy polishing code
+#   so no visit ever fails because of the rebuild. Facebook /
+#   Instagram / Snapchat / LinkedIn / Twitter / Pinterest Android
+#   behaviour is bit-identical to v2.6.18 — only TikTok Android UAs
+#   are rebuilt.
+#
+# ────────────────────────────────────────────────────────────────
+
+
 # v2.6.18 — 2026-02 — Browser-mixing FIX + UTM/click_id forwarding FIX
 #
 # TWO CUSTOMER-FACING FIXES IN ONE RELEASE

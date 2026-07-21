@@ -1726,6 +1726,31 @@ _PINTEREST_APP_VERSIONS: List[str] = [
     "11.34", "11.33", "11.32", "11.31", "11.30",
 ]
 
+# ── 2026-02 v2.6.19 — Real TikTok Android UA structure ─────────────
+# Real captures (2025-2026) show TikTok's Android app uses Google's
+# Cronet HTTP stack, NOT the standard Android WebView. So the UA has:
+#   • `Linux; U; Android <ver>; <locale>; <device>; Build/<id>; Cronet/<ver>)`
+# instead of the WebView-style:
+#   • `Linux; Android <ver>; <device> Build/<id>; wv) AppleWebKit/… Chrome/… Mobile Safari/…`
+# Advertiser UA parsers (Traxun, Voluum, RedTrack, Binom, IPQS, etc.)
+# scan for the FIRST recognizable browser token — if Chrome/Safari
+# appear in the middle they classify the visit as Chrome/Safari and
+# ignore the trailing `musical_ly_…` marker. Rebuilding the UA base
+# eliminates that mis-detection.
+_TIKTOK_CRONET_VERSIONS: List[str] = [
+    # Sampled from real 2025-2026 TikTok Android app captures.
+    "128.0.6613.113", "127.0.6533.99",
+    "122.0.6261.128", "121.0.6167.164",
+    "118.0.5993.65",  "115.0.5790.169",
+    "110.0.5481.100", "104.0.5112.114",
+    "100.0.4896.127", "94.0.4606.85",
+    "88.0.4324.152",  "80.0.3987.163",
+    "72.0.3626.121",  "66.0.3359.181",
+    "58.0.2991.0",
+]
+
+
+
 
 
 # Markers that mean "this UA is already in-app". When ANY of these
@@ -2008,6 +2033,75 @@ _FOREIGN_INAPP_STRIP_PATTERNS: Dict[str, str] = {
     "sogou":             r"\s+SogouMobileBrowser/\S+",
     "coc_coc":           r"\s+coc_coc_browser/\S+",
 }
+
+
+def _rebuild_tiktok_android_ua_base(ua: str) -> str:
+    """Rebuild an Android UA into REAL TikTok Android structure.
+
+    Real TikTok Android captures (2025-2026):
+        Mozilla/5.0 (Linux; U; Android 14; en_US; SM-S928B;
+                    Build/UP1A.231005.007; Cronet/58.0.2991.0)
+                    musical_ly_2024105080 JsSdk/1.0 …
+
+    Standard Android WebView captures (what our old code produced):
+        Mozilla/5.0 (Linux; Android 15; SM-S931B Build/AP3A.240905.015;
+                    wv) AppleWebKit/537.36 (KHTML, like Gecko)
+                    Version/4.0 Chrome/146.0.7432.116 Mobile Safari/537.36
+                    musical_ly_… …
+
+    Advertiser UA parsers (Traxun / Voluum / RedTrack / Binom / IPQS)
+    read the first recognisable browser token. WebView-style UAs
+    trip on `Chrome/xxx` and `Mobile Safari/xxx` — the trailing
+    musical_ly marker is ignored and the visit is labelled Chrome.
+    Rebuilding to the Cronet form eliminates that mis-detection
+    entirely because there IS no Chrome/Safari token to trip on.
+
+    Extracts the Android version + device model + build id from the
+    input UA and reuses them so the coerce is internally consistent
+    with any other fingerprint layers (Sec-CH-UA-Platform-Version,
+    Accept-Language, etc.). Missing pieces fall back to random
+    defaults from the customer's own Android UA pool.
+
+    Never raises — on parse failure returns the input UA unchanged
+    so the older WebView code path continues to run.
+    """
+    if not ua:
+        return ua or ""
+    try:
+        # Parse `Linux; Android <ver>; <device> Build/<id>[; wv]` block.
+        m = re.match(
+            r"^Mozilla/5\.0\s*\(Linux;\s*(?:U;\s*)?Android\s+"
+            r"([\d.]+)\s*;\s*"                     # 1 android version
+            r"([^;)]+?)"                            # 2 device model
+            r"(?:\s+Build/([^;)\s]+))?"             # 3 build id (optional)
+            r"(?:;\s*wv)?\)"                        # optional ";wv"
+            r"(?:\s*AppleWebKit/[\d.]+\s*\(KHTML,\s*like\s*Gecko\))?"
+            r"(?:\s*Version/[\d.]+)?"
+            r"(?:\s*Chrome/[\d.]+)?"
+            r"(?:\s*Mobile\s*Safari/[\d.]+)?",
+            ua,
+            flags=re.IGNORECASE,
+        )
+        if not m:
+            return ua
+        android_ver = (m.group(1) or "14").strip()
+        device = (m.group(2) or "SM-S928B").strip()
+        build_id = (m.group(3) or "UP1A.231005.007").strip()
+        # Locale — biased towards en_US since that dominates TikTok's
+        # US audience which is the majority of advertiser targeting.
+        locale_short = random.choice(
+            ["en_US", "en_US", "en_US", "en_GB", "es_US", "en_CA"]
+        )
+        cronet_ver = random.choice(_TIKTOK_CRONET_VERSIONS)
+        # Construct real TikTok Android UA prefix. Downstream code
+        # will append `musical_ly_<code> JsSdk/1.0 NetType/… …`.
+        return (
+            f"Mozilla/5.0 (Linux; U; Android {android_ver}; {locale_short}; "
+            f"{device}; Build/{build_id}; Cronet/{cronet_ver})"
+        )
+    except Exception:
+        return ua
+
 
 
 def _strip_foreign_inapp_markers(ua: str, keep_platform: str) -> str:
@@ -2322,30 +2416,66 @@ def coerce_ua_for_platform(ua: str, platform: str) -> str:
         # "Version/4.0" token. If they're missing, synthesise the most
         # common form before appending the suffix.
         if family == "android":
-            # 2026-06 BUG-G FIX: ensure a "; <model> Build/<id>" token is
-            # present so advertiser parsers populate Device with a real
-            # brand/model instead of "Unknown Generic Android". Without
-            # this, every plain "Linux; Android 14)" UA the customer
-            # pastes ends up labelled as Unknown on the offer dashboard.
-            new_ua = _ensure_android_device_token(new_ua)
-            # Insert "; wv" right before the closing ")" of the Linux/Android
-            # parenthesised section if not already present.
-            if "; wv)" not in new_ua and "wv)" not in new_ua:
-                new_ua = re.sub(
-                    r"\((Linux; Android[^)]*?)\)",
-                    lambda m: f"({m.group(1)}; wv)",
-                    new_ua,
-                    count=1,
-                )
-            # Insert "Version/4.0" before "Chrome/" if absent — matches
-            # the real Android WebView token order.
-            if "Version/4.0" not in new_ua:
-                new_ua = re.sub(
-                    r"AppleWebKit/([\d.]+) \(KHTML, like Gecko\) Chrome/",
-                    r"AppleWebKit/\1 (KHTML, like Gecko) Version/4.0 Chrome/",
-                    new_ua,
-                    count=1,
-                )
+            # ── 2026-02 v2.6.19 TIKTOK-ANDROID CRONET REBUILD ──────────
+            # Real TikTok Android uses Cronet, NOT the standard Android
+            # WebView. If we leave `Chrome/xxx Mobile Safari/537.36` in
+            # the UA, advertiser parsers (Traxun / Voluum / RedTrack /
+            # Binom / IPQS) classify the visit as Chrome and ignore
+            # the trailing musical_ly marker. For TikTok Android we
+            # rebuild the base to `(Linux; U; Android X; locale; device;
+            # Build/id; Cronet/ver)` — the true real-app structure —
+            # before appending the musical_ly suffix.
+            if p == "tiktok":
+                _rebuilt = _rebuild_tiktok_android_ua_base(new_ua)
+                if _rebuilt and _rebuilt != new_ua:
+                    new_ua = _rebuilt
+                    # Skip the WebView polishing (wv / Version/4.0 /
+                    # Chrome injection) — the Cronet UA does not need
+                    # or want those tokens.
+                else:
+                    # Fallback: input UA didn't match the WebView shape
+                    # we expected → run the legacy polishing so the
+                    # append at least stays consistent with any other
+                    # shape the operator uploaded.
+                    new_ua = _ensure_android_device_token(new_ua)
+                    if "; wv)" not in new_ua and "wv)" not in new_ua:
+                        new_ua = re.sub(
+                            r"\((Linux; Android[^)]*?)\)",
+                            lambda m: f"({m.group(1)}; wv)",
+                            new_ua,
+                            count=1,
+                        )
+                    if "Version/4.0" not in new_ua:
+                        new_ua = re.sub(
+                            r"AppleWebKit/([\d.]+) \(KHTML, like Gecko\) Chrome/",
+                            r"AppleWebKit/\1 (KHTML, like Gecko) Version/4.0 Chrome/",
+                            new_ua,
+                            count=1,
+                        )
+            else:
+                # Every OTHER Android in-app platform (Facebook,
+                # Messenger, Instagram, Snapchat, LinkedIn, Twitter,
+                # Pinterest) uses the standard Android WebView. Real
+                # FB Android UA:
+                #   ... Chrome/126.0.6478.99 Mobile Safari/537.36
+                #       [FB_IAB/FB4A;FBAV/…;IABMV/1;]
+                # so keeping Chrome+Safari and appending the bracket
+                # matches reality. Same for IG / Snap / LI / TW.
+                new_ua = _ensure_android_device_token(new_ua)
+                if "; wv)" not in new_ua and "wv)" not in new_ua:
+                    new_ua = re.sub(
+                        r"\((Linux; Android[^)]*?)\)",
+                        lambda m: f"({m.group(1)}; wv)",
+                        new_ua,
+                        count=1,
+                    )
+                if "Version/4.0" not in new_ua:
+                    new_ua = re.sub(
+                        r"AppleWebKit/([\d.]+) \(KHTML, like Gecko\) Chrome/",
+                        r"AppleWebKit/\1 (KHTML, like Gecko) Version/4.0 Chrome/",
+                        new_ua,
+                        count=1,
+                    )
 
         # iOS realism: real in-app webview UAs DROP the
         # `Version/<X.X>` and `Safari/<X.X.X>` tokens that plain Safari

@@ -22,9 +22,10 @@ REFERRER_FILE = REPO_ROOT / "referrer_pro.py"
 SERVER_FILE = REPO_ROOT / "server.py"
 
 
-def test_version_bumped_to_2_6_18():
+def test_version_bumped_to_2_6_18_or_higher():
     v = (REPO_ROOT / "VERSION").read_text().strip()
-    assert v == "2.6.18", f"Expected 2.6.18, got {v!r}"
+    parts = tuple(int(p) for p in v.split("."))
+    assert parts >= (2, 6, 18), f"Expected >= 2.6.18, got {v!r}"
 
 
 def test_third_party_browser_scrub_in_preset_gate():
