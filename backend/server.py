@@ -13399,38 +13399,57 @@ def _ua_tiktok_ios(d: dict, app_ver: str, region: Optional[dict] = None) -> str:
 
 
 def _ua_tiktok_android(d: dict, app_ver: str, region: Optional[dict] = None) -> str:
-    """In-app webview format — matches the real 2025-2026 TikTok APK.
+    """Real 2025-2026 TikTok Android UA — Cronet-based format.
 
-    v2.1.28: Added the trill/JsSdk/NetType/Channel tail fields that the
-    real TikTok Android app sends. Previously our UA was a generic
-    webview shape ("musical_ly_X trill BytedanceWebview/HASH") which
-    TikTok's server-side bot-detector marks as low-trust. Real captured
-    sample (TikTok 32.6.4, Pixel 7, Android 14):
+    v2.6.22 REBUILD: earlier v2.1.28 shipped a WebView-style shell
+    ("Chrome/{ver} Mobile Safari/537.36 trill_… musical_ly …"). While
+    that shape appears in some Chrome-DevTools TikTok captures, the
+    REAL TikTok Android app installed from Play Store uses Cronet, NOT
+    a WebView, so advertiser UA parsers (Traxun / Voluum / RedTrack /
+    Binom / IPQS) that read left-to-right ranked the `Chrome/xxx`
+    token above the trailing musical_ly marker and labelled visits
+    as "Chrome" — the customer's "mix browser" complaint on TikTok
+    RUT jobs.
 
-      Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/UD1A.231105.004; wv)
-      AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/120.0.0.0
-      Mobile Safari/537.36 trill_320604 JsSdk/1.0 NetType/WIFI
-      Channel/googleplay AppName/musical_ly app_version/32.6.4
-      ByteLocale/en ByteFullLocale/en Region/US
-      BytedanceWebview/d8a21c6 ttwebview/05080411
+    New (Cronet) shape mirrors the string real TikTok emits:
 
-    `trill_NNNNNN` is the build number (app_ver with dots removed +
-    padded). `Channel/googleplay` is constant for Play Store installs.
+      Mozilla/5.0 (Linux; U; Android 14; en_US; SM-S928B;
+                  Build/UP1A.231005.007; Cronet/58.0.2991.0)
+                  musical_ly_2024105080 JsSdk/1.0 NetType/WIFI
+                  Channel/googleplay AppName/musical_ly
+                  app_version/34.9.5 ByteLocale/en_US
+                  ByteFullLocale/en_US Region/US
+                  BytedanceWebview/d8a21c6 ttwebview/05080411
+
+    `musical_ly_NNNNNNNNNN` = 10-digit numeric build code derived from
+    app_ver (digits-only, zero-padded/truncated). `Channel/googleplay`
+    is constant for Play Store installs. Matches the safety guard in
+    referrer_pro._rebuild_tiktok_android_ua_base so downstream coerce
+    is a no-op for our own generator output.
     """
-    chrome_ver = random.choice(_CHROME_VERSIONS)
     webview_hash = ''.join(random.choices('abcdef0123456789', k=7))
-    # trill build number = digits-only flatten of app_ver, zero-padded to 6
-    trill_num = (app_ver.replace(".", "") + "000000")[:6]
-    # ttwebview internal version — 8-digit yymmddhh-style
+    # 10-digit musical_ly build code (real app format)
+    ml_build = (app_ver.replace(".", "") + "0000000000")[:10]
     ttwv = ''.join(random.choices('0123456789', k=8))
     r = region or _pick_region(None)
     byte_locale = r["byte_locale"]
     region_code = r["code"]
+    posix_locale = r.get("posix_locale", "en_US")
     net_type = random.choices(["WIFI", "4G", "5G"], weights=[70, 25, 5], k=1)[0]
+    # Cronet version pool — matches referrer_pro._TIKTOK_CRONET_VERSIONS
+    # so both generator and coerce emit realistic same-family versions.
+    try:
+        from referrer_pro import _TIKTOK_CRONET_VERSIONS as _cronet_pool
+        cronet_ver = random.choice(list(_cronet_pool))
+    except Exception:
+        cronet_ver = random.choice([
+            "58.0.2991.0", "100.0.4896.127", "104.0.5112.114",
+            "115.0.5790.169", "118.0.5993.117",
+        ])
     return (
-        f"Mozilla/5.0 (Linux; Android {d['and_ver']}; {d['model']} Build/{d['build']}; wv) "
-        f"AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/{chrome_ver} Mobile Safari/537.36 "
-        f"trill_{trill_num} JsSdk/1.0 NetType/{net_type} Channel/googleplay "
+        f"Mozilla/5.0 (Linux; U; Android {d['and_ver']}; {posix_locale}; "
+        f"{d['model']}; Build/{d['build']}; Cronet/{cronet_ver}) "
+        f"musical_ly_{ml_build} JsSdk/1.0 NetType/{net_type} Channel/googleplay "
         f"AppName/musical_ly app_version/{app_ver} "
         f"ByteLocale/{byte_locale} ByteFullLocale/{byte_locale} Region/{region_code} "
         f"BytedanceWebview/{webview_hash} ttwebview/{ttwv}"

@@ -1,0 +1,40 @@
+{
+  "summary": "Verified v2.6.21 hybrid-UA 'mixed browser leak' fix on Krexion backend. Backend up, /api/system/version returns 2.6.21, admin login on preview URL works with admin@krexion.local / Krexion@Preview2026! -> access_token returned. Wrote /app/backend/tests/test_v2_6_21_hybrid_ua_leak_fix.py with 11 tests covering all 9 scenarios from the review request (BUG A, BUG B, IG-stripping, WebView-Cronet regression, idempotent Cronet, FB-keeps-Chrome/Safari, IG target strips TT markers, generator Cronet shape x25, iOS generator no Safari x15, and generator->coerce composition idempotency). All 11 new tests PASS. Also re-ran existing v2.6.18 (6) + v2.6.19 (6) suites: all 12 remain green. Bug fix VERIFIED.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "tests/test_rut_referrer_bugs.py", "issue": "Pre-existing failing suite (13 errors) — has stale hardcoded ADMIN_PASSWORD='Krexion@2026' but current preview password is 'Krexion@Preview2026!'. All errors are fixture setup failures on admin_token due to wrong password. Unrelated to v2.6.21 UA fix. Fix: update ADMIN_PASSWORD constant to 'Krexion@Preview2026!' (or read from env)."},
+      {"endpoint": "tests/test_rut_referrer_concurrency_fixes_2026_02.py::TestCtxArgsFix::test_v230_block_uses_ctx_headers", "issue": "Pre-existing failing test — asserts '_ctx_headers' string appears in a hard-coded source line window (lines 8778:8830 of real_user_traffic.py). The window has drifted due to unrelated additions. Unrelated to v2.6.21 UA fix."},
+      {"endpoint": "tests/test_rut_referrer_concurrency_fixes_2026_02.py::TestAdminLoginSmoke::test_admin_login_200", "issue": "Same stale-password issue as test_rut_referrer_bugs.py. Unrelated to v2.6.21 UA fix."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_v2_6_21_hybrid_ua_leak_fix.py",
+    "/app/test_reports/pytest/v2_6_21_results.xml"
+  ],
+  "action_items": [
+    "None for v2.6.21 fix itself — all 11 new + 12 existing (v2.6.18/v2.6.19) tests PASS. Fix codified and regression-guarded.",
+    "OPTIONAL (unrelated cleanup): update ADMIN_PASSWORD in /app/backend/tests/test_rut_referrer_bugs.py and /app/backend/tests/test_rut_referrer_concurrency_fixes_2026_02.py from 'Krexion@2026' to 'Krexion@Preview2026!' (or read from env/test_credentials.md) so those pre-existing suites become runnable again.",
+    "OPTIONAL: fix stale line-range assertion in tests/test_rut_referrer_concurrency_fixes_2026_02.py::TestCtxArgsFix — change from src_lines[8778:8830] to a text-search for '_ctx_headers' anywhere in rut source (line indices drift)."
+  ],
+  "critical_code_review_comments": [
+    "coerce_ua_for_platform() flow reorder is correct: strip foreign -> Cronet-leak guard (TikTok Android only) -> idempotency check on CLEANED ua -> append if needed. Existing musical_ly suffix is preserved via a regex capture (r'\\s+musical_ly[_A-Za-z0-9]*\\s+.*?BytedanceWebview/\\S+') before rebuild — verified working on hybrid inputs.",
+    "server._ua_tiktok_android() now emits Cronet-shape UA matching referrer_pro._rebuild_tiktok_android_ua_base output so downstream coerce is a no-op. Verified by test_generator_output_is_idempotent_through_coerce (musical_ly_ appears exactly once, no Chrome/, no Mobile Safari).",
+    "server.py is 25685 lines — long overdue for modular split (device pools, UA generators, region picker, etc. each merit their own module). Not a v2.6.21 blocker."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_v2_6_21_hybrid_ua_leak_fix.py (created)"
+  ],
+  "success_rate": {"backend": "100% (23/23 targeted tests: v2.6.18 6/6 + v2.6.19 6/6 + v2.6.21 11/11)", "frontend": "not tested (backend-only per review request)"},
+  "test_credentials": "admin@krexion.local / Krexion@Preview2026! (verified working on preview URL)",
+  "seed_data_creation": "None — pure unit tests on referrer_pro.coerce_ua_for_platform() and server._ua_tiktok_android/_ua_tiktok_ios generators. No DB writes.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Bug FIX VERIFIED for v2.6.21 hybrid-UA leak. The two pre-existing failing suites (test_rut_referrer_bugs.py and test_rut_referrer_concurrency_fixes_2026_02.py) have stale admin password 'Krexion@2026' and a stale source-line-range assertion — both unrelated to the UA fix. Skip or update those before running regression again.",
+  "rca of the issue": "Root cause: referrer_pro.coerce_ua_for_platform() was short-circuiting on idempotency (_ua_has_inapp_marker) BEFORE stripping foreign in-app markers. Hybrid UAs (musical_ly + FBAV, or musical_ly + Chrome/MobileSafari WebView leaks) passed through UNCHANGED because they contained the target marker. Downstream advertiser UA parsers read left-to-right and latched on the earlier foreign bracket (FB) or Chrome/Safari tokens, mis-labelling clicks as Facebook / Chrome / Safari instead of TikTok. Fix reorders the flow: strip foreign markers -> (TikTok Android only) Cronet-leak guard rebuilds base if Chrome/Safari still present, preserving any clean musical_ly suffix -> THEN idempotency check on the cleaned UA -> append target suffix if still needed. Additionally, server._ua_tiktok_android() itself was emitting the old WebView shape (Chrome + Mobile Safari) so the generator's own output was triggering the coerce rebuild every run; rewritten to true Cronet shape so generator->coerce is a no-op."
+}

@@ -2349,14 +2349,70 @@ def coerce_ua_for_platform(ua: str, platform: str) -> str:
         family = _is_mobile_ua(ua)
         if not family:
             return ua
-        if _ua_has_inapp_marker(ua, p):
-            return ua
 
-        suffix = build_inapp_ua_suffix(p, ua)
+        # ── 2026-02 v2.6.22 CRITICAL FIX — "mixed browser leak" ────────
+        # Idempotency short-circuit MUST run AFTER foreign-marker strip
+        # and (for TikTok Android) the Chrome/Safari-leak sanity check,
+        # else hybrid UAs pass through unchanged and advertiser
+        # trackers latch onto the LEAKED signature (FB / Chrome /
+        # Safari) instead of the target platform. Two documented
+        # customer leaks this fix closes:
+        #   BUG A: UA carries target marker (e.g. musical_ly) AND a
+        #          foreign in-app marker (e.g. FBAV). Old code returned
+        #          UA unchanged → advertiser parser stops at FBAV →
+        #          click labelled "Facebook for Android".
+        #   BUG B: TikTok UA carries musical_ly AND leftover WebView
+        #          `Chrome/xxx Mobile Safari/537.36` tokens (hybrid
+        #          shape from AI generators or legacy coerce). Old
+        #          code returned UA unchanged → parser latched on
+        #          Chrome → click labelled Chrome, not TikTok.
+        # Fix: always run foreign-marker strip first, THEN run the
+        # TikTok Cronet sanity, THEN check idempotency, THEN append
+        # if still needed. Non-TikTok platforms are unaffected by the
+        # Cronet check.
+        new_ua = _strip_foreign_inapp_markers(ua, p)
+
+        # TikTok Android specifically must NEVER carry `Chrome/` or
+        # `Mobile Safari/` tokens — advertiser UA parsers rank those
+        # above the trailing musical_ly marker and mis-label the
+        # click as Chrome. If present, force a Cronet rebuild
+        # regardless of idempotency. All other in-app platforms
+        # (FB / IG / Snap / LI / TW / Pinterest) DO include Chrome +
+        # Mobile Safari in real captures, so this guard is TikTok-only.
+        if p == "tiktok" and family == "android":
+            _tt_has_chrome_leak = ("Chrome/" in new_ua) or (" Safari/" in new_ua)
+            if _tt_has_chrome_leak:
+                _rebuilt = _rebuild_tiktok_android_ua_base(new_ua)
+                if (
+                    _rebuilt
+                    and _rebuilt != new_ua
+                    and _rebuilt.startswith("Mozilla/5.0 ")
+                    and "Cronet/" in _rebuilt
+                    and "Chrome/" not in _rebuilt
+                ):
+                    # Preserve any existing (clean) musical_ly suffix
+                    # that survived _strip_foreign_inapp_markers.
+                    _mm = re.search(
+                        r"\s+musical_ly[_A-Za-z0-9]*\s+.*?BytedanceWebview/\S+",
+                        new_ua,
+                        flags=re.IGNORECASE,
+                    )
+                    _existing_tt_suffix = _mm.group(0).strip() if _mm else ""
+                    new_ua = _rebuilt
+                    if _existing_tt_suffix:
+                        # Re-append the existing clean TikTok suffix so
+                        # the UA still declares TikTok immediately (no
+                        # need to fall through to build_inapp_ua_suffix).
+                        new_ua = f"{new_ua} {_existing_tt_suffix}"
+
+        # Now idempotency check on the CLEANED UA. If clean UA still
+        # has the target's marker, we're done.
+        if _ua_has_inapp_marker(new_ua, p):
+            return new_ua
+
+        suffix = build_inapp_ua_suffix(p, new_ua)
         if not suffix:
-            return ua
-
-        new_ua = ua
+            return new_ua
 
         # 2026-07 v2.2.3 — Strip FOREIGN in-app markers first.
         # Customer report: TikTok RUT job produced clicks where Referrer=
