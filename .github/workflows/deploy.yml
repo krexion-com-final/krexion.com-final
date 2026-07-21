@@ -77,6 +77,19 @@ jobs:
           rm -rf /opt/krexion/backend/visual_recorder_sessions/*/screenshots 2>/dev/null || true
           docker image prune -f 2>&1 | tail -2 || true
           docker builder prune -f 2>&1 | tail -2 || true
+          # 2026-02 v2.6.21 — aggressive builder cache trim when the
+          # host has less than 15 GB free. Prior deploys (v2.6.19/20)
+          # failed at `docker compose build --no-cache` with cryptic
+          # exit codes; adding this second-pass prune ensures the
+          # builder always has enough working space even on tight
+          # VPS disks. `--keep-storage 5GB` keeps just enough hot
+          # cache for iterative rebuilds while freeing the rest.
+          FREE_GB=$(df --output=avail -BG / 2>/dev/null | tail -1 | tr -dc '0-9')
+          if [ -n "$FREE_GB" ] && [ "$FREE_GB" -lt 15 ]; then
+            echo ">> Disk under 15GB free — running aggressive builder prune"
+            docker builder prune -af --keep-storage 5GB 2>&1 | tail -3 || true
+            docker system prune -f 2>&1 | tail -2 || true
+          fi
           echo ">> Disk AFTER cleanup"
           df -h / /var/lib/docker 2>/dev/null | head -5
 

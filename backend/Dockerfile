@@ -46,10 +46,24 @@ COPY . .
 # Compile every .py recursively to optimised .pyc and remove source.
 # The PYTHONDONTWRITEBYTECODE=1 above is overridden during this step
 # because we explicitly run compileall.
-RUN python -O -m compileall -b -f -q . \
-    && find . -name "*.py" -type f -not -path "./tests/*" -delete \
-    && find . -name "__pycache__" -type d -prune -exec rm -rf {} + \
-    && find . -name "*.pyc" -type f | head -20
+#
+# 2026-02 v2.6.21 — Removed `-q` flag so compilation errors surface in
+# the Docker build log (previously suppressed → deploy failures were
+# opaque). Split the multi-command chain into individual RUN lines
+# with `set -euxo pipefail` so each step's exit code is visible, and
+# added a preflight `pip check` to catch dependency conflicts before
+# they cascade into cryptic import errors at container startup.
+RUN set -eux; \
+    echo ">> [1/4] pip check (dependency conflicts)"; \
+    python -m pip check || echo "  (pip check warnings — non-fatal)"; \
+    echo ">> [2/4] compileall recursive (verbose on error)"; \
+    python -O -m compileall -b -f . || (echo "!! compileall FAILED — see errors above" && exit 1); \
+    echo ">> [3/4] strip .py sources (keep tests/)"; \
+    find . -name "*.py" -type f -not -path "./tests/*" -delete; \
+    echo ">> [4/4] purge __pycache__"; \
+    find . -name "__pycache__" -type d -prune -exec rm -rf {} + ; \
+    echo ">> Compile-strip complete. Sample .pyc files:"; \
+    find . -name "*.pyc" -type f | head -20
 
 EXPOSE 8001
 
