@@ -1,0 +1,35 @@
+{
+  "summary": "Verified v2.6.22 guide-scenario ('Custom Landing Page URL + In-App Browser Preset for all 8 platforms') on Krexion backend. Preview backend up, /api/system/version returns 2.6.21 (mode=cloud), admin login on preview URL works with admin@krexion.local / Krexion@Preview2026! -> access_token returned. Independently re-ran /app/backend/tests/test_v2_6_22_custom_url_plus_preset_all_platforms.py: all 59 tests PASS (covers per-platform referer==operator URL, platform_tag==preset, Android+iOS UA carries platform in-app marker, no foreign marker leak, TikTok Chrome/Safari stripping, UTM defaults for paid vs referral, operator utm_source not overwritten, full-pipeline consistency, mix/weighted platform_pool restriction). Regression: v2.6.18 (6/6) + v2.6.19 (6/6) + v2.6.21 (11/11) = 23/23 remain green. Grand total this iteration: 82/82 tests PASS. Guide scenario deeply verified — pipeline works perfectly for all 8 in-app platforms.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "server.py FastAPI startup", "issue": "Deprecation warnings on @app.on_event('startup'/'shutdown') at multiple lines (23993, 24751, 25266, 25329) — FastAPI recommends lifespan event handlers. Non-blocking, but worth cleaning up for FastAPI future compatibility."},
+      {"endpoint": "backend general", "issue": "Pydantic v1-style class-based Config deprecation warnings — should migrate to ConfigDict. Non-blocking."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_v2_6_22_custom_url_plus_preset_all_platforms.py",
+    "/app/test_reports/pytest/v2_6_22_results.xml",
+    "/app/test_reports/pytest/v2_6_18_19_21_regression.xml"
+  ],
+  "action_items": [
+    "None for v2.6.22 guide-verification — 59/59 new + 23/23 regression = 82/82 PASS. Guide scenario codified and regression-guarded.",
+    "OPTIONAL (unrelated hygiene, carried over from iteration_15): migrate FastAPI @app.on_event to lifespan handlers in server.py; migrate Pydantic class-based Config -> ConfigDict.",
+    "OPTIONAL (carried over): update stale ADMIN_PASSWORD ('Krexion@2026' -> 'Krexion@Preview2026!') in test_rut_referrer_bugs.py and test_rut_referrer_concurrency_fixes_2026_02.py so those older suites are runnable again."
+  ],
+  "critical_code_review_comments": [
+    "_resolve_visit_referer (real_user_traffic.py ~1258-1281) correctly implements 'custom+preset' contract: returns operator URL verbatim as Referer, tags visit with preset platform (NOT domain-derived), and populates UTM defaults only when operator URL lacks utm_source. Verified for all 8 platforms + operator-wins case.",
+    "coerce_ua_for_platform (referrer_pro.py) is idempotent through the generator->coerce composition per iteration_15 fix, and the new v2.6.22 tests re-validate this by asserting NO foreign in-app markers (FBAV, Instagram vX, Snapchat/, LinkedInApp, TwitterAndroid, Pinterest/, musical_ly) survive when coercing across platforms — including TikTok stripping Chrome/ and Mobile Safari.",
+    "platform_pool resolver correctly honors both comma-list and weighted-JSON forms and never leaks a 3rd platform (verified across 200-500 visit samples).",
+    "server.py is still ~25.7k lines — long overdue for modular split (UA generators, device pools, region picker, resolver, referrer glue each merit their own module). Not a v2.6.22 blocker."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (82/82: v2.6.22 59/59 + v2.6.21 11/11 + v2.6.19 6/6 + v2.6.18 6/6)", "frontend": "not tested (backend-only per review request)"},
+  "test_credentials": "admin@krexion.local / Krexion@Preview2026! (verified working on https://krexion-staging-14.preview.emergentagent.com)",
+  "seed_data_creation": "None — pure unit tests on _resolve_visit_referer, coerce_ua_for_platform, and _ua_tiktok_* generators. No DB writes.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "v2.6.22 guide scenario (custom landing URL + in-app browser preset) is fully verified for all 8 platforms across 59 parametrized cases + 23 regression tests. Preview backend still reports version 2.6.21 (mode=cloud) — no version bump was pushed this iteration since there were no code changes, only a new verification test file. If a future iteration bumps to 2.6.22, update the version-check assertion accordingly. Two older suites (test_rut_referrer_bugs.py, test_rut_referrer_concurrency_fixes_2026_02.py) remain broken by stale ADMIN_PASSWORD constant — skip or fix before running.",
+  "rca of the issue": "N/A — this iteration was pure verification, not a bug fix. The upstream v2.6.21 RCA (hybrid-UA foreign-marker leak) remains valid; v2.6.22 tests confirm the fix holds across all 8 in-app platforms and both Android+iOS bases with the operator's custom landing URL as Referer."
+}
