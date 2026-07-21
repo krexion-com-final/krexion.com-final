@@ -19120,6 +19120,95 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         # Defensive: never break the redirect because of macro logic.
         logger.warning(f"[/r/{short_code}] offer-URL macro substitution skipped: {_macro_err}")
 
+    # ── 2026-02 v2.6.18: FORWARD INCOMING TRACKING QUERY PARAMS ─────────
+    # Customer report: operator appended
+    # `?utm_source=tiktok&utm_medium=cpc&utm_campaign=xxx&click_id=…` to
+    # the Krexion tracker URL. Their offer report (Traxun) showed
+    # empty UTM / click_id / sub_id / tid columns because this handler
+    # only captured the FastAPI-declared `sub1/sub2/sub3` args from
+    # the query string and dropped every other param on the floor.
+    #
+    # Fix: extract a whitelist of well-known passthrough parameters
+    # (utm_*, click_id / clickid / cid, sub1..sub10, tid / txid, gclid,
+    # fbclid, ttclid / ttp, msclkid / mclid, twclid, li_fat_id,
+    # yclid, etc.) from `request.query_params` and merge them into
+    # the destination URL. Existing params on the destination URL
+    # (from macros / stored url_params / platform params) always win
+    # over the incoming ones — the operator's per-link config is
+    # authoritative. This is a pure "forward what would otherwise be
+    # discarded" fix; nothing already-preserved is affected.
+    try:
+        _incoming_qp = dict(request.query_params)
+        if _incoming_qp:
+            _PASSTHROUGH_KEYS = {
+                # UTM
+                "utm_source", "utm_medium", "utm_campaign",
+                "utm_content", "utm_term", "utm_id",
+                # Krexion / generic click ids
+                "click_id", "clickid", "cid", "trans_id", "transaction_id",
+                # Common ad-network click ids
+                "gclid", "gbraid", "wbraid",       # Google Ads
+                "fbclid",                          # Meta / Facebook
+                "ttclid", "ttp",                   # TikTok
+                "msclkid", "mclid",                # Microsoft / Bing
+                "twclid",                          # X / Twitter
+                "li_fat_id", "trk",                # LinkedIn
+                "yclid",                           # Yandex
+                "epik", "s_kwcid",                 # Pinterest / other
+                "irclickid",                       # Impact
+                "affid", "aff_id", "affiliate_id", "aff",
+                # SubID passthroughs (affiliate networks use these
+                # interchangeably — support both p1/pub1 and sub1
+                # style so ANY tracker layout works).
+                "sub1", "sub2", "sub3", "sub4", "sub5",
+                "sub6", "sub7", "sub8", "sub9", "sub10",
+                "s1", "s2", "s3", "s4", "s5",
+                "p1", "p2", "p3", "p4", "p5",
+                "pub1", "pub2", "pub3", "pub4", "pub5",
+                "aff_sub", "aff_sub2", "aff_sub3", "aff_sub4", "aff_sub5",
+                # Transaction / offer / source ids common on trackers
+                "tid", "txid", "sid", "source_id", "offer_id",
+                "campaign_id", "adset_id", "ad_id", "creative_id",
+                "placement_id",
+            }
+            # Filter incoming params to whitelist + case-insensitive.
+            _fwd_params: Dict[str, str] = {}
+            for _k, _v in _incoming_qp.items():
+                _kl = (_k or "").strip().lower()
+                if _kl in _PASSTHROUGH_KEYS and _v:
+                    _fwd_params[_kl] = str(_v)[:500]  # cap value length
+            if _fwd_params:
+                from urllib.parse import urlparse as _up, parse_qsl as _pql
+                from urllib.parse import urlencode as _uen, urlunparse as _uun
+                _du = _up(destination_url)
+                _existing_qs = dict(_pql(_du.query, keep_blank_values=True))
+                # Only add keys the destination URL doesn't already have
+                # (so operator's own config / macros always win).
+                _added = 0
+                for _k, _v in _fwd_params.items():
+                    if _k not in _existing_qs:
+                        _existing_qs[_k] = _v
+                        _added += 1
+                if _added:
+                    destination_url = _uun(_du._replace(
+                        query=_uen(_existing_qs, doseq=True)
+                    ))
+                    try:
+                        logger.info(
+                            f"[/r/{short_code}] forwarded {_added} incoming "
+                            f"passthrough param(s) to offer URL: "
+                            f"{sorted(_fwd_params.keys())}"
+                        )
+                    except Exception:
+                        pass
+    except Exception as _fwd_err:  # noqa: BLE001
+        try:
+            logger.warning(
+                f"[/r/{short_code}] passthrough forwarding skipped: {_fwd_err}"
+            )
+        except Exception:
+            pass
+
     # Set referrer policy based on referrer_mode
     headers = {}
     if referrer_mode == "no_referrer":

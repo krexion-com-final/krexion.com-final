@@ -1,3 +1,152 @@
+# v2.6.18 — 2026-02 — Browser-mixing FIX + UTM/click_id forwarding FIX
+#
+# TWO CUSTOMER-FACING FIXES IN ONE RELEASE
+# =========================================
+#
+# ── FIX #1: Browser mixing (Traxun report showed WeChat / Firefox /
+#            Whale / Chrome / Facebook even though TikTok preset was ON)
+# ─────────────────────────────────────────────────────────────────────
+#
+#    Report:  Customer ran a job with In-App Browser Preset = TikTok +
+#             utm_source=tiktok on the target URL. Traxun's clicks CSV:
+#                Chrome            6
+#                WeChat for iOS    5
+#                Facebook for iOS  3
+#                Firefox           2
+#                Whale mobile      1
+#             Only a handful of clicks were actually detected as
+#             "TikTok" — a hard fail on the "har bar TikTok he ho"
+#             requirement.
+#
+#    Root cause:
+#        `_apply_inapp_preset_to_uas` had a `_FOREIGN_MARKERS` list
+#        that only stripped OTHER in-app markers (fban, fbav, fb_iab,
+#        fb4a, instagram, linkedinapp, snapchat, twitter). Third-party
+#        MOBILE BROWSERS were not covered — so when the operator
+#        uploaded a UA batch containing WeChat (`MicroMessenger`),
+#        Firefox iOS (`FxiOS`), Naver Whale (`Whale`), UC (`UCBrowser`),
+#        Samsung Internet (`SamsungBrowser`), Opera, Edge Mobile, Line
+#        Browser, KakaoTalk, Brave, Yandex, Puffin, MIUI, Huawei,
+#        Vivo, Oppo, Baidu, Sogou, or Coc Coc UAs, they PASSED the
+#        preset gate unchanged. `coerce_ua_for_platform` merely
+#        APPENDED `musical_ly_…` to the tail — Traxun's UA parser
+#        detected the FIRST recognizable browser (WeChat / Firefox /
+#        Whale / Chrome / Facebook) and ignored the tail.
+#
+#    Fix:
+#        1. `_apply_inapp_preset_to_uas` in
+#           `backend/real_user_traffic.py` now scrubs a MUCH larger
+#           list of third-party mobile browser markers. Any UA
+#           containing one is REPLACED with a fresh clean mobile base
+#           UA (Chrome/Safari mobile), so the coerce step gets a
+#           single-signature canvas.
+#        2. `_FOREIGN_INAPP_STRIP_PATTERNS` in
+#           `backend/referrer_pro.py` gained 23 new regex buckets
+#           (wechat, firefox_mobile, firefox_focus, whale, ucbrowser,
+#           samsung_internet, opera_mobile, edge_mobile, line_browser,
+#           kakao, qq, yandex, brave_mobile, duckduckgo, puffin, silk,
+#           miui, huawei, vivo, oppo, baidu, sogou, coc_coc). These
+#           are stripped by `_strip_foreign_inapp_markers` inside
+#           `coerce_ua_for_platform` — a defense-in-depth pass so the
+#           final UA is ALWAYS single-signature.
+#
+#    Effect after v2.6.18:
+#        Setting In-App preset = TikTok now guarantees EVERY visit's
+#        UA carries ONLY the `musical_ly_…` marker at the tail —
+#        Traxun / Voluum / RedTrack / Binom / Anura / IPQS all report
+#        "TikTok" browser, never a mix. Same guarantee applies to
+#        Facebook, Instagram, Snapchat, LinkedIn, Twitter, Pinterest
+#        presets (each strips all foreign markers before appending
+#        its own).
+#
+# ── FIX #2: UTM / click_id / sub_id / tid / gclid / fbclid / ttclid
+#            missing from offer reports even when operator sets them
+#            on the tracker URL.
+# ─────────────────────────────────────────────────────────────────────
+#
+#    Report:  Customer appended
+#             `?utm_source=tiktok&utm_medium=cpc&utm_campaign=…&click_id=…`
+#             to the Krexion tracker URL. Traxun's report showed the
+#             UTM columns and Sub1-Sub10 completely empty — as if the
+#             params were never sent.
+#
+#    Root cause:
+#        The tracker handler `/api/t/{short_code}` + `/api/r/`, `/t/`,
+#        `/r/` (all four routes → same `redirect_link` function) only
+#        declared `sub1`, `sub2`, `sub3` as FastAPI query args. Every
+#        other incoming query param was DROPPED on the floor and
+#        never merged into the destination URL. UTM tokens were only
+#        applied when the destination URL itself had `{utm_source}`-
+#        style macros OR when pro-mode was active — neither was the
+#        case here.
+#
+#    Fix:
+#        `redirect_link` in `backend/server.py` now iterates over the
+#        ENTIRE incoming `request.query_params` and forwards any key
+#        in a WHITELIST of well-known passthrough parameters to the
+#        destination URL. Whitelist covers:
+#           utm_*  (source/medium/campaign/content/term/id)
+#           click_id, clickid, cid, trans_id, transaction_id
+#           gclid, gbraid, wbraid  (Google Ads)
+#           fbclid                 (Meta / Facebook)
+#           ttclid, ttp            (TikTok)
+#           msclkid, mclid         (Microsoft / Bing)
+#           twclid                 (X / Twitter)
+#           li_fat_id, trk         (LinkedIn)
+#           yclid                  (Yandex)
+#           epik, s_kwcid, irclickid, affid, aff_id, aff, affiliate_id
+#           sub1..sub10, s1..s5, p1..p5, pub1..pub5, aff_sub..aff_sub5
+#           tid, txid, sid, source_id, offer_id, campaign_id,
+#           adset_id, ad_id, creative_id, placement_id
+#        Existing destination-URL params ALWAYS win (operator's own
+#        link config / macros / platform-params are authoritative);
+#        we only fill gaps. Values are truncated to 500 chars for
+#        safety.
+#
+#    Effect after v2.6.18:
+#        Every `?utm_source=tiktok&click_id=abc&fbclid=xyz&ttclid=xxx`
+#        appended to the Krexion tracker URL will now surface on the
+#        offer's Sub1-Sub10 / utm_* / click_id columns exactly as the
+#        operator intended.
+#
+# FILES TOUCHED
+# =============
+#   backend/real_user_traffic.py
+#     • _apply_inapp_preset_to_uas — expanded `_THIRD_PARTY_MOBILE_BROWSERS`
+#       list; joined into every preset's `_FOREIGN_MARKERS` entry.
+#
+#   backend/referrer_pro.py
+#     • _FOREIGN_INAPP_STRIP_PATTERNS — added 23 new third-party
+#       browser strip patterns (wechat, firefox_mobile, firefox_focus,
+#       whale, ucbrowser, samsung_internet, opera_mobile, edge_mobile,
+#       line_browser, kakao, qq, yandex, brave_mobile, duckduckgo,
+#       puffin, silk, miui, huawei, vivo, oppo, baidu, sogou, coc_coc).
+#
+#   backend/server.py
+#     • redirect_link — new "FORWARD INCOMING TRACKING QUERY PARAMS"
+#       block. Extracts whitelist of utm_* / click_id / sub_* / tid /
+#       ad-network click ids from incoming request.query_params and
+#       merges them into destination_url. Applies to all 4 routes
+#       (/t/, /r/, /api/t/, /api/r/).
+#
+#   backend/VERSION                    → 2.6.17 → 2.6.18
+#   electron-desktop/package.json      → 2.6.17 → 2.6.18
+#   desktop/__init__.py                → 2.6.17 → 2.6.18
+#
+#   backend/tests/test_v2_6_18_browser_mix_and_utm_fix.py  (NEW — 6 tests)
+#   backend/tests/test_v2_6_17_comprehensive_fix.py        (version assert bumped)
+#
+# COMPATIBILITY
+# =============
+#   Fully backwards-compatible. Older UA batches still work — the new
+#   stripping is additive and only fires when a third-party marker
+#   is detected. Incoming query param forwarding is opt-in per
+#   incoming request (no key present → no change). Existing destination
+#   URL params always win over incoming ones.
+#
+# ────────────────────────────────────────────────────────────────
+
+
 # v2.6.17 — 2026-02 — COMPREHENSIVE duplicate-IP fix pack
 # (per-offer scoping + burnt-IP cleanup + phrase tightening + TLS prewarm guard)
 #

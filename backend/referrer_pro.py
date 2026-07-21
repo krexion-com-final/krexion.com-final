@@ -1975,6 +1975,38 @@ _FOREIGN_INAPP_STRIP_PATTERNS: Dict[str, str] = {
     "google":     r"\s+GSA/\S+(?:\s+Mobile/\S+\s+Safari/\S+)?",
     "reddit":     r"\s+Reddit/Version\s+\S+(?:/Build\s+\S+)?(?:/Android\s+\S+)?",
     "pinterest":  r"\s+Pinterest/\S+",
+    # 2026-02 v2.6.18 — Third-party mobile browsers whose primary
+    # signature would out-rank an appended in-app suffix in the offer
+    # tracker's UA parser. Customer's Traxun report was labelling
+    # TikTok-preset visits as WeChat / Firefox / Whale / Chrome
+    # because the underlying UA carried these markers. Stripping them
+    # before coerce lets the fresh in-app suffix become the ONLY
+    # browser signature the offer's parser detects. None of these are
+    # in `_INAPP_CAPABLE_PLATFORMS`, so they are ALWAYS stripped —
+    # regardless of the target platform.
+    "wechat":            r"\s+MicroMessenger/\S+(?:\([^)]*\))?",
+    "firefox_mobile":    r"\s+FxiOS/\S+",
+    "firefox_focus":     r"\s+Focus/\S+",
+    "whale":             r"\s+(?:Whale|NaverW)/\S+",
+    "ucbrowser":         r"\s+(?:UCBrowser|UCWEB|UCTurbo)/\S+",
+    "samsung_internet":  r"\s+SamsungBrowser/\S+",
+    "opera_mobile":      r"\s+(?:OPR|Opera(?:Mini|Mobi)?)/\S+",
+    "edge_mobile":       r"\s+(?:EdgA|EdgiOS|EdgeIOS|Edge)/\S+",
+    "line_browser":      r"\s+Line/\S+",
+    "kakao":             r"\s+KAKAOTALK/\S+",
+    "qq":                r"\s+(?:MQQBrowser|QQBrowser|QQ)/\S+",
+    "yandex":            r"\s+(?:YaBrowser|YandexSearchBrowser|YandexSearch)/\S+",
+    "brave_mobile":      r"\s+Brave/\S+",
+    "duckduckgo":        r"\s+DuckDuckGo/\S+",
+    "puffin":            r"\s+Puffin/\S+",
+    "silk":              r"\s+Silk(?:-Accelerated=[^ ]+)?(?:/\S+)?",
+    "miui":              r"\s+MiuiBrowser/\S+",
+    "huawei":            r"\s+HuaweiBrowser/\S+",
+    "vivo":              r"\s+VivoBrowser/\S+",
+    "oppo":              r"\s+(?:HeyTapBrowser|OppoBrowser)/\S+",
+    "baidu":             r"\s+baiduboxapp/\S+",
+    "sogou":             r"\s+SogouMobileBrowser/\S+",
+    "coc_coc":           r"\s+coc_coc_browser/\S+",
 }
 
 

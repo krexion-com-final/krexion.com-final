@@ -19,9 +19,10 @@ RUT_FILE = REPO_ROOT / "real_user_traffic.py"
 SERVER_FILE = REPO_ROOT / "server.py"
 
 
-def test_version_bumped_to_2_6_17():
+def test_version_bumped_to_2_6_17_or_higher():
     version = (REPO_ROOT / "VERSION").read_text().strip()
-    assert version == "2.6.17", f"Expected 2.6.17, got {version!r}"
+    parts = tuple(int(p) for p in version.split("."))
+    assert parts >= (2, 6, 17), f"Expected >= 2.6.17, got {version!r}"
 
 
 def test_access_denied_removed_from_vpn_phrases():

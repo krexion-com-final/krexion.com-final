@@ -187,15 +187,54 @@ def _apply_inapp_preset_to_uas(user_agents: List[str], want_count: int, preset_p
             return ""
 
     # 2026-07 fix C: strict in-app preset — foreign markers get scrubbed.
+    # 2026-02 v2.6.18 EXPANDED: the customer's Traxun report labelled
+    # visits as "WeChat for iOS", "Firefox", "Whale mobile", "Chrome",
+    # even though the TikTok preset was active. Root cause: the operator
+    # uploaded a mixed mobile-UA batch that contained third-party
+    # browsers (WeChat, Firefox mobile, Whale, UC, Samsung Internet,
+    # Opera, Edge, Line, Kakao). None of those markers were in the
+    # previous foreign-list, so the UAs survived the preset gate and
+    # `coerce_ua_for_platform` merely APPENDED `musical_ly_…` to a
+    # WeChat/Firefox/Whale base — offer's parser detected the FIRST
+    # browser signature (WeChat/Firefox/Whale) and ignored the tail.
+    # New list includes ALL third-party mobile browsers whose primary
+    # marker would out-rank the trailing in-app suffix in advertiser
+    # UA parsers. When any of these are found in the input UA, the UA
+    # is REPLACED with a fresh clean mobile base — the coerce then
+    # gets a clean canvas to layer the target marker onto.
+    _THIRD_PARTY_MOBILE_BROWSERS = [
+        "micromessenger",   # WeChat
+        "fxios", "focus",   # Firefox iOS / Firefox Focus
+        "whale",            # Naver Whale mobile
+        "ucbrowser", "ucweb",  # UC Browser
+        "samsungbrowser",   # Samsung Internet
+        "opr/", "opera",    # Opera Mobile / Opera Mini
+        "edga/", "edgios/", "edgiosap", "edge/",  # Edge Mobile
+        "line/", "line ",   # Line browser
+        "kakaotalk",        # Kakao
+        "naver ",           # Naver browser (space to avoid matching "naver.com")
+        "mqqbrowser", "qqbrowser",  # QQ Browser
+        "duckduckgo",       # DuckDuckGo mobile
+        "brave/",           # Brave mobile
+        "yandexsearch", "yabrowser",  # Yandex mobile
+        "puffin",           # Puffin mobile
+        "sogou",            # Sogou
+        "baiduboxapp",      # Baidu app
+        "miuibrowser",      # Xiaomi Mi Browser
+        "huaweibrowser",    # Huawei Browser
+        "vivobrowser",      # Vivo Browser
+        "oppo",             # Oppo Browser (heuristic)
+        "silk-accelerated", # Amazon Silk
+    ]
     _pp = (preset_platform or "").strip().lower()
     _FOREIGN_MARKERS: Dict[str, List[str]] = {
-        "tiktok":    ["fban", "fbav", "fb_iab", "fb4a", "instagram", "linkedinapp", "snapchat", "twitter"],
-        "facebook":  ["musical_ly", "aweme", "trill_", "bytedancewebview", "instagram", "linkedinapp", "snapchat"],
-        "instagram": ["musical_ly", "aweme", "trill_", "bytedancewebview", "fban", "fb_iab", "linkedinapp", "snapchat"],
-        "snapchat":  ["musical_ly", "aweme", "trill_", "fban", "fb_iab", "instagram", "linkedinapp"],
-        "linkedin":  ["musical_ly", "aweme", "trill_", "fban", "fb_iab", "instagram", "snapchat"],
-        "twitter":   ["musical_ly", "aweme", "trill_", "fban", "fb_iab", "instagram", "linkedinapp", "snapchat"],
-        "pinterest": ["musical_ly", "aweme", "trill_", "fban", "fb_iab", "instagram", "linkedinapp", "snapchat"],
+        "tiktok":    ["fban", "fbav", "fb_iab", "fb4a", "instagram", "linkedinapp", "snapchat", "twitter"] + _THIRD_PARTY_MOBILE_BROWSERS,
+        "facebook":  ["musical_ly", "aweme", "trill_", "bytedancewebview", "instagram", "linkedinapp", "snapchat"] + _THIRD_PARTY_MOBILE_BROWSERS,
+        "instagram": ["musical_ly", "aweme", "trill_", "bytedancewebview", "fban", "fb_iab", "linkedinapp", "snapchat"] + _THIRD_PARTY_MOBILE_BROWSERS,
+        "snapchat":  ["musical_ly", "aweme", "trill_", "fban", "fb_iab", "instagram", "linkedinapp"] + _THIRD_PARTY_MOBILE_BROWSERS,
+        "linkedin":  ["musical_ly", "aweme", "trill_", "fban", "fb_iab", "instagram", "snapchat"] + _THIRD_PARTY_MOBILE_BROWSERS,
+        "twitter":   ["musical_ly", "aweme", "trill_", "fban", "fb_iab", "instagram", "linkedinapp", "snapchat"] + _THIRD_PARTY_MOBILE_BROWSERS,
+        "pinterest": ["musical_ly", "aweme", "trill_", "fban", "fb_iab", "instagram", "linkedinapp", "snapchat"] + _THIRD_PARTY_MOBILE_BROWSERS,
     }
     _foreign_needles = _FOREIGN_MARKERS.get(_pp, [])
 
