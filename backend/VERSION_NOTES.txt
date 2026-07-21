@@ -3212,3 +3212,77 @@
 #    file is attached with the correct size, it PATCHes the
 #    release to draft=false. Applied to BOTH build-electron-
 #    desktop.yml and build-windows-release.yml.
+
+# v2.6.22 (2026-07-21) - Hybrid-UA leak FIX + all-platform Custom-URL+Preset verification
+#
+# CUSTOMER BUG (RUT "mixed browser" leak):
+#    When operator ran a TikTok Ad campaign with in-app preset = TikTok
+#    AND user-agent generator = TikTok, advertiser trackers (Traxun /
+#    Voluum / RedTrack / Binom / IPQS) recorded some clicks as
+#    Facebook / Chrome / Safari instead of TikTok. Same class of leak
+#    could happen on any preset when the incoming UA pool contained
+#    a hybrid marker set (e.g. musical_ly + FBAV, or musical_ly +
+#    leftover "Chrome/xxx Mobile Safari/537.36" WebView tokens).
+#
+# ROOT CAUSE (referrer_pro.coerce_ua_for_platform):
+#    The idempotency short-circuit at the top of the function ran
+#    BEFORE the foreign-marker strip step, so any UA already carrying
+#    the TARGET platform's marker was returned unchanged - even when
+#    that UA still contained FOREIGN in-app markers (BUG A) or
+#    Chrome/Safari WebView tokens (BUG B). Advertiser UA parsers
+#    read left-to-right, latched on the leftover FBAV or Chrome
+#    signature, and mislabelled the visit.
+#
+# FIX (backend/referrer_pro.py):
+#    Reordered the coerce pipeline:
+#      1. Strip foreign in-app markers first.
+#      2. TikTok-Android specific: if Chrome/ or Safari/ still present
+#         after strip, force _rebuild_tiktok_android_ua_base to Cronet
+#         shape (preserving any clean musical_ly suffix that survived).
+#      3. THEN idempotency check on the CLEANED UA.
+#      4. THEN append target platform's in-app suffix if still needed.
+#    This closes both BUG A (FBAV leak) and BUG B (Chrome/Safari leak)
+#    for every platform (facebook / messenger / instagram / tiktok /
+#    snapchat / linkedin / twitter / pinterest).
+#
+# FIX (backend/server.py _ua_tiktok_android):
+#    Rewrote the generator to emit the REAL 2025-2026 TikTok Android
+#    UA shape (Cronet-based) instead of the legacy WebView shape:
+#      OLD: Mozilla/5.0 (Linux; Android X; Device Build/id; wv)
+#           AppleWebKit/537.36 ... Chrome/{ver} Mobile Safari/537.36
+#           trill_{code} JsSdk/1.0 ... AppName/musical_ly ...
+#      NEW: Mozilla/5.0 (Linux; U; Android X; posix_locale;
+#           Device; Build/id; Cronet/{ver}) musical_ly_{code}
+#           JsSdk/1.0 NetType/... Channel/googleplay
+#           AppName/musical_ly app_version/... BytedanceWebview/...
+#           ttwebview/...
+#    This matches _rebuild_tiktok_android_ua_base output exactly so
+#    downstream coerce is a no-op for our own generator output.
+#
+# VERIFICATION (82/82 tests PASS, backend testing_agent report):
+#    - v2.6.22 new coverage: 59/59 in
+#      backend/tests/test_v2_6_22_custom_url_plus_preset_all_platforms.py
+#      (per-platform referer == operator URL, platform_tag == preset,
+#      Android+iOS UA carries in-app marker, no foreign marker leak,
+#      TikTok Chrome/Safari stripping, UTM defaults for paid vs
+#      referral, operator utm_source not overwritten, full pipeline
+#      consistency, mix/weighted platform_pool restriction).
+#    - v2.6.21 hybrid-UA leak: 11/11 in
+#      backend/tests/test_v2_6_21_hybrid_ua_leak_fix.py
+#    - v2.6.19 TikTok Cronet: 6/6 (regression)
+#    - v2.6.18 browser-mix + UTM: 6/6 (regression)
+#    - Preview backend + admin login verified working.
+#
+# CUSTOMER GUIDE (Custom Landing URL + In-App Browser Preset):
+#    For every platform (facebook / messenger / instagram / tiktok /
+#    snapchat / linkedin / twitter / pinterest):
+#      Referer Mode         = Custom URL
+#      Custom Referer URL   = <operator's landing page>
+#      In-App Browser Preset = <platform>
+#    -> tracker records the landing URL as Referer, detects the
+#       browser as the preset platform, and never sees a
+#       cross-platform or third-party (Chrome/Safari/WeChat/etc.)
+#       leak. UTM defaults auto-added when operator's URL lacks
+#       utm_source; operator's utm_source (when present) is never
+#       overwritten. Mix mode via platform_pool restricts picks
+#       to the listed platforms only.
