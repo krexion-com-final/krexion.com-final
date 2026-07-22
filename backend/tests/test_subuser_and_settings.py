@@ -50,7 +50,7 @@ class TestSubUserManagement:
             for sub_user in sub_users:
                 if sub_user.get("email", "").startswith("TEST_"):
                     self.session.delete(f"{BASE_URL}/api/sub-users/{sub_user['id']}")
-        except:
+        except Exception:
             pass
     
     def test_create_sub_user(self):
@@ -497,7 +497,7 @@ class TestSubUserLogin:
         # Cleanup
         try:
             self.session.delete(f"{BASE_URL}/api/sub-users/{self.sub_user_id}")
-        except:
+        except Exception:
             pass
     
     def test_sub_user_can_login(self):

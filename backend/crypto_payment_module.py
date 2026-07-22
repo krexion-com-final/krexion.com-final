@@ -593,6 +593,9 @@ async def admin_add_wallet(body: WalletCreate, admin: dict = _admin_dep()):
         "updated_at": _now().isoformat(),
     }
     await _db.crypto_wallets.insert_one(doc)
+    # insert_one mutates `doc` by adding `_id: ObjectId(...)` which is not
+    # JSON-serialisable — strip before returning to keep the API response clean.
+    doc.pop("_id", None)
     return doc
 
 

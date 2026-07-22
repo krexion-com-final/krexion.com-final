@@ -959,7 +959,7 @@ async def admin_bulk_delete(payload: dict, admin: dict = _admin_dep()):
     Returns: { "ok": true, "deleted_count": N }
     """
     keys = payload.get("keys")
-    status = payload.get("status")
+    lic_status = payload.get("status")
     expired_only = bool(payload.get("expired_only"))
     unactivated_only = bool(payload.get("unactivated_only"))
 
@@ -969,12 +969,12 @@ async def admin_bulk_delete(payload: dict, admin: dict = _admin_dep()):
         return {"ok": True, "deleted_count": r.deleted_count, "by": "keys"}
 
     query: Dict[str, Any] = {}
-    if status and status != "all":
+    if lic_status and lic_status != "all":
         # "expired" is a logical filter, not a stored status
-        if status == "expired":
+        if lic_status == "expired":
             expired_only = True
         else:
-            query["status"] = status
+            query["status"] = lic_status
     if expired_only:
         # subscription_ends_at < now OR trial_ends_at < now (and no active sub)
         query["$or"] = [

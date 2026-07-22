@@ -10,6 +10,7 @@ Runs on plain pytest, no network / Playwright required.
 """
 
 import re
+import sys
 from pathlib import Path
 
 import pytest

@@ -529,8 +529,8 @@ app = FastAPI(
 # like `total` or `job_id`. So we raise this custom exception and
 # register a handler below that returns the body VERBATIM.
 class _BridgeDone(Exception):
-    def __init__(self, status, body):
-        self.status = status
+    def __init__(self, status_code, body):
+        self.status = status_code
         self.body = body
 
 
@@ -1650,7 +1650,7 @@ async def debug_search_ip(ip: str):
                 if count > 0:
                     results["found_in"].append({"database": db_name, "count": count})
                     results["total_found"] += count
-            except:
+            except Exception:
                 continue
     except Exception as e:
         results["error"] = str(e)
@@ -1938,7 +1938,7 @@ class ConnectionManager:
             for connection in self.active_connections[user_id]:
                 try:
                     await connection.send_json(message)
-                except:
+                except Exception:
                     pass
     
     async def broadcast_click(self, user_id: str, click_data: dict):
@@ -2778,7 +2778,7 @@ def normalize_ipv6(ip: str) -> str:
     try:
         import ipaddress
         return str(ipaddress.ip_address(ip))
-    except:
+    except Exception:
         return ip
 
 def get_all_client_ips(request: Request) -> dict:
@@ -3002,7 +3002,7 @@ def categorize_referrer(referrer: str, url_params: dict = None) -> dict:
         parsed = urlparse(referrer)
         domain = parsed.netloc or parsed.path.split('/')[0]
         domain = domain.replace("www.", "")
-    except:
+    except Exception:
         domain = referrer
     
     # Check against known patterns
@@ -3475,7 +3475,7 @@ async def check_vpn_scamalytics(ip: str) -> dict:
                         "risk": "high" if is_vpn else "low", 
                         "source": "ip-api"
                     }
-    except:
+    except Exception:
         pass
     
     return {"is_vpn": False, "vpn_score": 0, "risk": "unknown", "source": "none"}
@@ -3762,7 +3762,7 @@ async def check_vpn_detailed(ip: str, user_id: Optional[str] = None) -> dict:
                         await increment_api_usage("ipapi")
                         is_vpn = data.get("proxy", False) or data.get("hosting", False)
                         return {"is_vpn": is_vpn, "vpn_score": 100 if is_vpn else 0, "risk": "high" if is_vpn else "low", "source": "ip-api-fallback"}
-        except:
+        except Exception:
             pass
         return {"is_vpn": False, "vpn_score": 0, "risk": "unknown", "source": "none"}
     
@@ -3851,7 +3851,7 @@ async def get_country_from_ip(ip: str) -> dict:
             vpn_info = await check_vpn_scamalytics(ip)
             is_vpn = vpn_info.get("is_vpn", False)
             vpn_score = vpn_info.get("vpn_score", 0)
-        except:
+        except Exception:
             pass
     else:
         is_vpn = True
@@ -4032,12 +4032,12 @@ def detect_device(user_agent_string: str) -> dict:
 
 def check_user_feature(user: dict, feature: str):
     """Check if user has access to a specific feature. Raises HTTPException if not."""
-    status = user.get("status", "pending")
+    user_status = user.get("status", "pending")
     
-    if status == "blocked":
+    if user_status == "blocked":
         raise HTTPException(status_code=403, detail="Your account has been blocked. Contact admin for support.")
     
-    if status != "active":
+    if user_status != "active":
         raise HTTPException(status_code=403, detail=f"Your account is pending activation. Contact admin at {ADMIN_CONTACT_EMAIL} for access.")
     
     features = user.get("features", {})
@@ -11713,7 +11713,7 @@ async def check_google_profile_pic(email: str, google_access_token: str = None) 
                         result["pic_url"] = f"https://seccdn.libravatar.org/avatar/{email_hash}?s=200"
                         result["method"] = "libravatar"
                         return result
-            except:
+            except Exception:
                 pass
                 
     except Exception as e:
@@ -15792,7 +15792,7 @@ async def get_clicks(
         try:
             start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
             query["created_at"] = {"$gte": start_dt.isoformat()}
-        except:
+        except Exception:
             pass
     
     if end_date:
@@ -15803,7 +15803,7 @@ async def get_clicks(
                 query["created_at"]["$lte"] = end_dt.isoformat()
             else:
                 query["created_at"] = {"$lte": end_dt.isoformat()}
-        except:
+        except Exception:
             pass
     
     # Filter by time period (only if start_date/end_date not provided)
@@ -16334,7 +16334,7 @@ async def find_click_across_dbs(clickid: str):
     return None, None
 
 @api_router.get("/postback")
-async def postback(clickid: str, payout: float, status: str = "approved", token: str = ""):
+async def postback(clickid: str, payout: float, status: str = "approved", token: str = ""):  # noqa: F811 - `status` is the postback API's query key, intentional shadow of fastapi.status
     if token != POSTBACK_TOKEN:
         raise HTTPException(status_code=403, detail="Invalid token")
     
@@ -16761,7 +16761,7 @@ async def _test_proxy_fast(proxy_string: str, proxy_type: str, timeout: float = 
     detected_ip = None
     detected_ips = []
     response_time = None
-    status = "dead"
+    proxy_status = "dead"
     error_msg = None
     
     try:
@@ -16793,15 +16793,15 @@ async def _test_proxy_fast(proxy_string: str, proxy_type: str, timeout: float = 
                         if origin:
                             detected_ips = [ip.strip() for ip in str(origin).split(",") if ip.strip()]
                             detected_ip = detected_ips[-1] if detected_ips else None
-                        status = "alive"
+                        proxy_status = "alive"
                         break
-            except:
+            except Exception:
                 continue
     except Exception as e:
         error_msg = str(e)[:100]
     
     return {
-        "status": status,
+        "status": proxy_status,
         "detected_ip": detected_ip,
         "all_detected_ips": detected_ips,
         "response_time": round(response_time, 3) if response_time else None,
@@ -16813,7 +16813,7 @@ async def _test_proxy_with_proxycheck(proxy_string: str, proxy_type: str, timeou
     detected_ip = None
     detected_ips = []
     response_time = None
-    status = "dead"
+    test_status = "dead"
     error_msg = None
     is_vpn = False
     country = None
@@ -16852,7 +16852,7 @@ async def _test_proxy_with_proxycheck(proxy_string: str, proxy_type: str, timeou
                 # Only IPv4
                 if detected_ip and ":" not in detected_ip:
                     detected_ips.append(detected_ip)
-                    status = "alive"
+                    test_status = "alive"
                     
                     # Step 2: Use proxycheck.io for VPN and Geo (direct call)
                     try:
@@ -16879,13 +16879,13 @@ async def _test_proxy_with_proxycheck(proxy_string: str, proxy_type: str, timeou
                     except Exception as e:
                         logger.error(f"Proxycheck.io error for {detected_ip}: {e}")
                 else:
-                    status = "dead"
+                    test_status = "dead"
                     error_msg = "No IPv4 detected (IPv6 not supported)"
     except Exception as e:
         error_msg = str(e)[:100]
     
     return {
-        "status": status,
+        "status": test_status,
         "detected_ip": detected_ip,
         "all_detected_ips": detected_ips,
         "response_time": round(response_time, 3) if response_time else None,
@@ -17251,7 +17251,7 @@ async def test_proxy(
     detected_ip = None
     detected_ips = []  # Store all detected IPs
     response_time = None
-    status = "dead"
+    status = "dead"  # noqa: F811 - local proxy-test status var, intentional shadow of fastapi.status (not used in this function's scope)
     error_msg = None
     
     for protocol in ["http"]:  # Only try HTTP first (faster)
@@ -17314,7 +17314,7 @@ async def test_proxy(
             potential_ip = proxy_parts[0].strip()
             if potential_ip.replace(".", "").isdigit() or ":" in potential_ip:
                 proxy_host_ip = potential_ip
-    except:
+    except Exception:
         pass
     
     # Build list of ALL IPs to check
@@ -18249,7 +18249,7 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         try:
             logger.info(
                 f"[duplicate-block] short_code={short_code} matched_ip={matched_ip} "
-                f"client_ip={client_ip} matched_link={matched_link}"
+                f"client_ip={client_ip}"
             )
         except Exception:
             pass
@@ -19566,7 +19566,7 @@ async def upload_user_agents_gsheet(
 
 
 @api_router.post("/uploads/proxies", response_model=UploadedResourceResponse)
-async def upload_proxies(
+async def upload_proxies_resource(
     name: str = Form(...),
     country_tag: Optional[str] = Form(None),
     state_tag: Optional[str] = Form(None),
@@ -22153,7 +22153,7 @@ async def vr_live_test(session_id: str, req: _VRLiveTestReq, user: dict = Depend
 
 
 @api_router.get("/visual-recorder/{session_id}/diagnostics")
-async def vr_diagnostics(session_id: str, user: dict = Depends(get_current_user)):
+async def vr_session_diagnostics(session_id: str, user: dict = Depends(get_current_user)):
     """Static-analysis-only diagnostics for the current recorded steps
     (no execution). Useful as a quick lint pass before running a live
     test. Returns the same `diagnostics` shape as live-test minus the

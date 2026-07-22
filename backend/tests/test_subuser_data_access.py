@@ -128,7 +128,7 @@ class TestSubUserLinkCreation:
                     self.session.delete(f"{BASE_URL}/api/links/{self.created_link_id}", headers={
                         "Authorization": f"Bearer {token}"
                     })
-            except:
+            except Exception:
                 pass
     
     def get_main_user_token(self):
@@ -226,7 +226,7 @@ class TestLinkRestrictions:
                     self.session.delete(f"{BASE_URL}/api/links/{link_id}", headers={
                         "Authorization": f"Bearer {token}"
                     })
-        except:
+        except Exception:
             pass
     
     def get_token(self):
