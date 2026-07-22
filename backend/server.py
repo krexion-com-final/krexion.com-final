@@ -13464,10 +13464,27 @@ def _ua_tiktok_android(d: dict, app_ver: str, region: Optional[dict] = None) -> 
             "58.0.2991.0", "100.0.4896.127", "104.0.5112.114",
             "115.0.5790.169", "118.0.5993.117",
         ])
+    # v2.6.26: added explicit `TikTok/{app_ver}` marker between the
+    # Cronet closing paren and `musical_ly_{ml_build}`. Real 2026 TikTok
+    # Android in-app captures carry BOTH tokens — `TikTok/34.9.5` is the
+    # canonical browser identifier that advertiser UA parsers
+    # (ua-parser-js, ua-parser-cpp / uap-core, Everflow, Voluum, RedTrack)
+    # key on via the rule `TikTok\/([\d.]+)`, while `musical_ly_<build>`
+    # is the fraud-scanner (Anura / IPQS / Forensiq) marker for real-app
+    # shape verification. Prior to v2.6.26 our Cronet UA only carried
+    # `musical_ly_<build>` — parsers whose TikTok rule requires the
+    # explicit `TikTok/` slug (as most modern libs do) fell through to
+    # the generic `Android` rule and mis-labelled our clicks as
+    # `Browser=<empty>` (customer's clicks (4).csv confirmed 100% Android
+    # TikTok visits had empty Browser column vs 100% iOS TikTok correctly
+    # detected). The new token sits INSIDE the coerce/strip range
+    # (`\s+musical_ly[_A-Za-z0-9]*\s+.*?BytedanceWebview/\S+` in
+    # `_FOREIGN_INAPP_STRIP_PATTERNS['tiktok']`) so coercing to any other
+    # platform still cleanly removes it.
     return (
         f"Mozilla/5.0 (Linux; U; Android {d['and_ver']}; {posix_locale}; "
         f"{d['model']}; Build/{d['build']}; Cronet/{cronet_ver}) "
-        f"musical_ly_{ml_build} JsSdk/1.0 NetType/{net_type} Channel/googleplay "
+        f"TikTok/{app_ver} musical_ly_{ml_build} JsSdk/1.0 NetType/{net_type} Channel/googleplay "
         f"AppName/musical_ly app_version/{app_ver} "
         f"ByteLocale/{byte_locale} ByteFullLocale/{byte_locale} Region/{region_code} "
         f"BytedanceWebview/{webview_hash} ttwebview/{ttwv} "

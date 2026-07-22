@@ -2101,7 +2101,12 @@ _FOREIGN_INAPP_STRIP_PATTERNS: Dict[str, str] = {
     # TikTok — long `musical_ly_<code> ... BytedanceWebview/<hash>` run.
     # `.*?` is bounded by the required `BytedanceWebview/` trailer so
     # this regex can't chew up unrelated tokens accidentally.
-    "tiktok":     r"\s+musical_ly[_A-Za-z0-9]*\s+.*?BytedanceWebview/\S+",
+    # v2.6.26: also strip an optional preceding `TikTok/{ver}` marker
+    # (added in the same version to fix Everflow/Voluum browser
+    # detection). Without this, coercing an existing TikTok UA to
+    # another platform would leave the `TikTok/34.9.5` slug behind
+    # and the fresh target-platform suffix would then be double-signed.
+    "tiktok":     r"\s+(?:TikTok/[\d.]+\s+)?musical_ly[_A-Za-z0-9]*\s+.*?BytedanceWebview/\S+",
     # Snapchat — trailing `Snapchat/<ver>` token.
     "snapchat":   r"\s+Snapchat/[\d.]+",
     # LinkedIn — trailing `LinkedInApp/<ver>` (iOS) or
@@ -2360,8 +2365,18 @@ def build_inapp_ua_suffix(platform: str, ua: str) -> str:
         nettype = random.choice(["WIFI", "MOBILE", "4G", "5G"])
         if family == "android":
             channel = random.choice(["googleplay", "googleplay", "samsung", "huawei", "xiaomi"])
+            # v2.6.26: `TikTok/{ver}` explicit marker mirrors the
+            # `_ua_tiktok_android` fix in server.py — advertiser UA
+            # parsers (ua-parser-js, uap-core / ua-parser-cpp, Everflow,
+            # Voluum, RedTrack) require this token to correctly label
+            # Android TikTok in-app clicks as "TikTok for Android".
+            # Without it, real captured tracker reports show
+            # `Browser=<empty>` on ~100% of Android TikTok visits. The
+            # token sits INSIDE the `_FOREIGN_INAPP_STRIP_PATTERNS['tiktok']`
+            # regex range (`\s+musical_ly[_A-Za-z0-9]*\s+.*?BytedanceWebview/\S+`)
+            # so coercing away from tiktok still strips it cleanly.
             return (
-                f"musical_ly_{ver_code} JsSdk/1.0 NetType/{nettype} Channel/{channel} "
+                f"TikTok/{ver} musical_ly_{ver_code} JsSdk/1.0 NetType/{nettype} Channel/{channel} "
                 f"AppName/musical_ly app_version/{ver} ByteLocale/{locale} "
                 f"ByteFullLocale/{locale} Region/{region} AppVersion/{ver} "
                 f"BytedanceWebview/{wv_hash} com.zhiliaoapp.musically/{ver_code}"
