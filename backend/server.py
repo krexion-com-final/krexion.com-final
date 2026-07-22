@@ -8428,6 +8428,9 @@ async def _rut_prepare_and_run(
             referer_search_keywords=str(params.get("referer_search_keywords") or ""),
             referer_strip_search_path=bool(params.get("referer_strip_search_path", True)),
             referer_network_click_chain=bool(params.get("referer_network_click_chain", False)),
+            # v2.6.25 — Paid vs Organic split
+            referer_traffic_type=str(params.get("referer_traffic_type") or "auto"),
+            referer_campaign_type=str(params.get("referer_campaign_type") or "auto"),
             # 2026-01 — Pass-Referer-To-Offer (server-side tracker
             # resolve + direct offer navigation, see RUT engine
             # for behaviour). Default OFF preserves legacy path.
@@ -8797,6 +8800,11 @@ async def rut_create_job(
     referer_search_keywords: str = Form(""),      # Newline-separated keyword pool
     referer_strip_search_path: bool = Form(True), # Real Chrome Referrer-Policy
     referer_network_click_chain: bool = Form(False),  # One optional 302 hop
+    # ── v2.6.25 (2026-07) — Paid vs Organic split (matches LinksPage) ─
+    # auto (default) preserves legacy behaviour for jobs saved before
+    # v2.6.25. paid / organic / mixed force the corresponding pool.
+    referer_traffic_type: str = Form("auto"),
+    referer_campaign_type: str = Form("auto"),
     # ── 2026-01 — Pass-Referer-To-Offer (direct offer navigation) ────
     # OFF (default) → legacy: bot navigates tracker → 302 → offer.
     #                  Offer sees Krexion origin per browser policy.
@@ -9221,6 +9229,9 @@ async def rut_create_job(
         "referer_search_keywords": (referer_search_keywords or "")[:8000],
         "referer_strip_search_path": bool(referer_strip_search_path),
         "referer_network_click_chain": bool(referer_network_click_chain),
+        # v2.6.25 — Paid vs Organic split
+        "referer_traffic_type": (referer_traffic_type or "auto").strip().lower()[:16],
+        "referer_campaign_type": (referer_campaign_type or "auto").strip().lower()[:24],
         # 2026-01 — Pass-Referer-To-Offer (direct offer navigation)
         "referer_pass_to_offer": bool(referer_pass_to_offer),
         # 2026-06-14 — UA ↔ Referer coercion (anti-fraud, default ON).
@@ -9355,6 +9366,10 @@ async def rut_create_job(
             "referer_search_keywords": (referer_search_keywords or "")[:8000],
             "referer_strip_search_path": bool(referer_strip_search_path),
             "referer_network_click_chain": bool(referer_network_click_chain),
+            # v2.6.25 — Paid vs Organic split (persisted so operator's
+            # saved job resumes with the same realism mode next time).
+            "referer_traffic_type": (referer_traffic_type or "auto").strip().lower()[:16],
+            "referer_campaign_type": (referer_campaign_type or "auto").strip().lower()[:24],
             # 2026-06-14 — UA ↔ Referer coercion (persisted)
             "referer_match_ua_to_platform": bool(referer_match_ua_to_platform),
         }},

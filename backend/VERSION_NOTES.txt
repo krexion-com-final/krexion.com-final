@@ -1,3 +1,59 @@
+# v2.6.25 — 2026-07 — Traffic Type dropdown on Real User Traffic page (RUT parity with LinksPage)
+#
+# PROBLEM (customer feedback):
+#     v2.6.24 introduced the Paid vs Organic "Traffic Type" dropdown on
+#     the Links page (Create/Edit Link modal), but the Real User Traffic
+#     job form did NOT expose the same control. Operators who ran ALL
+#     traffic through RUT jobs had no way to force paid / organic mode
+#     per job — they had to either configure it on the underlying Link
+#     (redundant if RUT is the sole traffic source) or accept the legacy
+#     auto behaviour. This created UI/UX confusion: "why two places?".
+#
+# FIX:
+#     Added matching "🚦 Traffic Type" + "Campaign Type" dropdowns to the
+#     Real User Traffic page (RealUserTrafficPage.js) under the Realism
+#     Layers block. Backend RUT job start endpoint now accepts:
+#         referer_traffic_type: "auto" | "paid" | "organic" | "mixed"
+#         referer_campaign_type: "auto" | "static_image" | "video_ad" | …
+#     Both persisted in the saved RUT job config (users' saved profiles
+#     restore correctly) and forwarded into resolve_pro_visit() via the
+#     RUT engine's per-visit cfg dict (real_user_traffic.py — plumbing
+#     already shipped in v2.6.24).
+#
+# UI STATE MANAGEMENT:
+#     Two new React state hooks in RealUserTrafficPage:
+#         const [refererTrafficType,  setRefererTrafficType]  = useState("auto");
+#         const [refererCampaignType, setRefererCampaignType] = useState("auto");
+#     Restored from saved config on load; sent as FormData on job start;
+#     persisted to the saved-config document so re-opening the form
+#     shows the operator's previously-chosen values.
+#
+# BACKEND ENDPOINT:
+#     POST /api/real-user-traffic/start now accepts:
+#         referer_traffic_type: str = Form("auto")
+#         referer_campaign_type: str = Form("auto")
+#     Passed through to the RUT engine's run_traffic() function (which
+#     already accepts these kwargs since v2.6.24) and stored in the
+#     saved config document for later restoration.
+#
+# BACKWARDS COMPATIBILITY:
+#     - Default "auto" preserves every pre-2.6.25 job's behaviour
+#       identically (no migration).
+#     - Old saved configs without the field default to "auto" on load.
+#     - No changes to Docker Compose, Nginx, Cloudflare, Electron, or
+#       Native installers.
+#
+# EXPECTED IMPACT:
+#     - RUT operators now have first-class paid/organic control without
+#       needing to configure Pro-Referrer on the Link too.
+#     - Eliminates the "why is there Referrer Pro in two places?"
+#       confusion — RUT job settings override Link config when a RUT
+#       job targets a Krexion tracker link.
+#     - Same 6 platforms (TikTok, FB, IG, X, YT, LinkedIn, Snap,
+#       Pinterest, Reddit, Google, Bing, Messenger) as v2.6.24 are
+#       now controllable per RUT job.
+
+
 # v2.6.24 — 2026-07 — Paid vs Organic Referer Split (10 platforms)
 #
 # PROBLEM:

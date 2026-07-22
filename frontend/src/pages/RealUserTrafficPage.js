@@ -634,6 +634,11 @@ export default function RealUserTrafficPage() {
   const [refererInappDeep, setRefererInappDeep] = useState(true);
   const [refererStripSearchPath, setRefererStripSearchPath] = useState(true);
   const [refererNetworkClickChain, setRefererNetworkClickChain] = useState(false);
+  // v2.6.25 — Paid vs Organic referer split (mirrors LinksPage dropdown).
+  // "auto" preserves legacy behaviour so existing saved jobs keep working
+  // identically. Operator can force paid / organic / mixed per job.
+  const [refererTrafficType, setRefererTrafficType] = useState("auto");
+  const [refererCampaignType, setRefererCampaignType] = useState("auto");
   // 2026-01 — Pass-Referer-To-Offer (direct offer navigation so the
   // offer sees the EXACT chosen Referer instead of Krexion origin).
   // Default OFF — preserves legacy behavior for existing users.
@@ -747,6 +752,9 @@ export default function RealUserTrafficPage() {
       if (typeof cfg.inapp_deep === "boolean") setRefererInappDeep(cfg.inapp_deep);
       if (typeof cfg.strip_search_path === "boolean") setRefererStripSearchPath(cfg.strip_search_path);
       if (typeof cfg.network_click_chain === "boolean") setRefererNetworkClickChain(cfg.network_click_chain);
+      // v2.6.25 — restore paid/organic split settings from saved config
+      if (typeof cfg.traffic_type === "string") setRefererTrafficType(cfg.traffic_type);
+      if (typeof cfg.campaign_type === "string") setRefererCampaignType(cfg.campaign_type);
       if (typeof cfg.pass_to_offer === "boolean") setRefererPassToOffer(cfg.pass_to_offer);
       if (typeof cfg.match_ua_to_platform === "boolean") setRefererMatchUaToPlatform(cfg.match_ua_to_platform);
       if (typeof cfg.search_engine === "string") setRefererSearchEngine(cfg.search_engine);
@@ -775,6 +783,9 @@ export default function RealUserTrafficPage() {
       social_wrapper: refererSocialWrapper,
       inapp_deep: refererInappDeep,
       strip_search_path: refererStripSearchPath,
+      // v2.6.25 — persist paid/organic split settings in saved config
+      traffic_type: refererTrafficType,
+      campaign_type: refererCampaignType,
       network_click_chain: refererNetworkClickChain,
       pass_to_offer: refererPassToOffer,
       match_ua_to_platform: refererMatchUaToPlatform,
@@ -2144,6 +2155,9 @@ export default function RealUserTrafficPage() {
       }
       fd.append("referer_social_wrapper", String(!!refererSocialWrapper));
       fd.append("referer_inapp_deep", String(!!refererInappDeep));
+      // v2.6.25 — send paid/organic split to backend engine
+      fd.append("referer_traffic_type", String(refererTrafficType || "auto"));
+      fd.append("referer_campaign_type", String(refererCampaignType || "auto"));
       fd.append("referer_search_engine", refererSearchEngine || "google");
       fd.append("referer_search_keywords", refererSearchKeywords || "");
       fd.append("referer_strip_search_path", String(!!refererStripSearchPath));
@@ -4408,6 +4422,60 @@ export default function RealUserTrafficPage() {
                           <span className="text-fuchsia-300">Sec-Fetch-*</span> headers + UTM source/medium variation are <span className="text-emerald-300">always ON</span> in Pro Mode (no off-switch needed — they're 100% safe additive signals).
                         </div>
                       </div>
+                    </div>
+
+                    {/* v2.6.25 — Paid vs Organic Traffic Type + Campaign Type
+                        (mirrors LinksPage — RUT jobs can now force the same
+                        paid/organic referer pool that Create-Link uses).
+                        This is the SINGLE place where RUT-driven traffic
+                        chooses its realism mode — the operator does NOT
+                        need to also configure Pro-Referrer on the target
+                        Link (RUT overrides link config).                     */}
+                    <div className="p-3 rounded-md bg-gradient-to-br from-purple-950/40 to-fuchsia-950/40 border border-fuchsia-500/40">
+                      <div className="text-xs text-fuchsia-300 font-semibold mb-2 flex items-center gap-2">
+                        <span>🚦 Traffic Type</span>
+                        <span className="text-[10px] text-fuchsia-500/70 font-normal">(v2.6.25 — Paid vs Organic split)</span>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div>
+                          <Label className="text-xs text-zinc-400">Traffic Type</Label>
+                          <select
+                            data-testid="rut-pro-traffic-type"
+                            value={refererTrafficType}
+                            onChange={(e) => setRefererTrafficType(e.target.value)}
+                            className="w-full mt-1 p-2 rounded-md bg-zinc-900 border border-zinc-700 text-zinc-100 text-sm"
+                          >
+                            <option value="auto">Auto — detect from Campaign Type + platform</option>
+                            <option value="paid">Paid Ads — force paid-ad referer pool</option>
+                            <option value="organic">Organic — force organic-click referer pool</option>
+                            <option value="mixed">Mixed — 60% paid / 40% organic blend</option>
+                          </select>
+                        </div>
+                        <div>
+                          <Label className="text-xs text-zinc-400">Campaign Type</Label>
+                          <select
+                            data-testid="rut-pro-campaign-type"
+                            value={refererCampaignType}
+                            onChange={(e) => setRefererCampaignType(e.target.value)}
+                            className="w-full mt-1 p-2 rounded-md bg-zinc-900 border border-zinc-700 text-zinc-100 text-sm"
+                          >
+                            <option value="auto">Auto — random rotation (legacy)</option>
+                            <option value="static_image">Static Image Ad</option>
+                            <option value="video_ad">Video Ad</option>
+                            <option value="carousel_ad">Carousel Ad</option>
+                            <option value="story_ad">Story Ad</option>
+                            <option value="lookalike_prospect">Lookalike Prospecting</option>
+                            <option value="retargeting_warm">Retargeting (Warm)</option>
+                            <option value="retargeting_cold">Retargeting (Cold)</option>
+                            <option value="cold_email">Cold Email</option>
+                            <option value="search_cpc">Search / CPC (Google Ads)</option>
+                          </select>
+                        </div>
+                      </div>
+                      <p className="text-[10px] text-zinc-500 mt-2 leading-relaxed">
+                        Applies platform-specific real-capture referer patterns for all 10 platforms (TikTok, FB, IG, X, YouTube, LinkedIn, Snap, Pinterest, Reddit, Google, Bing, Messenger).
+                        &nbsp;<span className="text-fuchsia-400">Auto</span> preserves legacy — pick <span className="text-emerald-400">Paid / Organic / Mixed</span> to force a specific mode for this RUT job.
+                      </p>
                     </div>
 
                     {/* Brand identifier */}
