@@ -2319,6 +2319,7 @@ class LinkCreate(BaseModel):
     referrer_pro_tod_enabled: bool = False                 # Feature 4 — time-of-day pool weighting
     referrer_pro_campaign_type: str = "auto"               # Feature 5 — utm campaign preset (auto|static_image|video_ad|carousel_ad|story_ad|lookalike_prospect|retargeting_warm|retargeting_cold|cold_email|search_cpc)
     referrer_pro_quality_tier: str = "standard"            # Feature 6 — one-word preset: premium | standard | aggressive
+    referrer_pro_traffic_type: str = "auto"                # v2.6.24 — Paid vs Organic referer split (auto|paid|organic|mixed)
     referrer_pro_offer_urls: Optional[str] = None          # Feature 7 — weighted multi-URL rotation ("url:weight,url:weight" or JSON)
     postback_url: Optional[str] = None                     # Feature 8 — outbound S2S postback (forwarded on conversion, supports {click_id}/{payout} macros)
     referrer_pro_auto_pause_enabled: bool = False          # Feature 10 — auto-pause after N consecutive non-converting clicks
@@ -2362,6 +2363,7 @@ class LinkUpdate(BaseModel):
     referrer_pro_tod_enabled: Optional[bool] = None
     referrer_pro_campaign_type: Optional[str] = None
     referrer_pro_quality_tier: Optional[str] = None
+    referrer_pro_traffic_type: Optional[str] = None  # v2.6.24
     referrer_pro_offer_urls: Optional[str] = None
     postback_url: Optional[str] = None
     referrer_pro_auto_pause_enabled: Optional[bool] = None
@@ -2408,6 +2410,7 @@ class LinkResponse(BaseModel):
     referrer_pro_tod_enabled: bool = False
     referrer_pro_campaign_type: str = "auto"
     referrer_pro_quality_tier: str = "standard"
+    referrer_pro_traffic_type: str = "auto"  # v2.6.24 — Paid vs Organic
     referrer_pro_offer_urls: Optional[str] = None
     postback_url: Optional[str] = None
     referrer_pro_auto_pause_enabled: bool = False
@@ -14757,6 +14760,7 @@ async def create_link(link: LinkCreate, user: dict = Depends(get_current_user_wi
         "referrer_pro_tod_enabled":           bool(link.referrer_pro_tod_enabled),
         "referrer_pro_campaign_type":         (link.referrer_pro_campaign_type or "auto"),
         "referrer_pro_quality_tier":          (link.referrer_pro_quality_tier or "standard"),
+        "referrer_pro_traffic_type":          (link.referrer_pro_traffic_type or "auto"),  # v2.6.24
         "referrer_pro_offer_urls":            link.referrer_pro_offer_urls,
         "postback_url":                       link.postback_url,
         "referrer_pro_auto_pause_enabled":    bool(link.referrer_pro_auto_pause_enabled),
@@ -15128,6 +15132,7 @@ async def qa_check_link(link_id: str, user: dict = Depends(get_current_user_with
                     device_mode=str(link.get("referrer_pro_device_mode") or "auto"),
                     tod_enabled=bool(link.get("referrer_pro_tod_enabled", False)),
                     campaign_type=str(link.get("referrer_pro_campaign_type") or "auto"),
+                    traffic_type=str(link.get("referrer_pro_traffic_type") or "auto"),  # v2.6.24
                 )
                 samples.append({
                     "index": i + 1,
@@ -18989,6 +18994,7 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
                 device_mode=str(link.get("referrer_pro_device_mode") or "auto"),
                 tod_enabled=bool(link.get("referrer_pro_tod_enabled", False)),
                 campaign_type=str(link.get("referrer_pro_campaign_type") or "auto"),
+                traffic_type=str(link.get("referrer_pro_traffic_type") or "auto"),  # v2.6.24
             )
             _pro_result = _pro or {}
             _pro_platform = _pro.get("platform", "")

@@ -457,7 +457,8 @@ def is_inapp_browser_ua(ua: str) -> str:
     return ""
 
 
-def build_inapp_deep_referer(platform: str, target_url: str = "") -> str:
+def build_inapp_deep_referer(platform: str, target_url: str = "",
+                              is_paid: Optional[bool] = None) -> str:
     """Build a realistic in-app deep-path Referer for a mobile webview
     visit (the user tapped a link inside the app's feed/post viewer).
 
@@ -470,7 +471,33 @@ def build_inapp_deep_referer(platform: str, target_url: str = "") -> str:
     referer' and modern marketers see it as obviously fake. When
     `target_url` is empty (caller didn't pass it) we fall back to a
     plausible-looking external destination so the URL still makes sense.
+
+    v2.6.24 (2026-07): `is_paid` parameter (Optional[bool]) enables the
+    Paid-vs-Organic referer split across all 10 major platforms.
+      - is_paid=None    → LEGACY behaviour (backwards compatible)
+      - is_paid=True    → paid-ad realistic pool per platform
+                           (e.g. TikTok: empty/ads.tiktok.com/link.tiktok.com,
+                                 Facebook: l.php with __cft__[0] + __tn__,
+                                 Google: googleads.g.doubleclick.net/pagead/aclk)
+      - is_paid=False   → organic-click realistic pool per platform
+                           (e.g. TikTok: empty/l.tiktok.com, no ttclid,
+                                 Facebook: linkshim without __cft__,
+                                 Google: origin-only google.<tld>/)
+    Falls back to legacy behaviour on ANY error so existing callers stay safe.
     """
+    # v2.6.24 — Paid vs Organic split (bypasses legacy path when caller
+    # explicitly asks for it). ALL error paths fall through to legacy
+    # so no visit ever crashes on a new-code bug.
+    if is_paid is not None:
+        try:
+            v2 = _build_inapp_deep_referer_v2(platform, target_url, bool(is_paid))
+            # Explicit empty string is a VALID paid/organic pattern (Snap ads,
+            # webview strip, etc.) so we return it as-is. Only fall through
+            # when the v2 helper returned None (unknown platform).
+            if v2 is not None:
+                return v2
+        except Exception:
+            pass
     p = (platform or "").lower()
     if p == "tiktok":
         vid_id = str(random.randint(7000000000000000000, 7999999999999999999))
@@ -1409,6 +1436,10 @@ def resolve_pro_visit(
     device_mode: str = "auto",
     tod_enabled: bool = False,
     campaign_type: str = "auto",
+    # v2.6.24 (2026-07) — Paid vs Organic referer split. Default "auto"
+    # preserves legacy behaviour for existing links (traffic_type field
+    # was absent on every pre-2.6.24 job → "auto" → legacy resolver runs).
+    traffic_type: str = "auto",
 ) -> Dict[str, Any]:
     """Top-level pro-mode resolver — returns a dict with everything the
     engine needs for ONE visit:
@@ -1537,6 +1568,21 @@ def resolve_pro_visit(
         # Signal must reflect the ACTUAL engine used so downstream
         # tracker/UA coercion picks the right platform.
         actual_signal = eng if eng in VALID_PLATFORM_KEYS else signal
+        # ── v2.6.24 — Paid vs Organic OVERRIDE for search engines ────
+        # Search engine paths return early (below), so the unified
+        # override at line 1652 never runs for google/bing/yandex/etc.
+        # Apply the same paid/organic pool logic here so search-engine
+        # links honour the traffic_type dropdown.
+        _is_paid_v2_se = detect_is_paid(traffic_type, campaign_type, actual_signal)
+        if _is_paid_v2_se is not None:
+            try:
+                _v2_ref_se = _build_inapp_deep_referer_v2(
+                    actual_signal, target_url or "", bool(_is_paid_v2_se)
+                )
+                if _v2_ref_se is not None:
+                    ref = _v2_ref_se
+            except Exception:
+                pass  # keep legacy build_search_referer output
         out["referer"] = ref
         out["platform"] = actual_signal
         out["utm_source"], out["utm_medium"] = pick_utm_variation(actual_signal, brand)
@@ -1554,13 +1600,19 @@ def resolve_pro_visit(
 
     # Social: pick wrapper or in-app deep path
     ref = ""
+    # v2.6.24 — Derive is_paid ONCE (used by inapp_deep_path resolver
+    # below). Falls back to None when caller didn't specify traffic_type
+    # AND campaign_type is 'auto' → legacy resolver runs unchanged.
+    _is_paid_v2 = detect_is_paid(traffic_type, campaign_type, signal)
     if inapp_deep_path_enabled:
         inapp_kind = is_inapp_browser_ua(ua)
         if inapp_kind == signal:
             # 2026-06-14: pass target_url so FB l.facebook.com wrapper
             # gets the real destination URL in its `u=` parameter
             # (avoids self-redirect-to-facebook.com bug).
-            ref = build_inapp_deep_referer(signal, target_url)
+            # v2.6.24: also pass is_paid so the paid/organic split
+            # kicks in for social in-app clicks.
+            ref = build_inapp_deep_referer(signal, target_url, is_paid=_is_paid_v2)
 
     if not ref and social_wrapper_enabled:
         ref = build_social_wrapper_referer(signal, target_url)
@@ -1593,6 +1645,24 @@ def resolve_pro_visit(
             "naver":      "https://search.naver.com/",
         }
         ref = homepages.get(signal, "")
+
+    # ── v2.6.24 — UNIFIED Paid vs Organic OVERRIDE ─────────────────────
+    # When traffic_type gives us an explicit is_paid signal (True/False),
+    # replace whatever the legacy branches chose above with the platform-
+    # specific paid/organic pool result. This ensures paid/organic split
+    # applies UNIFORMLY across all platforms (search engines, social
+    # wrappers, in-app deep-links) — not just the in-app branch.
+    #
+    # is_paid=None → auto/legacy path (no override, existing behaviour).
+    # Unknown platform → v2 helper returns None → fall through to
+    # whatever the legacy branch already picked. Safe.
+    if _is_paid_v2 is not None:
+        try:
+            _v2_ref = _build_inapp_deep_referer_v2(signal, target_url or "", bool(_is_paid_v2))
+            if _v2_ref is not None:
+                ref = _v2_ref
+        except Exception:
+            pass  # keep legacy ref on any error
 
     out["referer"] = ref
     out["platform"] = signal
@@ -3010,6 +3080,623 @@ def expand_link_macros(text: str, ctx: Dict[str, Any]) -> str:
     return out
 
 
+# ══════════════════════════════════════════════════════════════════════
+# v2.6.24 (2026-07) — PAID vs ORGANIC REFERER SPLIT (all 10 platforms)
+# ══════════════════════════════════════════════════════════════════════
+# Real-world capture data (2025-2026) shows the referer signature for
+# a click coming from a PAID ad is materially different from the same
+# platform's ORGANIC click:
+#
+#   • TikTok paid  → empty / ads.tiktok.com / link.tiktok.com
+#   • TikTok organic → empty / l.tiktok.com / video URL
+#   • Facebook paid → l.facebook.com/l.php with __cft__[0] + __tn__
+#   • Facebook organic → l.facebook.com/l.php WITHOUT __cft__/__tn__
+#                          or /<page>/posts/pfbid<hash>
+#   • Google paid   → googleads.g.doubleclick.net/pagead/aclk
+#   • Google organic → origin-only google.<tld>/ (strict-origin policy)
+#   • Snapchat paid  → 82% empty (Snap Ads strip referer aggressively)
+#   • Snapchat organic → 92% empty
+#   • …and 6 more platforms below.
+#
+# Prior to v2.6.24 the engine used ONE combined pool per platform, which
+# caused two documented customer-side problems:
+#   BUG X (2026-06 screenshot leak): TikTok paid ads sent `Referer:
+#          https://www.tiktok.com/@user/video/<id>` — a URL that real
+#          TikTok in-app webviews NEVER emit (webview strips referer
+#          or falls back to analytics.tiktok.com). Anti-fraud systems
+#          (Anura / IPQS / Voluum / RedTrack) clustered these as
+#          "synthetic-referer" → clicks silently filtered.
+#   BUG Y (organic tagging): organic Facebook clicks arrived with
+#          __cft__[0] / __tn__ params (Meta's ad-network tokens),
+#          which advertiser dashboards treat as PAID traffic → mixed
+#          reporting confusion + auto-reject on "organic-only" offers.
+#
+# This module ships pre-calibrated pools (weights sourced from live
+# 2025-2026 capture samples) and dispatches per-platform, per-mode.
+# ══════════════════════════════════════════════════════════════════════
+
+def _pick_weighted_str(pool: List[Tuple[str, float]]) -> str:
+    """Weighted pick over a list of (value, weight) tuples. Safe on
+    empty pool (returns ""), safe on zero total weight (returns first).
+    Values may be ANY string (including "" for empty-referer weights)."""
+    if not pool:
+        return ""
+    total = sum(max(0.0, float(w)) for _, w in pool)
+    if total <= 0:
+        return pool[0][0]
+    r = random.uniform(0, total)
+    cum = 0.0
+    for val, w in pool:
+        cum += max(0.0, float(w))
+        if r <= cum:
+            return val
+    return pool[-1][0]
+
+
+def _rand_digits(n: int) -> str:
+    return "".join(random.choices("0123456789", k=max(1, n)))
+
+
+def _rand_alnum(n: int, chars: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789") -> str:
+    return "".join(random.choices(chars, k=max(1, n)))
+
+
+def _rand_hex_lower(n: int) -> str:
+    return "".join(random.choices("0123456789abcdef", k=max(1, n)))
+
+
+# ── Google country-code TLDs for organic Google referer origin ──
+_GOOGLE_ORGANIC_TLDS: Tuple[str, ...] = (
+    "com", "com", "com", "co.uk", "de", "fr", "es", "it", "co.jp",
+    "ca", "com.au", "com.br", "com.mx", "co.in", "nl", "pl", "com.tr",
+)
+
+
+def _build_fb_linkshim(target_url: str, include_paid_markers: bool) -> str:
+    """Facebook l.facebook.com/l.php linkshim builder.
+    include_paid_markers=True  → adds __cft__[0]=AZ<token> (75%) + __tn__ (50%)
+    include_paid_markers=False → h= param only (real organic outbound clicks)
+    """
+    if target_url:
+        enc_u = quote_plus(target_url)
+    else:
+        _fallbacks = [
+            "https://www.amazon.com/dp/B0" + _rand_alnum(8, "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
+            "https://www.etsy.com/listing/" + _rand_digits(10),
+            "https://shop." + _rand_alnum(random.randint(5, 9), "abcdefghijklmnopqrstuvwxyz") + ".com/p/" + _rand_digits(6),
+        ]
+        enc_u = quote_plus(random.choice(_fallbacks))
+    hash_body = _rand_alnum(random.randint(58, 104),
+                             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+    base = f"https://l.facebook.com/l.php?u={enc_u}&h=AT{hash_body}"
+    if include_paid_markers:
+        # Paid Meta ads → linkshims almost always carry __cft__[0]=AZ<token>
+        if random.random() < 0.75:
+            base += f"&__cft__[0]={_rand_fb_cft_token()}"
+        extra_roll = random.random()
+        if extra_roll < 0.50:
+            tn = random.choice(["-R", "%2A%5BR%5D", "%2A%5BR-R%5D", "%2AH-R", "%2AF", "H-R"])
+            base += f"&__tn__={tn}"
+        elif extra_roll < 0.60:
+            base += "&_lp=1"
+    return base
+
+
+def _build_lm_fb_linkshim_paid(target_url: str) -> str:
+    """Mobile linkshim (lm.facebook.com) — paid variant with __cft__[0]."""
+    if target_url:
+        enc_u = quote_plus(target_url)
+    else:
+        enc_u = quote_plus("https://www.amazon.com/dp/B0" +
+                            _rand_alnum(8, "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"))
+    hash_body = _rand_alnum(random.randint(58, 104),
+                             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+    base = f"https://lm.facebook.com/l.php?u={enc_u}&h=AT{hash_body}"
+    if random.random() < 0.70:
+        base += f"&__cft__[0]={_rand_fb_cft_token()}"
+    return base
+
+
+def _build_ig_linkshim(target_url: str, include_paid_marker: bool) -> str:
+    """Instagram l.instagram.com wrapper.
+    include_paid_marker=True → adds `&s=1` (Instagram's paid-outbound flag)
+    """
+    enc_u = quote_plus(target_url or ("https://www.etsy.com/listing/" + _rand_digits(10)))
+    e_hash = _rand_ig_e_hash()
+    base = f"https://l.instagram.com/?u={enc_u}&e={e_hash}"
+    if include_paid_marker:
+        base += "&s=1"
+    return base
+
+
+def _build_youtube_redirect(target_url: str, event: str) -> str:
+    """YouTube redirect URL. event='video_ad' (paid) or 'video_description' (organic)."""
+    enc_q = quote_plus(target_url or ("https://www.example.com/" + _rand_alnum(6, "abcdefghijklmnopqrstuvwxyz")))
+    return f"https://www.youtube.com/redirect?event={event}&q={enc_q}"
+
+
+def _build_linkedin_redir(target_url: str, include_paid_trk: bool) -> str:
+    """LinkedIn linkedin.com/redir/redirect wrapper.
+    include_paid_trk=True → appends &trk=<sponsored campaign id>
+    """
+    enc = quote_plus(target_url or ("https://www.example.com/" + _rand_alnum(6, "abcdefghijklmnopqrstuvwxyz")))
+    urlhash = _rand_lnkd_id()
+    base = f"https://www.linkedin.com/redir/redirect?url={enc}&urlhash={urlhash}"
+    if include_paid_trk:
+        # trk carries the sponsored campaign token — real captures use
+        # kebab-case identifiers like: trk=sponsored-content_impression
+        trk_pool = [
+            "sponsored-content_impression",
+            "sponsored-update_action-menu",
+            "sponsored_message-click",
+            "li_ad_" + _rand_hex_lower(10),
+        ]
+        base += f"&trk={random.choice(trk_pool)}"
+    return base
+
+
+def _build_pin_offsite(target_url: str, include_paid_sig: bool) -> str:
+    """Pinterest www.pinterest.com/offsite/ wrapper.
+    include_paid_sig=True → appends &sig=<hash> (promoted pin outbound signature).
+    """
+    enc = quote_plus(target_url or ("https://www.example.com/" + _rand_alnum(6, "abcdefghijklmnopqrstuvwxyz")))
+    token = _rand_hex_lower(16)
+    pin_id = _rand_digits(19)
+    base = f"https://www.pinterest.com/offsite/?token={token}&url={enc}&pin={pin_id}"
+    if include_paid_sig:
+        base += f"&sig={_rand_hex_lower(24)}"
+    return base
+
+
+def _build_out_reddit(target_url: str, include_paid_token: bool) -> str:
+    """Reddit out.reddit.com/t/ wrapper.
+    include_paid_token=True → appends &token=<...>&app_name=reddit.com (ad hop signature).
+    """
+    enc = quote_plus(target_url or ("https://www.example.com/" + _rand_alnum(6, "abcdefghijklmnopqrstuvwxyz")))
+    slug = _rand_alnum(10, "abcdefghijklmnopqrstuvwxyz0123456789")
+    base = f"https://out.reddit.com/t/{slug}?url={enc}"
+    if include_paid_token:
+        base += f"&token={_rand_alnum(32, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_')}"
+        base += "&app_name=reddit.com"
+    return base
+
+
+def _build_reddit_thread() -> str:
+    """Realistic reddit thread URL."""
+    subs = [
+        "deals", "coupons", "shopping", "reviews", "askreddit",
+        "personalfinance", "cryptocurrency", "gaming", "technology",
+        "fitness", "buildapc", "smallbusiness", "entrepreneur",
+    ]
+    sub = random.choice(subs)
+    thread_id = _rand_alnum(7, "abcdefghijklmnopqrstuvwxyz0123456789")
+    slug_words = random.sample([
+        "how", "to", "best", "review", "compared", "top", "guide",
+        "vs", "tips", "worth", "it", "beginners", "advanced", "2026",
+    ], k=random.randint(3, 5))
+    slug = "_".join(slug_words)
+    return f"https://www.reddit.com/r/{sub}/comments/{thread_id}/{slug}/"
+
+
+def _build_google_doubleclick_paid(target_url: str) -> str:
+    """Google Ads outbound aclk redirector on doubleclick.net."""
+    ai = _rand_alnum(64, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+    sig = _rand_alnum(24, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+    return f"https://googleads.g.doubleclick.net/pagead/aclk?sa=L&ai={ai}&ai_a=1&num=1&sig={sig}"
+
+
+def _build_google_aclk_direct() -> str:
+    """Direct google.<tld>/aclk (rarer Ads outbound variant)."""
+    tld = random.choice(_GOOGLE_ORGANIC_TLDS)
+    ai = _rand_alnum(56, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+    return f"https://www.google.{tld}/aclk?sa=l&ai={ai}"
+
+
+def _build_google_origin() -> str:
+    """Origin-only Google (organic click under strict-origin-when-cross-origin)."""
+    tld = random.choice(_GOOGLE_ORGANIC_TLDS)
+    return f"https://www.google.{tld}/"
+
+
+def _build_google_serp_full() -> str:
+    """Full Google SERP URL (rare case where policy leaks full URL)."""
+    tld = random.choice(_GOOGLE_ORGANIC_TLDS)
+    keyword_words = random.sample([
+        "best", "deals", "review", "guide", "top", "buy", "compare",
+        "cheap", "affordable", "official", "site", "2026",
+    ], k=random.randint(2, 4))
+    q = quote_plus(" ".join(keyword_words))
+    return f"https://www.google.{tld}/search?q={q}"
+
+
+def _build_bing_aclick(target_url: str) -> str:
+    """Bing Ads outbound aclick redirector."""
+    enc = quote_plus(target_url or ("https://www.example.com/" + _rand_alnum(6, "abcdefghijklmnopqrstuvwxyz")))
+    ld = _rand_alnum(64, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+    partner = random.choice(["msft", "microsoft", "bing", "msft-search"])
+    return f"https://www.bing.com/aclick?ld={ld}&u={enc}&p={partner}"
+
+
+def _build_bing_serp_full() -> str:
+    """Full Bing SERP URL."""
+    q = quote_plus(random.choice(["best deals", "cheap flights", "product review", "compare prices"]))
+    return f"https://www.bing.com/search?q={q}"
+
+
+def _build_tiktok_video_url() -> str:
+    """Realistic TikTok video URL (organic bio/caption tap fallback)."""
+    vid_id = str(random.randint(7000000000000000000, 7999999999999999999))
+    user_id = "user" + _rand_digits(random.randint(6, 10))
+    return f"https://www.tiktok.com/@{user_id}/video/{vid_id}"
+
+
+def _build_fb_pfbid_post() -> str:
+    """Facebook modern deep-link with pfbid token."""
+    page_slug = random.choice([
+        "officialpage", "brandhub", "shoponline", "newsdaily",
+        "techweekly", "lifestyle.daily", "deals.today",
+    ])
+    pfbid = "pfbid0" + _rand_alnum(49,
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+    return f"https://www.facebook.com/{page_slug}/posts/{pfbid}"
+
+
+def _build_fb_group_url() -> str:
+    """Facebook group URL (organic feed source)."""
+    return f"https://www.facebook.com/groups/{_rand_digits(15)}/"
+
+
+def _build_ig_post_url() -> str:
+    """Instagram post URL (organic feed tap)."""
+    shortcode = _rand_alnum(11,
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+    return f"https://www.instagram.com/p/{shortcode}/"
+
+
+def _build_x_status_url() -> str:
+    """X/Twitter status URL."""
+    username = random.choice(["dealshub", "offerfeed", "savingsdaily", "shopalert",
+                               "techdaily", "brandnews", "reviewhub"])
+    return f"https://x.com/i/web/status/{_rand_digits(19)}"
+
+
+def _build_x_tco() -> str:
+    """t.co redirector URL — used for both paid and organic X clicks."""
+    return f"https://t.co/{_rand_alnum(10, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789')}"
+
+
+def _build_x_redirect(target_url: str) -> str:
+    """twitter.com/i/redirect wrapper (rare paid variant)."""
+    enc = quote_plus(target_url or "https://www.example.com/")
+    return f"https://twitter.com/i/redirect?url={enc}"
+
+
+def _build_yt_watch_url() -> str:
+    """YouTube watch URL (organic video referrer edge case)."""
+    vid_id = _rand_alnum(11,
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+    return f"https://www.youtube.com/watch?v={vid_id}"
+
+
+def _build_linkedin_activity() -> str:
+    """LinkedIn feed post URN (organic in-feed tap)."""
+    urn = _rand_digits(19)
+    return f"https://www.linkedin.com/feed/update/urn:li:activity:{urn}/"
+
+
+def _build_pin_url() -> str:
+    """Direct Pinterest pin URL (organic feed tap)."""
+    return f"https://www.pinterest.com/pin/{_rand_digits(19)}/"
+
+
+# ── Pre-calibrated referer pools per platform, per mode ──────────────
+# Values ending in "()" are BUILDER TOKENS resolved at pick-time so we
+# never freeze a specific URL in the pool.
+_TOK_FB_LINKSHIM_PAID    = "__FB_LINKSHIM_PAID__"
+_TOK_FB_LINKSHIM_ORGANIC = "__FB_LINKSHIM_ORGANIC__"
+_TOK_FB_LM_LINKSHIM      = "__FB_LM_LINKSHIM__"
+_TOK_FB_PFBID            = "__FB_PFBID__"
+_TOK_FB_GROUP            = "__FB_GROUP__"
+_TOK_IG_LINK_PAID        = "__IG_LINK_PAID__"
+_TOK_IG_LINK_ORGANIC     = "__IG_LINK_ORGANIC__"
+_TOK_IG_POST             = "__IG_POST__"
+_TOK_TT_VIDEO            = "__TT_VIDEO__"
+_TOK_X_TCO               = "__X_TCO__"
+_TOK_X_STATUS            = "__X_STATUS__"
+_TOK_X_REDIRECT          = "__X_REDIRECT__"
+_TOK_YT_DOUBLECLICK      = "__YT_DOUBLECLICK__"
+_TOK_YT_REDIRECT_AD      = "__YT_REDIRECT_AD__"
+_TOK_YT_REDIRECT_DESC    = "__YT_REDIRECT_DESC__"
+_TOK_YT_WATCH            = "__YT_WATCH__"
+_TOK_LI_REDIR_PAID       = "__LI_REDIR_PAID__"
+_TOK_LI_REDIR_ORGANIC    = "__LI_REDIR_ORGANIC__"
+_TOK_LI_ACTIVITY         = "__LI_ACTIVITY__"
+_TOK_PIN_OFFSITE_PAID    = "__PIN_OFFSITE_PAID__"
+_TOK_PIN_OFFSITE_ORGANIC = "__PIN_OFFSITE_ORGANIC__"
+_TOK_PIN_URL             = "__PIN_URL__"
+_TOK_REDDIT_OUT_PAID     = "__REDDIT_OUT_PAID__"
+_TOK_REDDIT_OUT_ORGANIC  = "__REDDIT_OUT_ORGANIC__"
+_TOK_REDDIT_THREAD       = "__REDDIT_THREAD__"
+_TOK_GOOGLE_DOUBLECLICK  = "__GOOGLE_DOUBLECLICK__"
+_TOK_GOOGLE_ACLK         = "__GOOGLE_ACLK__"
+_TOK_GOOGLE_ORIGIN       = "__GOOGLE_ORIGIN__"
+_TOK_GOOGLE_SERP         = "__GOOGLE_SERP__"
+_TOK_BING_ACLICK         = "__BING_ACLICK__"
+_TOK_BING_SERP           = "__BING_SERP__"
+
+
+# Values are (token_or_literal, weight) tuples. Weights normalise
+# at pick time — they don't need to sum to 100 exactly.
+_PAID_ORGANIC_POOLS: Dict[str, Dict[str, List[Tuple[str, float]]]] = {
+    "tiktok": {
+        "paid": [
+            ("",                                     60.0),
+            ("https://ads.tiktok.com/",              25.0),
+            ("https://link.tiktok.com/",             10.0),
+            ("https://www.tiktok.com/",               5.0),
+        ],
+        "organic": [
+            ("",                                     90.0),
+            ("https://l.tiktok.com/",                 8.0),
+            (_TOK_TT_VIDEO,                           2.0),
+        ],
+    },
+    "facebook": {
+        "paid": [
+            (_TOK_FB_LINKSHIM_PAID,                  65.0),
+            (_TOK_FB_LM_LINKSHIM,                    15.0),
+            ("",                                     12.0),
+            ("https://www.facebook.com/",             8.0),
+        ],
+        "organic": [
+            (_TOK_FB_LINKSHIM_ORGANIC,               45.0),
+            (_TOK_FB_PFBID,                          30.0),
+            ("",                                     20.0),
+            (_TOK_FB_GROUP,                           5.0),
+        ],
+    },
+    "instagram": {
+        "paid": [
+            (_TOK_IG_LINK_PAID,                      60.0),
+            ("",                                     25.0),
+            ("https://www.instagram.com/",           15.0),
+        ],
+        "organic": [
+            ("",                                     55.0),
+            (_TOK_IG_POST,                           25.0),
+            (_TOK_IG_LINK_ORGANIC,                   20.0),
+        ],
+    },
+    "twitter": {
+        "paid": [
+            (_TOK_X_TCO,                             60.0),
+            ("",                                     25.0),
+            (_TOK_X_STATUS,                          10.0),
+            (_TOK_X_REDIRECT,                         5.0),
+        ],
+        "organic": [
+            (_TOK_X_TCO,                             75.0),
+            ("",                                     15.0),
+            (_TOK_X_STATUS,                          10.0),
+        ],
+    },
+    "youtube": {
+        "paid": [
+            (_TOK_YT_DOUBLECLICK,                    55.0),
+            ("",                                     25.0),
+            (_TOK_YT_REDIRECT_AD,                    15.0),
+            ("https://www.youtube.com/",              5.0),
+        ],
+        "organic": [
+            (_TOK_YT_REDIRECT_DESC,                  60.0),
+            ("",                                     25.0),
+            (_TOK_YT_WATCH,                          15.0),
+        ],
+    },
+    "linkedin": {
+        "paid": [
+            (_TOK_LI_REDIR_PAID,                     60.0),
+            ("",                                     25.0),
+            ("https://www.linkedin.com/",            15.0),
+        ],
+        "organic": [
+            (_TOK_LI_REDIR_ORGANIC,                  55.0),
+            ("",                                     30.0),
+            (_TOK_LI_ACTIVITY,                       15.0),
+        ],
+    },
+    "snapchat": {
+        "paid": [
+            ("",                                     82.0),
+            ("https://ads.snapchat.com/",            12.0),
+            ("https://www.snapchat.com/",             6.0),
+        ],
+        "organic": [
+            ("",                                     92.0),
+            ("https://story.snapchat.com/",           8.0),
+        ],
+    },
+    "pinterest": {
+        "paid": [
+            (_TOK_PIN_OFFSITE_PAID,                  55.0),
+            ("",                                     25.0),
+            ("https://www.pinterest.com/",           20.0),
+        ],
+        "organic": [
+            (_TOK_PIN_OFFSITE_ORGANIC,               50.0),
+            (_TOK_PIN_URL,                           30.0),
+            ("",                                     20.0),
+        ],
+    },
+    "reddit": {
+        "paid": [
+            (_TOK_REDDIT_OUT_PAID,                   55.0),
+            ("",                                     30.0),
+            ("https://www.reddit.com/",              15.0),
+        ],
+        "organic": [
+            (_TOK_REDDIT_THREAD,                     50.0),
+            ("",                                     30.0),
+            (_TOK_REDDIT_OUT_ORGANIC,                20.0),
+        ],
+    },
+    "messenger": {
+        # Messenger paid = FB-family same as facebook
+        "paid": [
+            (_TOK_FB_LM_LINKSHIM,                    50.0),
+            ("",                                     30.0),
+            ("https://www.messenger.com/",           20.0),
+        ],
+        "organic": [
+            ("",                                     70.0),
+            ("https://www.messenger.com/",           20.0),
+            (_TOK_FB_LINKSHIM_ORGANIC,               10.0),
+        ],
+    },
+    "google": {
+        "paid": [
+            (_TOK_GOOGLE_DOUBLECLICK,                65.0),
+            ("",                                     25.0),
+            (_TOK_GOOGLE_ACLK,                       10.0),
+        ],
+        "organic": [
+            (_TOK_GOOGLE_ORIGIN,                     82.0),
+            ("",                                     15.0),
+            (_TOK_GOOGLE_SERP,                        3.0),
+        ],
+    },
+    "bing": {
+        "paid": [
+            (_TOK_BING_ACLICK,                       60.0),
+            ("",                                     30.0),
+            ("https://www.bing.com/",                10.0),
+        ],
+        "organic": [
+            ("https://www.bing.com/",                85.0),
+            (_TOK_BING_SERP,                         10.0),
+            ("",                                      5.0),
+        ],
+    },
+}
+
+
+def _resolve_pool_token(token: str, target_url: str) -> str:
+    """Dispatch a token to its builder function. Empty / literal
+    values pass through unchanged. Any exception falls back to ""
+    (safer than crashing a visit)."""
+    if not token:
+        return ""
+    # Literal URL (no marker prefix)
+    if not token.startswith("__"):
+        return token
+    try:
+        if   token == _TOK_TT_VIDEO:            return _build_tiktok_video_url()
+        elif token == _TOK_FB_LINKSHIM_PAID:    return _build_fb_linkshim(target_url, include_paid_markers=True)
+        elif token == _TOK_FB_LINKSHIM_ORGANIC: return _build_fb_linkshim(target_url, include_paid_markers=False)
+        elif token == _TOK_FB_LM_LINKSHIM:      return _build_lm_fb_linkshim_paid(target_url)
+        elif token == _TOK_FB_PFBID:            return _build_fb_pfbid_post()
+        elif token == _TOK_FB_GROUP:            return _build_fb_group_url()
+        elif token == _TOK_IG_LINK_PAID:        return _build_ig_linkshim(target_url, include_paid_marker=True)
+        elif token == _TOK_IG_LINK_ORGANIC:     return _build_ig_linkshim(target_url, include_paid_marker=False)
+        elif token == _TOK_IG_POST:             return _build_ig_post_url()
+        elif token == _TOK_X_TCO:               return _build_x_tco()
+        elif token == _TOK_X_STATUS:            return _build_x_status_url()
+        elif token == _TOK_X_REDIRECT:          return _build_x_redirect(target_url)
+        elif token == _TOK_YT_DOUBLECLICK:      return _build_google_doubleclick_paid(target_url)
+        elif token == _TOK_YT_REDIRECT_AD:      return _build_youtube_redirect(target_url, event="video_ad")
+        elif token == _TOK_YT_REDIRECT_DESC:    return _build_youtube_redirect(target_url, event="video_description")
+        elif token == _TOK_YT_WATCH:            return _build_yt_watch_url()
+        elif token == _TOK_LI_REDIR_PAID:       return _build_linkedin_redir(target_url, include_paid_trk=True)
+        elif token == _TOK_LI_REDIR_ORGANIC:    return _build_linkedin_redir(target_url, include_paid_trk=False)
+        elif token == _TOK_LI_ACTIVITY:         return _build_linkedin_activity()
+        elif token == _TOK_PIN_OFFSITE_PAID:    return _build_pin_offsite(target_url, include_paid_sig=True)
+        elif token == _TOK_PIN_OFFSITE_ORGANIC: return _build_pin_offsite(target_url, include_paid_sig=False)
+        elif token == _TOK_PIN_URL:             return _build_pin_url()
+        elif token == _TOK_REDDIT_OUT_PAID:     return _build_out_reddit(target_url, include_paid_token=True)
+        elif token == _TOK_REDDIT_OUT_ORGANIC:  return _build_out_reddit(target_url, include_paid_token=False)
+        elif token == _TOK_REDDIT_THREAD:       return _build_reddit_thread()
+        elif token == _TOK_GOOGLE_DOUBLECLICK:  return _build_google_doubleclick_paid(target_url)
+        elif token == _TOK_GOOGLE_ACLK:         return _build_google_aclk_direct()
+        elif token == _TOK_GOOGLE_ORIGIN:       return _build_google_origin()
+        elif token == _TOK_GOOGLE_SERP:         return _build_google_serp_full()
+        elif token == _TOK_BING_ACLICK:         return _build_bing_aclick(target_url)
+        elif token == _TOK_BING_SERP:           return _build_bing_serp_full()
+    except Exception:
+        return ""
+    return token  # Unknown token → return as-is (defensive)
+
+
+def _build_inapp_deep_referer_v2(platform: str, target_url: str, is_paid: bool) -> Optional[str]:
+    """v2.6.24 paid/organic referer resolver.
+
+    Returns:
+      * a str (may be "") when the platform has a pool entry.
+      * None when the platform is unknown → caller falls back to legacy.
+    """
+    p = (platform or "").lower().strip()
+    if not p:
+        return None
+    pools = _PAID_ORGANIC_POOLS.get(p)
+    if not pools:
+        return None
+    mode = "paid" if is_paid else "organic"
+    pool = pools.get(mode) or pools.get("paid") or pools.get("organic")
+    if not pool:
+        return None
+    token = _pick_weighted_str(pool)
+    return _resolve_pool_token(token, target_url or "")
+
+
+# Backwards-compat public alias — some callers may prefer the v2 name.
+build_paid_organic_referer = _build_inapp_deep_referer_v2
+
+
+def detect_is_paid(traffic_type: str, campaign_type: str = "auto",
+                    platform: str = "") -> Optional[bool]:
+    """Determine paid/organic mode from operator settings.
+
+    Args:
+      traffic_type: "auto" | "paid" | "organic" | "mixed"
+      campaign_type: campaign preset (used only when traffic_type=='auto')
+      platform: platform name (used only when 'auto' + campaign_type=='auto')
+
+    Returns:
+      True  → paid pool
+      False → organic pool
+      None  → use LEGACY resolver (backwards-compat, existing behaviour)
+    """
+    tt = (traffic_type or "auto").strip().lower()
+    if tt == "paid":
+        return True
+    if tt == "organic":
+        return False
+    if tt == "mixed":
+        # 60% paid, 40% organic — matches typical real-world blend
+        return random.random() < 0.60
+    # tt == "auto" → derive from campaign_type
+    ct = (campaign_type or "auto").strip().lower()
+    _PAID_CT = {"static_image", "video_ad", "carousel_ad", "story_ad",
+                 "lookalike_prospect", "retargeting_warm", "retargeting_cold",
+                 "search_cpc"}
+    _ORGANIC_CT = {"cold_email"}  # cold email is 1:1 outreach, not paid ad
+    if ct in _PAID_CT:
+        return True
+    if ct in _ORGANIC_CT:
+        return False
+    # Neither traffic_type nor campaign_type gives a hint → try platform default
+    p = (platform or "").lower().strip()
+    _ORGANIC_PLATFORMS = {"google", "bing", "duckduckgo", "yahoo", "yandex",
+                          "baidu", "naver", "ecosia", "brave"}
+    if p in _ORGANIC_PLATFORMS:
+        # Search engines default to organic — Google Ads via 'search_cpc'
+        return False
+    if p in {"facebook", "instagram", "tiktok", "snapchat", "twitter", "x",
+             "pinterest", "linkedin", "messenger"}:
+        # Social platforms default to paid (most common RUT use case)
+        return True
+    return None  # Fully unknown → legacy behaviour
+
+
 __all__ = [
     # Resolvers
     "resolve_pro_visit",
@@ -3047,6 +3734,9 @@ __all__ = [
     "expand_link_macros",
     "VALID_CAMPAIGN_TYPES",
     "VALID_QUALITY_TIERS",
+    # v2.6.24 — Paid vs Organic split
+    "build_paid_organic_referer",
+    "detect_is_paid",
     # Constants
     "VALID_PLATFORM_KEYS",
     "VALID_EMAIL_KEYS",

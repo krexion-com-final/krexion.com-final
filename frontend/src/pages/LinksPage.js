@@ -422,6 +422,7 @@ export default function LinksPage() {
     referrer_pro_tod_enabled: false,
     referrer_pro_campaign_type: "auto",
     referrer_pro_quality_tier: "standard",
+    referrer_pro_traffic_type: "auto",
     referrer_pro_offer_urls: "",
     postback_url: "",
     referrer_pro_auto_pause_enabled: false,
@@ -564,6 +565,7 @@ export default function LinksPage() {
       referrer_pro_tod_enabled: false,
       referrer_pro_campaign_type: "auto",
       referrer_pro_quality_tier: "standard",
+      referrer_pro_traffic_type: "auto",
       referrer_pro_offer_urls: "",
       postback_url: "",
       referrer_pro_auto_pause_enabled: false,
@@ -749,6 +751,7 @@ export default function LinksPage() {
       referrer_pro_tod_enabled: link.referrer_pro_tod_enabled || false,
       referrer_pro_campaign_type: link.referrer_pro_campaign_type || "auto",
       referrer_pro_quality_tier: link.referrer_pro_quality_tier || "standard",
+      referrer_pro_traffic_type: link.referrer_pro_traffic_type || "auto",
       referrer_pro_offer_urls: link.referrer_pro_offer_urls || "",
       postback_url: link.postback_url || "",
       referrer_pro_auto_pause_enabled: link.referrer_pro_auto_pause_enabled || false,
@@ -1872,6 +1875,25 @@ export default function LinksPage() {
                             </select>
                             <p className="text-[10px] text-[#52525B] mt-1">
                               Sets utm_medium / utm_content / utm_term to a realistic campaign combo — Meta / Google / Voluum dashboards render properly.
+                            </p>
+                          </div>
+
+                          {/* v2.6.24 — Traffic Type: Paid vs Organic Referer Split */}
+                          <div className="mt-3">
+                            <Label className="text-xs text-[#A1A1AA]">🚦 Traffic Type (v2.6.24 — Paid vs Organic split)</Label>
+                            <select
+                              value={formData.referrer_pro_traffic_type || 'auto'}
+                              onChange={(e) => setFormData({ ...formData, referrer_pro_traffic_type: e.target.value })}
+                              className="w-full p-2 rounded-md bg-[var(--brand-card)] border border-[var(--brand-border)] text-white mt-1 text-sm"
+                              data-testid="pro-traffic-type"
+                            >
+                              <option value="auto">Auto — detect from Campaign Type + platform (safest default)</option>
+                              <option value="paid">Paid Ads — use paid-ad referer pool (l.facebook.com w/ __cft__, googleads.g.doubleclick.net, t.co, empty for TikTok, etc.)</option>
+                              <option value="organic">Organic — use organic-click referer pool (google.tld origin only, pfbid post URLs, no ad tracking params)</option>
+                              <option value="mixed">Mixed — 60% paid / 40% organic (realistic real-world blend)</option>
+                            </select>
+                            <p className="text-[10px] text-[#52525B] mt-1">
+                              Applies platform-specific real-capture referer patterns for all 10 supported platforms. &quot;Auto&quot; preserves legacy behaviour for existing links — pick Paid / Organic / Mixed to force a specific mode.
                             </p>
                           </div>
 

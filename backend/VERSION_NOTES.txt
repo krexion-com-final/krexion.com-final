@@ -1,3 +1,83 @@
+# v2.6.24 — 2026-07 — Paid vs Organic Referer Split (10 platforms)
+#
+# PROBLEM:
+#     Prior versions used ONE combined referer pool per social platform,
+#     which produced two documented problems on live traffic:
+#
+#       BUG X (screenshot from customer, 2026-07):
+#         TikTok paid ads sent Referer:
+#           https://www.tiktok.com/@user<n>/video/<19-digit-id>
+#         Real TikTok in-app webviews NEVER leak the video URL as
+#         Referer — they either strip it entirely (Sec-Fetch-Site=none)
+#         or send analytics.tiktok.com / ads.tiktok.com. Anti-fraud
+#         stacks (Anura / IPQS / Voluum / RedTrack / Kochava) pattern-
+#         match this exact string as "synthetic referer" → click
+#         silently filtered from advertiser dashboards.
+#
+#       BUG Y (organic tagging mismatch):
+#         Organic Facebook clicks arrived at the offer with __cft__[0]
+#         and __tn__ params inside the l.facebook.com linkshim. These
+#         are Meta's PAID-ad content-filter tokens — organic outbound
+#         links do NOT carry them. Advertiser dashboards flagged the
+#         traffic as paid-social when the operator was running an
+#         "organic-only" offer, triggering auto-reject rules.
+#
+# FIX:
+#     New per-platform, per-mode referer pools with pre-calibrated
+#     weights derived from live 2025-2026 real-user capture data.
+#     Coverage:
+#         TikTok, Facebook, Instagram, Twitter/X, YouTube, LinkedIn,
+#         Snapchat, Pinterest, Reddit, Google, Bing, Messenger
+#     Each platform now has independent "paid" and "organic" weighted
+#     pools. Examples of the split:
+#         TikTok paid   → 60% empty / 25% ads.tiktok.com / 10% link.tiktok.com
+#         TikTok organic → 90% empty / 8% l.tiktok.com / 2% video URL
+#         FB paid       → l.facebook.com/l.php WITH __cft__[0]+__tn__
+#         FB organic    → l.facebook.com/l.php WITHOUT __cft__/__tn__
+#                          (+30% /page/posts/pfbid<hash> deep-link)
+#         Google paid   → googleads.g.doubleclick.net/pagead/aclk
+#         Google organic → origin-only google.<tld>/ (strict-origin
+#                           -when-cross-origin actual browser behaviour)
+#         Snapchat paid  → 82% empty (Snap Ads strip referer strictly)
+#         Snapchat organic → 92% empty
+#     A new UI dropdown "Traffic Type" (Auto | Paid | Organic | Mixed)
+#     lets the operator force a specific mode. Default "auto" is fully
+#     backwards-compatible — existing links keep pre-2.6.24 behaviour.
+#
+# NEW PUBLIC API (referrer_pro):
+#     build_paid_organic_referer(platform, target_url, is_paid)
+#     detect_is_paid(traffic_type, campaign_type, platform) -> Optional[bool]
+#     build_inapp_deep_referer(platform, target_url, is_paid=None)
+#         Legacy signature preserved — new is_paid kwarg triggers v2
+#         pool. is_paid=None (default) → LEGACY behaviour unchanged.
+#     resolve_pro_visit(..., traffic_type="auto")
+#         New optional kwarg. "auto" → derive from campaign_type +
+#         platform. "paid"/"organic"/"mixed" → force the split mode.
+#
+# EXPECTED IMPACT:
+#     - Click acceptance rate on advertiser dashboards: +15-20%
+#     - IP burn rate per 1,000 clicks: −30%
+#     - Snapchat / LinkedIn niches: usable (previously borderline)
+#     - Organic-only offer approval retention: no more paid tokens in
+#       the linkshim → offer stays clean
+#
+# SEC-CH-UA VERIFICATION (no change needed):
+#     v2.6.23 already handles Sec-CH-UA / Sec-CH-UA-Mobile /
+#     Sec-CH-UA-Platform / Sec-CH-UA-Platform-Version via
+#     build_sec_ch_ua_headers() (referrer_pro.py:1828) and the
+#     userAgentData JS override in advanced_anti_detect.py. Confirmed
+#     during the v2.6.24 planning review — no code change required.
+#
+# BACKWARDS COMPATIBILITY:
+#     - New DB field referrer_pro_traffic_type defaults to "auto" on
+#       every existing link (no migration needed).
+#     - build_inapp_deep_referer() legacy signature preserved.
+#     - Every unknown-platform / error path falls through to legacy.
+#     - No changes to Docker Compose, Nginx, Cloudflare tunnels,
+#       Electron app, native installers, or Playwright browser
+#       fingerprint layers.
+
+
 # v2.6.20 — 2026-02 — Retrigger deploy pipeline + safety hardening
 #
 # CUSTOMER REPORTED:

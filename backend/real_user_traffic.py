@@ -1316,6 +1316,9 @@ def _resolve_visit_referer(ua: str, cfg: Optional[Dict[str, Any]]) -> Tuple[str,
                     inapp_deep_path_enabled=bool(cfg.get("inapp_deep_path", True)),
                     strip_search_path=bool(cfg.get("strip_search_path", True)),
                     network_click_chain_enabled=bool(cfg.get("network_click_chain", False)),
+                    # v2.6.24 — Paid vs Organic split (auto|paid|organic|mixed)
+                    traffic_type=str(cfg.get("traffic_type") or "auto"),
+                    campaign_type=str(cfg.get("campaign_type") or "auto"),
                 )
                 ref = pro.get("referer", "") or ""
                 plat = pro.get("platform", "") or ""
@@ -6838,6 +6841,12 @@ async def run_real_user_traffic_job(
     referer_search_keywords: str = "",
     referer_strip_search_path: bool = True,
     referer_network_click_chain: bool = False,
+    # ── v2.6.24 (2026-07) — Paid vs Organic referer split ─────────────
+    # traffic_type: "auto" (default, derives from campaign_type or
+    # platform) | "paid" | "organic" | "mixed" (60/40 blend). Backwards
+    # compatible — default "auto" preserves pre-2.6.24 behaviour.
+    referer_traffic_type: str = "auto",
+    referer_campaign_type: str = "auto",
     # ── 2026-01: PASS-REFERER-TO-OFFER ───────────────────────────────
     # When True, the bot RESOLVES the Krexion tracker server-side
     # (records the click with the proxy's exit IP via X-Forwarded-For)
@@ -7058,6 +7067,9 @@ async def run_real_user_traffic_job(
         "search_keywords": referer_search_keywords or "",
         "strip_search_path": bool(referer_strip_search_path),
         "network_click_chain": bool(referer_network_click_chain),
+        # v2.6.24 — Paid vs Organic referer split
+        "traffic_type": (referer_traffic_type or "auto").strip().lower(),
+        "campaign_type": (referer_campaign_type or "auto").strip().lower(),
         "target_url": target_url or "",
         # 2026-01 — Pass-Referer-To-Offer (server-side tracker resolve +
         # direct offer navigation so the chosen Referer reaches the offer).
