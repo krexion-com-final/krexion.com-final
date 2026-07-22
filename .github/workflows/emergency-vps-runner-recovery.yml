@@ -1,0 +1,125 @@
+name: Emergency VPS Runner Recovery (SSH-based)
+
+# 2026-07-22 — v2.6.22 emergency recovery workflow.
+#
+# Purpose: When the self-hosted `krexion-vps` runner goes offline (systemd
+# service died, VPS temporarily unreachable, etc.), the deploy.yml,
+# recover-services.yml, fix-caddy.yml, and Windows-build's "React frontend"
+# job all get stuck queued indefinitely because they require the
+# `krexion-vps` runner label.
+#
+# This workflow is the "chicken-and-egg" breaker: it runs on GitHub's
+# hosted `ubuntu-latest` runner, SSHes into the VPS using the existing
+# repository secrets (VPS_HOST, VPS_USER, VPS_PORT, VPS_SSH_KEY), and
+# restarts the `krexion-runner` systemd service. Once the runner reports
+# online in GitHub, the queued self-hosted jobs auto-pick up and run.
+#
+# Also frees up disk space (v2.6.21 failed with "No space left on device"
+# during docker build) so the subsequently-picked-up deploy doesn't hit
+# the same wall.
+#
+# Trigger: MANUAL ONLY (workflow_dispatch). Never fires on push.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cleanup_docker:
+        description: 'Also prune Docker images/builders to free disk space'
+        required: false
+        default: 'yes'
+        type: choice
+        options: ['yes', 'no']
+
+concurrency:
+  group: krexion-vps-emergency-recovery
+  cancel-in-progress: false
+
+jobs:
+  restart-runner:
+    name: SSH into VPS, restart krexion-runner, free disk
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: SSH into VPS and restart runner + cleanup
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          port: ${{ secrets.VPS_PORT }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script_stop: false
+          command_timeout: 6m
+          script: |
+            set -e
+            echo "===== VPS host uptime + disk BEFORE ====="
+            uptime
+            df -h / /var/lib/docker 2>/dev/null | head -5
+            echo ""
+            echo "===== Runner service state BEFORE ====="
+            systemctl status krexion-runner --no-pager -l 2>&1 | head -20 \
+              || systemctl status "actions.runner.krexion-com-final-krexion.com-final.krexion-vps.service" --no-pager -l 2>&1 | head -20 \
+              || echo "  (neither service unit found — will attempt to enable+start)"
+            echo ""
+            echo "===== Restart runner ====="
+            if systemctl list-unit-files | grep -q '^krexion-runner\.service'; then
+              sudo systemctl restart krexion-runner
+              sudo systemctl status krexion-runner --no-pager -l | head -15
+            elif systemctl list-unit-files | grep -q '^actions\.runner\.krexion-com-final'; then
+              sudo systemctl restart "actions.runner.krexion-com-final-krexion.com-final.krexion-vps.service"
+              sudo systemctl status "actions.runner.krexion-com-final-krexion.com-final.krexion-vps.service" --no-pager -l | head -15
+            else
+              echo "!! No runner service unit found. Trying start via svc.sh fallback."
+              if [ -f /opt/krexion-runner/svc.sh ]; then
+                cd /opt/krexion-runner
+                sudo ./svc.sh stop || true
+                sudo ./svc.sh start
+                sudo ./svc.sh status | head -20
+              else
+                echo "ERROR: /opt/krexion-runner/svc.sh missing — runner has to be reinstalled."
+                exit 1
+              fi
+            fi
+            echo ""
+            if [ "${{ github.event.inputs.cleanup_docker }}" = "yes" ]; then
+              echo "===== Docker disk cleanup ====="
+              docker image prune -af 2>&1 | tail -3 || true
+              docker builder prune -af --keep-storage 5GB 2>&1 | tail -3 || true
+              docker system prune -f 2>&1 | tail -3 || true
+              echo ""
+              echo "===== Disk AFTER cleanup ====="
+              df -h / /var/lib/docker 2>/dev/null | head -5
+            else
+              echo "(Docker cleanup skipped by user input)"
+            fi
+            echo ""
+            echo "===== Verify runner listener is reaching github ====="
+            sleep 4
+            tail -20 /opt/krexion-runner/_diag/Runner_*.log 2>/dev/null | tail -30 || echo "  (no runner diag logs yet — service just started)"
+            echo ""
+            echo "===== Recovery complete: $(date -u +%FT%TZ) ====="
+
+      - name: Poll GitHub API — confirm krexion-vps runner is ONLINE
+        env:
+          GH_PAT: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          for i in $(seq 1 12); do
+            sleep 5
+            RESPONSE=$(curl -sfH "Authorization: token $GH_PAT" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runners")
+            STATUS=$(echo "$RESPONSE" | python3 -c "
+          import json, sys
+          d = json.load(sys.stdin)
+          for r in d.get('runners', []):
+              if r['name'] == 'krexion-vps':
+                  print(r['status'])
+                  break
+          " 2>/dev/null || echo "unknown")
+            echo "  Poll #$i: krexion-vps = $STATUS"
+            if [ "$STATUS" = "online" ]; then
+              echo "  ✅ Runner is ONLINE — queued self-hosted jobs will pick up automatically."
+              exit 0
+            fi
+          done
+          echo "  ⚠️ Runner did NOT come back online after 60s. Check runner logs on VPS manually."
+          exit 1
