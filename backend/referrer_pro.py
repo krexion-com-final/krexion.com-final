@@ -1538,6 +1538,15 @@ def resolve_pro_visit(
             out["utm_content"] = _preset.get("content", "")
             out["utm_term"]    = _preset.get("term", "")
         out["sec_fetch"] = build_sec_fetch_headers(ref, is_navigation=True)
+        # v2.6.26 — email is neither paid nor organic in the tracker sense
+        # (SendGrid/Mailchimp/Klaviyo etc. are 1:1 outreach). Expose the
+        # decision anyway so the tracker can inject `sub2=organic` (cold
+        # email → organic) or the operator's own macro.
+        _is_paid_v2_em = detect_is_paid(traffic_type, campaign_type, "email")
+        out["is_paid"] = _is_paid_v2_em
+        out["traffic_type"] = ("paid" if _is_paid_v2_em is True
+                               else "organic" if _is_paid_v2_em is False
+                               else "auto")
         # BUG #6 fix (2026-07): honour network_click_chain for email too.
         if network_click_chain_enabled:
             out["network_click_referer"] = build_network_click_referer(network_click_host)
@@ -1592,6 +1601,14 @@ def resolve_pro_visit(
             out["utm_content"] = _preset.get("content", "")
             out["utm_term"]    = _preset.get("term", "")
         out["sec_fetch"] = build_sec_fetch_headers(ref, is_navigation=True)
+        # v2.6.26 — expose paid/organic decision so the tracker can inject
+        # `sub2=paid|organic` (or the operator-configured macro) into the
+        # destination URL. Falls back to "auto" when detect_is_paid gave
+        # no verdict (search-engine on legacy `traffic_type=auto`).
+        out["is_paid"] = _is_paid_v2_se
+        out["traffic_type"] = ("paid" if _is_paid_v2_se is True
+                               else "organic" if _is_paid_v2_se is False
+                               else "auto")
         # BUG #5 fix (2026-07): honour network_click_chain for search
         # paths too — previously only social paths got the network ref.
         if network_click_chain_enabled:
@@ -1673,6 +1690,14 @@ def resolve_pro_visit(
         out["utm_content"] = _preset.get("content", "")
         out["utm_term"]    = _preset.get("term", "")
     out["sec_fetch"] = build_sec_fetch_headers(ref, is_navigation=True)
+    # v2.6.26 — expose paid/organic decision (see comment above at search-
+    # engine branch). Uses the SAME `_is_paid_v2` already computed at
+    # line ~1606 so the value is consistent with the referer pool that
+    # was actually chosen.
+    out["is_paid"] = _is_paid_v2
+    out["traffic_type"] = ("paid" if _is_paid_v2 is True
+                           else "organic" if _is_paid_v2 is False
+                           else "auto")
 
     # Network click chain (one optional 302 hop)
     if network_click_chain_enabled:

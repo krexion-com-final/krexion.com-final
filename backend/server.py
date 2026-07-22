@@ -19132,6 +19132,14 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         "utm_content":     str(_pro_result.get("utm_content") or ""),
         "utm_term":        str(_pro_result.get("utm_term") or ""),
         "accept_language": _visit_accept_language or "",
+        # v2.6.26 — expose paid/organic verdict as a macro so operators
+        # can add `?sub2={traffic_type}` (or any key) manually to their
+        # offer URL. Also usable via `{is_paid}` if they only need a
+        # true/false boolean rendered as "true"/"false"/"auto".
+        "traffic_type":    str(_pro_result.get("traffic_type") or "auto"),
+        "is_paid":         ("true" if _pro_result.get("is_paid") is True
+                            else "false" if _pro_result.get("is_paid") is False
+                            else "auto"),
     }
 
     # (a) — Apply macros INSIDE the values of `url_params` first, so
@@ -19267,12 +19275,78 @@ async def redirect_link(short_code: str, request: Request, sub1: str = "", sub2:
         except Exception:
             pass
 
+    # ── v2.6.26 — Paid vs Organic auto-inject into destination URL ────────
+    # Customer report (clicks (4).csv): the Sub2 column at the offer network
+    # (Everflow / Voluum / RedTrack) was 100% empty across 106 rows, making
+    # it impossible to filter paid vs organic traffic in the report. Root
+    # cause: while resolve_pro_visit correctly picked the paid/organic pool
+    # (v2.6.24 fix), the tracker was NOT propagating that decision into any
+    # query param on the destination URL — so the network stored empty
+    # sub_id fields.
+    #
+    # Fix: when `_pro_result` carried a decisive is_paid verdict (True or
+    # False, not None), inject the resolved traffic_type ("paid" / "organic")
+    # into the destination URL under the operator-configured `traffic_type_param`
+    # key on the link (default: "sub2"). Operator can override to sub3 / s2 /
+    # aff_sub2 / p2 / etc. — whatever their tracker layout expects. Existing
+    # values on the destination URL always win (per-link config authoritative).
+    try:
+        _tt_verdict = _pro_result.get("traffic_type") if isinstance(_pro_result, dict) else None
+        if _tt_verdict in ("paid", "organic"):
+            _tt_key = str(link.get("traffic_type_param") or "sub2").strip().lower()
+            # Validate key — must be a plain sub-param name (letters/digits/underscore).
+            if re.match(r"^[a-z][a-z0-9_]{0,31}$", _tt_key):
+                from urllib.parse import urlparse as _up_tt, parse_qsl as _pql_tt
+                from urllib.parse import urlencode as _uen_tt, urlunparse as _uun_tt
+                _du_tt = _up_tt(destination_url)
+                _q_tt = dict(_pql_tt(_du_tt.query, keep_blank_values=True))
+                if _tt_key not in _q_tt or not (_q_tt.get(_tt_key) or "").strip():
+                    _q_tt[_tt_key] = _tt_verdict
+                    destination_url = _uun_tt(_du_tt._replace(
+                        query=_uen_tt(_q_tt, doseq=True)
+                    ))
+                    try:
+                        logger.info(
+                            f"[/r/{short_code}] injected traffic_type "
+                            f"{_tt_key}={_tt_verdict} into destination URL"
+                        )
+                    except Exception:
+                        pass
+    except Exception as _tt_err:
+        try:
+            logger.warning(f"[/r/{short_code}] traffic_type inject skipped: {_tt_err}")
+        except Exception:
+            pass
+
     # Set referrer policy based on referrer_mode
+    # v2.6.26 — DEFAULT policy is now `unsafe-url` (was: unset → browser
+    # default `strict-origin-when-cross-origin`, which stripped Referer to
+    # origin on every hop of the redirect chain). Customer's clicks (4).csv
+    # showed intermediate affiliate-network URLs (click.networkx.io / mb-pl
+    # / performcb / mb01 / glitchyads / tracker.gateway) leaking into the
+    # tracker's Referrer column — because Chromium's default policy replaced
+    # the spoofed platform Referer (facebook.com / instagram.com / tiktok.com)
+    # with the previous hop's URL. `unsafe-url` preserves the ORIGINAL
+    # Referer through the entire chain so the offer network sees the real
+    # social-platform referrer on the FINAL click event.
+    #
+    # Operator can still opt into stricter policies via the link's
+    # `referrer_mode` field: "no_referrer" / "origin" / "strict_origin" /
+    # "same_origin" / "unsafe_url" (default).
     headers = {}
     if referrer_mode == "no_referrer":
         headers["Referrer-Policy"] = "no-referrer"
     elif referrer_mode == "origin":
         headers["Referrer-Policy"] = "origin"
+    elif referrer_mode == "strict_origin":
+        headers["Referrer-Policy"] = "strict-origin"
+    elif referrer_mode == "same_origin":
+        headers["Referrer-Policy"] = "same-origin"
+    elif referrer_mode == "no_referrer_when_downgrade":
+        headers["Referrer-Policy"] = "no-referrer-when-downgrade"
+    else:
+        # v2.6.26 default — preserve full Referer through redirect chain
+        headers["Referrer-Policy"] = "unsafe-url"
 
     # v2.1.80 — Pro-Referrer wrapper redirect. When the link enables
     # `referrer_pro_wrapper_redirect` AND resolve_pro_visit produced a
