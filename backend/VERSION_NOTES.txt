@@ -3286,3 +3286,87 @@
 #       utm_source; operator's utm_source (when present) is never
 #       overwritten. Mix mode via platform_pool restricts picks
 #       to the listed platforms only.
+
+# v2.6.23 (2026-07-22) - Sec-CH-UA + userAgentData + com.zhiliaoapp.musically fix
+#
+# CUSTOMER REPORT (post-v2.6.22 Everflow CSV):
+#   TikTok In-App Preset + platform_mix=tiktok 100% + custom landing
+#   URL, 52 clicks: 40% Chrome, 15% Firefox, 12% Facebook iOS,
+#   10% WeChat iOS, 6% Whale, 4% Samsung Browser, 2% FB Android,
+#   2% Safari, 8% empty; only 1/52 clicks labelled TikTok.
+#   16 clicks arrived AFTER v2.6.22 deploy completed — the leak was
+#   not fully closed by the UA-string fix alone.
+#
+# 3-LAYER ROOT CAUSE:
+#   Layer 1 — Sec-CH-UA HTTP header: Chromium's default sec-ch-ua
+#     ("Chromium";v="141", "Google Chrome";v="141") went out on
+#     every visit because our _build_client_hint_headers only
+#     emitted an override when the UA contained "chrome/". TikTok
+#     Cronet UAs (v2.6.22 change) don't have "chrome/", so no
+#     override, so Chromium leaked "Google Chrome" to advertiser
+#     trackers. ~40% Chrome misclassification.
+#   Layer 2 — navigator.userAgentData JS: Our stealth override
+#     script gated on `/Chrome\//.test(navigator.userAgent)`, so
+#     non-Chrome UAs left Chromium's default userAgentData intact,
+#     exposing "Google Chrome" brand to tracker JS.
+#   Layer 3 — UA package-name marker missing: Advertiser trackers
+#     (Everflow / Voluum / RedTrack) trigger TikTok detection on
+#     `com.zhiliaoapp.musically/` package-name substring. Our v2.6.22
+#     UA had `musical_ly_<code>` + `AppName/musical_ly` but no
+#     package-name → tracker fell back to generic labels
+#     (Firefox, WeChat, Whale, Samsung Browser, etc.) depending on
+#     which other tokens partially matched their regex rules.
+#
+# FIXES (all additive to v2.6.22 baseline):
+#   backend/referrer_pro.py:
+#     • NEW `is_non_chrome_inapp_ua(ua)` classifier — returns True
+#       for TikTok Cronet Android, TikTok iOS, native FB iOS
+#       (FBAN/FBIOS), Instagram iOS, native Snapchat. Chromium-based
+#       in-apps (FB Android WebView, IG Android) return False so
+#       their legitimate Chrome hints are preserved.
+#     • `build_inapp_ua_suffix` TikTok Android + iOS returns now
+#       append `com.zhiliaoapp.musically/{ver_code}` at the tail.
+#       Matches the real 2025-2026 TikTok APK's package-name marker.
+#
+#   backend/real_user_traffic.py:
+#     • `_build_client_hint_headers`: when `is_non_chrome_inapp_ua`
+#       returns True, emit ONLY the low-entropy hints
+#       (Sec-CH-UA-Mobile + Sec-CH-UA-Platform) that real WebViews do
+#       send, plus explicit empty `Sec-CH-UA: ""` to override
+#       Chromium's default brand list. Skips Sec-CH-UA-Full-Version-
+#       List + Sec-CH-UA-Platform-Version entirely.
+#     • Route interceptor (`_make_route_handler`): for every outgoing
+#       request whose UA matches `is_non_chrome_inapp_ua`, strip all
+#       `sec-ch-ua*` headers EXCEPT `sec-ch-ua-mobile` and
+#       `sec-ch-ua-platform`. Belt-and-braces defence against
+#       Chromium re-emitting the header if extra_http_headers isn't
+#       honoured for that particular sub-request.
+#     • JS stealth injection: added a non-Chrome-in-app branch that
+#       calls `safeDefine(navigator, 'userAgentData', () => undefined)`
+#       BEFORE the existing Chrome branch runs. Detection uses the
+#       same substrings the Python helper uses (musical_ly,
+#       BytedanceWebview, com.zhiliaoapp.musically, FBAN/FBIOS,
+#       "instagram " + iphone, snapchat/ without chrome/).
+#
+#   backend/server.py:
+#     • `_ua_tiktok_android` UA generator now appends
+#       `com.zhiliaoapp.musically/{ml_build}` at the end so generator
+#       output and coerce output match exactly (downstream coerce is
+#       a no-op on generator UAs).
+#
+# VERIFICATION (backend testing_agent iteration_17):
+#   • 98/98 tests PASS (16 new v2.6.23 + 82 regression from v2.6.18/
+#     19/21/22). 0 critical issues, retest_needed=False.
+#   • Test file: backend/tests/test_v2_6_23_sec_ch_ua_and_zhiliaoapp_fixes.py
+#
+# EXPECTED CUSTOMER IMPACT:
+#   Advertiser tracker (Everflow / Voluum / RedTrack / Binom / IPQS)
+#   will now:
+#     • Read Sec-CH-UA as empty → fall back to UA string parsing.
+#     • Read navigator.userAgentData as undefined → fall back to UA
+#       string parsing.
+#     • Match the UA string's com.zhiliaoapp.musically/<code> +
+#       musical_ly_<code> + BytedanceWebview markers → label the
+#       click as "TikTok for Android" / "TikTok for iOS" reliably.
+#   Chrome / Firefox / WeChat / Whale / Samsung Browser / Safari
+#   misclassifications on TikTok RUT should drop to zero.
