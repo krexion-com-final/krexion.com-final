@@ -1835,6 +1835,34 @@ def _build_client_hint_headers(fp: Dict[str, Any], ua: str) -> Dict[str, str]:
     os_key = fp.get("os", "")
     ua_l = (ua or "").lower()
 
+    # v2.6.23 — non-Chrome in-app UAs (TikTok Cronet, native FB iOS,
+    # native Instagram iOS, native Snapchat) MUST NOT carry any
+    # Sec-CH-UA-* headers.  Real device WebViews don't send them —
+    # advertiser trackers (Everflow / Voluum) that see them treat the
+    # visit as Chrome, ignoring the tail app marker in the UA string.
+    # Returning {} here also lets the route interceptor STRIP the
+    # Chromium-emitted default sec-ch-ua before the request goes out.
+    try:
+        from referrer_pro import is_non_chrome_inapp_ua as _is_non_chrome_inapp
+        if _is_non_chrome_inapp(ua):
+            # Keep Sec-CH-UA-Mobile + Platform because real WebViews DO
+            # emit these two low-entropy hints. Only the branded
+            # Sec-CH-UA + Sec-CH-UA-Platform-Version leak the parent
+            # Chromium identity, so we omit those.
+            platform_label = {
+                "windows": "Windows", "macos": "macOS", "ios": "iOS",
+                "android": "Android", "linux": "Linux",
+            }.get(os_key, "")
+            if platform_label:
+                headers["Sec-CH-UA-Platform"] = f'"{platform_label}"'
+            headers["Sec-CH-UA-Mobile"] = "?1" if fp.get("is_mobile") else "?0"
+            # Empty Sec-CH-UA overrides Chromium's default (Playwright
+            # extra_http_headers replaces the built-in on match).
+            headers["Sec-CH-UA"] = ""
+            return headers
+    except Exception:
+        pass
+
     platform_label = {
         "windows": "Windows", "macos": "macOS", "ios": "iOS",
         "android": "Android", "linux": "Linux",
@@ -2988,6 +3016,25 @@ def _make_macro_guard(job_id: str, visit_index: int, force_referer: str = "", ta
                         # capitalised variant that might have been added.
                         _hdrs.pop("Referer", None)
                         _hdrs["referer"] = force_referer
+                        # v2.6.23 — Strip sec-ch-ua* for non-Chrome in-app
+                        # UAs (see is_non_chrome_inapp_ua). Real TikTok /
+                        # native FB iOS / IG iOS / Snapchat WebViews DO
+                        # NOT send these headers — Chromium's defaults
+                        # leak Chrome identity to advertiser trackers.
+                        try:
+                            _req_ua = _hdrs.get("user-agent") or _hdrs.get("User-Agent") or ""
+                            from referrer_pro import is_non_chrome_inapp_ua as _is_nci
+                            if _is_nci(_req_ua):
+                                for _k in list(_hdrs.keys()):
+                                    if _k.lower().startswith("sec-ch-ua"):
+                                        # Preserve mobile + platform (low-entropy,
+                                        # real WebViews DO emit these).
+                                        _kl = _k.lower()
+                                        if _kl in ("sec-ch-ua-mobile", "sec-ch-ua-platform"):
+                                            continue
+                                        _hdrs.pop(_k, None)
+                        except Exception:
+                            pass
                         await route.continue_(headers=_hdrs)
                         return
                     except Exception:
@@ -2995,6 +3042,26 @@ def _make_macro_guard(job_id: str, visit_index: int, force_referer: str = "", ta
                         # continue below — never break a visit because
                         # of referer-injection edge cases.
                         pass
+
+            # v2.6.23 — sec-ch-ua strip path (even when force_referer is
+            # off). Applies to ALL requests from a non-Chrome in-app UA
+            # context so no leak survives sub-resource loads either.
+            try:
+                _req_ua = request.headers.get("user-agent") or request.headers.get("User-Agent") or ""
+                from referrer_pro import is_non_chrome_inapp_ua as _is_nci
+                if _is_nci(_req_ua):
+                    _hdrs = dict(request.headers or {})
+                    _changed = False
+                    for _k in list(_hdrs.keys()):
+                        _kl = _k.lower()
+                        if _kl.startswith("sec-ch-ua") and _kl not in ("sec-ch-ua-mobile", "sec-ch-ua-platform"):
+                            _hdrs.pop(_k, None)
+                            _changed = True
+                    if _changed:
+                        await route.continue_(headers=_hdrs)
+                        return
+            except Exception:
+                pass
 
             await route.continue_()
         except Exception:
@@ -4016,6 +4083,24 @@ safe(() => safeDefine(window, 'devicePixelRatio', () => __KX.dpr));
 
 // ── userAgentData (Sec-CH-UA equivalent in JS) ─────────────────
 safe(() => {
+  // v2.6.23 — Non-Chrome in-app UAs (TikTok Cronet, native FB iOS,
+  // Instagram iOS, Snapchat) must NOT expose navigator.userAgentData.
+  // Real device WebViews don't expose it — advertiser trackers that
+  // read it see "Google Chrome" (Chromium's default) and label the
+  // click Chrome, ignoring the TikTok/FB/IG marker in the UA string.
+  const _ua_l = String(navigator.userAgent || '').toLowerCase();
+  const _is_non_chrome_inapp = (
+    _ua_l.indexOf('musical_ly') !== -1 ||
+    _ua_l.indexOf('bytedancewebview') !== -1 ||
+    _ua_l.indexOf('com.zhiliaoapp.musically') !== -1 ||
+    _ua_l.indexOf('fban/fbios') !== -1 ||
+    (_ua_l.indexOf('instagram ') !== -1 && _ua_l.indexOf('iphone') !== -1) ||
+    (_ua_l.indexOf('snapchat/') !== -1 && _ua_l.indexOf('chrome/') === -1)
+  );
+  if (_is_non_chrome_inapp) {
+    try { safeDefine(navigator, 'userAgentData', () => undefined); } catch (e) {}
+    return;
+  }
   if (navigator.userAgent && /Chrome\//.test(navigator.userAgent)) {
     const cv = String(__KX.chromeVersion);
     const platformName = ({ windows: 'Windows', macos: 'macOS', ios: 'iOS', android: 'Android', linux: 'Linux' })[__KX.os] || 'Windows';

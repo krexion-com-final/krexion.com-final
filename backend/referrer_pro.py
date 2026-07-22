@@ -1912,6 +1912,50 @@ def _extract_ios_device_model(ua: str) -> str:
     return "iPhone15,3"
 
 
+def is_non_chrome_inapp_ua(ua: str) -> bool:
+    """v2.6.23 — True iff `ua` is an in-app WebView UA that MUST NOT
+    emit Chromium's default Sec-CH-UA / navigator.userAgentData
+    (real device would send TikTok-Cronet / Facebook-Cronet / IG /
+    Snapchat markers instead of "Google Chrome").
+
+    Real advertiser trackers (Voluum / RedTrack / Anura / IPQS /
+    Everflow / FingerprintJS Pro) treat Sec-CH-UA + userAgentData as
+    "browser identity" — higher priority than the UA string. If we
+    emit `"Google Chrome"` in those two channels while the UA string
+    says TikTok/Cronet, the tracker either latches on Chrome
+    (~40% of clicks in the customer's 07-21 Everflow report) or
+    flags the visit as inconsistent (Firefox / WeChat / Whale
+    fallback labels).
+
+    Used by real_user_traffic.py to:
+      1. STRIP `sec-ch-ua*` headers via route interception.
+      2. SUPPRESS the `navigator.userAgentData` JS stealth override
+         (real WebViews don't expose it).
+      3. Skip the chrome-only branch inside `_build_client_hint_headers`.
+    """
+    if not ua:
+        return False
+    ul = ua.lower()
+    # TikTok Android Cronet-shape or TikTok iOS in-app (musical_ly is
+    # the definitive TikTok marker — real TikTok WebViews emit it and
+    # NEVER carry Chrome/xxx Mobile Safari tokens).
+    if "musical_ly" in ul or "bytedancewebview" in ul or "com.zhiliaoapp.musically" in ul:
+        return True
+    # Facebook / Messenger native app UAs (iOS FBIOS variant is
+    # non-Chrome — a WKWebView shell around FB's own network stack).
+    if "fban/fbios" in ul or "fbav/" in ul and "chrome/" not in ul:
+        return True
+    # Instagram iOS native. Android IG is Chrome WebView so it
+    # legitimately keeps Chrome/xxx tokens — do NOT flag as non-chrome.
+    if "instagram " in ul and "iphone" in ul:
+        return True
+    # Snapchat native app UA — non-Chrome.
+    if "snapchat/" in ul and "chrome/" not in ul:
+        return True
+    return False
+
+
+
 def _ua_has_inapp_marker(ua: str, platform: str) -> bool:
     """True iff `ua` already carries the in-app marker for `platform`.
 
@@ -2250,13 +2294,14 @@ def build_inapp_ua_suffix(platform: str, ua: str) -> str:
                 f"musical_ly_{ver_code} JsSdk/1.0 NetType/{nettype} Channel/{channel} "
                 f"AppName/musical_ly app_version/{ver} ByteLocale/{locale} "
                 f"ByteFullLocale/{locale} Region/{region} AppVersion/{ver} "
-                f"BytedanceWebview/{wv_hash}"
+                f"BytedanceWebview/{wv_hash} com.zhiliaoapp.musically/{ver_code}"
             )
         # iOS
         return (
             f"musical_ly_{ver_code} JsSdk/1.0 NetType/{nettype} "
             f"AppName/musical_ly app_version/{ver} ByteLocale/{locale} "
-            f"Region/{region} AppVersion/{ver} BytedanceWebview/{wv_hash}"
+            f"Region/{region} AppVersion/{ver} BytedanceWebview/{wv_hash} "
+            f"com.zhiliaoapp.musically/{ver_code}"
         )
 
     if p == "snapchat":

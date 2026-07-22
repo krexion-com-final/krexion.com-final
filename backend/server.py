@@ -13452,7 +13452,8 @@ def _ua_tiktok_android(d: dict, app_ver: str, region: Optional[dict] = None) -> 
         f"musical_ly_{ml_build} JsSdk/1.0 NetType/{net_type} Channel/googleplay "
         f"AppName/musical_ly app_version/{app_ver} "
         f"ByteLocale/{byte_locale} ByteFullLocale/{byte_locale} Region/{region_code} "
-        f"BytedanceWebview/{webview_hash} ttwebview/{ttwv}"
+        f"BytedanceWebview/{webview_hash} ttwebview/{ttwv} "
+        f"com.zhiliaoapp.musically/{ml_build}"
     )
 
 # ─── YouTube in-app UAs ──────────────────────────────────────────────
