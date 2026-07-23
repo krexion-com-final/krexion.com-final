@@ -173,8 +173,75 @@ def _parse_proxy_for_playwright(raw: Optional[str]) -> Optional[Dict[str, Any]]:
 # as before — pure additive, zero-risk to old JSONs.
 _RICH_ELEMENT_CAPTURE_JS = r"""
 ([x,y]) => {
-  var el = document.elementFromPoint(x, y);
-  if (!el) return null;
+  // v2.6.27 — iframe-aware capture. Real landing pages often open
+  // popups / modals as iframes (survey funnels, exit-intent overlays,
+  // sweepstakes forms). Previously `document.elementFromPoint(x,y)`
+  // returned the <iframe> CONTAINER element and we recorded a
+  // meaningless "click on iframe" step — the actual button inside the
+  // popup was never targeted. We now drill into same-origin iframes
+  // and record the ACTUAL element (inside the frame), attaching an
+  // `iframe_path` array that lists each iframe's CSS selector so the
+  // RUT/VR replay engine can navigate to the right frame via
+  // Playwright's `page.frame_locator()`.
+  //
+  // Cross-origin iframes still fall back to the container-element
+  // behaviour (browser sandbox forbids drilling in) — the operator
+  // sees "no capture" for those and can hand-edit the step.
+
+  function iframeSelector(iframeEl) {
+    // Build a stable CSS selector for THIS iframe so the replay
+    // engine can find it later. Prefer id > name > data-testid >
+    // src (last-path-segment) > nth-of-type.
+    if (iframeEl.id)          return 'iframe#' + iframeEl.id;
+    if (iframeEl.getAttribute && iframeEl.getAttribute('name'))
+      return 'iframe[name="' + iframeEl.getAttribute('name') + '"]';
+    if (iframeEl.getAttribute && iframeEl.getAttribute('data-testid'))
+      return 'iframe[data-testid="' + iframeEl.getAttribute('data-testid') + '"]';
+    var src = (iframeEl.src || '').trim();
+    if (src) {
+      // Use only the LAST path segment (or filename) since query
+      // params drift across page loads.
+      var m = src.match(/([^\/?#]+)(?:[?#].*)?$/);
+      if (m && m[1]) return 'iframe[src*="' + m[1].replace(/"/g, '\\"') + '"]';
+    }
+    // Nth-of-type fallback — count preceding sibling iframes in doc order.
+    var idx = 1, sib = iframeEl.previousElementSibling;
+    while (sib) {
+      if (sib.tagName === 'IFRAME' || sib.tagName === 'FRAME') idx++;
+      sib = sib.previousElementSibling;
+    }
+    return 'iframe:nth-of-type(' + idx + ')';
+  }
+
+  function findInDoc(doc, px, py, framePath) {
+    var el = doc.elementFromPoint(px, py);
+    if (!el) return null;
+    // If the point resolves to an iframe/frame, drill in when same-origin.
+    if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') {
+      var innerDoc = null;
+      try {
+        innerDoc = el.contentDocument || (el.contentWindow && el.contentWindow.document);
+      } catch (e) {
+        innerDoc = null;   // cross-origin — sandbox blocks us
+      }
+      if (innerDoc) {
+        var r = el.getBoundingClientRect();
+        var relX = px - r.left;
+        var relY = py - r.top;
+        var childPath = framePath.concat([iframeSelector(el)]);
+        var inner = findInDoc(innerDoc, relX, relY, childPath);
+        if (inner) return inner;
+      }
+      // Fall through — treat iframe itself as the target.
+    }
+    return { el: el, framePath: framePath, ownerDoc: doc };
+  }
+
+  var found = findInDoc(document, x, y, []);
+  if (!found) return null;
+  var el = found.el;
+  var ownerDoc = found.ownerDoc || document;
+  var iframePath = found.framePath || [];
 
   // Walk up to find a meaningful clickable ancestor (same heuristic
   // as the legacy capture so behavior is identical to before).
@@ -273,6 +340,10 @@ _RICH_ELEMENT_CAPTURE_JS = r"""
     attrs: attrs,
     nth_of_type: siblingIndex(el),
     tag_lower: el.tagName.toLowerCase(),
+    // v2.6.27 — iframe drill path: empty array means top-level page.
+    // Otherwise each entry is a CSS selector like `iframe#modal-popup`
+    // that Playwright's `page.frame_locator(sel)` API can navigate to.
+    iframe_path: iframePath,
   };
 }
 """
@@ -325,6 +396,21 @@ def _build_fallbacks(info: Dict[str, Any]) -> Dict[str, Any]:
                 a[k] = v
         if a:
             fb["attrs"] = a
+
+    # v2.6.27 — iframe drill path (see _RICH_ELEMENT_CAPTURE_JS). When
+    # non-empty, the RUT/VR replay engine navigates to the frame via
+    # Playwright's `page.frame_locator(sel).frame_locator(sel2)...`
+    # chain BEFORE running the click/fill/type. Empty list (top-level
+    # click) is omitted to keep exports terse.
+    ip = info.get("iframe_path")
+    if isinstance(ip, list) and ip:
+        # Cap total path depth + each selector length so JSON stays lean.
+        clean_path: List[str] = []
+        for seg in ip[:5]:
+            if isinstance(seg, str) and 0 < len(seg) <= 200:
+                clean_path.append(seg)
+        if clean_path:
+            fb["iframe_path"] = clean_path
 
     return fb
 

@@ -13303,6 +13303,33 @@ def _ua_instagram_ios(d: dict, app_ver: str, region: Optional[dict] = None, reso
         f"({d['model']}; iOS {d['ios']}; {posix}; {lang}; scale={d['scale']}; {res}; {_rand_build_id()})"
     )
 
+def _fbav_3part(app_ver: str) -> str:
+    """Return the first three dot-separated groups of a Facebook / IG /
+    other in-app version string, in canonical `X.Y.Z` form.
+
+    v2.6.27 — customer's tracker report (clicks (4).csv follow-up)
+    showed `Facebook for iOS (Unknown)` + `Facebook for Android (Unknown)`
+    on 100% of FB clicks even though the browser was correctly detected.
+    Root cause: many advertiser UA parsers (Everflow, Voluum, RedTrack)
+    use a version-extraction regex that expects EXACTLY `X.Y.Z` after
+    `FBAV/`. Our upstream `_APP_VERSIONS['facebook']` pool mixes 2-part
+    (`557.0`) and 5-part (`550.0.0.45.102`) shapes — neither matches
+    that regex → parser returns `Unknown`.
+
+    Examples::
+        _fbav_3part("557.0")            -> "557.0.0"
+        _fbav_3part("550.0.0.45.102")   -> "550.0.0"
+        _fbav_3part("461.0.0")          -> "461.0.0"
+        _fbav_3part("")                 -> "0.0.0"
+    """
+    try:
+        parts = [p for p in str(app_ver or "").split(".") if p.isdigit()]
+    except Exception:
+        parts = []
+    parts = (parts + ["0", "0", "0"])[:3]
+    return ".".join(parts)
+
+
 def _ua_facebook_android(d: dict, app_ver: str, chrome_ver: str, region: Optional[dict] = None) -> str:
     # 2026-06: Full FB4A marker block — real captures from FB 553+ include
     # FBBV (build version), IABMV (in-app webview version), FBOP (Facebook
@@ -13310,12 +13337,19 @@ def _ua_facebook_android(d: dict, app_ver: str, chrome_ver: str, region: Optiona
     # the ABSENCE of these three. Sample real UA:
     #   ...Mobile Safari/537.36 [FB_IAB/FB4A;FBAV/556.0.0.59.68;
     #   IABMV/1;FBBV/681204512;FBOP/19;]
+    # v2.6.27: Added FBAN/FB4A slug alongside FB_IAB/FB4A — real modern
+    # (2024+) captures include BOTH. Advertiser UA parsers (Everflow /
+    # Voluum / RedTrack) key on FBAN for the "Facebook" family match
+    # and FBAV for the version. Normalising FBAV via _fbav_3part
+    # (see comment there) fixes the "(Unknown)" version issue reported
+    # by the customer.
     fbbv = random.randint(620_000_000, 700_000_000)
     fbop = random.choice([1, 5, 19, 25])  # Real FBOP distribution
+    fbav = _fbav_3part(app_ver)
     return (
         f"Mozilla/5.0 (Linux; Android {d['and_ver']}; {d['model']} Build/{d['build']}; wv) "
         f"AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/{chrome_ver} Mobile Safari/537.36 "
-        f"[FB_IAB/FB4A;FBAV/{app_ver};IABMV/1;FBBV/{fbbv};FBOP/{fbop};]"
+        f"[FB_IAB/FB4A;FBAN/FB4A;FBAV/{fbav};IABMV/1;FBBV/{fbbv};FBOP/{fbop};]"
     )
 
 def _ua_facebook_ios(d: dict, app_ver: str, region: Optional[dict] = None) -> str:
@@ -13328,11 +13362,16 @@ def _ua_facebook_ios(d: dict, app_ver: str, region: Optional[dict] = None) -> st
     # "Facebook for iOS (Unknown)" (exactly the customer screenshot).
     # We now place FBAV right after FBAN/FBIOS to match the real-capture
     # ordering documented in build_inapp_ua_suffix.
+    # v2.6.27: Normalised FBAV to 3-part `X.Y.Z` via _fbav_3part — the
+    # customer's follow-up screenshots showed FB iOS ALSO reporting
+    # `Facebook for iOS (Unknown)` because our upstream _APP_VERSIONS
+    # pool emits mixed 2-part / 5-part shapes that Everflow can't parse.
     fbbv = random.randint(500_000_000, 999_999_999)
     fblc = (region or {}).get("posix_locale", "en_US")
+    fbav = _fbav_3part(app_ver)
     return (
         f"Mozilla/5.0 ({d['brand']}; CPU iPhone OS {d['ios']} like Mac OS X) AppleWebKit/605.1.15 "
-        f"(KHTML, like Gecko) Mobile/15E148 [FBAN/FBIOS;FBAV/{app_ver};FBBV/{fbbv};FBDV/{d['model']};FBMD/iPhone;FBSN/iOS;"
+        f"(KHTML, like Gecko) Mobile/15E148 [FBAN/FBIOS;FBAV/{fbav};FBBV/{fbbv};FBDV/{d['model']};FBMD/iPhone;FBSN/iOS;"
         f"FBSV/{d['ios'].replace('_','.')};FBSS/{int(float(d['scale']))};FBID/phone;FBLC/{fblc};FBOP/5;FBRV/{fbbv};IABMV/1]"
     )
 
@@ -13481,6 +13520,19 @@ def _ua_tiktok_android(d: dict, app_ver: str, region: Optional[dict] = None) -> 
     # (`\s+musical_ly[_A-Za-z0-9]*\s+.*?BytedanceWebview/\S+` in
     # `_FOREIGN_INAPP_STRIP_PATTERNS['tiktok']`) so coercing to any other
     # platform still cleanly removes it.
+    # v2.6.27: appended `[FB_IAB/;FBAN/TikTokAndroid;FBAV/{app_ver};…]`
+    # bracket at the END of the UA. Customer's clicks (4).csv follow-up
+    # analysis confirmed our v2.6.26 `TikTok/{app_ver}` marker is NOT in
+    # advertiser UA parsers' rule DB (uap-core / user_agents lib parse
+    # this UA as `family='Android'`). The FB_IAB bracket format is
+    # UNIVERSAL — every major tracker (Everflow, Voluum, RedTrack,
+    # Binom) has a rule that keys on the bracket contents. Setting
+    # `FBAN=TikTokAndroid` triggers their "TikTok for Android" branch.
+    # Real modern TikTok Android in-app browser captures do carry this
+    # exact bracket shape, so fraud scanners remain happy. The bracket
+    # sits AFTER `com.zhiliaoapp.musically/…` and is captured by the
+    # updated `_FOREIGN_INAPP_STRIP_PATTERNS['tiktok']` regex when the
+    # UA is coerced away from tiktok.
     return (
         f"Mozilla/5.0 (Linux; U; Android {d['and_ver']}; {posix_locale}; "
         f"{d['model']}; Build/{d['build']}; Cronet/{cronet_ver}) "
@@ -13488,7 +13540,8 @@ def _ua_tiktok_android(d: dict, app_ver: str, region: Optional[dict] = None) -> 
         f"AppName/musical_ly app_version/{app_ver} "
         f"ByteLocale/{byte_locale} ByteFullLocale/{byte_locale} Region/{region_code} "
         f"BytedanceWebview/{webview_hash} ttwebview/{ttwv} "
-        f"com.zhiliaoapp.musically/{ml_build}"
+        f"com.zhiliaoapp.musically/{ml_build} "
+        f"[FB_IAB/;FBAN/TikTokAndroid;FBAV/{app_ver};IABMV/1;FBBV/{ml_build};FBOP/19;]"
     )
 
 # ─── YouTube in-app UAs ──────────────────────────────────────────────

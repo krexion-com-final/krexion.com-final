@@ -2116,22 +2116,29 @@ def _ua_has_inapp_marker(ua: str, platform: str) -> bool:
 # call from any codepath. Never raises.
 # ──────────────────────────────────────────────────────────────────────
 _FOREIGN_INAPP_STRIP_PATTERNS: Dict[str, str] = {
-    # Facebook / Messenger use the same `[FB_IAB/…]` or `[FBAN/…]`
-    # trailing bracket. When target is fb or msgr we skip this bucket
-    # (they're aliases of each other for stripping purposes).
-    "fb_bracket": r"\s*\[\s*(?:FB_IAB|FBAN)/[^\]]*\]\s*",
+    # Facebook / Messenger use the same `[FB_IAB/FB4A;...]` (Android) or
+    # `[FBAN/FBIOS;...]` (iOS) trailing bracket. When target is fb or msgr
+    # we skip this bucket (they're aliases of each other for stripping).
+    # v2.6.27 TIGHTENING: we now match ONLY the Facebook-specific bracket
+    # shapes — `FB_IAB/FB4A` or `FBAN/FBIOS`. Other in-app browsers now
+    # also use the FB_IAB/FBAN bracket format (TikTokAndroid, IG Android,
+    # etc.) but with DIFFERENT FBAN values; matching those under the
+    # `fb_bracket` bucket accidentally stripped them when coercing to
+    # their own platform (e.g. our new `[FB_IAB/;FBAN/TikTokAndroid;…]`
+    # trailer was being wiped by the coerce-to-tiktok path).
+    "fb_bracket": r"\s*\[\s*(?:FB_IAB/FB4A|FBAN/FBIOS)[^\]]*\]\s*",
     # Instagram — `Instagram <ver> (Android|iPhone; ...)` block. We keep
     # the regex tolerant (any run of non-paren chars between the parens).
     "instagram":  r"\s+Instagram\s+\S+\s+(?:Android\s+)?\([^)]*\)",
-    # TikTok — long `musical_ly_<code> ... BytedanceWebview/<hash>` run.
+    # TikTok — long `musical_ly_<code> ... BytedanceWebview/<hash>` run,
+    # optionally followed by the v2.6.27 `[FB_IAB/;FBAN/TikTokAndroid;…]`
+    # trailer that advertiser trackers use to label the click.
     # `.*?` is bounded by the required `BytedanceWebview/` trailer so
     # this regex can't chew up unrelated tokens accidentally.
-    # v2.6.26: also strip an optional preceding `TikTok/{ver}` marker
-    # (added in the same version to fix Everflow/Voluum browser
-    # detection). Without this, coercing an existing TikTok UA to
-    # another platform would leave the `TikTok/34.9.5` slug behind
-    # and the fresh target-platform suffix would then be double-signed.
-    "tiktok":     r"\s+(?:TikTok/[\d.]+\s+)?musical_ly[_A-Za-z0-9]*\s+.*?BytedanceWebview/\S+",
+    # v2.6.26: also strip an optional preceding `TikTok/{ver}` marker.
+    # v2.6.27: also strip an optional trailing FB_IAB TikTokAndroid
+    # bracket + any preceding `com.zhiliaoapp.musically/…` token.
+    "tiktok":     r"\s+(?:TikTok/[\d.]+\s+)?musical_ly[_A-Za-z0-9]*\s+.*?BytedanceWebview/\S+(?:\s+ttwebview/\S+)?(?:\s+com\.zhiliaoapp\.musically/\S+)?(?:\s+\[FB_IAB/;FBAN/TikTokAndroid;[^\]]+\])?",
     # Snapchat — trailing `Snapchat/<ver>` token.
     "snapchat":   r"\s+Snapchat/[\d.]+",
     # LinkedIn — trailing `LinkedInApp/<ver>` (iOS) or
@@ -2390,21 +2397,19 @@ def build_inapp_ua_suffix(platform: str, ua: str) -> str:
         nettype = random.choice(["WIFI", "MOBILE", "4G", "5G"])
         if family == "android":
             channel = random.choice(["googleplay", "googleplay", "samsung", "huawei", "xiaomi"])
-            # v2.6.26: `TikTok/{ver}` explicit marker mirrors the
-            # `_ua_tiktok_android` fix in server.py — advertiser UA
-            # parsers (ua-parser-js, uap-core / ua-parser-cpp, Everflow,
-            # Voluum, RedTrack) require this token to correctly label
-            # Android TikTok in-app clicks as "TikTok for Android".
-            # Without it, real captured tracker reports show
-            # `Browser=<empty>` on ~100% of Android TikTok visits. The
-            # token sits INSIDE the `_FOREIGN_INAPP_STRIP_PATTERNS['tiktok']`
-            # regex range (`\s+musical_ly[_A-Za-z0-9]*\s+.*?BytedanceWebview/\S+`)
-            # so coercing away from tiktok still strips it cleanly.
+            # v2.6.27: appended `[FB_IAB/;FBAN/TikTokAndroid;FBAV/{ver};…]`
+            # bracket (mirrors the `_ua_tiktok_android` fix in server.py) —
+            # advertiser trackers (Everflow / Voluum / RedTrack / Binom)
+            # detect Android TikTok via the FB_IAB bracket contents.
+            # v2.6.26's `TikTok/{ver}` marker alone is NOT in uap-core /
+            # user_agents / advertiser DBs and clicks were mis-labelled
+            # as `Browser=Android` in the customer's tracker.
             return (
                 f"TikTok/{ver} musical_ly_{ver_code} JsSdk/1.0 NetType/{nettype} Channel/{channel} "
                 f"AppName/musical_ly app_version/{ver} ByteLocale/{locale} "
                 f"ByteFullLocale/{locale} Region/{region} AppVersion/{ver} "
-                f"BytedanceWebview/{wv_hash} com.zhiliaoapp.musically/{ver_code}"
+                f"BytedanceWebview/{wv_hash} com.zhiliaoapp.musically/{ver_code} "
+                f"[FB_IAB/;FBAN/TikTokAndroid;FBAV/{ver};IABMV/1;FBBV/{ver_code};FBOP/19;]"
             )
         # iOS
         return (

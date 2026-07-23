@@ -1,0 +1,26 @@
+{
+  "summary": "Backend-only verification of v2.6.27 fixes (TikTok Android FB_IAB TikTokAndroid bracket, FB Android/iOS FBAV 3-part normalisation via _fbav_3part, Visual Recorder iframe drill + iframe_path forwarding, coerce_ua_for_platform pattern updates). Ran the full v2.6.* regression suite: 139 passed + 1 pre-existing skip — matches expected 139/139. Ran the two target files (test_v2_6_27_fb_iab_bracket_and_iframe_capture.py + test_v2_6_21_hybrid_ua_leak_fix.py): 21/21 passed. Wrote a fresh iteration_20 verification file with 15 extra focused assertions (30-iter fuzz of TikTok Android bracket regex, build_inapp_ua_suffix 25-iter fuzz, _fbav_3part cases, FB iOS+Android FBAV normalisation across 2/3/5-part inputs, coerce idempotency for tiktok→tiktok and facebook→facebook, cross-platform strip for tiktok→{6 targets} and facebook→tiktok, _build_fallbacks iframe_path forwarding + sanitisation, user_agents lib parse smoke) — all 15 pass. Service health: /api/public/status=200, admin JWT login OK (token len=164), supervisor shows backend/frontend/mongodb RUNNING. No regressions.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": { "ui_bugs": [], "integration_issues": [], "design_issues": [] },
+  "test_report_links": [
+    "/app/backend/tests/test_v2_6_27_fb_iab_bracket_and_iframe_capture.py",
+    "/app/backend/tests/test_v2_6_21_hybrid_ua_leak_fix.py",
+    "/app/backend/tests/test_iteration_20_v2_6_27_verification.py",
+    "/app/test_reports/pytest/pytest_v2_6_27.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py remains >25k lines — long-term refactor into modules still recommended (unchanged from iter_19 note).",
+    "Deprecated @app.on_event('startup'/'shutdown') still emit DeprecationWarnings; migrate to FastAPI lifespan handlers when a maintenance window permits (non-blocking)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration_20_v2_6_27_verification.py (new — 15 additional focused assertions)"
+  ],
+  "success_rate": { "backend": "100% (139 passed + 1 pre-existing skip in v2.6.* suite; +15/15 iter_20 extras; +21/21 target files)", "frontend": "n/a (skipped per request)" },
+  "test_credentials": "admin@krexion.local / KrexionAdmin@2026 via /api/admin/login (JWT valid).",
+  "seed_data_creation": "None. No DB writes in this iteration — all verification was pure-function / regex-based via unit tests. Live curl skipped because iteration_19 already verified Referrer-Policy + sub2 injection end-to-end AND v2.6.27 does not touch tracker/redirect code (only UA generators, coerce_ua strip patterns, and Visual Recorder capture JS).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "IMPORTANT NOTE for the customer / next reviewer regarding uap-core: after v2.6.27 the TikTok Android UA carries the universal in-app bracket [FB_IAB/;FBAN/TikTokAndroid;FBAV/{ver};IABMV/1;FBBV/{n};FBOP/19;]. Because the Python `user_agents` library relies on the generic FB_IAB rule in ua-parser core, `parse(ua).browser.family` will return 'Facebook' for this UA — this is EXPECTED AND CORRECT. Trackers like Everflow have MORE SPECIFIC downstream rules keyed on the FBAN VALUE: FBAN=TikTokAndroid → 'TikTok for Android' branch; FBAN=FB4A → 'Facebook for Android' branch; FBAN=FBIOS → 'Facebook for iOS' branch. So a local user_agents parse returning 'Facebook' does NOT mean the fix regressed. Also confirmed FBAV is always 3-part (X.Y.Z) after _fbav_3part normalisation — this is what previously made Everflow render 'Facebook for iOS (Unknown)'. All v2.6.* tests pass; VERSION file NOT bumped (per user rules).",
+  "rca_of_the_issue": "Not applicable — this iteration is a green-light verification pass, no bug hunt. All three customer-reported issues (TikTok Android browser=Android, FB browser=Unknown version, Visual Recorder popup click failure) are addressed by v2.6.27 code changes and confirmed by both the new v2.6.27 test file (10 tests) and the iteration_20 extended verification (15 tests)."
+}

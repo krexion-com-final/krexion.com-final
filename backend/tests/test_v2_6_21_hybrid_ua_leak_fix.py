@@ -75,7 +75,15 @@ def test_version_at_or_above_2_6_21():
 # ─── (a) BUG A: musical_ly + FBAV hybrid coerced to tiktok ──────────
 def test_bug_a_musical_ly_plus_fbav_stripped_on_tiktok_coerce():
     """Hybrid TikTok+Facebook UA → tiktok target must produce a clean
-    TikTok UA with NO Facebook markers left."""
+    TikTok UA with NO Facebook-specific markers left.
+    
+    v2.6.27 update: coerce now ADDS a `[FB_IAB/;FBAN/TikTokAndroid;
+    FBAV/{ver};IABMV/1;FBBV/{code};FBOP/19;]` trailer (advertiser
+    trackers use this bracket format universally to detect TikTok
+    Android). So the assertion is now: any pre-existing FACEBOOK-
+    specific bracket (`FB_IAB/FB4A`, `FBAN/FB4A`, `FBAN/FBIOS`) or
+    the specific INPUT `FBAV/450.0.0.34.109` must be gone — but a
+    FRESH TikTok-signed bracket with its own FBAV is allowed."""
     rp = _get_rp()
     input_ua = (
         "Mozilla/5.0 (Linux; Android 14; SM-S928B Build/UP1A.231005.007; wv) "
@@ -84,11 +92,20 @@ def test_bug_a_musical_ly_plus_fbav_stripped_on_tiktok_coerce():
         "[FB_IAB/FB4A;FBAV/450.0.0.34.109;]"
     )
     out = rp.coerce_ua_for_platform(input_ua, "tiktok")
-    lower = out.lower()
-    assert "fbav" not in lower, f"FBAV leaked: {out}"
-    assert "fb_iab" not in lower, f"FB_IAB leaked: {out}"
-    assert "fban" not in lower, f"FBAN leaked: {out}"
-    assert "musical_ly" in lower, f"musical_ly missing: {out}"
+    # v2.6.27 — the specific INPUT Facebook version must NOT leak into
+    # the output. Chrome/Safari leak from Bug B same-file must also
+    # remain gone.
+    assert "450.0.0.34.109" not in out, f"input FBAV leaked: {out}"
+    assert "FB_IAB/FB4A" not in out, f"FB4A bracket leaked: {out}"
+    assert "FBAN/FB4A" not in out, f"FBAN/FB4A slug leaked: {out}"
+    assert "FBAN/FBIOS" not in out, f"FBAN/FBIOS slug leaked: {out}"
+    assert "Chrome/" not in out, f"Chrome/ leaked: {out}"
+    assert "Mobile Safari/" not in out, f"Mobile Safari/ leaked: {out}"
+    # Positive: our v2.6.27 TikTokAndroid bracket must be present
+    assert "FBAN/TikTokAndroid" in out, (
+        f"v2.6.27 TikTokAndroid bracket missing: {out}"
+    )
+    assert "musical_ly" in out.lower(), f"musical_ly missing: {out}"
 
 
 # ─── (b) BUG B: musical_ly + Chrome/Safari WebView leak ─────────────
@@ -111,7 +128,14 @@ def test_bug_b_musical_ly_plus_chrome_safari_forces_cronet():
 
 # ─── (c) musical_ly + Instagram tokens stripped ─────────────────────
 def test_musical_ly_plus_instagram_tokens_stripped():
-    """Hybrid TikTok+Instagram Android UA → tiktok target strips IG tokens."""
+    """Hybrid TikTok+Instagram Android UA → tiktok target strips IG tokens.
+    
+    v2.6.27 update: our TikTokAndroid FB_IAB bracket contains IABMV/1,
+    so we can no longer assert 'IABMV not in out'. Instead we assert
+    the IG-specific `Instagram <ver> Android (...)` block is stripped
+    AND the FB_IAB bracket that IS present carries FBAN/TikTokAndroid
+    (proving IABMV came from OUR tiktok-signed bracket, not a leaked
+    Instagram/Facebook one)."""
     rp = _get_rp()
     input_ua = (
         "Mozilla/5.0 (Linux; Android 14; SM-A546B Build/UP1A.231005.007; wv) "
@@ -121,7 +145,12 @@ def test_musical_ly_plus_instagram_tokens_stripped():
     )
     out = rp.coerce_ua_for_platform(input_ua, "tiktok")
     assert "Instagram" not in out, f"Instagram token leaked: {out}"
-    assert "IABMV" not in out, f"IABMV leaked: {out}"
+    # v2.6.27 — IABMV/1 IS present (inside our new TikTokAndroid bracket)
+    # but must come from a TikTokAndroid-signed bracket, NOT a leaked IG one
+    if "IABMV" in out:
+        assert "FBAN/TikTokAndroid" in out, (
+            f"IABMV present but not inside a TikTokAndroid bracket: {out}"
+        )
     assert "musical_ly" in out.lower(), f"musical_ly missing: {out}"
 
 
