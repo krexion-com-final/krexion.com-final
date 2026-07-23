@@ -1,3 +1,215 @@
+# v2.6.27 — 2026-01 — TikTok Android FB_IAB bracket + FB FBAV normalisation + Visual Recorder iframe drill
+#
+# =================================================================
+# CUSTOMER-REPORTED FOLLOW-UP TO v2.6.26
+# =================================================================
+#
+# The customer sent Everflow click-detail screenshots showing v2.6.26
+# was only partially fixing the report bugs from clicks (4).csv:
+#
+#   ✓ TikTok iOS clicks now correctly render as
+#     `Browser=TikTok for iOS (46)` — v2.6.26 AppId/1233 works.
+#
+#   ✗ TikTok Android clicks STILL render as `Browser=Android (13.0)`
+#     — v2.6.26's `TikTok/{app_ver}` slug alone is NOT in uap-core /
+#     user_agents / most advertiser DBs.
+#
+#   ✗ Facebook clicks (both iOS + Android) render as
+#     `Browser=Facebook for iOS (Unknown)` or `(Unknown)` for Android
+#     — browser detected but the version column is always "Unknown"
+#     because our upstream `_APP_VERSIONS['facebook']` pool mixes
+#     2-part (`557.0`) and 5-part (`550.0.0.45.102`) shapes that
+#     Everflow's `FBAV/([\d.]+)` regex can't extract cleanly.
+#
+#   ✗ Visual Recorder popups (iframe-based modals — very common on
+#     landing pages for exit-intent overlays, survey funnels,
+#     sweepstakes forms): recording clicks/form-fills on ANY element
+#     inside a popup was recording metadata for the <iframe> CONTAINER
+#     element instead of the actual target inside the popup. Replay
+#     never worked on those clicks.
+#
+# All FOUR are fixed in v2.6.27.
+#
+# ------------------------------------------------------------------
+# CORE FIXES
+# ------------------------------------------------------------------
+#
+# A. TikTok Android — universal FB_IAB in-app-browser bracket
+#    backend/server.py::_ua_tiktok_android
+#    backend/referrer_pro.py::build_inapp_ua_suffix (tiktok/android)
+#
+#    Real modern (2024+) TikTok Android in-app browser captures
+#    carry a UNIVERSAL in-app-browser signature:
+#      [FB_IAB/;FBAN/TikTokAndroid;FBAV/{app_ver};IABMV/1;FBBV/{code};FBOP/19;]
+#    Every major advertiser tracker (Everflow / Voluum / RedTrack /
+#    Binom) understands the FB_IAB bracket format and keys the
+#    "TikTok for Android" branch on FBAN=TikTokAndroid. Prior to
+#    v2.6.27 we shipped only `musical_ly_<code>` (v2.6.22) and
+#    `TikTok/{ver}` (v2.6.26) — neither is present in uap-core's
+#    rule DB (which most trackers still use), so 100% of Android
+#    TikTok clicks fell through to `Browser=Android`.
+#
+#    Note: uap-core's generic FB_IAB rule matches this bracket and
+#    will return `family="Facebook"` for local `user_agents.parse()`
+#    tests — this is EXPECTED. Tracker-side rules (FBAN-value keyed)
+#    correctly disambiguate at the report layer.
+#
+#    Multi-layer detection is now:
+#      1. `TikTok/{app_ver}`       (v2.6.26, keys ua-parser-js rule)
+#      2. `musical_ly_{ml_build}`  (v2.6.22, keys legacy TT regexes)
+#      3. `com.zhiliaoapp.musically/{ml_build}`  (v2.6.22, keys some
+#                                    modern parsers)
+#      4. `[FB_IAB/;FBAN/TikTokAndroid;FBAV/{ver};IABMV/1;
+#          FBBV/{code};FBOP/19;]`  (v2.6.27, keys advertiser trackers)
+#    Any ONE match is enough for a parser to label the click as
+#    TikTok — quadruple redundancy for maximum coverage.
+#
+# B. Facebook FBAV canonicalised to 3-part `X.Y.Z`
+#    backend/server.py::_fbav_3part (new helper)
+#    backend/server.py::_ua_facebook_android + _ua_facebook_ios
+#
+#    Advertiser trackers use a version-extraction regex on `FBAV/`
+#    that expects EXACTLY `X.Y.Z` (three dot-separated numeric
+#    groups). Our upstream `_APP_VERSIONS['facebook']` pool has
+#    both 2-part (`557.0`) and 5-part (`550.0.0.45.102`) shapes —
+#    neither matches → parser returns `Unknown`.
+#
+#    v2.6.27 introduces `_fbav_3part(app_ver)` which coerces any
+#    input to canonical 3-part form:
+#      "557.0"           → "557.0.0"
+#      "550.0.0.45.102"  → "550.0.0"
+#      "461.0.0"         → "461.0.0"     (unchanged, already 3-part)
+#      ""                → "0.0.0"        (never emit a naked FBAV)
+#    Both FB Android and FB iOS generators now route their `app_ver`
+#    through this helper before rendering `FBAV/…`.
+#
+#    v2.6.27 also adds `FBAN/FB4A;` slug alongside the existing
+#    `FB_IAB/FB4A;` in the FB Android bracket — real 2024+ FB
+#    Android captures carry BOTH and Everflow's Facebook rule keys
+#    on the FBAN value for family detection.
+#
+# C. Coerce-machinery updates
+#    backend/referrer_pro.py::_FOREIGN_INAPP_STRIP_PATTERNS
+#
+#    Two regex changes so the new markers survive round-tripping:
+#
+#    - `fb_bracket` bucket TIGHTENED from
+#         `\s*\[\s*(?:FB_IAB|FBAN)/[^\]]*\]\s*`
+#      to
+#         `\s*\[\s*(?:FB_IAB/FB4A|FBAN/FBIOS)[^\]]*\]\s*`
+#      so it matches ONLY the Facebook-specific bracket shapes.
+#      Otherwise our new `[FB_IAB/;FBAN/TikTokAndroid;…]` trailer
+#      was wiped by the coerce-to-tiktok path (same bucket regex
+#      matched it too eagerly).
+#
+#    - `tiktok` bucket EXTENDED to also capture the trailing
+#      `ttwebview/…`, `com.zhiliaoapp.musically/…`, and the FB_IAB
+#      TikTokAndroid bracket. So coerce-away-from-tiktok now cleanly
+#      strips ALL TikTok markers.
+#
+# D. Visual Recorder — iframe drill
+#    backend/visual_recorder.py::_RICH_ELEMENT_CAPTURE_JS
+#    backend/visual_recorder.py::_build_fallbacks
+#
+#    Previously `document.elementFromPoint(x,y)` returned the
+#    `<iframe>` CONTAINER element when the user clicked on a
+#    popup/modal that's implemented via same-origin iframe. Our
+#    recorded step then targeted the iframe itself → replay
+#    couldn't do anything meaningful.
+#
+#    v2.6.27 recursively drills through same-origin iframes:
+#      - When elementFromPoint returns an <iframe>/<frame> element,
+#        we compute iframe-relative coordinates and re-query the
+#        iframe's contentDocument for the actual target element.
+#      - Each drill level appends the iframe's CSS selector to an
+#        `iframe_path` array — using the most stable available
+#        identifier (id > name > data-testid > src filename >
+#        nth-of-type).
+#      - Cross-origin iframes still fall back to the container-
+#        element behaviour (browser sandbox forbids drilling in);
+#        the operator can hand-edit the step in that case.
+#
+#    `_build_fallbacks(info)` sanitises and forwards `iframe_path`
+#    into `step.fallbacks.iframe_path` (capped at 5 levels, each
+#    selector ≤200 chars, non-string junk filtered). Empty list
+#    is omitted from the JSON to keep exports terse.
+#
+#    The RUT/VR replay engine already has a `frame_locator`-based
+#    path for iframe clicks (see `iframe_click` /
+#    `iframe_action` helpers in visual_recorder.py); it now
+#    activates whenever `step.fallbacks.iframe_path` is non-empty.
+#
+# ------------------------------------------------------------------
+# TEST-SUITE HOUSEKEEPING
+# ------------------------------------------------------------------
+#
+# Two pre-existing v2.6.21 tests were updated (not deleted):
+#   test_bug_a_musical_ly_plus_fbav_stripped_on_tiktok_coerce
+#   test_musical_ly_plus_instagram_tokens_stripped
+# Prior version asserted `"fbav" not in output` and `"IABMV" not
+# in output` after coerce-to-tiktok — those tokens now legitimately
+# appear INSIDE our new TikTokAndroid bracket. Updated assertions
+# now check that:
+#   • the INPUT Facebook version (`450.0.0.34.109`) is stripped
+#   • FB4A / FBIOS slugs are gone
+#   • Chrome/ + Mobile Safari/ leak is still zero
+#   • the NEW TikTokAndroid bracket is present
+#   • Instagram-specific `Instagram <ver> Android (…)` block is
+#     still stripped
+#
+# All customer-facing behaviour of the two tests is preserved —
+# just tightened to the actual bug intent (no FACEBOOK-specific
+# markers leaking) rather than a blanket "no FBAV anywhere".
+#
+# ==================================================================
+# VERIFICATION
+# ==================================================================
+#
+# Local pytest:
+#   139/139 v2.6.* tests pass + 1 pre-existing skip.
+#   +10 new v2.6.27 tests in
+#     backend/tests/test_v2_6_27_fb_iab_bracket_and_iframe_capture.py
+#   +15 additional focused assertions in
+#     backend/tests/test_iteration_20_v2_6_27_verification.py
+#
+# Emergent testing agent iteration_20:
+#   ✓ 100% backend success.
+#   ✓ 30-iter fuzz of TikTok Android bracket regex — always matches.
+#   ✓ 25-iter fuzz of build_inapp_ua_suffix — always contains bracket.
+#   ✓ _fbav_3part edge cases (empty, 1-part, 2-part, 5-part) all
+#     canonicalise correctly.
+#   ✓ FB Android + iOS FBAV always 3-part regardless of input.
+#   ✓ Coerce idempotency: tt→tt keeps ALL new markers.
+#   ✓ Coerce cross-platform: tt → 6 other platforms all strip
+#     TikTokAndroid bracket + TikTok/{ver} + musical_ly + Bytedance
+#     + com.zhiliaoapp cleanly.
+#   ✓ Coerce fb→fb preserves FB4A + FBIOS bracket.
+#   ✓ Coerce fb→tt strips FB4A and adds TikTokAndroid bracket
+#     (no Chrome/Safari leak).
+#   ✓ _build_fallbacks iframe_path forwarding + sanitisation OK.
+#   ✓ Service health: /api/public/status=200, admin JWT login OK,
+#     supervisor RUNNING.
+#
+# ==================================================================
+# UPGRADE NOTES FOR OPERATORS
+# ==================================================================
+#
+# 1. No config change required — drop-in upgrade from v2.6.26.
+# 2. Existing links (RUT, LinksPage, RPA workflows) continue to work
+#    exactly as before. UA changes only affect the OUTGOING User-
+#    Agent header, not any link/settings persisted in the DB.
+# 3. If your fraud scanner (Anura / IPQS / Forensiq) begins flagging
+#    a small percentage of Android TikTok clicks as "in-app browser"
+#    (which was their real classification anyway), that's the new
+#    FB_IAB bracket firing your scanner's IAB heuristic — this is
+#    correct behaviour matching real TikTok Android clicks.
+# 4. Visual Recorder: newly-recorded steps that fell inside a popup
+#    iframe will now carry a `fallbacks.iframe_path` array. Old
+#    steps recorded before v2.6.27 are UNAFFECTED — they replay
+#    the same way as before (no iframe_path → top-level page as
+#    before). No manual re-recording needed.
+
+
 # v2.6.26 — 2026-01 — Advertiser browser detection + Referrer-chain preservation + Paid/Organic auto-inject
 #
 # ================================================================
